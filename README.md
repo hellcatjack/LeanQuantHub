@@ -11,46 +11,46 @@ LeanQuantHub 是基于 Lean 引擎的本地化量化研究与回测平台，提�
 - Lean 回测集成与报告归档
 
 ## 目录结构
-- ackend/：FastAPI API + MySQL 元数据
-- rontend/：React + Vite 前端
+- ackend/：FastAPI API + MySQL 元数据
+- rontend/：React + Vite 前端
 - scripts/：数据管线与工具脚本
 - configs/：默认主题与权重模板
-- lgorithms/：Lean 策略脚本
+- lgorithms/：Lean 策略脚本
 - deploy/：部署与数据库脚本
 
 ## 快速开始（服务器）
 1. 初始化数据库
-`ash
-mysql -u <user> -p < /app/stocklean/deploy/mysql/schema.sql
-`
+   ```
+   mysql -u <user> -p < /app/stocklean/deploy/mysql/schema.sql
+   ```
 2. 配置环境变量
-`ash
-cp /app/stocklean/backend/.env.example /app/stocklean/backend/.env
-# 填写 DB_* 与 Lean 路径
-`
+   ```
+   cp /app/stocklean/backend/.env.example /app/stocklean/backend/.env
+   # 填写 DB_* 与 Lean 路径
+   ```
 3. 启动服务（systemd 用户服务）
-`ash
-systemctl --user restart stocklean-backend stocklean-frontend
-`
+   ```
+   systemctl --user restart stocklean-backend stocklean-frontend
+   ```
 4. 访问
-- 前端：http://<server>:8081
-- 后端：http://<server>:8021
+   - 前端：http://<server>:8081
+   - 后端：http://<server>:8021
 
 ## 本地开发
 后端：
-`ash
+```
 cd backend
 python -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt
 uvicorn app.main:app --host 0.0.0.0 --port 8021
-`
+```
 前端：
-`ash
+```
 cd frontend
 npm install
 npm run dev
-`
+```
 
 ## 配置与安全
 - 所有敏感配置使用 .env，请勿提交到仓库。

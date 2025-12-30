@@ -1,8 +1,8 @@
 # 贡献指南
 
 ## 提交流程
-1. 创建分支：eature/<name> 或 ix/<name>
-2. 保持提交信息清晰简短（建议 eat: / ix: / chore:）
+1. 创建分支：feature/<name> 或 fix/<name>
+2. 保持提交信息清晰简短（建议 feat: / fix: / chore:）
 3. 提交前请确认 .env、数据目录、构建产物未被加入
 
 ## 本地验证
