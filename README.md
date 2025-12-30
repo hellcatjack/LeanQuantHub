@@ -11,11 +11,11 @@ LeanQuantHub 是基于 Lean 引擎的本地化量化研究与回测平台，提�
 - Lean 回测集成与报告归档
 
 ## 目录结构
-- ackend/：FastAPI API + MySQL 元数据
-- rontend/：React + Vite 前端
+- backend/：FastAPI API + MySQL 元数据
+- frontend/：React + Vite 前端
 - scripts/：数据管线与工具脚本
 - configs/：默认主题与权重模板
-- lgorithms/：Lean 策略脚本
+- algorithms/：Lean 策略脚本
 - deploy/：部署与数据库脚本
 
 ## 快速开始（服务器）
