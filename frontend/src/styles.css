@@ -233,6 +233,33 @@ a {
   gap: 10px;
 }
 
+.themes-project-row {
+  margin-top: 12px;
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(220px, 320px) 1fr;
+}
+
+.themes-project-select {
+  display: grid;
+  gap: 6px;
+}
+
+.themes-project-info {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 12px;
+  background: #f8fafc;
+  border: 1px solid var(--border);
+}
+
+@media (max-width: 900px) {
+  .themes-project-row {
+    grid-template-columns: 1fr;
+  }
+}
+
 .theme-table-wrapper {
   border: 1px solid var(--border);
   border-radius: 12px;

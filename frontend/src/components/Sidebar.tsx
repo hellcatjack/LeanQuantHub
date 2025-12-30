@@ -5,6 +5,7 @@ export default function Sidebar() {
   const { t } = useI18n();
   const links = [
     { to: "/projects", label: t("nav.projects") },
+    { to: "/themes", label: t("nav.themes") },
     { to: "/algorithms", label: t("nav.algorithms") },
     { to: "/backtests", label: t("nav.backtests") },
     { to: "/reports", label: t("nav.reports") },
@@ -14,7 +15,7 @@ export default function Sidebar() {
 
   return (
     <aside className="sidebar">
-      <div className="brand">LeanQuantHub</div>
+      <div className="brand">StockLean</div>
       <nav className="nav-group">
         {links.map((link) => (
           <NavLink

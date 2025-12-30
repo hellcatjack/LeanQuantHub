@@ -938,7 +938,6 @@ export default function ProjectsPage() {
   const configTabs = [
     { key: "universe", label: t("projects.config.sectionUniverse") },
     { key: "data", label: t("projects.config.sectionData") },
-    { key: "themes", label: t("projects.config.sectionThemes") },
     { key: "portfolio", label: t("projects.config.sectionPortfolio") },
   ] as const;
 
@@ -1019,6 +1018,7 @@ export default function ProjectsPage() {
                     <strong>{themeDrafts.length}</strong>
                   </div>
                 </div>
+                <div className="form-hint">{t("projects.config.themeMovedHint")}</div>
 
                 {configSection === "universe" && (
                   <div className="config-section">

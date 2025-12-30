@@ -8,6 +8,7 @@ const messages: Record<Locale, MessageTree> = {
   zh: {
     nav: {
       projects: "项目",
+      themes: "主题",
       algorithms: "算法",
       backtests: "回测",
       reports: "报告",
@@ -163,6 +164,7 @@ const messages: Record<Locale, MessageTree> = {
         sectionData: "数据源",
         sectionThemes: "主题",
         sectionPortfolio: "组合",
+        themeMovedHint: "主题管理已迁移到「主题」页面",
         weightTotal: "权重合计",
         source: "配置来源",
         save: "保存配置",
@@ -241,6 +243,29 @@ const messages: Record<Locale, MessageTree> = {
         createdAt: "创建时间",
         empty: "暂无版本记录",
         unnamed: "未命名",
+      },
+    },
+    themes: {
+      title: "主题管理",
+      project: {
+        title: "项目选择",
+        meta: "选择项目后管理主题结构与权重",
+        select: "当前项目",
+        name: "项目名称",
+        description: "项目描述",
+        configSource: "配置来源",
+        empty: "请选择项目后继续",
+      },
+      config: {
+        title: "主题配置",
+        meta: "维护主题权重、关键词与手动股票",
+      },
+      composition: {
+        title: "主题构成",
+        meta: "查看主题覆盖与股票组成",
+      },
+      compare: {
+        meta: "对比主题交集与差集",
       },
     },
     algorithms: {
@@ -563,6 +588,7 @@ const messages: Record<Locale, MessageTree> = {
   en: {
     nav: {
       projects: "Projects",
+      themes: "Themes",
       algorithms: "Algorithms",
       backtests: "Backtests",
       reports: "Reports",
@@ -718,6 +744,7 @@ const messages: Record<Locale, MessageTree> = {
         sectionData: "Data",
         sectionThemes: "Themes",
         sectionPortfolio: "Portfolio",
+        themeMovedHint: "Theme management moved to the Themes page.",
         weightTotal: "Weight Total",
         source: "Config Source",
         save: "Save Config",
@@ -796,6 +823,29 @@ const messages: Record<Locale, MessageTree> = {
         createdAt: "Created At",
         empty: "No versions yet",
         unnamed: "Unnamed",
+      },
+    },
+    themes: {
+      title: "Theme Studio",
+      project: {
+        title: "Project Scope",
+        meta: "Select a project to manage themes",
+        select: "Active Project",
+        name: "Project Name",
+        description: "Description",
+        configSource: "Config Source",
+        empty: "Select a project to continue",
+      },
+      config: {
+        title: "Theme Configuration",
+        meta: "Manage weights, keywords, and manual symbols",
+      },
+      composition: {
+        title: "Theme Composition",
+        meta: "Review coverage and constituent symbols",
+      },
+      compare: {
+        meta: "Compare overlaps and deltas",
       },
     },
     algorithms: {
