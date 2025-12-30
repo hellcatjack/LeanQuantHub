@@ -1,0 +1,24 @@
+﻿services:
+  backend:
+    build:
+      context: ../backend
+    container_name: stocklean-backend
+    restart: unless-stopped
+    env_file:
+      - ./.env
+    environment:
+      ARTIFACT_ROOT: /app/artifacts
+    volumes:
+      - ./volumes/artifacts:/app/artifacts
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build:
+      context: ../frontend
+    container_name: stocklean-frontend
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend

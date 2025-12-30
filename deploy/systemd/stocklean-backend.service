@@ -1,0 +1,14 @@
+﻿[Unit]
+Description=StockLean Backend API
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/app/stocklean/backend
+EnvironmentFile=/app/stocklean/backend/.env
+ExecStart=/app/stocklean/backend/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8021
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

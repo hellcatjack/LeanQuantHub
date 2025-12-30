@@ -1,0 +1,11 @@
+{
+  "benchmark": "SPY",
+  "rebalance": "M",
+  "risk_free_rate": 0.02,
+  "category_weights": {
+    "AI_CORE": 0.45,
+    "AI_INFRA": 0.25,
+    "ENERGY_FUSION": 0.2,
+    "SP500_OTHER": 0.1
+  }
+}

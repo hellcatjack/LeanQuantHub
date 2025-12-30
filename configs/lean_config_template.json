@@ -1,0 +1,37 @@
+{
+  "environment": "backtesting",
+  "algorithm-language": "Python",
+  "algorithm-location": "",
+  "data-folder": "",
+  "python-venv": "",
+  "python-additional-paths": [
+    "/app/stocklean/Lean_git/Common"
+  ],
+  "log-handler": "QuantConnect.Logging.CompositeLogHandler",
+  "messaging-handler": "QuantConnect.Messaging.Messaging",
+  "job-queue-handler": "QuantConnect.Queues.JobQueue",
+  "api-handler": "QuantConnect.Api.Api",
+  "map-file-provider": "QuantConnect.Data.Auxiliary.LocalDiskMapFileProvider",
+  "factor-file-provider": "QuantConnect.Data.Auxiliary.LocalDiskFactorFileProvider",
+  "data-provider": "QuantConnect.Lean.Engine.DataFeeds.DefaultDataProvider",
+  "data-aggregator": "QuantConnect.Lean.Engine.DataFeeds.AggregationManager",
+  "symbol-minute-limit": 10000,
+  "symbol-second-limit": 10000,
+  "symbol-tick-limit": 10000,
+  "show-missing-data-logs": false,
+  "force-exchange-always-open": false,
+  "results-destination-folder": "",
+  "environments": {
+    "backtesting": {
+      "live-mode": false,
+      "setup-handler": "QuantConnect.Lean.Engine.Setup.BacktestingSetupHandler",
+      "result-handler": "QuantConnect.Lean.Engine.Results.BacktestingResultHandler",
+      "data-feed-handler": "QuantConnect.Lean.Engine.DataFeeds.FileSystemDataFeed",
+      "real-time-handler": "QuantConnect.Lean.Engine.RealTime.BacktestingRealTimeHandler",
+      "history-provider": [
+        "QuantConnect.Lean.Engine.HistoricalData.SubscriptionDataReaderHistoryProvider"
+      ],
+      "transaction-handler": "QuantConnect.Lean.Engine.TransactionHandlers.BacktestingTransactionHandler"
+    }
+  }
+}

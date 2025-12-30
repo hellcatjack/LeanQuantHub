@@ -1,0 +1,50 @@
+{
+  "categories": [
+    {
+      "key": "AI_CORE",
+      "label": "AI核心",
+      "keywords": [
+        "artificial intelligence",
+        "generative ai",
+        "machine learning",
+        "deep learning"
+      ],
+      "manual": ["NVDA", "MSFT", "GOOGL", "META", "AMZN", "AAPL"]
+    },
+    {
+      "key": "AI_INFRA",
+      "label": "AI基础设施",
+      "keywords": [
+        "semiconductor",
+        "gpu",
+        "data center",
+        "cloud computing",
+        "networking",
+        "server"
+      ],
+      "manual": ["AMD", "AVGO", "TSM", "ASML", "MRVL", "SMCI"]
+    },
+    {
+      "key": "ENERGY_FUSION",
+      "label": "核聚变与能源",
+      "keywords": [
+        "nuclear",
+        "fusion",
+        "uranium",
+        "energy storage",
+        "power grid",
+        "utility"
+      ],
+      "manual": ["CEG", "NEE", "DUK", "EXC", "ETR", "BWXT", "SMR"]
+    }
+  ],
+  "defaults": {
+    "region": "US",
+    "asset_class": "Equity"
+  },
+  "yahoo": {
+    "quotesCount": 25,
+    "pauseSeconds": 0.3,
+    "allowExchanges": ["NMS", "NYQ", "ASE", "NGM", "NCM", "NAS", "HKG"]
+  }
+}
