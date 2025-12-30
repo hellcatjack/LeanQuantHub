@@ -188,6 +188,13 @@ export default function ProjectsPage() {
   const [activeThemeKey, setActiveThemeKey] = useState("");
   const [activeThemeSymbols, setActiveThemeSymbols] = useState<ProjectThemeSymbols | null>(null);
   const [themeSymbolQuery, setThemeSymbolQuery] = useState("");
+  const [themeSymbolsCache, setThemeSymbolsCache] = useState<
+    Record<string, ProjectThemeSymbols>
+  >({});
+  const [highlightThemeKey, setHighlightThemeKey] = useState("");
+  const [compareThemeA, setCompareThemeA] = useState("");
+  const [compareThemeB, setCompareThemeB] = useState("");
+  const [compareMessage, setCompareMessage] = useState("");
   const [configSection, setConfigSection] = useState<
     "universe" | "data" | "themes" | "portfolio"
   >("universe");
@@ -395,6 +402,11 @@ export default function ProjectsPage() {
       setActiveThemeKey("");
       setActiveThemeSymbols(null);
       setThemeSymbolQuery("");
+      setThemeSymbolsCache({});
+      setHighlightThemeKey("");
+      setCompareThemeA("");
+      setCompareThemeB("");
+      setCompareMessage("");
       setBinding(null);
     }
   }, [selectedProjectId]);
@@ -510,10 +522,49 @@ export default function ProjectsPage() {
       setActiveThemeKey(key);
       setActiveThemeSymbols(res.data);
       setThemeSymbolQuery("");
+      setThemeSymbolsCache((prev) => ({ ...prev, [key]: res.data }));
     } catch (err) {
       setActiveThemeKey("");
       setActiveThemeSymbols(null);
     }
+  };
+
+  const fetchThemeSymbolsCached = async (key: string) => {
+    if (!selectedProjectId || !key) {
+      return null;
+    }
+    const cached = themeSymbolsCache[key];
+    if (cached) {
+      return cached;
+    }
+    try {
+      const res = await api.get<ProjectThemeSymbols>(
+        `/api/projects/${selectedProjectId}/themes/symbols`,
+        { params: { category: key } }
+      );
+      setThemeSymbolsCache((prev) => ({ ...prev, [key]: res.data }));
+      return res.data;
+    } catch (err) {
+      return null;
+    }
+  };
+
+  const exportThemeSymbols = () => {
+    if (!activeThemeKey || !activeThemeSymbols) {
+      return;
+    }
+    const rows = ["symbol", ...filteredActiveSymbols];
+    const blob = new Blob([rows.join("\n")], {
+      type: "text/csv;charset=utf-8;",
+    });
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `theme-${activeThemeKey.toLowerCase()}-symbols.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(url);
   };
 
   const closeThemeSymbols = () => {
@@ -555,6 +606,25 @@ export default function ProjectsPage() {
   const applyThemeSymbolFilter = async (symbol: string) => {
     setThemeSearchSymbol(symbol);
     await searchThemeSymbol(symbol);
+  };
+
+  const toggleHighlightTheme = (key: string) => {
+    setHighlightThemeKey((prev) => (prev === key ? "" : key));
+  };
+
+  const updateCompareTheme = async (key: string, slot: "A" | "B") => {
+    if (slot === "A") {
+      setCompareThemeA(key);
+    } else {
+      setCompareThemeB(key);
+    }
+    setCompareMessage("");
+    if (key) {
+      const data = await fetchThemeSymbolsCached(key);
+      if (!data) {
+        setCompareMessage(t("projects.config.themeCompareError"));
+      }
+    }
   };
 
   const saveProjectConfig = async () => {
@@ -730,6 +800,7 @@ export default function ProjectsPage() {
             const dashArray = `${dash} ${circumference - dash}`;
             const dashOffset = -offset;
             offset += dash;
+            const dimmed = highlightThemeKey && highlightThemeKey !== segment.key;
             return (
               <circle
                 key={segment.key}
@@ -740,15 +811,23 @@ export default function ProjectsPage() {
                 stroke={segment.color}
                 strokeDasharray={dashArray}
                 strokeDashoffset={dashOffset}
+                style={{ opacity: dimmed ? 0.3 : 1 }}
               />
             );
           })}
         </svg>
         <div className="weight-legend">
           {(weightSegments.length ? weightSegments : themeDrafts)
-            .slice(0, 4)
+            .slice(0, 6)
             .map((segment, idx) => (
-              <div className="weight-legend-item" key={segment.key || idx}>
+              <button
+                type="button"
+                className={`weight-legend-item ${
+                  highlightThemeKey === (segment as any).key ? "active" : ""
+                }`}
+                onClick={() => toggleHighlightTheme((segment as any).key || "")}
+                key={(segment as any).key || idx}
+              >
                 <span
                   className="weight-dot"
                   style={{
@@ -762,7 +841,7 @@ export default function ProjectsPage() {
                 ) : (
                   <span>{formatPercent((segment as any).weight || 0)}</span>
                 )}
-              </div>
+              </button>
             ))}
         </div>
       </div>
@@ -801,6 +880,28 @@ export default function ProjectsPage() {
     () => Math.max(1, ...themeRows.map((item) => item.symbols)),
     [themeRows]
   );
+  const themeSelectOptions = useMemo(
+    () =>
+      themeRows.map((item) => ({
+        key: item.key,
+        label: item.label || item.key,
+      })),
+    [themeRows]
+  );
+  const compareSymbolsA = themeSymbolsCache[compareThemeA]?.symbols || [];
+  const compareSymbolsB = themeSymbolsCache[compareThemeB]?.symbols || [];
+  const compareSets = useMemo(() => {
+    const setA = new Set(compareSymbolsA);
+    const setB = new Set(compareSymbolsB);
+    const shared = [...setA].filter((symbol) => setB.has(symbol));
+    const onlyA = [...setA].filter((symbol) => !setB.has(symbol));
+    const onlyB = [...setB].filter((symbol) => !setA.has(symbol));
+    return {
+      shared: shared.sort(),
+      onlyA: onlyA.sort(),
+      onlyB: onlyB.sort(),
+    };
+  }, [compareSymbolsA, compareSymbolsB]);
   const activeManualSet = useMemo(
     () => new Set(activeThemeSymbols?.manual_symbols || []),
     [activeThemeSymbols]
@@ -1185,7 +1286,13 @@ export default function ProjectsPage() {
                             {themeRowsFiltered.length ? (
                               themeRowsFiltered.map((item) => (
                                 <Fragment key={item.key}>
-                                  <tr>
+                                  <tr
+                                    className={
+                                      highlightThemeKey && highlightThemeKey === item.key
+                                        ? "theme-row-highlight"
+                                        : ""
+                                    }
+                                  >
                                     <td>
                                       <div className="theme-name">
                                         <span className="theme-key">{item.key}</span>
@@ -1292,7 +1399,7 @@ export default function ProjectsPage() {
                               <input
                                 className="form-input"
                                 value={themeSymbolQuery}
-                                onChange={(e) => setThemeSymbolQuery(e.target.value)}
+                                onChange={(e) => setThemeSymbolQuery(e.target.value.toUpperCase())}
                                 placeholder={t("projects.config.themeDetailFilter")}
                               />
                               <button
@@ -1301,6 +1408,13 @@ export default function ProjectsPage() {
                                 onClick={() => setThemeSymbolQuery("")}
                               >
                                 {t("projects.config.themeDetailClear")}
+                              </button>
+                              <button
+                                type="button"
+                                className="button-secondary"
+                                onClick={exportThemeSymbols}
+                              >
+                                {t("projects.config.themeDetailExport")}
                               </button>
                             </div>
                           </div>
@@ -1326,6 +1440,116 @@ export default function ProjectsPage() {
                           </div>
                         </div>
                       )}
+                    </div>
+
+                    <div className="theme-compare-panel">
+                      <div className="form-label">{t("projects.config.themeCompareTitle")}</div>
+                      <div className="theme-compare-controls">
+                        <div className="theme-compare-field">
+                          <label className="form-label">{t("projects.config.themeCompareA")}</label>
+                          <select
+                            className="form-select"
+                            value={compareThemeA}
+                            onChange={(e) => updateCompareTheme(e.target.value, "A")}
+                          >
+                            <option value="">{t("projects.config.themeCompareEmpty")}</option>
+                            {themeSelectOptions.map((option) => (
+                              <option key={option.key} value={option.key}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <div className="theme-compare-field">
+                          <label className="form-label">{t("projects.config.themeCompareB")}</label>
+                          <select
+                            className="form-select"
+                            value={compareThemeB}
+                            onChange={(e) => updateCompareTheme(e.target.value, "B")}
+                          >
+                            <option value="">{t("projects.config.themeCompareEmpty")}</option>
+                            {themeSelectOptions.map((option) => (
+                              <option key={option.key} value={option.key}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <div className="theme-compare-stats">
+                          <div>
+                            {t("projects.config.themeCompareShared")}{" "}
+                            <strong>{compareSets.shared.length}</strong>
+                          </div>
+                          <div>
+                            {t("projects.config.themeCompareOnlyA")}{" "}
+                            <strong>{compareSets.onlyA.length}</strong>
+                          </div>
+                          <div>
+                            {t("projects.config.themeCompareOnlyB")}{" "}
+                            <strong>{compareSets.onlyB.length}</strong>
+                          </div>
+                        </div>
+                      </div>
+                      {compareMessage && <div className="form-hint">{compareMessage}</div>}
+                      <div className="theme-compare-grid">
+                        <div className="theme-compare-block">
+                          <div className="theme-compare-title">
+                            {t("projects.config.themeCompareOnlyA")}
+                          </div>
+                          <div className="theme-compare-list">
+                            {compareSets.onlyA.length
+                              ? compareSets.onlyA.map((symbol) => (
+                                  <button
+                                    key={symbol}
+                                    type="button"
+                                    className="theme-chip"
+                                    onClick={() => applyThemeSymbolFilter(symbol)}
+                                  >
+                                    {symbol}
+                                  </button>
+                                ))
+                              : t("projects.config.themeEmptySymbols")}
+                          </div>
+                        </div>
+                        <div className="theme-compare-block">
+                          <div className="theme-compare-title">
+                            {t("projects.config.themeCompareShared")}
+                          </div>
+                          <div className="theme-compare-list">
+                            {compareSets.shared.length
+                              ? compareSets.shared.map((symbol) => (
+                                  <button
+                                    key={symbol}
+                                    type="button"
+                                    className="theme-chip"
+                                    onClick={() => applyThemeSymbolFilter(symbol)}
+                                  >
+                                    {symbol}
+                                  </button>
+                                ))
+                              : t("projects.config.themeEmptySymbols")}
+                          </div>
+                        </div>
+                        <div className="theme-compare-block">
+                          <div className="theme-compare-title">
+                            {t("projects.config.themeCompareOnlyB")}
+                          </div>
+                          <div className="theme-compare-list">
+                            {compareSets.onlyB.length
+                              ? compareSets.onlyB.map((symbol) => (
+                                  <button
+                                    key={symbol}
+                                    type="button"
+                                    className="theme-chip"
+                                    onClick={() => applyThemeSymbolFilter(symbol)}
+                                  >
+                                    {symbol}
+                                  </button>
+                                ))
+                              : t("projects.config.themeEmptySymbols")}
+                          </div>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 )}
