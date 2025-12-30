@@ -42,6 +42,8 @@ from app.schemas import (
     ProjectVersionOut,
     ProjectVersionPageOut,
     ProjectThematicBacktestOut,
+    ProjectThemeSummaryOut,
+    ProjectThemeSymbolsOut,
 )
 from app.services.audit_log import record_audit
 
@@ -378,6 +380,105 @@ def _collect_data_status(project_id: int) -> dict[str, Any]:
             "updated_at": _format_mtime(backtest_summary),
             "summary": backtest_payload,
         },
+    }
+
+
+def _build_theme_index(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    themes = config.get("themes") or []
+    if not themes:
+        themes = config.get("categories") or []
+    index: dict[str, dict[str, Any]] = {}
+    for item in themes:
+        key = str(item.get("key", "")).strip()
+        if not key:
+            continue
+        label = str(item.get("label", "")).strip() or key
+        manual = [
+            str(symbol).strip().upper()
+            for symbol in (item.get("manual") or [])
+            if str(symbol).strip()
+        ]
+        index[key] = {"label": label, "manual_symbols": manual}
+    return index
+
+
+def _collect_theme_summary(project_id: int, config: dict[str, Any]) -> dict[str, Any]:
+    data_root = _get_data_root()
+    universe_path = data_root / "universe" / "universe.csv"
+    rows = _safe_read_csv(universe_path)
+    theme_index = _build_theme_index(config)
+    by_key: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        key = row.get("category", "").strip()
+        if not key:
+            continue
+        symbol = row.get("symbol", "").strip().upper()
+        if not symbol:
+            continue
+        label = row.get("category_label", "").strip() or theme_index.get(key, {}).get("label") or key
+        entry = by_key.setdefault(key, {"label": label, "symbols": []})
+        entry["symbols"].append(symbol)
+
+    for key, meta in theme_index.items():
+        by_key.setdefault(key, {"label": meta.get("label") or key, "symbols": []})
+
+    ordered_keys = list(theme_index.keys())
+    remaining_keys = [key for key in by_key.keys() if key not in theme_index]
+    ordered_keys.extend(sorted(remaining_keys))
+
+    items: list[dict[str, Any]] = []
+    total_symbols = 0
+    for key in ordered_keys:
+        entry = by_key[key]
+        symbols = sorted(set(entry["symbols"]))
+        total_symbols += len(symbols)
+        items.append(
+            {
+                "key": key,
+                "label": entry["label"],
+                "symbols": len(symbols),
+                "sample": symbols[:8],
+                "manual_symbols": theme_index.get(key, {}).get("manual_symbols", []),
+            }
+        )
+
+    return {
+        "project_id": project_id,
+        "updated_at": _format_mtime(universe_path),
+        "total_symbols": total_symbols,
+        "themes": items,
+    }
+
+
+def _collect_theme_symbols(
+    project_id: int, category: str, config: dict[str, Any]
+) -> dict[str, Any]:
+    data_root = _get_data_root()
+    universe_path = data_root / "universe" / "universe.csv"
+    rows = _safe_read_csv(universe_path)
+    theme_index = _build_theme_index(config)
+    symbols = sorted(
+        {
+            row.get("symbol", "").strip().upper()
+            for row in rows
+            if row.get("category", "").strip() == category
+            and row.get("symbol", "").strip()
+        }
+    )
+    label = None
+    for row in rows:
+        if row.get("category", "").strip() == category:
+            label = row.get("category_label", "").strip() or None
+            if label:
+                break
+    if not label:
+        label = theme_index.get(category, {}).get("label")
+    return {
+        "project_id": project_id,
+        "category": category,
+        "label": label,
+        "symbols": symbols,
+        "manual_symbols": theme_index.get(category, {}).get("manual_symbols", []),
     }
 
 
@@ -842,6 +943,31 @@ def get_project_data_status(project_id: int):
             raise HTTPException(status_code=404, detail="项目不存在")
     status = _collect_data_status(project_id)
     return ProjectDataStatusOut(**status)
+
+
+@router.get("/{project_id}/themes/summary", response_model=ProjectThemeSummaryOut)
+def get_project_theme_summary(project_id: int):
+    with get_session() as session:
+        project = session.get(Project, project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="椤圭洰涓嶅瓨鍦?")
+        config = _resolve_project_config(session, project_id)
+    summary = _collect_theme_summary(project_id, config)
+    return ProjectThemeSummaryOut(**summary)
+
+
+@router.get("/{project_id}/themes/symbols", response_model=ProjectThemeSymbolsOut)
+def get_project_theme_symbols(project_id: int, category: str = Query(...)):
+    category = category.strip()
+    if not category:
+        raise HTTPException(status_code=400, detail="主题分类不能为空")
+    with get_session() as session:
+        project = session.get(Project, project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="椤圭洰涓嶅瓨鍦?")
+        config = _resolve_project_config(session, project_id)
+    payload = _collect_theme_symbols(project_id, category, config)
+    return ProjectThemeSymbolsOut(**payload)
 
 
 @router.post("/{project_id}/actions/refresh-data", response_model=ProjectDataRefreshOut)

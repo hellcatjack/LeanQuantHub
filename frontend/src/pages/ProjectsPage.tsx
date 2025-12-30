@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import PaginationBar from "../components/PaginationBar";
 import TopBar from "../components/TopBar";
@@ -104,6 +104,29 @@ interface ProjectThematicBacktest {
   source?: string | null;
 }
 
+interface ThemeSummaryItem {
+  key: string;
+  label: string;
+  symbols: number;
+  sample: string[];
+  manual_symbols?: string[];
+}
+
+interface ProjectThemeSummary {
+  project_id: number;
+  updated_at?: string | null;
+  total_symbols: number;
+  themes: ThemeSummaryItem[];
+}
+
+interface ProjectThemeSymbols {
+  project_id: number;
+  category: string;
+  label?: string | null;
+  symbols: string[];
+  manual_symbols?: string[];
+}
+
 interface ProjectAlgorithmBinding {
   project_id: number;
   exists: boolean;
@@ -144,6 +167,12 @@ export default function ProjectsPage() {
   const [configMeta, setConfigMeta] = useState<ProjectConfigResponse | null>(null);
   const [configMessage, setConfigMessage] = useState("");
   const [themeDrafts, setThemeDrafts] = useState<ThemeConfigItem[]>([]);
+  const [themeSummary, setThemeSummary] = useState<ProjectThemeSummary | null>(null);
+  const [themeSummaryMessage, setThemeSummaryMessage] = useState("");
+  const [expandedThemeKey, setExpandedThemeKey] = useState("");
+  const [expandedThemeSymbols, setExpandedThemeSymbols] = useState<ProjectThemeSymbols | null>(
+    null
+  );
   const [configSection, setConfigSection] = useState<
     "universe" | "data" | "themes" | "portfolio"
   >("universe");
@@ -261,6 +290,19 @@ export default function ProjectsPage() {
     }
   };
 
+  const loadThemeSummary = async (projectId: number) => {
+    try {
+      const res = await api.get<ProjectThemeSummary>(
+        `/api/projects/${projectId}/themes/summary`
+      );
+      setThemeSummary(res.data);
+      setThemeSummaryMessage("");
+    } catch (err) {
+      setThemeSummary(null);
+      setThemeSummaryMessage(t("projects.config.themeSummaryError"));
+    }
+  };
+
   const loadAlgorithms = async () => {
     try {
       const res = await api.get<Algorithm[]>("/api/algorithms");
@@ -315,6 +357,7 @@ export default function ProjectsPage() {
       loadProjectConfig(selectedProjectId);
       loadProjectDataStatus(selectedProjectId);
       loadThematicBacktest(selectedProjectId);
+      loadThemeSummary(selectedProjectId);
       loadProjectBinding(selectedProjectId);
       setConfigMessage("");
       setDataMessage("");
@@ -328,6 +371,10 @@ export default function ProjectsPage() {
       setConfigMeta(null);
       setDataStatus(null);
       setThematicBacktest(null);
+      setThemeSummary(null);
+      setThemeSummaryMessage("");
+      setExpandedThemeKey("");
+      setExpandedThemeSymbols(null);
       setBinding(null);
     }
   }, [selectedProjectId]);
@@ -431,6 +478,28 @@ export default function ProjectsPage() {
     setThemeDrafts((prev) => prev.filter((_, idx) => idx !== index));
   };
 
+  const toggleThemeSymbols = async (key: string) => {
+    if (!selectedProjectId) {
+      return;
+    }
+    if (expandedThemeKey === key) {
+      setExpandedThemeKey("");
+      setExpandedThemeSymbols(null);
+      return;
+    }
+    try {
+      const res = await api.get<ProjectThemeSymbols>(
+        `/api/projects/${selectedProjectId}/themes/symbols`,
+        { params: { category: key } }
+      );
+      setExpandedThemeKey(key);
+      setExpandedThemeSymbols(res.data);
+    } catch (err) {
+      setExpandedThemeKey("");
+      setExpandedThemeSymbols(null);
+    }
+  };
+
   const saveProjectConfig = async () => {
     if (!selectedProjectId || !configDraft) {
       return;
@@ -470,6 +539,7 @@ export default function ProjectsPage() {
       });
       setConfigMessage(t("projects.config.saved"));
       await loadProjectConfig(selectedProjectId);
+      await loadThemeSummary(selectedProjectId);
     } catch (err) {
       setConfigMessage(t("projects.config.error"));
     }
@@ -483,6 +553,7 @@ export default function ProjectsPage() {
       await api.post(`/api/projects/${selectedProjectId}/actions/refresh-data`, {});
       setDataMessage(t("projects.dataStatus.queued"));
       await loadProjectDataStatus(selectedProjectId);
+      await loadThemeSummary(selectedProjectId);
     } catch (err) {
       setDataMessage(t("projects.dataStatus.error"));
     }
@@ -567,6 +638,11 @@ export default function ProjectsPage() {
   };
 
   const weightTotalWarn = Math.abs(weightTotal - 1) > 0.02;
+  const themeRows = themeSummary?.themes || [];
+  const expandedManualSet = useMemo(
+    () => new Set(expandedThemeSymbols?.manual_symbols || []),
+    [expandedThemeSymbols]
+  );
   const metricRows = [
     { key: "cagr", label: t("projects.backtest.metrics.cagr"), format: formatPercent },
     { key: "volatility", label: t("projects.backtest.metrics.volatility"), format: formatPercent },
@@ -730,6 +806,27 @@ export default function ProjectsPage() {
 
                 {configSection === "themes" && (
                   <div className="config-section">
+                    <div className="theme-summary-grid">
+                      <div className="theme-summary-card">
+                        <div className="theme-summary-label">{t("projects.config.themeCount")}</div>
+                        <div className="theme-summary-value">{themeRows.length}</div>
+                      </div>
+                      <div className="theme-summary-card">
+                        <div className="theme-summary-label">
+                          {t("projects.config.themeTotalSymbols")}
+                        </div>
+                        <div className="theme-summary-value">
+                          {themeSummary?.total_symbols ?? 0}
+                        </div>
+                      </div>
+                      <div className="theme-summary-card">
+                        <div className="theme-summary-label">{t("common.labels.updatedAt")}</div>
+                        <div className="theme-summary-value">
+                          {themeSummary?.updated_at || t("common.none")}
+                        </div>
+                      </div>
+                    </div>
+                    {themeSummaryMessage && <div className="form-hint">{themeSummaryMessage}</div>}
                     <div className="form-row">
                       <div className="form-label">{t("projects.config.themesTitle")}</div>
                       <div className="theme-table-wrapper">
@@ -818,6 +915,97 @@ export default function ProjectsPage() {
                           {t("projects.config.themeAdd")}
                         </button>
                         <span className="form-hint">{t("projects.config.themeHint")}</span>
+                      </div>
+                    </div>
+
+                    <div className="form-row">
+                      <div className="form-label">{t("projects.config.themeComposition")}</div>
+                      <div className="theme-table-wrapper">
+                        <table className="theme-table theme-composition-table">
+                          <thead>
+                            <tr>
+                              <th>{t("projects.config.themeLabel")}</th>
+                              <th>{t("projects.config.themeSymbolCount")}</th>
+                              <th>{t("projects.config.themeSample")}</th>
+                              <th>{t("projects.config.themeManual")}</th>
+                              <th>{t("projects.config.themeActions")}</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {themeRows.length ? (
+                              themeRows.map((item) => (
+                                <Fragment key={item.key}>
+                                  <tr>
+                                    <td>
+                                      <div className="theme-name">
+                                        <span className="theme-key">{item.key}</span>
+                                        <span className="theme-label">{item.label}</span>
+                                      </div>
+                                    </td>
+                                    <td>{item.symbols}</td>
+                                    <td>
+                                      <div className="theme-samples">
+                                        {item.sample.length
+                                          ? item.sample.map((symbol) => (
+                                              <span key={symbol} className="theme-chip">
+                                                {symbol}
+                                              </span>
+                                            ))
+                                          : "-"}
+                                      </div>
+                                    </td>
+                                    <td>
+                                      <div className="theme-samples">
+                                        {(item.manual_symbols || []).length
+                                          ? (item.manual_symbols || []).map((symbol) => (
+                                              <span key={symbol} className="theme-chip manual">
+                                                {symbol}
+                                              </span>
+                                            ))
+                                          : "-"}
+                                      </div>
+                                    </td>
+                                    <td className="theme-actions">
+                                      <button
+                                        type="button"
+                                        className="link-button"
+                                        onClick={() => toggleThemeSymbols(item.key)}
+                                      >
+                                        {expandedThemeKey === item.key
+                                          ? t("projects.config.themeCollapse")
+                                          : t("projects.config.themeExpand")}
+                                      </button>
+                                    </td>
+                                  </tr>
+                                  {expandedThemeKey === item.key && expandedThemeSymbols && (
+                                    <tr className="theme-expand-row">
+                                      <td colSpan={5}>
+                                        <div className="theme-symbols">
+                                          {expandedThemeSymbols.symbols.length
+                                            ? expandedThemeSymbols.symbols.map((symbol) => (
+                                                <span
+                                                  key={symbol}
+                                                  className={`theme-chip ${
+                                                    expandedManualSet.has(symbol) ? "manual" : ""
+                                                  }`}
+                                                >
+                                                  {symbol}
+                                                </span>
+                                              ))
+                                            : t("projects.config.themeEmptySymbols")}
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  )}
+                                </Fragment>
+                              ))
+                            ) : (
+                              <tr>
+                                <td colSpan={5}>{t("projects.config.themesEmpty")}</td>
+                              </tr>
+                            )}
+                          </tbody>
+                        </table>
                       </div>
                     </div>
                   </div>

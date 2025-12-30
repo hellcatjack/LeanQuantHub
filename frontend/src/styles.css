@@ -263,12 +263,88 @@ a {
   letter-spacing: 0.02em;
 }
 
+.theme-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+}
+
+.theme-summary-card {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
+  background: #f8fafc;
+  display: grid;
+  gap: 6px;
+}
+
+.theme-summary-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.theme-summary-value {
+  font-size: 18px;
+  font-weight: 600;
+}
+
 .table-input {
   width: 100%;
   padding: 6px 8px;
   border-radius: 8px;
   border: 1px solid var(--border);
   font-size: 12px;
+}
+
+.theme-composition-table th {
+  font-size: 11px;
+}
+
+.theme-name {
+  display: grid;
+  gap: 4px;
+}
+
+.theme-key {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.theme-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.theme-samples {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.theme-chip {
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  background: #eef2ff;
+  color: #1f3c88;
+  border: 1px solid rgba(31, 60, 136, 0.15);
+}
+
+.theme-chip.manual {
+  background: #fff4e6;
+  color: #8a4b0f;
+  border-color: rgba(138, 75, 15, 0.2);
+}
+
+.theme-expand-row td {
+  background: #f8fafc;
+}
+
+.theme-symbols {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .theme-actions {

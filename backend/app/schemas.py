@@ -101,6 +101,29 @@ class ProjectDataStatusOut(BaseModel):
     backtest: dict[str, Any]
 
 
+class ThemeSummaryItem(BaseModel):
+    key: str
+    label: str
+    symbols: int
+    sample: list[str]
+    manual_symbols: list[str] = []
+
+
+class ProjectThemeSummaryOut(BaseModel):
+    project_id: int
+    updated_at: str | None = None
+    total_symbols: int
+    themes: list[ThemeSummaryItem]
+
+
+class ProjectThemeSymbolsOut(BaseModel):
+    project_id: int
+    category: str
+    label: str | None = None
+    symbols: list[str]
+    manual_symbols: list[str] = []
+
+
 class ProjectDataRefreshRequest(BaseModel):
     steps: list[str] | None = None
 
