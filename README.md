@@ -58,3 +58,6 @@ npm run dev
 
 ## 项目地址
 - GitHub：https://github.com/hellcatjack/LeanQuantHub
+
+## 许可协议
+- MIT License

@@ -14,7 +14,7 @@ export default function Sidebar() {
 
   return (
     <aside className="sidebar">
-      <div className="brand">StockLean</div>
+      <div className="brand">LeanQuantHub</div>
       <nav className="nav-group">
         {links.map((link) => (
           <NavLink
