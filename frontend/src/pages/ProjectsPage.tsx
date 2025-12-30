@@ -127,6 +127,18 @@ interface ProjectThemeSymbols {
   manual_symbols?: string[];
 }
 
+interface ThemeSearchItem {
+  key: string;
+  label: string;
+  is_manual?: boolean;
+}
+
+interface ProjectThemeSearch {
+  project_id: number;
+  symbol: string;
+  themes: ThemeSearchItem[];
+}
+
 interface ProjectAlgorithmBinding {
   project_id: number;
   exists: boolean;
@@ -169,10 +181,13 @@ export default function ProjectsPage() {
   const [themeDrafts, setThemeDrafts] = useState<ThemeConfigItem[]>([]);
   const [themeSummary, setThemeSummary] = useState<ProjectThemeSummary | null>(null);
   const [themeSummaryMessage, setThemeSummaryMessage] = useState("");
-  const [expandedThemeKey, setExpandedThemeKey] = useState("");
-  const [expandedThemeSymbols, setExpandedThemeSymbols] = useState<ProjectThemeSymbols | null>(
-    null
-  );
+  const [themeFilterText, setThemeFilterText] = useState("");
+  const [themeSearchSymbol, setThemeSearchSymbol] = useState("");
+  const [themeSearchResult, setThemeSearchResult] = useState<ProjectThemeSearch | null>(null);
+  const [themeSearchMessage, setThemeSearchMessage] = useState("");
+  const [activeThemeKey, setActiveThemeKey] = useState("");
+  const [activeThemeSymbols, setActiveThemeSymbols] = useState<ProjectThemeSymbols | null>(null);
+  const [themeSymbolQuery, setThemeSymbolQuery] = useState("");
   const [configSection, setConfigSection] = useState<
     "universe" | "data" | "themes" | "portfolio"
   >("universe");
@@ -373,8 +388,13 @@ export default function ProjectsPage() {
       setThematicBacktest(null);
       setThemeSummary(null);
       setThemeSummaryMessage("");
-      setExpandedThemeKey("");
-      setExpandedThemeSymbols(null);
+      setThemeFilterText("");
+      setThemeSearchSymbol("");
+      setThemeSearchResult(null);
+      setThemeSearchMessage("");
+      setActiveThemeKey("");
+      setActiveThemeSymbols(null);
+      setThemeSymbolQuery("");
       setBinding(null);
     }
   }, [selectedProjectId]);
@@ -478,13 +498,8 @@ export default function ProjectsPage() {
     setThemeDrafts((prev) => prev.filter((_, idx) => idx !== index));
   };
 
-  const toggleThemeSymbols = async (key: string) => {
+  const loadThemeSymbols = async (key: string) => {
     if (!selectedProjectId) {
-      return;
-    }
-    if (expandedThemeKey === key) {
-      setExpandedThemeKey("");
-      setExpandedThemeSymbols(null);
       return;
     }
     try {
@@ -492,12 +507,54 @@ export default function ProjectsPage() {
         `/api/projects/${selectedProjectId}/themes/symbols`,
         { params: { category: key } }
       );
-      setExpandedThemeKey(key);
-      setExpandedThemeSymbols(res.data);
+      setActiveThemeKey(key);
+      setActiveThemeSymbols(res.data);
+      setThemeSymbolQuery("");
     } catch (err) {
-      setExpandedThemeKey("");
-      setExpandedThemeSymbols(null);
+      setActiveThemeKey("");
+      setActiveThemeSymbols(null);
     }
+  };
+
+  const closeThemeSymbols = () => {
+    setActiveThemeKey("");
+    setActiveThemeSymbols(null);
+    setThemeSymbolQuery("");
+  };
+
+  const searchThemeSymbol = async (symbolOverride?: string) => {
+    if (!selectedProjectId) {
+      return;
+    }
+    const symbol = (symbolOverride ?? themeSearchSymbol).trim().toUpperCase();
+    if (!symbol) {
+      setThemeSearchMessage(t("projects.config.themeSearchEmpty"));
+      setThemeSearchResult(null);
+      return;
+    }
+    try {
+      const res = await api.get<ProjectThemeSearch>(
+        `/api/projects/${selectedProjectId}/themes/search`,
+        { params: { symbol } }
+      );
+      setThemeSearchSymbol(symbol);
+      setThemeSearchResult(res.data);
+      setThemeSearchMessage("");
+    } catch (err) {
+      setThemeSearchResult(null);
+      setThemeSearchMessage(t("projects.config.themeSearchError"));
+    }
+  };
+
+  const clearThemeSearch = () => {
+    setThemeSearchSymbol("");
+    setThemeSearchResult(null);
+    setThemeSearchMessage("");
+  };
+
+  const applyThemeSymbolFilter = async (symbol: string) => {
+    setThemeSearchSymbol(symbol);
+    await searchThemeSymbol(symbol);
   };
 
   const saveProjectConfig = async () => {
@@ -637,12 +694,138 @@ export default function ProjectsPage() {
     return value.toFixed(4);
   };
 
+  const renderWeightDonut = (value: number) => {
+    const percent = Math.max(0, Math.min(1, value || 0));
+    const radius = 10;
+    const circumference = 2 * Math.PI * radius;
+    const dash = circumference * percent;
+    const remainder = circumference - dash;
+    return (
+      <div className="weight-donut">
+        <svg viewBox="0 0 24 24">
+          <circle className="donut-bg" cx="12" cy="12" r={radius} />
+          <circle
+            className="donut-fg"
+            cx="12"
+            cy="12"
+            r={radius}
+            strokeDasharray={`${dash} ${remainder}`}
+          />
+        </svg>
+        <span>{formatPercent(value)}</span>
+      </div>
+    );
+  };
+
+  const renderWeightPie = () => {
+    const radius = 12;
+    const circumference = 2 * Math.PI * radius;
+    let offset = 0;
+    return (
+      <div className="weight-pie">
+        <svg viewBox="0 0 32 32">
+          <circle className="donut-bg" cx="16" cy="16" r={radius} />
+          {weightSegments.map((segment) => {
+            const dash = circumference * segment.percent;
+            const dashArray = `${dash} ${circumference - dash}`;
+            const dashOffset = -offset;
+            offset += dash;
+            return (
+              <circle
+                key={segment.key}
+                className="donut-segment"
+                cx="16"
+                cy="16"
+                r={radius}
+                stroke={segment.color}
+                strokeDasharray={dashArray}
+                strokeDashoffset={dashOffset}
+              />
+            );
+          })}
+        </svg>
+        <div className="weight-legend">
+          {(weightSegments.length ? weightSegments : themeDrafts)
+            .slice(0, 4)
+            .map((segment, idx) => (
+              <div className="weight-legend-item" key={segment.key || idx}>
+                <span
+                  className="weight-dot"
+                  style={{
+                    backgroundColor:
+                      (segment as any).color || ["#0f62fe", "#35b9a3", "#f6ad55", "#ed5564"][idx],
+                  }}
+                />
+                <span className="weight-label">{segment.label || segment.key}</span>
+                {"value" in segment ? (
+                  <span>{formatPercent((segment as any).value || 0)}</span>
+                ) : (
+                  <span>{formatPercent((segment as any).weight || 0)}</span>
+                )}
+              </div>
+            ))}
+        </div>
+      </div>
+    );
+  };
+
   const weightTotalWarn = Math.abs(weightTotal - 1) > 0.02;
   const themeRows = themeSummary?.themes || [];
-  const expandedManualSet = useMemo(
-    () => new Set(expandedThemeSymbols?.manual_symbols || []),
-    [expandedThemeSymbols]
+  const themeWeightMap = useMemo(
+    () =>
+      themeDrafts.reduce<Record<string, number>>((acc, item) => {
+        acc[item.key] = Number(item.weight) || 0;
+        return acc;
+      }, {}),
+    [themeDrafts]
   );
+  const themeSearchKeys = useMemo(
+    () => new Set((themeSearchResult?.themes || []).map((item) => item.key)),
+    [themeSearchResult]
+  );
+  const themeRowsFiltered = useMemo(() => {
+    const keyword = themeFilterText.trim().toLowerCase();
+    const normalizedSymbol = themeSearchSymbol.trim().toUpperCase();
+    const hasSymbolFilter =
+      normalizedSymbol.length > 0 && themeSearchResult?.symbol === normalizedSymbol;
+    return themeRows.filter((row) => {
+      const textMatch =
+        !keyword ||
+        row.key.toLowerCase().includes(keyword) ||
+        row.label.toLowerCase().includes(keyword);
+      const symbolMatch = !hasSymbolFilter || themeSearchKeys.has(row.key);
+      return textMatch && symbolMatch;
+    });
+  }, [themeRows, themeFilterText, themeSearchSymbol, themeSearchKeys]);
+  const maxThemeSymbols = useMemo(
+    () => Math.max(1, ...themeRows.map((item) => item.symbols)),
+    [themeRows]
+  );
+  const activeManualSet = useMemo(
+    () => new Set(activeThemeSymbols?.manual_symbols || []),
+    [activeThemeSymbols]
+  );
+  const activeSymbols = activeThemeSymbols?.symbols || [];
+  const filteredActiveSymbols = useMemo(() => {
+    const keyword = themeSymbolQuery.trim().toUpperCase();
+    if (!keyword) {
+      return activeSymbols;
+    }
+    return activeSymbols.filter((symbol) => symbol.includes(keyword));
+  }, [activeSymbols, themeSymbolQuery]);
+  const weightSegments = useMemo(() => {
+    const palette = ["#0f62fe", "#35b9a3", "#f6ad55", "#ed5564", "#6f56d9", "#6b7280"];
+    const total = themeDrafts.reduce((sum, item) => sum + (Number(item.weight) || 0), 0);
+    return themeDrafts
+      .map((item, idx) => ({
+        key: item.key,
+        label: item.label || item.key,
+        value: Number(item.weight) || 0,
+        percent: total > 0 ? (Number(item.weight) || 0) / total : 0,
+        color: palette[idx % palette.length],
+      }))
+      .filter((item) => item.value > 0);
+  }, [themeDrafts]);
   const metricRows = [
     { key: "cagr", label: t("projects.backtest.metrics.cagr"), format: formatPercent },
     { key: "volatility", label: t("projects.backtest.metrics.volatility"), format: formatPercent },
@@ -825,6 +1008,12 @@ export default function ProjectsPage() {
                           {themeSummary?.updated_at || t("common.none")}
                         </div>
                       </div>
+                      <div className="theme-summary-card theme-summary-chart-card">
+                        <div className="theme-summary-label">
+                          {t("projects.config.themeWeightDistribution")}
+                        </div>
+                        {renderWeightPie()}
+                      </div>
                     </div>
                     {themeSummaryMessage && <div className="form-hint">{themeSummaryMessage}</div>}
                     <div className="form-row">
@@ -918,6 +1107,65 @@ export default function ProjectsPage() {
                       </div>
                     </div>
 
+                    <div className="theme-toolbar">
+                      <div className="theme-toolbar-row">
+                        <div className="theme-filter-field">
+                          <label className="form-label">{t("projects.config.themeFilter")}</label>
+                          <input
+                            className="form-input"
+                            value={themeFilterText}
+                            onChange={(e) => setThemeFilterText(e.target.value)}
+                            placeholder={t("projects.config.themeFilterPlaceholder")}
+                          />
+                        </div>
+                        <div className="theme-filter-field">
+                          <label className="form-label">
+                            {t("projects.config.themeSearchSymbol")}
+                          </label>
+                          <div className="theme-filter-input">
+                            <input
+                              className="form-input"
+                              value={themeSearchSymbol}
+                              onChange={(e) => setThemeSearchSymbol(e.target.value.toUpperCase())}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                  searchThemeSymbol();
+                                }
+                              }}
+                              placeholder={t("projects.config.themeSearchPlaceholder")}
+                            />
+                            <button
+                              type="button"
+                              className="button-secondary"
+                              onClick={() => searchThemeSymbol()}
+                            >
+                              {t("common.actions.query")}
+                            </button>
+                            <button
+                              type="button"
+                              className="link-button"
+                              onClick={clearThemeSearch}
+                            >
+                              {t("projects.config.themeSearchClear")}
+                            </button>
+                          </div>
+                          <div className="form-hint">
+                            {t("projects.config.themeSearchHint")}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="theme-toolbar-row theme-toolbar-meta">
+                        <span>
+                          {t("projects.config.themeSearchMatches", {
+                            count: themeSearchResult?.themes.length ?? 0,
+                          })}
+                        </span>
+                        {themeSearchMessage && (
+                          <span className="form-hint">{themeSearchMessage}</span>
+                        )}
+                      </div>
+                    </div>
+
                     <div className="form-row">
                       <div className="form-label">{t("projects.config.themeComposition")}</div>
                       <div className="theme-table-wrapper">
@@ -925,15 +1173,17 @@ export default function ProjectsPage() {
                           <thead>
                             <tr>
                               <th>{t("projects.config.themeLabel")}</th>
+                              <th>{t("projects.config.themeWeight")}</th>
                               <th>{t("projects.config.themeSymbolCount")}</th>
+                              <th>{t("projects.config.themeDistribution")}</th>
                               <th>{t("projects.config.themeSample")}</th>
                               <th>{t("projects.config.themeManual")}</th>
                               <th>{t("projects.config.themeActions")}</th>
                             </tr>
                           </thead>
                           <tbody>
-                            {themeRows.length ? (
-                              themeRows.map((item) => (
+                            {themeRowsFiltered.length ? (
+                              themeRowsFiltered.map((item) => (
                                 <Fragment key={item.key}>
                                   <tr>
                                     <td>
@@ -942,14 +1192,40 @@ export default function ProjectsPage() {
                                         <span className="theme-label">{item.label}</span>
                                       </div>
                                     </td>
+                                    <td>{renderWeightDonut(themeWeightMap[item.key] || 0)}</td>
                                     <td>{item.symbols}</td>
+                                    <td>
+                                      <div className="theme-distribution">
+                                        <div className="theme-bar-track">
+                                          <div
+                                            className="theme-bar-fill"
+                                            style={{
+                                              width: `${Math.round(
+                                                (item.symbols / maxThemeSymbols) * 100
+                                              )}%`,
+                                            }}
+                                          />
+                                        </div>
+                                        <span>
+                                          {formatPercent(
+                                            item.symbols /
+                                              Math.max(themeSummary?.total_symbols ?? 0, 1)
+                                          )}
+                                        </span>
+                                      </div>
+                                    </td>
                                     <td>
                                       <div className="theme-samples">
                                         {item.sample.length
                                           ? item.sample.map((symbol) => (
-                                              <span key={symbol} className="theme-chip">
+                                              <button
+                                                key={symbol}
+                                                type="button"
+                                                className="theme-chip"
+                                                onClick={() => applyThemeSymbolFilter(symbol)}
+                                              >
                                                 {symbol}
-                                              </span>
+                                              </button>
                                             ))
                                           : "-"}
                                       </div>
@@ -958,9 +1234,14 @@ export default function ProjectsPage() {
                                       <div className="theme-samples">
                                         {(item.manual_symbols || []).length
                                           ? (item.manual_symbols || []).map((symbol) => (
-                                              <span key={symbol} className="theme-chip manual">
+                                              <button
+                                                key={symbol}
+                                                type="button"
+                                                className="theme-chip manual"
+                                                onClick={() => applyThemeSymbolFilter(symbol)}
+                                              >
                                                 {symbol}
-                                              </span>
+                                              </button>
                                             ))
                                           : "-"}
                                       </div>
@@ -969,44 +1250,82 @@ export default function ProjectsPage() {
                                       <button
                                         type="button"
                                         className="link-button"
-                                        onClick={() => toggleThemeSymbols(item.key)}
+                                        onClick={() =>
+                                          activeThemeKey === item.key
+                                            ? closeThemeSymbols()
+                                            : loadThemeSymbols(item.key)
+                                        }
                                       >
-                                        {expandedThemeKey === item.key
-                                          ? t("projects.config.themeCollapse")
-                                          : t("projects.config.themeExpand")}
+                                        {activeThemeKey === item.key
+                                          ? t("projects.config.themeClose")
+                                          : t("projects.config.themeView")}
                                       </button>
                                     </td>
                                   </tr>
-                                  {expandedThemeKey === item.key && expandedThemeSymbols && (
-                                    <tr className="theme-expand-row">
-                                      <td colSpan={5}>
-                                        <div className="theme-symbols">
-                                          {expandedThemeSymbols.symbols.length
-                                            ? expandedThemeSymbols.symbols.map((symbol) => (
-                                                <span
-                                                  key={symbol}
-                                                  className={`theme-chip ${
-                                                    expandedManualSet.has(symbol) ? "manual" : ""
-                                                  }`}
-                                                >
-                                                  {symbol}
-                                                </span>
-                                              ))
-                                            : t("projects.config.themeEmptySymbols")}
-                                        </div>
-                                      </td>
-                                    </tr>
-                                  )}
                                 </Fragment>
                               ))
                             ) : (
                               <tr>
-                                <td colSpan={5}>{t("projects.config.themesEmpty")}</td>
+                                <td colSpan={7}>{t("projects.config.themesEmpty")}</td>
                               </tr>
                             )}
                           </tbody>
                         </table>
                       </div>
+                      {activeThemeKey && activeThemeSymbols && (
+                        <div className="theme-detail-panel">
+                          <div className="theme-detail-header">
+                            <div>
+                              <div className="theme-detail-title">
+                                {t("projects.config.themeDetailTitle", {
+                                  name: activeThemeSymbols.label || activeThemeKey,
+                                })}
+                              </div>
+                              <div className="theme-detail-meta">
+                                {t("projects.config.themeDetailMeta", {
+                                  total: activeThemeSymbols.symbols.length,
+                                  manual: activeManualSet.size,
+                                })}
+                              </div>
+                            </div>
+                            <div className="theme-detail-actions">
+                              <input
+                                className="form-input"
+                                value={themeSymbolQuery}
+                                onChange={(e) => setThemeSymbolQuery(e.target.value)}
+                                placeholder={t("projects.config.themeDetailFilter")}
+                              />
+                              <button
+                                type="button"
+                                className="button-secondary"
+                                onClick={() => setThemeSymbolQuery("")}
+                              >
+                                {t("projects.config.themeDetailClear")}
+                              </button>
+                            </div>
+                          </div>
+                          <div className="theme-detail-list">
+                            {filteredActiveSymbols.length ? (
+                              filteredActiveSymbols.map((symbol) => (
+                                <button
+                                  key={symbol}
+                                  type="button"
+                                  className={`theme-chip ${
+                                    activeManualSet.has(symbol) ? "manual" : ""
+                                  }`}
+                                  onClick={() => applyThemeSymbolFilter(symbol)}
+                                >
+                                  {symbol}
+                                </button>
+                              ))
+                            ) : (
+                              <span className="theme-detail-empty">
+                                {t("projects.config.themeEmptySymbols")}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </div>
                 )}

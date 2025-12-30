@@ -44,6 +44,7 @@ from app.schemas import (
     ProjectThematicBacktestOut,
     ProjectThemeSummaryOut,
     ProjectThemeSymbolsOut,
+    ProjectThemeSearchOut,
 )
 from app.services.audit_log import record_audit
 
@@ -480,6 +481,35 @@ def _collect_theme_symbols(
         "symbols": symbols,
         "manual_symbols": theme_index.get(category, {}).get("manual_symbols", []),
     }
+
+
+def _collect_theme_search(
+    project_id: int, symbol: str, config: dict[str, Any]
+) -> dict[str, Any]:
+    data_root = _get_data_root()
+    universe_path = data_root / "universe" / "universe.csv"
+    rows = _safe_read_csv(universe_path)
+    theme_index = _build_theme_index(config)
+    target = symbol.strip().upper()
+    themes: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if row.get("symbol", "").strip().upper() != target:
+            continue
+        key = row.get("category", "").strip()
+        if not key:
+            continue
+        label = row.get("category_label", "").strip() or theme_index.get(key, {}).get("label") or key
+        themes[key] = {"label": label, "is_manual": False}
+    for key, meta in theme_index.items():
+        manual_symbols = set(meta.get("manual_symbols") or [])
+        if target in manual_symbols:
+            entry = themes.setdefault(key, {"label": meta.get("label") or key, "is_manual": True})
+            entry["is_manual"] = True
+    items = [
+        {"key": key, "label": payload["label"], "is_manual": payload.get("is_manual", False)}
+        for key, payload in sorted(themes.items())
+    ]
+    return {"project_id": project_id, "symbol": target, "themes": items}
 
 
 def _run_pipeline_steps(project_id: int, steps: list[str], config: dict[str, Any]) -> None:
@@ -968,6 +998,20 @@ def get_project_theme_symbols(project_id: int, category: str = Query(...)):
         config = _resolve_project_config(session, project_id)
     payload = _collect_theme_symbols(project_id, category, config)
     return ProjectThemeSymbolsOut(**payload)
+
+
+@router.get("/{project_id}/themes/search", response_model=ProjectThemeSearchOut)
+def search_project_theme_symbol(project_id: int, symbol: str = Query(...)):
+    symbol = symbol.strip().upper()
+    if not symbol:
+        raise HTTPException(status_code=400, detail="股票代码不能为空")
+    with get_session() as session:
+        project = session.get(Project, project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="项目不存在")
+        config = _resolve_project_config(session, project_id)
+    payload = _collect_theme_search(project_id, symbol, config)
+    return ProjectThemeSearchOut(**payload)
 
 
 @router.post("/{project_id}/actions/refresh-data", response_model=ProjectDataRefreshOut)

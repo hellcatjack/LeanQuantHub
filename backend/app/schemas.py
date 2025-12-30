@@ -124,6 +124,18 @@ class ProjectThemeSymbolsOut(BaseModel):
     manual_symbols: list[str] = []
 
 
+class ThemeSearchItem(BaseModel):
+    key: str
+    label: str
+    is_manual: bool = False
+
+
+class ProjectThemeSearchOut(BaseModel):
+    project_id: int
+    symbol: str
+    themes: list[ThemeSearchItem]
+
+
 class ProjectDataRefreshRequest(BaseModel):
     steps: list[str] | None = None
 
