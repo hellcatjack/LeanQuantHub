@@ -679,6 +679,19 @@ a {
   white-space: nowrap;
 }
 
+.theme-actions,
+.theme-actions th,
+.theme-actions td,
+.theme-table th:last-child,
+.theme-table td:last-child {
+  text-align: right;
+}
+
+.theme-table th:last-child,
+.theme-table td:last-child {
+  padding-right: 16px;
+}
+
 .theme-footer {
   display: flex;
   align-items: center;
