@@ -831,6 +831,15 @@ export default function ThemesPage() {
                 <div className="form-label">{t("projects.config.themeComposition")}</div>
                 <div className="theme-table-wrapper">
                   <table className="theme-table theme-composition-table">
+                    <colgroup>
+                      <col className="col-theme" />
+                      <col className="col-weight" />
+                      <col className="col-count" />
+                      <col className="col-distribution" />
+                      <col className="col-sample" />
+                      <col className="col-manual" />
+                      <col className="col-actions" />
+                    </colgroup>
                     <thead>
                       <tr>
                         <th>{t("projects.config.themeLabel")}</th>
@@ -838,7 +847,7 @@ export default function ThemesPage() {
                         <th>{t("projects.config.themeSymbolCount")}</th>
                         <th>{t("projects.config.themeDistribution")}</th>
                         <th>{t("projects.config.themeSample")}</th>
-                        <th>{t("projects.config.themeManual")}</th>
+                        <th>{t("projects.config.themeManualShort")}</th>
                         <th>{t("projects.config.themeActions")}</th>
                       </tr>
                     </thead>

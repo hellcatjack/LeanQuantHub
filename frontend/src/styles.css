@@ -332,6 +332,51 @@ a {
   font-size: 11px;
 }
 
+.theme-composition-table {
+  table-layout: fixed;
+}
+
+.theme-composition-table col.col-theme {
+  width: 180px;
+}
+
+.theme-composition-table col.col-weight {
+  width: 140px;
+}
+
+.theme-composition-table col.col-count {
+  width: 110px;
+}
+
+.theme-composition-table col.col-distribution {
+  width: 170px;
+}
+
+.theme-composition-table col.col-sample {
+  width: 320px;
+}
+
+.theme-composition-table col.col-manual {
+  width: 220px;
+}
+
+.theme-composition-table col.col-actions {
+  width: 110px;
+}
+
+.theme-composition-table th,
+.theme-composition-table td {
+  white-space: normal;
+}
+
+.theme-composition-table .theme-samples {
+  max-width: 100%;
+}
+
+.theme-composition-table .theme-actions {
+  justify-content: flex-start;
+}
+
 .theme-name {
   display: grid;
   gap: 4px;
