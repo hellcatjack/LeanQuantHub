@@ -334,39 +334,42 @@ a {
 
 .theme-composition-table {
   table-layout: fixed;
+  width: 100%;
+  min-width: 1200px;
 }
 
 .theme-composition-table col.col-theme {
-  width: 180px;
+  width: 14%;
 }
 
 .theme-composition-table col.col-weight {
-  width: 140px;
+  width: 10%;
 }
 
 .theme-composition-table col.col-count {
-  width: 110px;
+  width: 8%;
 }
 
 .theme-composition-table col.col-distribution {
-  width: 170px;
+  width: 14%;
 }
 
 .theme-composition-table col.col-sample {
-  width: 320px;
+  width: 24%;
 }
 
 .theme-composition-table col.col-manual {
-  width: 220px;
+  width: 20%;
 }
 
 .theme-composition-table col.col-actions {
-  width: 110px;
+  width: 10%;
 }
 
 .theme-composition-table th,
 .theme-composition-table td {
   white-space: normal;
+  vertical-align: middle;
 }
 
 .theme-composition-table .theme-samples {
@@ -374,7 +377,7 @@ a {
 }
 
 .theme-composition-table .theme-actions {
-  justify-content: flex-start;
+  justify-content: flex-end;
 }
 
 .theme-name {
