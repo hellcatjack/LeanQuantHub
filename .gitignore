@@ -16,3 +16,4 @@ artifacts/
 logs/
 data/
 tmp/
+scripts/.restart-local.pids.json
