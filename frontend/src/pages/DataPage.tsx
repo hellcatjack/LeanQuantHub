@@ -1,22 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import axios from "axios";
 import { api } from "../api";
+import DatasetChartPanel from "../components/DatasetChartPanel";
 import PaginationBar from "../components/PaginationBar";
 import TopBar from "../components/TopBar";
 import { useI18n } from "../i18n";
-import { Paginated } from "../types";
-
-interface Dataset {
-  id: number;
-  name: string;
-  vendor?: string | null;
-  asset_class?: string | null;
-  region?: string | null;
-  frequency?: string | null;
-  coverage_start?: string | null;
-  coverage_end?: string | null;
-  source_path?: string | null;
-  updated_at: string;
-}
+import { DatasetSummary, Paginated } from "../types";
 
 interface DatasetQuality {
   dataset_id: number;
@@ -25,6 +14,8 @@ interface DatasetQuality {
   coverage_end?: string | null;
   coverage_days?: number | null;
   expected_points_estimate?: number | null;
+  data_points?: number | null;
+  min_interval_days?: number | null;
   issues: string[];
   status: string;
 }
@@ -50,6 +41,7 @@ interface DataSyncJob {
   dataset_name?: string | null;
   source_path: string;
   date_column: string;
+  reset_history?: boolean;
   status: string;
   rows_scanned?: number | null;
   coverage_start?: string | null;
@@ -67,18 +59,60 @@ interface DataSyncJob {
 }
 
 interface DatasetFetchResult {
-  dataset: Dataset;
+  dataset: DatasetSummary;
   job?: DataSyncJob | null;
   created: boolean;
 }
 
+interface UniverseTheme {
+  key: string;
+  label: string;
+  symbols: number;
+  updated_at?: string | null;
+}
+
+interface UniverseThemeSymbols {
+  key: string;
+  label?: string | null;
+  symbols: string[];
+  updated_at?: string | null;
+}
+
+interface ThemeCoverage {
+  theme_key: string;
+  theme_label?: string | null;
+  total_symbols: number;
+  covered_symbols: number;
+  missing_symbols: string[];
+  updated_at?: string | null;
+}
+
+interface ThemeFetchResult {
+  theme_key: string;
+  total_symbols: number;
+  created: number;
+  reused: number;
+  queued: number;
+}
+
 export default function DataPage() {
-  const { t } = useI18n();
-  const [datasets, setDatasets] = useState<Dataset[]>([]);
+  const { t, formatDateTime } = useI18n();
+  const [datasets, setDatasets] = useState<DatasetSummary[]>([]);
   const [datasetTotal, setDatasetTotal] = useState(0);
   const [datasetPage, setDatasetPage] = useState(1);
   const [datasetPageSize, setDatasetPageSize] = useState(10);
   const [frequencyFilter, setFrequencyFilter] = useState<"all" | "daily" | "minute">("all");
+  const [themeFilter, setThemeFilter] = useState("all");
+  const [themeOptions, setThemeOptions] = useState<UniverseTheme[]>([]);
+  const [themeSymbols, setThemeSymbols] = useState<Set<string>>(new Set());
+  const [themeLoading, setThemeLoading] = useState(false);
+  const [themeError, setThemeError] = useState("");
+  const [themeCoverage, setThemeCoverage] = useState<ThemeCoverage | null>(null);
+  const [themeCoverageLoading, setThemeCoverageLoading] = useState(false);
+  const [themeCoverageError, setThemeCoverageError] = useState("");
+  const [themeFetchLoading, setThemeFetchLoading] = useState(false);
+  const [themeFetchResult, setThemeFetchResult] = useState<ThemeFetchResult | null>(null);
+  const [themeFetchError, setThemeFetchError] = useState("");
   const [form, setForm] = useState({
     name: "",
     vendor: "",
@@ -91,11 +125,13 @@ export default function DataPage() {
   });
   const [fetchForm, setFetchForm] = useState({
     symbol: "",
-    vendor: "stooq",
+    vendor: "alpha",
     asset_class: "Equity",
     region: "US",
     frequency: "daily",
   });
+  const [stooqOnly, setStooqOnly] = useState(false);
+  const [resetHistory, setResetHistory] = useState(false);
   const [fetchLoading, setFetchLoading] = useState(false);
   const [fetchError, setFetchError] = useState("");
   const [fetchResult, setFetchResult] = useState<DatasetFetchResult | null>(null);
@@ -103,6 +139,8 @@ export default function DataPage() {
   const [qualityMap, setQualityMap] = useState<Record<number, DatasetQuality>>({});
   const [qualityLoading, setQualityLoading] = useState<Record<number, boolean>>({});
   const [qualityErrors, setQualityErrors] = useState<Record<number, string>>({});
+  const qualityAbortRef = useRef<Record<number, AbortController>>({});
+  const deletingDatasetIdsRef = useRef<Set<number>>(new Set());
   const [scanForm, setScanForm] = useState({
     dataset_id: "",
     file_path: "",
@@ -126,9 +164,11 @@ export default function DataPage() {
   const [syncTotal, setSyncTotal] = useState(0);
   const [syncPage, setSyncPage] = useState(1);
   const [syncPageSize, setSyncPageSize] = useState(10);
+  const [expandedGroupKey, setExpandedGroupKey] = useState<string | null>(null);
+  const [chartSelection, setChartSelection] = useState<Record<string, number>>({});
 
   const loadDatasets = async () => {
-    const res = await api.get<Paginated<Dataset>>("/api/datasets/page", {
+    const res = await api.get<Paginated<DatasetSummary>>("/api/datasets/page", {
       params: { page: datasetPage, page_size: datasetPageSize },
     });
     setDatasets(res.data.items);
@@ -143,6 +183,98 @@ export default function DataPage() {
     setSyncTotal(res.data.total);
   };
 
+  const loadThemeOptions = async () => {
+    setThemeError("");
+    setThemeLoading(true);
+    try {
+      const res = await api.get<{ items: UniverseTheme[] }>("/api/universe/themes");
+      setThemeOptions(res.data.items || []);
+    } catch (err) {
+      setThemeError(t("data.list.theme.error"));
+    } finally {
+      setThemeLoading(false);
+    }
+  };
+
+  const loadThemeSymbols = async (themeKey: string) => {
+    if (!themeKey || themeKey === "all") {
+      setThemeSymbols(new Set());
+      return;
+    }
+    setThemeError("");
+    setThemeLoading(true);
+    try {
+      const res = await api.get<UniverseThemeSymbols>(
+        `/api/universe/themes/${encodeURIComponent(themeKey)}/symbols`
+      );
+      setThemeSymbols(new Set(res.data.symbols || []));
+    } catch (err) {
+      setThemeError(t("data.list.theme.error"));
+      setThemeSymbols(new Set());
+    } finally {
+      setThemeLoading(false);
+    }
+  };
+
+  const loadThemeCoverage = async (themeKey: string) => {
+    if (!themeKey || themeKey === "all") {
+      setThemeCoverage(null);
+      return;
+    }
+    setThemeCoverageError("");
+    setThemeCoverageLoading(true);
+    try {
+      const res = await api.get<ThemeCoverage>("/api/datasets/theme-coverage", {
+        params: { theme_key: themeKey },
+      });
+      setThemeCoverage(res.data);
+    } catch (err) {
+      setThemeCoverage(null);
+      setThemeCoverageError(t("data.list.theme.coverageError"));
+    } finally {
+      setThemeCoverageLoading(false);
+    }
+  };
+
+  const fetchThemeData = async () => {
+    if (!themeFilter || themeFilter === "all") {
+      return;
+    }
+    const missing = themeCoverage?.missing_symbols?.length ?? 0;
+    if (missing === 0) {
+      setThemeFetchResult(null);
+      setThemeFetchError(t("data.list.theme.noMissing"));
+      return;
+    }
+    const confirmed = window.confirm(
+      t("data.list.theme.confirm", { count: missing })
+    );
+    if (!confirmed) {
+      return;
+    }
+    setThemeFetchError("");
+    setThemeFetchResult(null);
+    setThemeFetchLoading(true);
+    try {
+      const res = await api.post<ThemeFetchResult>("/api/datasets/actions/fetch-theme", {
+        theme_key: themeFilter,
+        vendor: "alpha",
+        asset_class: "Equity",
+        region: "US",
+        frequency: "daily",
+        auto_sync: true,
+        only_missing: true,
+      });
+      setThemeFetchResult(res.data);
+      loadDatasets();
+      loadThemeCoverage(themeFilter);
+    } catch (err) {
+      setThemeFetchError(t("data.list.theme.fetchError"));
+    } finally {
+      setThemeFetchLoading(false);
+    }
+  };
+
   useEffect(() => {
     loadDatasets();
   }, [datasetPage, datasetPageSize]);
@@ -150,6 +282,18 @@ export default function DataPage() {
   useEffect(() => {
     loadSyncJobs();
   }, [syncPage, syncPageSize]);
+
+  useEffect(() => {
+    loadThemeOptions();
+  }, []);
+
+  useEffect(() => {
+    loadThemeSymbols(themeFilter);
+  }, [themeFilter]);
+
+  useEffect(() => {
+    loadThemeCoverage(themeFilter);
+  }, [themeFilter]);
 
   const updateForm = (key: keyof typeof form, value: string) => {
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -196,7 +340,7 @@ export default function DataPage() {
     setSyncForm((prev) => ({ ...prev, [key]: value }));
   };
 
-  const syncDataset = async (dataset: Dataset) => {
+  const syncDataset = async (dataset: DatasetSummary) => {
     setSyncError("");
     setListError("");
     setSyncing((prev) => ({ ...prev, [dataset.id]: true }));
@@ -204,6 +348,8 @@ export default function DataPage() {
       await api.post(`/api/datasets/${dataset.id}/sync`, {
         source_path: dataset.source_path || null,
         date_column: "date",
+        stooq_only: stooqOnly,
+        reset_history: resetHistory,
       });
       loadSyncJobs();
     } catch (err: any) {
@@ -224,19 +370,46 @@ export default function DataPage() {
     options: { silent?: boolean; force?: boolean } = {}
   ) => {
     const { silent = false, force = false } = options;
+    if (deletingDatasetIdsRef.current.has(datasetId)) {
+      return;
+    }
+    if (!datasets.some((dataset) => dataset.id === datasetId)) {
+      return;
+    }
     if (!force && (qualityMap[datasetId] || qualityLoading[datasetId])) {
       return;
     }
+    const existingController = qualityAbortRef.current[datasetId];
+    if (existingController) {
+      existingController.abort();
+    }
+    const controller = new AbortController();
+    qualityAbortRef.current[datasetId] = controller;
     setQualityLoading((prev) => ({ ...prev, [datasetId]: true }));
     setQualityErrors((prev) => ({ ...prev, [datasetId]: "" }));
     try {
-      const res = await api.get<DatasetQuality>(`/api/datasets/${datasetId}/quality`);
+      const res = await api.get<DatasetQuality>(`/api/datasets/${datasetId}/quality`, {
+        signal: controller.signal,
+      });
       setQualityMap((prev) => ({ ...prev, [datasetId]: res.data }));
-    } catch {
+    } catch (err: any) {
+      if (
+        axios.isCancel(err) ||
+        err?.code === "ERR_CANCELED" ||
+        err?.name === "CanceledError"
+      ) {
+        return;
+      }
+      if (err?.response?.status === 404) {
+        return;
+      }
       if (!silent) {
         setQualityErrors((prev) => ({ ...prev, [datasetId]: t("data.list.quality.error") }));
       }
     } finally {
+      if (qualityAbortRef.current[datasetId] === controller) {
+        delete qualityAbortRef.current[datasetId];
+      }
       setQualityLoading((prev) => {
         const next = { ...prev };
         delete next[datasetId];
@@ -251,7 +424,12 @@ export default function DataPage() {
     }
     const idsToLoad = datasets
       .map((dataset) => dataset.id)
-      .filter((id) => !qualityMap[id] && !qualityLoading[id]);
+      .filter(
+        (id) =>
+          !deletingDatasetIdsRef.current.has(id) &&
+          !qualityMap[id] &&
+          !qualityLoading[id]
+      );
     if (!idsToLoad.length) {
       return;
     }
@@ -298,6 +476,8 @@ export default function DataPage() {
       await api.post(`/api/datasets/${Number(syncForm.dataset_id)}/sync`, {
         source_path: syncForm.source_path.trim() || null,
         date_column: syncForm.date_column || "date",
+        stooq_only: stooqOnly,
+        reset_history: resetHistory,
       });
       setSyncForm({ dataset_id: "", source_path: "", date_column: "date" });
       loadSyncJobs();
@@ -312,7 +492,14 @@ export default function DataPage() {
     setListError("");
     setSyncAllLoading(true);
     try {
-      await api.post("/api/datasets/sync-all", {});
+      if (resetHistory && !window.confirm(t("data.list.update.resetConfirm"))) {
+        return;
+      }
+      await api.post("/api/datasets/sync-all", {
+        stooq_only: stooqOnly,
+        vendor: fetchForm.vendor,
+        reset_history: resetHistory,
+      });
       loadSyncJobs();
     } catch (err: any) {
       const detail = err?.response?.data?.detail || t("data.sync.errorBatch");
@@ -329,7 +516,10 @@ export default function DataPage() {
       setFetchError(t("data.fetch.errorSymbol"));
       return;
     }
-    if (fetchForm.vendor === "stooq" && fetchForm.frequency === "minute") {
+    if (
+      fetchForm.frequency === "minute" &&
+      ["stooq", "yahoo", "alpha"].includes(fetchForm.vendor)
+    ) {
       setFetchError(t("data.fetch.errorFrequency"));
       return;
     }
@@ -344,6 +534,7 @@ export default function DataPage() {
         region: fetchForm.region,
         frequency: fetchForm.frequency,
         auto_sync: true,
+        stooq_only: stooqOnly && fetchForm.vendor === "stooq",
       });
       setFetchResult(res.data);
       setDatasetPage(1);
@@ -362,7 +553,7 @@ export default function DataPage() {
     key: string;
     symbol: string;
     region: string;
-    items: Dataset[];
+    items: DatasetSummary[];
   }) => {
     setListError("");
     const targetItems = datasets.filter((item) => {
@@ -388,11 +579,20 @@ export default function DataPage() {
       setListError(t("data.list.delete.mismatch"));
       return;
     }
-    setDeleteLoading((prev) => ({ ...prev, [group.key]: true }));
-    try {
-      await api.post("/api/datasets/actions/batch-delete", {
-        dataset_ids: targetItems.map((item) => item.id),
-      });
+      setDeleteLoading((prev) => ({ ...prev, [group.key]: true }));
+      const deletingIds = targetItems.map((item) => item.id);
+      deletingIds.forEach((id) => deletingDatasetIdsRef.current.add(id));
+      try {
+        targetItems.forEach((item) => {
+          const controller = qualityAbortRef.current[item.id];
+          if (controller) {
+            controller.abort();
+            delete qualityAbortRef.current[item.id];
+          }
+        });
+        await api.post("/api/datasets/actions/batch-delete", {
+          dataset_ids: targetItems.map((item) => item.id),
+        });
       const ids = new Set(targetItems.map((item) => item.id));
       setQualityMap((prev) => {
         const next = { ...prev };
@@ -414,19 +614,20 @@ export default function DataPage() {
         ids.forEach((id) => delete next[id]);
         return next;
       });
-      await loadDatasets();
-      await loadSyncJobs();
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail || t("data.list.delete.error");
-      setListError(String(detail));
-    } finally {
-      setDeleteLoading((prev) => {
-        const next = { ...prev };
-        delete next[group.key];
-        return next;
-      });
-    }
-  };
+        await loadDatasets();
+        await loadSyncJobs();
+      } catch (err: any) {
+        const detail = err?.response?.data?.detail || t("data.list.delete.error");
+        setListError(String(detail));
+      } finally {
+        setDeleteLoading((prev) => {
+          const next = { ...prev };
+          delete next[group.key];
+          return next;
+        });
+        deletingIds.forEach((id) => deletingDatasetIdsRef.current.delete(id));
+      }
+    };
 
   const renderStatus = (value: string) => {
     const key = `common.status.${value}`;
@@ -438,8 +639,56 @@ export default function DataPage() {
     if (value === "success" || value === "ok") {
       return "success";
     }
+    if (value === "rate_limited" || value === "not_found" || value === "warn") {
+      return "warn";
+    }
     if (value === "failed") {
       return "danger";
+    }
+    return "";
+  };
+
+  const normalizeJobStatus = (job: DataSyncJob) => {
+    if (job.status !== "failed" || !job.message) {
+      return job.status;
+    }
+    const message = job.message.toLowerCase();
+    if (message.includes("daily hits limit") || message.includes("访问限制")) {
+      return "rate_limited";
+    }
+    if (message.includes("未覆盖") || message.includes("not found")) {
+      return "not_found";
+    }
+    return job.status;
+  };
+
+  const resolveJobReason = (job: DataSyncJob) => {
+    const normalized = normalizeJobStatus(job);
+    const message = (job.message || "").toLowerCase();
+    if (message.includes("stooq_only")) {
+      return t("data.jobs.reason.stooqOnly");
+    }
+    if (message.includes("premium") || message.includes("付费")) {
+      return t("data.jobs.reason.premium");
+    }
+    if (normalized === "rate_limited") {
+      return t("data.jobs.reason.rateLimited");
+    }
+    if (normalized === "not_found") {
+      return t("data.jobs.reason.notFound");
+    }
+    if (normalized === "failed") {
+      return t("data.jobs.reason.failed");
+    }
+    return "";
+  };
+
+  const reasonClass = (status: string) => {
+    if (status === "failed") {
+      return "danger";
+    }
+    if (status === "rate_limited" || status === "not_found") {
+      return "warn";
     }
     return "";
   };
@@ -472,7 +721,7 @@ export default function DataPage() {
   const normalizeSymbolInput = (value: string) =>
     value.trim().toUpperCase().replace(/[^A-Z0-9.]/g, "");
 
-  const deriveSymbol = (dataset: Dataset) => {
+  const deriveSymbol = (dataset: DatasetSummary) => {
     const source = (dataset.source_path || "").trim();
     let symbol = "";
     if (source) {
@@ -481,11 +730,23 @@ export default function DataPage() {
         symbol = source.slice(8);
       } else if (lower.startsWith("stooq:")) {
         symbol = source.slice(6);
+      } else if (lower.startsWith("stooq-only://")) {
+        symbol = source.slice(13);
+      } else if (lower.startsWith("stooq-only:")) {
+        symbol = source.slice(11);
+      } else if (lower.startsWith("yahoo://")) {
+        symbol = source.slice(8);
+      } else if (lower.startsWith("yahoo:")) {
+        symbol = source.slice(6);
+      } else if (lower.startsWith("alpha://")) {
+        symbol = source.slice(8);
+      } else if (lower.startsWith("alpha:")) {
+        symbol = source.slice(6);
       } else {
         const normalized = source.replace(/\\/g, "/");
         const parts = normalized.split("/");
         const last = parts[parts.length - 1] || normalized;
-        symbol = last.replace(/\.csv$/i, "");
+        symbol = last.replace(/\.(csv|zip)$/i, "");
       }
     }
     if (!symbol) {
@@ -505,6 +766,24 @@ export default function DataPage() {
     if (lower.startsWith("stooq:")) {
       return value;
     }
+    if (lower.startsWith("stooq-only://")) {
+      return `stooq-only:${value.slice(13)}`;
+    }
+    if (lower.startsWith("stooq-only:")) {
+      return value;
+    }
+    if (lower.startsWith("yahoo://")) {
+      return `yahoo:${value.slice(8)}`;
+    }
+    if (lower.startsWith("yahoo:")) {
+      return value;
+    }
+    if (lower.startsWith("alpha://")) {
+      return `alpha:${value.slice(8)}`;
+    }
+    if (lower.startsWith("alpha:")) {
+      return value;
+    }
     const normalized = value.replace(/\\/g, "/");
     const parts = normalized.split("/");
     return parts[parts.length - 1] || value;
@@ -522,15 +801,32 @@ export default function DataPage() {
       .trim()
       .toUpperCase()
       .replace(/[^A-Z0-9.]/g, "");
+    const vendorLabelMap: Record<string, string> = {
+      stooq: "Stooq",
+      yahoo: "Yahoo",
+      alpha: "Alpha",
+    };
     const vendorLabel =
-      fetchForm.vendor === "stooq" ? "Stooq" : fetchForm.vendor.toUpperCase();
+      vendorLabelMap[fetchForm.vendor] || fetchForm.vendor.toUpperCase();
     const frequencyLabel = fetchForm.frequency === "minute" ? "Minute" : "Daily";
+    const stooqOnlyActive = stooqOnly && fetchForm.vendor === "stooq";
+    const sourceVendor = stooqOnlyActive ? "stooq-only" : fetchForm.vendor;
     return {
       symbol,
       datasetName: symbol ? `${vendorLabel}_${symbol}_${frequencyLabel}` : t("common.none"),
-      sourcePath: symbol ? `${fetchForm.vendor}:${symbol}` : t("common.none"),
+      sourcePath: symbol ? `${sourceVendor}:${symbol}` : t("common.none"),
     };
-  }, [fetchForm, t]);
+  }, [fetchForm, stooqOnly, t]);
+
+  const sourceOnlyVendorLabel = useMemo(() => {
+    if (fetchForm.vendor === "alpha") {
+      return "Alpha";
+    }
+    if (fetchForm.vendor === "yahoo") {
+      return "Yahoo";
+    }
+    return "Stooq";
+  }, [fetchForm.vendor]);
 
   const latestSyncByDataset = useMemo(() => {
     const map = new Map<number, DataSyncJob>();
@@ -542,32 +838,46 @@ export default function DataPage() {
     }
     return map;
   }, [syncJobs]);
-
   const buildQualityTooltip = (quality: DatasetQuality) => {
     return [
-      `${t("data.quality.status")}：${renderStatus(quality.status)}`,
-      `${t("data.quality.coverage")}：${quality.coverage_start || t("common.none")} ~ ${quality.coverage_end || t("common.none")}`,
-      `${t("data.quality.days")}：${quality.coverage_days ?? t("common.none")}`,
-      `${t("data.quality.expected")}：${
+      `${t("data.quality.status")}: ${renderStatus(quality.status)}`,
+      `${t("data.quality.coverage")}: ${quality.coverage_start || t("common.none")} ~ ${quality.coverage_end || t("common.none")}`,
+      `${t("data.quality.days")}: ${quality.coverage_days ?? t("common.none")}`,
+      `${t("data.quality.expected")}: ${
         quality.expected_points_estimate ?? t("common.none")
       }`,
-      `${t("data.quality.issues")}：${
-        quality.issues.length ? quality.issues.join("；") : t("common.noneText")
+      `${t("data.quality.points")}: ${quality.data_points ?? t("common.none")}`,
+      `${t("data.quality.minInterval")}: ${quality.min_interval_days ?? t("common.none")}`,
+      `${t("data.quality.issues")}: ${
+        quality.issues.length ? quality.issues.join(", ") : t("common.noneText")
       }`,
     ].join("\n");
   };
 
-  const renderQualitySummary = (datasetId: number) => {
-    if (qualityLoading[datasetId]) {
+  const isDailyFrequency = (value?: string | null) => {
+    const normalized = normalizeFrequency(value);
+    return normalized === "daily";
+  };
+
+  const renderQualitySummary = (dataset: DatasetSummary) => {
+    if (qualityLoading[dataset.id]) {
       return <span className="market-subtle">{t("data.list.quality.loading")}</span>;
     }
-    const error = qualityErrors[datasetId];
+    const error = qualityErrors[dataset.id];
     if (error) {
       return <span className="market-subtle">{error}</span>;
     }
-    const quality = qualityMap[datasetId];
+    const quality = qualityMap[dataset.id];
     if (!quality) {
       return <span className="market-subtle">{t("common.none")}</span>;
+    }
+    const minInterval = quality.min_interval_days;
+    if (isDailyFrequency(dataset.frequency) && typeof minInterval === "number" && minInterval > 1) {
+      return (
+        <span className="pill danger" title={buildQualityTooltip(quality)}>
+          {t("data.list.quality.incomplete")}
+        </span>
+      );
     }
     return (
       <span className={`pill ${statusClass(quality.status) || ""}`} title={buildQualityTooltip(quality)}>
@@ -575,7 +885,6 @@ export default function DataPage() {
       </span>
     );
   };
-
 
   const groupedDatasets = useMemo(() => {
     const groups = new Map<
@@ -586,7 +895,7 @@ export default function DataPage() {
         region: string;
         name: string;
         meta: string;
-        items: Dataset[];
+        items: DatasetSummary[];
       }
     >();
 
@@ -601,6 +910,9 @@ export default function DataPage() {
         continue;
       }
       const symbol = deriveSymbol(dataset);
+      if (themeFilter !== "all" && !themeSymbols.has(symbol)) {
+        continue;
+      }
       const region = (dataset.region || "").trim();
       const key = `${symbol}|${region || "-"}`;
       const entry = groups.get(key) || {
@@ -651,11 +963,46 @@ export default function DataPage() {
 
     grouped.sort((a, b) => a.symbol.localeCompare(b.symbol));
     return grouped;
-  }, [datasets, frequencyFilter]);
+  }, [datasets, frequencyFilter, themeFilter, themeSymbols]);
   const filteredDatasetTotal = groupedDatasets.reduce(
     (sum, group) => sum + group.items.length,
     0
   );
+  const selectedTheme = useMemo(
+    () => themeOptions.find((item) => item.key === themeFilter),
+    [themeOptions, themeFilter]
+  );
+  const themeLabel =
+    selectedTheme?.label || themeCoverage?.theme_label || themeFilter;
+  const themeMissing = themeCoverage?.missing_symbols || [];
+  const themeMissingSample = themeMissing.slice(0, 8).join(", ");
+
+  const getChartDatasetId = (group: {
+    key: string;
+    items: DatasetSummary[];
+  }) => chartSelection[group.key] ?? group.items[0]?.id;
+
+  const getChartDataset = (group: {
+    key: string;
+    items: DatasetSummary[];
+  }) => {
+    const selectedId = getChartDatasetId(group);
+    return group.items.find((item) => item.id === selectedId) || group.items[0];
+  };
+
+  const toggleChart = (group: { key: string; items: DatasetSummary[] }) => {
+    setExpandedGroupKey((prev) => (prev === group.key ? null : group.key));
+    if (!chartSelection[group.key] && group.items[0]) {
+      setChartSelection((prev) => ({
+        ...prev,
+        [group.key]: group.items[0].id,
+      }));
+    }
+  };
+
+  const updateChartSelection = (groupKey: string, datasetId: number) => {
+    setChartSelection((prev) => ({ ...prev, [groupKey]: datasetId }));
+  };
 
   return (
     <div className="main">
@@ -686,6 +1033,8 @@ export default function DataPage() {
                   onChange={(e) => updateFetchForm("vendor", e.target.value)}
                 >
                   <option value="stooq">{t("data.fetch.vendor.stooq")}</option>
+                  <option value="yahoo">{t("data.fetch.vendor.yahoo")}</option>
+                  <option value="alpha">{t("data.fetch.vendor.alpha")}</option>
                 </select>
                 <select
                   className="form-select"
@@ -693,11 +1042,23 @@ export default function DataPage() {
                   onChange={(e) => updateFetchForm("frequency", e.target.value)}
                 >
                   <option value="daily">{t("data.fetch.frequency.daily")}</option>
-                  <option value="minute" disabled={fetchForm.vendor === "stooq"}>
+                  <option
+                    value="minute"
+                    disabled={["stooq", "yahoo", "alpha"].includes(fetchForm.vendor)}
+                  >
                     {t("data.fetch.frequency.minute")}
                   </option>
                 </select>
               </div>
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={stooqOnly}
+                  onChange={(e) => setStooqOnly(e.target.checked)}
+                  disabled={fetchForm.vendor === "yahoo"}
+                />
+                <span>{t("data.fetch.stooqOnly", { vendor: sourceOnlyVendorLabel })}</span>
+              </label>
               <div className="form-grid two-col">
                 <select
                   className="form-select"
@@ -852,33 +1213,131 @@ export default function DataPage() {
               >
                 {syncAllLoading ? t("data.list.update.syncingAll") : t("data.list.update.syncAll")}
               </button>
-              <span className="market-toolbar-label">{t("data.list.filter.label")}</span>
-              <div className="segmented">
-                <button
-                  type="button"
-                  className={frequencyFilter === "all" ? "active" : ""}
-                  onClick={() => setFrequencyFilter("all")}
+              <label className="market-toolbar-checkbox">
+                <input
+                  type="checkbox"
+                  checked={stooqOnly}
+                  onChange={(e) => setStooqOnly(e.target.checked)}
+                />
+                <span>{t("data.list.stooqOnly", { vendor: sourceOnlyVendorLabel })}</span>
+              </label>
+              <label className="market-toolbar-checkbox">
+                <input
+                  type="checkbox"
+                  checked={resetHistory}
+                  onChange={(e) => setResetHistory(e.target.checked)}
+                />
+                <span>{t("data.list.update.reset")}</span>
+              </label>
+              <div className="market-toolbar-group">
+                <span className="market-toolbar-label">{t("data.list.theme.label")}</span>
+                <select
+                  className="market-toolbar-select"
+                  value={themeFilter}
+                  onChange={(e) => setThemeFilter(e.target.value)}
                 >
-                  {t("data.list.filter.all")}
-                </button>
-                <button
-                  type="button"
-                  className={frequencyFilter === "daily" ? "active" : ""}
-                  onClick={() => setFrequencyFilter("daily")}
-                >
-                  {t("data.list.filter.daily")}
-                </button>
-                <button
-                  type="button"
-                  className={frequencyFilter === "minute" ? "active" : ""}
-                  onClick={() => setFrequencyFilter("minute")}
-                >
-                  {t("data.list.filter.minute")}
-                </button>
+                  <option value="all">{t("data.list.theme.all")}</option>
+                  {themeOptions.map((theme) => (
+                    <option key={theme.key} value={theme.key}>
+                      {theme.label} ({theme.symbols})
+                    </option>
+                  ))}
+                </select>
+                {themeLoading && (
+                  <span className="market-toolbar-hint">{t("data.list.theme.loading")}</span>
+                )}
+              </div>
+              <div className="market-toolbar-group">
+                <span className="market-toolbar-label">{t("data.list.filter.label")}</span>
+                <div className="segmented">
+                  <button
+                    type="button"
+                    className={frequencyFilter === "all" ? "active" : ""}
+                    onClick={() => setFrequencyFilter("all")}
+                  >
+                    {t("data.list.filter.all")}
+                  </button>
+                  <button
+                    type="button"
+                    className={frequencyFilter === "daily" ? "active" : ""}
+                    onClick={() => setFrequencyFilter("daily")}
+                  >
+                    {t("data.list.filter.daily")}
+                  </button>
+                  <button
+                    type="button"
+                    className={frequencyFilter === "minute" ? "active" : ""}
+                    onClick={() => setFrequencyFilter("minute")}
+                  >
+                    {t("data.list.filter.minute")}
+                  </button>
+                </div>
               </div>
             </div>
           </div>
+          {themeFilter !== "all" && (
+            <div className="market-coverage">
+              <div>
+                <div className="market-coverage-title">
+                  {t("data.list.theme.coverageTitle", { theme: themeLabel })}
+                </div>
+                {themeCoverageLoading ? (
+                  <div className="market-coverage-meta">
+                    {t("data.list.theme.loading")}
+                  </div>
+                ) : themeCoverage ? (
+                  <>
+                    <div className="market-coverage-meta">
+                      {t("data.list.theme.coverageMeta", {
+                        covered: themeCoverage.covered_symbols,
+                        total: themeCoverage.total_symbols,
+                        missing: themeMissing.length,
+                      })}
+                    </div>
+                    {themeMissingSample && (
+                      <div className="market-coverage-sample">
+                        {t("data.list.theme.coverageSample", {
+                          symbols: themeMissingSample,
+                        })}
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <div className="market-coverage-meta">
+                    {t("data.list.theme.coverageEmpty")}
+                  </div>
+                )}
+                {themeCoverageError && (
+                  <div className="market-coverage-error">{themeCoverageError}</div>
+                )}
+                {themeFetchError && (
+                  <div className="market-coverage-error">{themeFetchError}</div>
+                )}
+                {themeFetchResult && (
+                  <div className="market-coverage-success">
+                    {t("data.list.theme.fetchSuccess", {
+                      created: themeFetchResult.created,
+                      queued: themeFetchResult.queued,
+                    })}
+                  </div>
+                )}
+              </div>
+              <div className="market-coverage-actions">
+                <button
+                  type="button"
+                  className="button-secondary"
+                  onClick={fetchThemeData}
+                  disabled={themeFetchLoading || themeCoverageLoading}
+                >
+                  {themeFetchLoading
+                    ? t("data.list.theme.fetching")
+                    : t("data.list.theme.fetch")}
+                </button>
+              </div>
+            </div>
+          )}
           {listError && <div className="market-inline-error">{listError}</div>}
+          {themeError && <div className="market-inline-error">{themeError}</div>}
           <div className="market-table-wrapper">
             <table className="market-table">
               <thead>
@@ -899,104 +1358,137 @@ export default function DataPage() {
                     <td colSpan={8}>{t("data.list.empty")}</td>
                   </tr>
                 )}
-                {groupedDatasets.map((group) => (
-                  <tr key={group.key}>
-                    <td>
-                      <div className="market-symbol">{group.symbol}</div>
-                      <div className="market-sub">{group.region || t("common.none")}</div>
-                    </td>
-                    <td>
-                      <div className="market-name">{group.name}</div>
-                      <div className="market-sub">{group.meta || t("common.none")}</div>
-                    </td>
-                    <td>
-                      <div className="market-stack">
-                        {group.items.map((item) => {
-                          const freq = formatFrequency(item.frequency);
-                          return (
-                            <div key={item.id} className="market-line">
-                              <span className={`market-pill ${freq.className}`}>{freq.label}</span>
-                              <span className="market-coverage">
-                                {formatCoverage(item.coverage_start, item.coverage_end)}
-                              </span>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </td>
-                    <td>
-                      <div className="market-stack">
-                        {group.items.map((item) => (
-                          <div key={item.id} className="market-line">
-                            {new Date(item.updated_at).toLocaleString()}
+                {groupedDatasets.map((group) => {
+                  const expanded = expandedGroupKey === group.key;
+                  const chartDataset = getChartDataset(group);
+                  const chartDatasetId = chartDataset?.id ?? getChartDatasetId(group);
+                  return (
+                    <Fragment key={group.key}>
+                      <tr>
+                        <td>
+                          <div className="market-symbol">{group.symbol}</div>
+                          <div className="market-sub">{group.region || t("common.none")}</div>
+                        </td>
+                        <td>
+                          <div className="market-name">{group.name}</div>
+                          <div className="market-sub">{group.meta || t("common.none")}</div>
+                        </td>
+                        <td>
+                          <div className="market-stack">
+                            {group.items.map((item) => {
+                              const freq = formatFrequency(item.frequency);
+                              return (
+                                <div key={item.id} className="market-line">
+                                  <span className={`market-pill ${freq.className}`}>{freq.label}</span>
+                                  <span className="market-coverage">
+                                    {formatCoverage(item.coverage_start, item.coverage_end)}
+                                  </span>
+                                </div>
+                              );
+                            })}
                           </div>
-                        ))}
-                      </div>
-                    </td>
-                    <td>
-                      <div className="market-stack">
-                        {group.items.map((item) => (
-                          <div
-                            key={item.id}
-                            className="market-line market-source"
-                            title={item.source_path || ""}
-                          >
-                            {formatSource(item.source_path)}
+                        </td>
+                        <td>
+                          <div className="market-stack">
+                            {group.items.map((item) => (
+                              <div key={item.id} className="market-line">
+                                {formatDateTime(item.updated_at)}
+                              </div>
+                            ))}
                           </div>
-                        ))}
-                      </div>
-                    </td>
-                    <td className="market-actions">
-                      <div className="market-stack">
-                        {group.items.map((item) => (
-                          <div key={item.id} className="market-line">
-                            {renderQualitySummary(item.id)}
-                          </div>
-                        ))}
-                      </div>
-                    </td>
-                    <td className="market-actions">
-                      <div className="market-stack">
-                        {group.items.map((item) => {
-                          const job = latestSyncByDataset.get(item.id);
-                          return (
-                            <div key={item.id} className="market-line">
-                              <button
-                                type="button"
-                                className="link-button"
-                                onClick={() => syncDataset(item)}
-                                disabled={!!syncing[item.id]}
+                        </td>
+                        <td>
+                          <div className="market-stack">
+                            {group.items.map((item) => (
+                              <div
+                                key={item.id}
+                                className="market-line market-source"
+                                title={item.source_path || ""}
                               >
-                                {syncing[item.id]
-                                  ? t("data.list.update.syncing")
-                                  : t("data.list.update.sync")}
-                              </button>
-                              {job ? (
-                                <span className={`pill ${statusClass(job.status) || ""}`}>
-                                  {renderStatus(job.status)}
-                                </span>
-                              ) : (
-                                <span className="market-subtle">{t("common.none")}</span>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </td>
-                    <td className="market-actions">
-                      <button
-                        type="button"
-                        className="danger-button"
-                        onClick={() => deleteGroup(group)}
-                        disabled={!!deleteLoading[group.key]}
-                      >
-                        {deleteLoading[group.key]
-                          ? t("data.list.delete.deleting")
-                          : t("data.list.delete.action")}
-                      </button>
-                    </td>
-                  </tr>
-                ))}
+                                {formatSource(item.source_path)}
+                              </div>
+                            ))}
+                          </div>
+                        </td>
+                        <td className="market-actions">
+                          <div className="market-stack">
+                            {group.items.map((item) => (
+                              <div key={item.id} className="market-line">
+                            {renderQualitySummary(item)}
+                              </div>
+                            ))}
+                          </div>
+                        </td>
+                        <td className="market-actions">
+                          <div className="market-stack">
+                            {group.items.map((item) => {
+                              const job = latestSyncByDataset.get(item.id);
+                              const jobStatus = job ? normalizeJobStatus(job) : null;
+                              return (
+                                <div key={item.id} className="market-line">
+                                  <button
+                                    type="button"
+                                    className="link-button"
+                                    onClick={() => syncDataset(item)}
+                                    disabled={!!syncing[item.id]}
+                                  >
+                                    {syncing[item.id]
+                                      ? t("data.list.update.syncing")
+                                      : t("data.list.update.sync")}
+                                  </button>
+                                  {job ? (
+                                    <span
+                                      className={`pill ${statusClass(jobStatus || job.status) || ""}`}
+                                      title={job.message || ""}
+                                    >
+                                      {renderStatus(jobStatus || job.status)}
+                                    </span>
+                                  ) : (
+                                    <span className="market-subtle">{t("common.none")}</span>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </td>
+                        <td className="market-actions">
+                          <div className="market-action-stack">
+                            <button
+                              type="button"
+                              className="link-button"
+                              onClick={() => toggleChart(group)}
+                            >
+                              {expanded ? t("data.list.chart.hide") : t("data.list.chart.show")}
+                            </button>
+                            <button
+                              type="button"
+                              className="danger-button"
+                              onClick={() => deleteGroup(group)}
+                              disabled={!!deleteLoading[group.key]}
+                            >
+                              {deleteLoading[group.key]
+                                ? t("data.list.delete.deleting")
+                                : t("data.list.delete.action")}
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                      {expanded && chartDataset && (
+                        <tr className="market-chart-row">
+                          <td colSpan={8}>
+                            <DatasetChartPanel
+                              dataset={chartDataset}
+                              datasets={group.items}
+                              selectedId={chartDatasetId}
+                              onSelect={(id) => updateChartSelection(group.key, id)}
+                              openUrl={chartDataset ? `/data/charts/${chartDataset.id}` : undefined}
+                            />
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -1204,51 +1696,65 @@ export default function DataPage() {
                   <td colSpan={8}>{t("data.jobs.empty")}</td>
                 </tr>
               )}
-              {syncJobs.map((job) => (
-                <tr key={job.id}>
-                  <td>{job.id}</td>
-                  <td>{job.dataset_name || `#${job.dataset_id}`}</td>
-                  <td>
-                    <span className={`pill ${statusClass(job.status) || ""}`}>
-                      {renderStatus(job.status)}
-                    </span>
-                  </td>
-                  <td>{job.rows_scanned ?? t("common.none")}</td>
-                  <td>
-                    {job.coverage_start || t("common.none")} ~{" "}
-                    {job.coverage_end || t("common.none")}
-                  </td>
-                  <td>
-                    <div style={{ fontSize: "12px", lineHeight: 1.4 }}>
-                      <div>
-                        {t("data.jobs.outputLabels.curated")}:{" "}
-                        {job.output_path || t("common.none")}
+              {syncJobs.map((job) => {
+                const normalized = normalizeJobStatus(job);
+                const reason = resolveJobReason(job);
+                return (
+                  <tr key={job.id}>
+                    <td>{job.id}</td>
+                    <td>{job.dataset_name || `#${job.dataset_id}`}</td>
+                    <td>
+                      <span
+                        className={`pill ${statusClass(normalized) || ""}`}
+                        title={job.message || ""}
+                      >
+                        {renderStatus(normalized)}
+                      </span>
+                    </td>
+                    <td>{job.rows_scanned ?? t("common.none")}</td>
+                    <td>
+                      {job.coverage_start || t("common.none")} ~{" "}
+                      {job.coverage_end || t("common.none")}
+                    </td>
+                    <td>
+                      <div style={{ fontSize: "12px", lineHeight: 1.4 }}>
+                        <div>
+                          {t("data.jobs.outputLabels.curated")}:{" "}
+                          {job.output_path || t("common.none")}
+                        </div>
+                        <div>
+                          {t("data.jobs.outputLabels.normalized")}:{" "}
+                          {job.normalized_path || t("common.none")}
+                        </div>
+                        <div>
+                          {t("data.jobs.outputLabels.adjusted")}:{" "}
+                          {job.adjusted_path || t("common.none")}
+                        </div>
+                        <div>
+                          {t("data.jobs.outputLabels.snapshot")}:{" "}
+                          {job.snapshot_path || t("common.none")}
+                        </div>
+                        <div>
+                          {t("data.jobs.outputLabels.lean")}: {job.lean_path || t("common.none")}
+                        </div>
+                        <div>
+                          {t("data.jobs.outputLabels.leanAdjusted")}:{" "}
+                          {job.lean_adjusted_path || t("common.none")}
+                        </div>
                       </div>
-                      <div>
-                        {t("data.jobs.outputLabels.normalized")}:{" "}
-                        {job.normalized_path || t("common.none")}
+                    </td>
+                    <td>
+                      <div className="job-message">
+                        {reason && (
+                          <span className={`pill ${reasonClass(normalized)}`}>{reason}</span>
+                        )}
+                        <span>{job.message || t("common.none")}</span>
                       </div>
-                      <div>
-                        {t("data.jobs.outputLabels.adjusted")}:{" "}
-                        {job.adjusted_path || t("common.none")}
-                      </div>
-                      <div>
-                        {t("data.jobs.outputLabels.snapshot")}:{" "}
-                        {job.snapshot_path || t("common.none")}
-                      </div>
-                      <div>
-                        {t("data.jobs.outputLabels.lean")}: {job.lean_path || t("common.none")}
-                      </div>
-                      <div>
-                        {t("data.jobs.outputLabels.leanAdjusted")}:{" "}
-                        {job.lean_adjusted_path || t("common.none")}
-                      </div>
-                    </div>
-                  </td>
-                  <td>{job.message || t("common.none")}</td>
-                  <td>{new Date(job.created_at).toLocaleString()}</td>
-                </tr>
-              ))}
+                    </td>
+                    <td>{formatDateTime(job.created_at)}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
           <PaginationBar

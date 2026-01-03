@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import PaginationBar from "../components/PaginationBar";
+import BacktestChartPanel from "../components/BacktestChartPanel";
 import TopBar from "../components/TopBar";
 import { useI18n } from "../i18n";
 import { Paginated } from "../types";
@@ -114,7 +115,7 @@ const LineChart = ({
 };
 
 export default function ReportsPage() {
-  const { t } = useI18n();
+  const { t, formatDateTime } = useI18n();
   const [reports, setReports] = useState<Report[]>([]);
   const [reportTotal, setReportTotal] = useState(0);
   const [reportPage, setReportPage] = useState(1);
@@ -126,6 +127,8 @@ export default function ReportsPage() {
   const [chartErrorKey, setChartErrorKey] = useState("");
   const [equityPoints, setEquityPoints] = useState<ChartPoint[]>([]);
   const [drawdownPoints, setDrawdownPoints] = useState<ChartPoint[]>([]);
+  const [tradeChartInput, setTradeChartInput] = useState("");
+  const [tradeChartRunId, setTradeChartRunId] = useState<number | null>(null);
   const [previewReportId, setPreviewReportId] = useState<number | null>(null);
 
   const metricItems = useMemo(
@@ -348,6 +351,47 @@ export default function ReportsPage() {
           </div>
         )}
 
+        <div className="card">
+          <div className="card-title">{t("reports.trades.title")}</div>
+          <div className="card-meta">{t("reports.trades.meta")}</div>
+          <div style={{ marginTop: "12px", display: "flex", gap: "8px", flexWrap: "wrap" }}>
+            <input
+              value={tradeChartInput}
+              onChange={(e) => setTradeChartInput(e.target.value)}
+              placeholder={t("reports.trades.placeholder")}
+              style={{
+                padding: "10px",
+                borderRadius: "10px",
+                border: "1px solid #e3e6ee",
+                minWidth: 180,
+              }}
+            />
+            <button
+              onClick={() => {
+                const nextId = Number(tradeChartInput);
+                if (Number.isFinite(nextId)) {
+                  setTradeChartRunId(nextId);
+                } else {
+                  setTradeChartRunId(null);
+                }
+              }}
+              style={{
+                padding: "10px 16px",
+                borderRadius: "10px",
+                border: "none",
+                background: "#0f62fe",
+                color: "#fff",
+                fontWeight: 600,
+                cursor: "pointer",
+              }}
+            >
+              {t("reports.trades.load")}
+            </button>
+          </div>
+        </div>
+
+        {tradeChartRunId && <BacktestChartPanel runId={tradeChartRunId} />}
+
         <table className="table">
           <thead>
             <tr>
@@ -375,15 +419,26 @@ export default function ReportsPage() {
                     {t("common.actions.view")}
                   </button>
                   <span style={{ margin: "0 6px", color: "#c1c7d0" }}>|</span>
-                  <a
-                    href={`${apiBase}/api/reports/${report.id}/file?download=1`}
-                    download
-                    style={{ color: "#0f62fe", fontWeight: 600 }}
-                  >
-                    {t("common.actions.download")}
-                  </a>
+                  {report.report_type === "html" ? (
+                    <a
+                      href={`${apiBase}/api/reports/${report.id}/file`}
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{ color: "#0f62fe", fontWeight: 600 }}
+                    >
+                      {t("reports.preview.open")}
+                    </a>
+                  ) : (
+                    <a
+                      href={`${apiBase}/api/reports/${report.id}/file?download=1`}
+                      download
+                      style={{ color: "#0f62fe", fontWeight: 600 }}
+                    >
+                      {t("common.actions.download")}
+                    </a>
+                  )}
                 </td>
-                <td>{new Date(report.created_at).toLocaleString()}</td>
+                <td>{formatDateTime(report.created_at)}</td>
               </tr>
             ))}
           </tbody>

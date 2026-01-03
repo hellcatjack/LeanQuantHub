@@ -7,6 +7,7 @@ import ProjectsPage from "./pages/ProjectsPage";
 import ThemesPage from "./pages/ThemesPage";
 import ReportsPage from "./pages/ReportsPage";
 import AuditLogsPage from "./pages/AuditLogsPage";
+import DatasetChartPage from "./pages/DatasetChartPage";
 
 export default function App() {
   return (
@@ -20,6 +21,7 @@ export default function App() {
         <Route path="/backtests" element={<BacktestsPage />} />
         <Route path="/reports" element={<ReportsPage />} />
         <Route path="/data" element={<DataPage />} />
+        <Route path="/data/charts/:datasetId" element={<DatasetChartPage />} />
         <Route path="/audit-logs" element={<AuditLogsPage />} />
       </Routes>
     </div>

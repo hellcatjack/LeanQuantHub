@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, JSON, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, JSON, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -119,6 +119,7 @@ class AlgorithmVersion(Base):
     type_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
     content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    params: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     algorithm: Mapped[Algorithm] = relationship(back_populates="versions")
@@ -151,6 +152,100 @@ class ProjectAlgorithmBinding(Base):
     )
 
 
+class SystemTheme(Base):
+    __tablename__ = "system_themes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    key: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    label: Mapped[str] = mapped_column(String(120), nullable=False)
+    source: Mapped[str] = mapped_column(String(64), default="config")
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    versions: Mapped[list["SystemThemeVersion"]] = relationship(back_populates="theme")
+    bindings: Mapped[list["ProjectSystemThemeBinding"]] = relationship(
+        back_populates="theme"
+    )
+
+
+class SystemThemeVersion(Base):
+    __tablename__ = "system_theme_versions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    theme_id: Mapped[int] = mapped_column(ForeignKey("system_themes.id"), nullable=False)
+    version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    theme: Mapped["SystemTheme"] = relationship(back_populates="versions")
+    bindings: Mapped[list["ProjectSystemThemeBinding"]] = relationship(
+        back_populates="version"
+    )
+
+
+class ProjectSystemThemeBinding(Base):
+    __tablename__ = "project_system_theme_bindings"
+    __table_args__ = (UniqueConstraint("project_id", "theme_id", name="uq_project_theme"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False)
+    theme_id: Mapped[int] = mapped_column(ForeignKey("system_themes.id"), nullable=False)
+    version_id: Mapped[int] = mapped_column(
+        ForeignKey("system_theme_versions.id"), nullable=False
+    )
+    mode: Mapped[str] = mapped_column(String(32), default="follow_latest")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    theme: Mapped["SystemTheme"] = relationship(back_populates="bindings")
+    version: Mapped["SystemThemeVersion"] = relationship(back_populates="bindings")
+
+
+class ThemeChangeReport(Base):
+    __tablename__ = "theme_change_reports"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False)
+    theme_id: Mapped[int] = mapped_column(ForeignKey("system_themes.id"), nullable=False)
+    from_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey("system_theme_versions.id"), nullable=True
+    )
+    to_version_id: Mapped[int] = mapped_column(
+        ForeignKey("system_theme_versions.id"), nullable=False
+    )
+    diff: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class UniverseMembership(Base):
+    __tablename__ = "universe_memberships"
+    __table_args__ = (
+        UniqueConstraint("symbol", "category", name="uq_universe_symbol_category"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    category: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    category_label: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    region: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    asset_class: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    in_sp500_history: Mapped[bool] = mapped_column(Boolean, default=False)
+    start_date: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    end_date: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    source: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    theme_source: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    theme_keyword: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
 class DataSyncJob(Base):
     __tablename__ = "data_sync_jobs"
 
@@ -158,6 +253,9 @@ class DataSyncJob(Base):
     dataset_id: Mapped[int] = mapped_column(ForeignKey("datasets.id"), nullable=False)
     source_path: Mapped[str] = mapped_column(String(255), nullable=False)
     date_column: Mapped[str] = mapped_column(String(64), default="date")
+    reset_history: Mapped[bool] = mapped_column(Boolean, default=False)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="queued")
     rows_scanned: Mapped[int | None] = mapped_column(Integer, nullable=True)
     coverage_start: Mapped[str | None] = mapped_column(String(16), nullable=True)

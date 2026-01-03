@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import PaginationBar from "../components/PaginationBar";
 import TopBar from "../components/TopBar";
@@ -46,12 +46,33 @@ interface AlgorithmVersion {
   created_at: string;
 }
 
+interface ThemeSystemMeta {
+  theme_id: number;
+  version_id?: number | null;
+  version?: string | null;
+  source?: string | null;
+  mode?: string | null;
+}
+
+interface ThemeSystemBase {
+  label?: string | null;
+  keywords?: string[];
+  manual?: string[];
+  exclude?: string[];
+}
+
 interface ThemeConfigItem {
   key: string;
   label: string;
   weight: number;
+  priority?: number;
   keywords?: string[];
   manual?: string[];
+  exclude?: string[];
+  system?: ThemeSystemMeta | null;
+  system_base?: ThemeSystemBase | null;
+  source?: string | null;
+  snapshot?: { theme_id?: number; version_id?: number; version?: string } | null;
 }
 
 interface ProjectConfig {
@@ -64,6 +85,7 @@ interface ProjectConfig {
   risk_free_rate?: number;
   categories?: { key: string; label: string }[];
   themes?: ThemeConfigItem[];
+  symbol_types?: Record<string, string>;
 }
 
 interface ProjectConfigResponse {
@@ -96,12 +118,14 @@ interface ProjectDataStatus {
   backtest: { updated_at?: string | null; summary?: Record<string, any> | null };
 }
 
-interface ProjectThematicBacktest {
+interface BacktestRun {
+  id: number;
   project_id: number;
   status: string;
-  summary?: Record<string, any> | null;
-  updated_at?: string | null;
-  source?: string | null;
+  params?: Record<string, unknown> | null;
+  metrics?: Record<string, unknown> | null;
+  created_at: string;
+  ended_at?: string | null;
 }
 
 interface ThemeSummaryItem {
@@ -109,7 +133,9 @@ interface ThemeSummaryItem {
   label: string;
   symbols: number;
   sample: string[];
+  sample_types?: Record<string, string>;
   manual_symbols?: string[];
+  exclude_symbols?: string[];
 }
 
 interface ProjectThemeSummary {
@@ -124,13 +150,17 @@ interface ProjectThemeSymbols {
   category: string;
   label?: string | null;
   symbols: string[];
+  auto_symbols?: string[];
   manual_symbols?: string[];
+  exclude_symbols?: string[];
+  symbol_types?: Record<string, string>;
 }
 
 interface ThemeSearchItem {
   key: string;
   label: string;
   is_manual?: boolean;
+  is_excluded?: boolean;
 }
 
 interface ProjectThemeSearch {
@@ -151,7 +181,7 @@ interface ProjectAlgorithmBinding {
 }
 
 export default function ProjectsPage() {
-  const { t } = useI18n();
+  const { t, formatDateTime } = useI18n();
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectTotal, setProjectTotal] = useState(0);
   const [projectPage, setProjectPage] = useState(1);
@@ -195,12 +225,16 @@ export default function ProjectsPage() {
   const [compareThemeA, setCompareThemeA] = useState("");
   const [compareThemeB, setCompareThemeB] = useState("");
   const [compareMessage, setCompareMessage] = useState("");
+  const [newThemeSymbol, setNewThemeSymbol] = useState("");
+  const [newThemeSymbolType, setNewThemeSymbolType] = useState("STOCK");
+  const [themeSymbolMessage, setThemeSymbolMessage] = useState("");
+  const themeSaveTimer = useRef<number | null>(null);
   const [configSection, setConfigSection] = useState<
     "universe" | "data" | "themes" | "portfolio"
   >("universe");
   const [dataStatus, setDataStatus] = useState<ProjectDataStatus | null>(null);
   const [dataMessage, setDataMessage] = useState("");
-  const [thematicBacktest, setThematicBacktest] = useState<ProjectThematicBacktest | null>(null);
+  const [latestBacktest, setLatestBacktest] = useState<BacktestRun | null>(null);
   const [backtestMessage, setBacktestMessage] = useState("");
   const [algorithms, setAlgorithms] = useState<Algorithm[]>([]);
   const [algorithmVersions, setAlgorithmVersions] = useState<AlgorithmVersion[]>([]);
@@ -211,6 +245,23 @@ export default function ProjectsPage() {
     isLocked: true,
   });
   const [bindingMessage, setBindingMessage] = useState("");
+  const [benchmarkMessage, setBenchmarkMessage] = useState("");
+  const [projectTab, setProjectTab] = useState<
+    "overview" | "config" | "algorithm" | "data" | "backtest" | "versions" | "diff"
+  >("overview");
+  const [projectSearch, setProjectSearch] = useState("");
+  const backtestRefreshTimers = useRef<number[]>([]);
+
+  const symbolTypeOptions = [
+    { value: "STOCK", label: t("symbols.types.stock") },
+    { value: "ETF", label: t("symbols.types.etf") },
+    { value: "ADR", label: t("symbols.types.adr") },
+    { value: "REIT", label: t("symbols.types.reit") },
+    { value: "ETN", label: t("symbols.types.etn") },
+    { value: "FUND", label: t("symbols.types.fund") },
+    { value: "INDEX", label: t("symbols.types.index") },
+    { value: "UNKNOWN", label: t("symbols.types.unknown") },
+  ];
 
   const normalizeThemeDrafts = (config: ProjectConfig): ThemeConfigItem[] => {
     if (config.themes && config.themes.length) {
@@ -218,8 +269,14 @@ export default function ProjectsPage() {
         key: item.key || "",
         label: item.label || item.key || "",
         weight: Number(item.weight ?? config.weights?.[item.key] ?? 0),
+        priority: Number(item.priority ?? 0),
         keywords: item.keywords || [],
         manual: item.manual || [],
+        exclude: item.exclude || [],
+        system: item.system || null,
+        system_base: item.system_base || null,
+        source: item.source || null,
+        snapshot: item.snapshot || null,
       }));
     }
     const categoryList =
@@ -230,8 +287,10 @@ export default function ProjectsPage() {
       key: category.key,
       label: category.label || category.key,
       weight: Number(config.weights?.[category.key] ?? 0),
+      priority: 0,
       keywords: [],
       manual: [],
+      exclude: [],
     }));
   };
 
@@ -300,16 +359,26 @@ export default function ProjectsPage() {
     }
   };
 
-  const loadThematicBacktest = async (projectId: number) => {
+  const loadLatestBacktest = async (projectId: number) => {
     try {
-      const res = await api.get<ProjectThematicBacktest>(
-        `/api/projects/${projectId}/thematic-backtest`
-      );
-      setThematicBacktest(res.data);
+      const res = await api.get<BacktestRun[]>(`/api/projects/${projectId}/backtests`);
+      setLatestBacktest(res.data[0] || null);
     } catch (err) {
-      setThematicBacktest(null);
+      setLatestBacktest(null);
       setBacktestMessage(t("projects.backtest.error"));
     }
+  };
+
+  const scheduleBacktestRefresh = (projectId: number) => {
+    backtestRefreshTimers.current.forEach((timer) => window.clearTimeout(timer));
+    backtestRefreshTimers.current = [
+      window.setTimeout(() => {
+        void loadLatestBacktest(projectId);
+      }, 4000),
+      window.setTimeout(() => {
+        void loadLatestBacktest(projectId);
+      }, 12000),
+    ];
   };
 
   const loadThemeSummary = async (projectId: number) => {
@@ -378,13 +447,18 @@ export default function ProjectsPage() {
       loadVersionOptions(selectedProjectId);
       loadProjectConfig(selectedProjectId);
       loadProjectDataStatus(selectedProjectId);
-      loadThematicBacktest(selectedProjectId);
+      loadLatestBacktest(selectedProjectId);
       loadThemeSummary(selectedProjectId);
       loadProjectBinding(selectedProjectId);
       setConfigMessage("");
       setDataMessage("");
       setBacktestMessage("");
+      setBenchmarkMessage("");
       setBindingMessage("");
+      setNewThemeSymbol("");
+      setNewThemeSymbolType("STOCK");
+      setThemeSymbolMessage("");
+      setProjectTab("overview");
     } else {
       setVersions([]);
       setVersionOptions([]);
@@ -392,7 +466,7 @@ export default function ProjectsPage() {
       setConfigDraft(null);
       setConfigMeta(null);
       setDataStatus(null);
-      setThematicBacktest(null);
+      setLatestBacktest(null);
       setThemeSummary(null);
       setThemeSummaryMessage("");
       setThemeFilterText("");
@@ -408,6 +482,10 @@ export default function ProjectsPage() {
       setCompareThemeB("");
       setCompareMessage("");
       setBinding(null);
+      setNewThemeSymbol("");
+      setNewThemeSymbolType("STOCK");
+      setThemeSymbolMessage("");
+      setBenchmarkMessage("");
     }
   }, [selectedProjectId]);
 
@@ -425,6 +503,18 @@ export default function ProjectsPage() {
       loadVersions(selectedProjectId);
     }
   }, [versionPage, versionPageSize]);
+
+  useEffect(() => {
+    if (selectedProjectId && projectTab === "backtest") {
+      loadLatestBacktest(selectedProjectId);
+    }
+  }, [projectTab, selectedProjectId]);
+
+  useEffect(() => {
+    return () => {
+      backtestRefreshTimers.current.forEach((timer) => window.clearTimeout(timer));
+    };
+  }, []);
 
   const createProject = async () => {
     if (!name.trim()) {
@@ -481,13 +571,20 @@ export default function ProjectsPage() {
   const addTheme = () => {
     setThemeDrafts((prev) => [
       ...prev,
-      { key: "", label: "", weight: 0, keywords: [], manual: [] },
+      { key: "", label: "", weight: 0, priority: 0, keywords: [], manual: [], exclude: [] },
     ]);
   };
 
   const updateTheme = (
     index: number,
-    field: "key" | "label" | "weight" | "keywords" | "manual",
+    field:
+      | "key"
+      | "label"
+      | "weight"
+      | "priority"
+      | "keywords"
+      | "manual"
+      | "exclude",
     value: string | number
   ) => {
     setThemeDrafts((prev) =>
@@ -495,11 +592,14 @@ export default function ProjectsPage() {
         if (idx !== index) {
           return item;
         }
-        if (field === "keywords" || field === "manual") {
+        if (field === "keywords" || field === "manual" || field === "exclude") {
           return { ...item, [field]: parseListInput(String(value)) };
         }
         if (field === "weight") {
           return { ...item, weight: Number(value) || 0 };
+        }
+        if (field === "priority") {
+          return { ...item, priority: Number(value) || 0 };
         }
         return { ...item, [field]: String(value) };
       })
@@ -522,6 +622,10 @@ export default function ProjectsPage() {
       setActiveThemeKey(key);
       setActiveThemeSymbols(res.data);
       setThemeSymbolQuery("");
+      setNewThemeSymbol("");
+      setNewThemeSymbolType("STOCK");
+      setThemeSymbolMessage("");
+      setBenchmarkMessage("");
       setThemeSymbolsCache((prev) => ({ ...prev, [key]: res.data }));
     } catch (err) {
       setActiveThemeKey("");
@@ -553,7 +657,7 @@ export default function ProjectsPage() {
     if (!activeThemeKey || !activeThemeSymbols) {
       return;
     }
-    const rows = ["symbol", ...filteredActiveSymbols];
+    const rows = ["symbol", ...filteredCombinedSymbols];
     const blob = new Blob([rows.join("\n")], {
       type: "text/csv;charset=utf-8;",
     });
@@ -608,6 +712,118 @@ export default function ProjectsPage() {
     await searchThemeSymbol(symbol);
   };
 
+  const normalizeSymbolInput = (value: string) => value.trim().toUpperCase();
+
+  const normalizeSymbolType = (value?: string | null) => {
+    const text = String(value || "").trim().toUpperCase();
+    if (!text) {
+      return "UNKNOWN";
+    }
+    if (text === "EQUITY") {
+      return "STOCK";
+    }
+    return text;
+  };
+
+  const updateSymbolTypeOverride = (symbol: string, type: string) => {
+    if (!configDraft) {
+      return undefined;
+    }
+    const nextTypes = { ...(configDraft.symbol_types || {}) };
+    nextTypes[symbol] = normalizeSymbolType(type);
+    setConfigDraft((prev) => (prev ? { ...prev, symbol_types: nextTypes } : prev));
+    return nextTypes;
+  };
+
+  const updateThemeSymbols = (
+    themeKey: string,
+    updater: (current: ThemeConfigItem) => ThemeConfigItem
+  ) => {
+    const nextDrafts = themeDrafts.map((item) =>
+      item.key === themeKey ? updater(item) : item
+    );
+    setThemeDrafts(nextDrafts);
+    return nextDrafts;
+  };
+
+  const addManualSymbol = (symbol: string, type: string) => {
+    if (!activeThemeKey) {
+      return;
+    }
+    const nextDrafts = updateThemeSymbols(activeThemeKey, (item) => {
+      const manual = new Set(item.manual || []);
+      manual.add(symbol);
+      const exclude = new Set(item.exclude || []);
+      exclude.delete(symbol);
+      return {
+        ...item,
+        manual: Array.from(manual),
+        exclude: Array.from(exclude),
+      };
+    });
+    const nextTypes = updateSymbolTypeOverride(symbol, type);
+    scheduleThemeSave(nextDrafts, nextTypes);
+  };
+
+  const addExcludeSymbol = (symbol: string, type: string) => {
+    if (!activeThemeKey) {
+      return;
+    }
+    const nextDrafts = updateThemeSymbols(activeThemeKey, (item) => {
+      const exclude = new Set(item.exclude || []);
+      exclude.add(symbol);
+      const manual = new Set(item.manual || []);
+      manual.delete(symbol);
+      return {
+        ...item,
+        manual: Array.from(manual),
+        exclude: Array.from(exclude),
+      };
+    });
+    const nextTypes = updateSymbolTypeOverride(symbol, type);
+    scheduleThemeSave(nextDrafts, nextTypes);
+  };
+
+  const removeManualSymbol = (symbol: string) => {
+    if (!activeThemeKey) {
+      return;
+    }
+    const nextDrafts = updateThemeSymbols(activeThemeKey, (item) => ({
+      ...item,
+      manual: (item.manual || []).filter((value) => value !== symbol),
+    }));
+    scheduleThemeSave(nextDrafts, undefined);
+  };
+
+  const restoreExcludedSymbol = (symbol: string) => {
+    if (!activeThemeKey) {
+      return;
+    }
+    const nextDrafts = updateThemeSymbols(activeThemeKey, (item) => ({
+      ...item,
+      exclude: (item.exclude || []).filter((value) => value !== symbol),
+    }));
+    scheduleThemeSave(nextDrafts, undefined);
+  };
+
+  const handleAddSymbol = (mode: "manual" | "exclude") => {
+    const symbol = normalizeSymbolInput(newThemeSymbol);
+    if (!symbol) {
+      setThemeSymbolMessage(t("projects.config.themeSymbolEmpty"));
+      return;
+    }
+    setThemeSymbolMessage("");
+    if (mode === "manual") {
+      addManualSymbol(symbol, newThemeSymbolType);
+    } else {
+      addExcludeSymbol(symbol, newThemeSymbolType);
+    }
+    setNewThemeSymbol("");
+  };
+
+  const yahooSymbolUrl = (symbol: string) =>
+    `https://finance.yahoo.com/quote/${encodeURIComponent(symbol)}`;
+
   const toggleHighlightTheme = (key: string) => {
     setHighlightThemeKey((prev) => (prev === key ? "" : key));
   };
@@ -627,23 +843,41 @@ export default function ProjectsPage() {
     }
   };
 
-  const saveProjectConfig = async () => {
-    if (!selectedProjectId || !configDraft) {
-      return;
-    }
-    const themePayload = themeDrafts
+  const buildThemePayload = (drafts: ThemeConfigItem[]) =>
+    drafts
       .map((theme) => ({
         key: theme.key.trim(),
         label: theme.label.trim() || theme.key.trim(),
         weight: Number(theme.weight) || 0,
+        priority: Number(theme.priority) || 0,
         keywords: theme.keywords || [],
         manual: theme.manual || [],
+        exclude: theme.exclude || [],
+        system: theme.system || undefined,
+        system_base: theme.system_base || undefined,
+        source: theme.source || undefined,
+        snapshot: theme.snapshot || undefined,
       }))
       .filter((theme) => theme.key);
+
+  const persistProjectConfig = async (
+    draftsOverride?: ThemeConfigItem[],
+    symbolTypesOverride?: Record<string, string>,
+    silent?: boolean
+  ) => {
+    if (!selectedProjectId || !configDraft) {
+      return false;
+    }
+    const themePayload = buildThemePayload(draftsOverride ?? themeDrafts);
     const keys = themePayload.map((theme) => theme.key);
     if (new Set(keys).size !== keys.length) {
-      setConfigMessage(t("projects.config.themeDuplicate"));
-      return;
+      const message = t("projects.config.themeDuplicate");
+      if (silent) {
+        setThemeSymbolMessage(message);
+      } else {
+        setConfigMessage(message);
+      }
+      return false;
     }
     const weights = themePayload.reduce<Record<string, number>>((acc, theme) => {
       acc[theme.key] = theme.weight;
@@ -659,17 +893,51 @@ export default function ProjectsPage() {
       weights,
       categories,
     };
+    if (symbolTypesOverride) {
+      payloadConfig.symbol_types = symbolTypesOverride;
+    }
     try {
       await api.post(`/api/projects/${selectedProjectId}/config`, {
         config: payloadConfig,
         version: new Date().toISOString(),
       });
-      setConfigMessage(t("projects.config.saved"));
-      await loadProjectConfig(selectedProjectId);
-      await loadThemeSummary(selectedProjectId);
+      if (silent) {
+        setThemeSymbolMessage(t("projects.config.saved"));
+      } else {
+        setConfigMessage(t("projects.config.saved"));
+      }
+      if (silent) {
+        await loadThemeSummary(selectedProjectId);
+      } else {
+        await loadProjectConfig(selectedProjectId);
+        await loadThemeSummary(selectedProjectId);
+      }
+      return true;
     } catch (err) {
-      setConfigMessage(t("projects.config.error"));
+      const message = t("projects.config.error");
+      if (silent) {
+        setThemeSymbolMessage(message);
+      } else {
+        setConfigMessage(message);
+      }
+      return false;
     }
+  };
+
+  const saveProjectConfig = async () => {
+    await persistProjectConfig();
+  };
+
+  const scheduleThemeSave = (
+    draftsOverride?: ThemeConfigItem[],
+    symbolTypesOverride?: Record<string, string>
+  ) => {
+    if (themeSaveTimer.current !== null) {
+      window.clearTimeout(themeSaveTimer.current);
+    }
+    themeSaveTimer.current = window.setTimeout(() => {
+      void persistProjectConfig(draftsOverride, symbolTypesOverride, true);
+    }, 0);
   };
 
   const refreshProjectData = async () => {
@@ -691,9 +959,12 @@ export default function ProjectsPage() {
       return;
     }
     try {
-      await api.post(`/api/projects/${selectedProjectId}/actions/thematic-backtest`, {});
       setBacktestMessage(t("projects.backtest.queued"));
-      await loadThematicBacktest(selectedProjectId);
+      const res = await api.post<BacktestRun>("/api/backtests", {
+        project_id: selectedProjectId,
+      });
+      setLatestBacktest(res.data || null);
+      scheduleBacktestRefresh(selectedProjectId);
     } catch (err) {
       setBacktestMessage(t("projects.backtest.error"));
     }
@@ -742,6 +1013,17 @@ export default function ProjectsPage() {
     () => projects.find((item) => item.id === selectedProjectId),
     [projects, selectedProjectId]
   );
+  const filteredProjects = useMemo(() => {
+    const keyword = projectSearch.trim().toLowerCase();
+    if (!keyword) {
+      return projects;
+    }
+    return projects.filter(
+      (item) =>
+        item.name.toLowerCase().includes(keyword) ||
+        (item.description || "").toLowerCase().includes(keyword)
+    );
+  }, [projects, projectSearch]);
 
   const weightTotal = useMemo(() => {
     if (!themeDrafts.length) {
@@ -902,18 +1184,93 @@ export default function ProjectsPage() {
       onlyB: onlyB.sort(),
     };
   }, [compareSymbolsA, compareSymbolsB]);
-  const activeManualSet = useMemo(
-    () => new Set(activeThemeSymbols?.manual_symbols || []),
-    [activeThemeSymbols]
+  const symbolTypeLabels = useMemo(
+    () => ({
+      STOCK: t("symbols.types.stock"),
+      ETF: t("symbols.types.etf"),
+      ADR: t("symbols.types.adr"),
+      REIT: t("symbols.types.reit"),
+      ETN: t("symbols.types.etn"),
+      FUND: t("symbols.types.fund"),
+      INDEX: t("symbols.types.index"),
+      UNKNOWN: t("symbols.types.unknown"),
+    }),
+    [t]
   );
-  const activeSymbols = activeThemeSymbols?.symbols || [];
-  const filteredActiveSymbols = useMemo(() => {
+  const configSymbolTypes = useMemo(() => {
+    const normalized: Record<string, string> = {};
+    Object.entries(configDraft?.symbol_types || {}).forEach(([symbol, type]) => {
+      normalized[symbol.toUpperCase()] = normalizeSymbolType(type);
+    });
+    return normalized;
+  }, [configDraft]);
+  const activeSymbolTypes = useMemo(() => {
+    const base = { ...(activeThemeSymbols?.symbol_types || {}) };
+    Object.entries(configSymbolTypes).forEach(([symbol, type]) => {
+      base[symbol.toUpperCase()] = normalizeSymbolType(type);
+    });
+    return base;
+  }, [activeThemeSymbols, configSymbolTypes]);
+  const compareSymbolTypes = useMemo(() => {
+    const base = {
+      ...(themeSymbolsCache[compareThemeA]?.symbol_types || {}),
+      ...(themeSymbolsCache[compareThemeB]?.symbol_types || {}),
+    };
+    Object.entries(configSymbolTypes).forEach(([symbol, type]) => {
+      base[symbol.toUpperCase()] = normalizeSymbolType(type);
+    });
+    return base;
+  }, [themeSymbolsCache, compareThemeA, compareThemeB, configSymbolTypes]);
+  const formatSymbolLabel = (symbol: string, types: Record<string, string>) => {
+    const raw = types[symbol];
+    if (!raw) {
+      return symbol;
+    }
+    const label = symbolTypeLabels[normalizeSymbolType(raw)] || symbolTypeLabels.UNKNOWN;
+    return `${symbol} · ${label}`;
+  };
+  const activeThemeDraft = useMemo(
+    () => themeDrafts.find((item) => item.key === activeThemeKey),
+    [themeDrafts, activeThemeKey]
+  );
+  const activeAutoSymbols = activeThemeSymbols?.auto_symbols || activeThemeSymbols?.symbols || [];
+  const activeManualSymbols =
+    activeThemeDraft?.manual || activeThemeSymbols?.manual_symbols || [];
+  const activeExcludeSymbols =
+    activeThemeDraft?.exclude || activeThemeSymbols?.exclude_symbols || [];
+  const activeExcludeSet = useMemo(
+    () => new Set(activeExcludeSymbols),
+    [activeExcludeSymbols]
+  );
+  const activeCombinedSymbols = useMemo(() => {
+    const combined = new Set(activeAutoSymbols);
+    activeManualSymbols.forEach((symbol) => combined.add(symbol));
+    activeExcludeSymbols.forEach((symbol) => combined.delete(symbol));
+    return Array.from(combined).sort();
+  }, [activeAutoSymbols, activeManualSymbols, activeExcludeSymbols]);
+  const filterSymbolsByQuery = (symbols: string[]) => {
     const keyword = themeSymbolQuery.trim().toUpperCase();
     if (!keyword) {
-      return activeSymbols;
+      return symbols;
     }
-    return activeSymbols.filter((symbol) => symbol.includes(keyword));
-  }, [activeSymbols, themeSymbolQuery]);
+    return symbols.filter((symbol) => symbol.includes(keyword));
+  };
+  const filteredAutoSymbols = useMemo(
+    () => filterSymbolsByQuery(activeAutoSymbols.filter((symbol) => !activeExcludeSet.has(symbol))),
+    [activeAutoSymbols, activeExcludeSet, themeSymbolQuery]
+  );
+  const filteredManualSymbols = useMemo(
+    () => filterSymbolsByQuery(activeManualSymbols.filter((symbol) => !activeExcludeSet.has(symbol))),
+    [activeManualSymbols, activeExcludeSet, themeSymbolQuery]
+  );
+  const filteredExcludedSymbols = useMemo(
+    () => filterSymbolsByQuery(activeExcludeSymbols),
+    [activeExcludeSymbols, themeSymbolQuery]
+  );
+  const filteredCombinedSymbols = useMemo(
+    () => filterSymbolsByQuery(activeCombinedSymbols),
+    [activeCombinedSymbols, themeSymbolQuery]
+  );
   const weightSegments = useMemo(() => {
     const palette = ["#0f62fe", "#35b9a3", "#f6ad55", "#ed5564", "#6f56d9", "#6b7280"];
     const total = themeDrafts.reduce((sum, item) => sum + (Number(item.weight) || 0), 0);
@@ -927,25 +1284,112 @@ export default function ProjectsPage() {
       }))
       .filter((item) => item.value > 0);
   }, [themeDrafts]);
+  const activeThemeCount = useMemo(
+    () => themeDrafts.filter((item) => (Number(item.weight) || 0) > 0).length,
+    [themeDrafts]
+  );
   const metricRows = [
-    { key: "cagr", label: t("projects.backtest.metrics.cagr"), format: formatPercent },
-    { key: "volatility", label: t("projects.backtest.metrics.volatility"), format: formatPercent },
-    { key: "sharpe", label: t("projects.backtest.metrics.sharpe"), format: formatNumber },
-    { key: "max_drawdown", label: t("projects.backtest.metrics.maxDrawdown"), format: formatPercent },
+    { key: "Compounding Annual Return", label: t("metrics.cagr") },
+    { key: "Drawdown", label: t("metrics.drawdown") },
+    { key: "Sharpe Ratio", label: t("metrics.sharpe") },
+    { key: "Net Profit", label: t("metrics.netProfit") },
+    { key: "Total Fees", label: t("metrics.totalFees") },
+    { key: "Portfolio Turnover", label: t("metrics.turnover") },
+    { key: "Risk Status", label: t("metrics.riskStatus") },
   ];
+  const backtestSummary = latestBacktest?.metrics as Record<string, any> | null;
+  const benchmarkSummary =
+    (backtestSummary?.benchmark as Record<string, any> | undefined) || {};
+  const backtestErrorMessage =
+    latestBacktest?.status === "failed" ? t("projects.backtest.error") : "";
+  const missingScoresRaw =
+    (backtestSummary?.["Missing Scores"] as unknown) ?? backtestSummary?.missing_scores;
+  const missingScores = Array.isArray(missingScoresRaw)
+    ? missingScoresRaw.map((item) => String(item).trim()).filter((item) => item.length)
+    : typeof missingScoresRaw === "string"
+      ? missingScoresRaw
+          .split(",")
+          .map((item) => item.trim())
+          .filter((item) => item.length)
+      : [];
+  const formatPriceMode = (mode?: string | null) => {
+    if (!mode) {
+      return t("common.none");
+    }
+    const value = String(mode).toLowerCase();
+    if (value === "adjusted") {
+      return t("projects.backtest.priceAdjusted");
+    }
+    if (value === "raw") {
+      return t("projects.backtest.priceRaw");
+    }
+    if (value === "mixed") {
+      return t("projects.backtest.priceMixed");
+    }
+    return String(mode);
+  };
+  const formatMetricValue = (value: unknown) => {
+    if (value === null || value === undefined || value === "") {
+      return t("common.none");
+    }
+    return String(value);
+  };
+  const saveBenchmark = async () => {
+    if (!configDraft) {
+      return;
+    }
+    setBenchmarkMessage("");
+    const ok = await persistProjectConfig();
+    setBenchmarkMessage(ok ? t("projects.config.saved") : t("projects.config.error"));
+  };
 
+
+  const renderBenchmarkEditor = () => (
+    <div className="card">
+      <div className="card-title">{t("projects.backtest.benchmarkTitle")}</div>
+      <div className="card-meta">{t("projects.backtest.benchmarkMeta")}</div>
+      <div className="form-grid">
+        <div className="form-row">
+          <label className="form-label">{t("projects.config.benchmark")}</label>
+          <input
+            className="form-input"
+            value={configDraft?.benchmark || ""}
+            onChange={(e) =>
+              setConfigDraft((prev) => ({ ...(prev || {}), benchmark: e.target.value }))
+            }
+            placeholder="SPY"
+          />
+        </div>
+        {benchmarkMessage && <div className="form-hint">{benchmarkMessage}</div>}
+        <button className="button-secondary" onClick={saveBenchmark}>
+          {t("projects.config.save")}
+        </button>
+      </div>
+    </div>
+  );
   const placeholderDescription = selectedProject?.description || t("common.none");
   const configTabs = [
     { key: "universe", label: t("projects.config.sectionUniverse") },
     { key: "data", label: t("projects.config.sectionData") },
     { key: "portfolio", label: t("projects.config.sectionPortfolio") },
   ] as const;
+  const projectTabs = [
+    { key: "overview", label: t("projects.tabs.overview") },
+    { key: "config", label: t("projects.tabs.config") },
+    { key: "algorithm", label: t("projects.tabs.algorithm") },
+    { key: "data", label: t("projects.tabs.data") },
+    { key: "backtest", label: t("projects.tabs.backtest") },
+    { key: "versions", label: t("projects.tabs.versions") },
+    { key: "diff", label: t("projects.tabs.diff") },
+  ] as const;
 
   return (
     <div className="main">
       <TopBar title={t("projects.title")} />
       <div className="content">
-        <div className="grid-2">
+        <div className="projects-layout">
+          <div className="projects-sidebar">
+            <div className="grid-2">
           <div className="card">
             <div className="card-title">{t("projects.new.title")}</div>
             <div className="card-meta">{t("projects.new.meta")}</div>
@@ -990,10 +1434,281 @@ export default function ProjectsPage() {
               {projectTotal}
             </div>
           </div>
-        </div>
+            </div>
+            <div className="card">
+              <div className="card-title">{t("projects.list.title")}</div>
+              <div className="card-meta">{t("projects.list.meta")}</div>
+              <input
+                value={projectSearch}
+                onChange={(e) => setProjectSearch(e.target.value)}
+                placeholder={t("projects.list.search")}
+                className="form-input"
+                style={{ marginTop: "12px" }}
+              />
+              <div className="project-list">
+                {filteredProjects.map((project) => (
+                  <div
+                    key={project.id}
+                    className={
+                      project.id === selectedProjectId
+                        ? "project-item project-item-active"
+                        : "project-item"
+                    }
+                    onClick={() => setSelectedProjectId(project.id)}
+                  >
+                    <div className="project-item-title">{project.name}</div>
+                    <div className="project-item-meta">
+                      #{project.id} | {formatDateTime(project.created_at)}
+                    </div>
+                  </div>
+                ))}
+                {filteredProjects.length === 0 && (
+                  <div className="form-hint">{t("projects.list.empty")}</div>
+                )}
+              </div>
+              <PaginationBar
+                page={projectPage}
+                pageSize={projectPageSize}
+                total={projectTotal}
+                onPageChange={setProjectPage}
+                onPageSizeChange={(size) => {
+                  setProjectPage(1);
+                  setProjectPageSize(size);
+                }}
+              />
+            </div>
+          </div>
 
-        <div className="grid-2">
+          <div className="projects-main">
+        {selectedProject ? (
+          <>
+            <div className="card project-detail-card">
+              <div className="project-detail-header">
+                <div>
+                  <div className="project-detail-title">{selectedProject.name}</div>
+                  <div className="project-detail-meta">
+                    {selectedProject.description || t("common.none")}
+                  </div>
+                </div>
+              <div className="project-detail-actions">
+                <a className="button-secondary" href="/themes">
+                  {t("projects.detail.openThemes")}
+                </a>
+                <button className="button-secondary" onClick={refreshProjectData}>
+                  {t("projects.dataStatus.action")}
+                </button>
+                <button className="button-primary" onClick={runThematicBacktest}>
+                  {t("projects.backtest.action")}
+                </button>
+              </div>
+            </div>
+            {backtestMessage && (
+              <div className="project-detail-status">{backtestMessage}</div>
+            )}
+            <div className="project-detail-meta-grid">
+              <div className="meta-row">
+                <span>{t("projects.detail.projectId")}</span>
+                  <strong>{selectedProject.id}</strong>
+                </div>
+                <div className="meta-row">
+                  <span>{t("common.labels.createdAt")}</span>
+                  <strong>{formatDateTime(selectedProject.created_at)}</strong>
+                </div>
+                <div className="meta-row">
+                  <span>{t("projects.config.source")}</span>
+                  <strong>{configMeta?.source || t("common.none")}</strong>
+                </div>
+                <div className="meta-row">
+                  <span>{t("common.labels.updatedAt")}</span>
+                  <strong>{formatDateTime(configMeta?.updated_at)}</strong>
+                </div>
+              </div>
+            </div>
+
+            <div className="project-tabs">
+              {projectTabs.map((tab) => (
+                <button
+                  key={tab.key}
+                  className={projectTab === tab.key ? "tab-button active" : "tab-button"}
+                  onClick={() => setProjectTab(tab.key)}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+
+            {projectTab === "overview" && (
+              <>
+                <div className="grid-2">
+                  <div className="card">
+                    <div className="card-title">{t("projects.detail.summaryTitle")}</div>
+                    <div className="card-meta">{t("projects.detail.summaryMeta")}</div>
+                    <div className="overview-grid">
+                      <div className="overview-card">
+                        <div className="overview-label">{t("projects.config.themeCount")}</div>
+                        <div className="overview-value">{activeThemeCount}</div>
+                        <div className="overview-sub">
+                          {t("projects.config.themeTotalSymbols")}{" "}
+                          {themeSummary?.total_symbols ?? 0}
+                        </div>
+                      </div>
+                      <div className="overview-card">
+                        <div className="overview-label">{t("projects.algorithm.title")}</div>
+                        <div className="overview-value">
+                          {binding?.algorithm_name || t("common.none")}
+                        </div>
+                        <div className="overview-sub">
+                          {binding?.algorithm_version || t("common.none")}
+                        </div>
+                      </div>
+                      <div className="overview-card">
+                        <div className="overview-label">
+                          {t("projects.dataStatus.membership")}
+                        </div>
+                        <div className="overview-value">
+                          {dataStatus?.membership.symbols ?? 0}
+                        </div>
+                        <div className="overview-sub">
+                          {dataStatus?.membership.start || t("common.none")} ~{" "}
+                          {dataStatus?.membership.end || t("common.none")}
+                        </div>
+                      </div>
+                      <div className="overview-card">
+                        <div className="overview-label">{t("projects.backtest.title")}</div>
+                        <div className="overview-value">
+                          {latestBacktest?.status || t("common.none")}
+                        </div>
+                        <div className="overview-sub">
+                          {t("common.labels.updatedAt")}{" "}
+                          {formatDateTime(latestBacktest?.ended_at || latestBacktest?.created_at)}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="card">
+                    <div className="card-title">{t("projects.detail.themeTitle")}</div>
+                    <div className="card-meta">{t("projects.detail.themeMeta")}</div>
+                    {themeDrafts.length ? (
+                      renderWeightPie()
+                    ) : (
+                      <div className="empty-state">{t("projects.config.themesEmpty")}</div>
+                    )}
+                    <div className={`meta-row ${weightTotalWarn ? "meta-warn" : ""}`}>
+                      <span>{t("projects.config.weightTotal")}</span>
+                      <strong>{formatPercent(weightTotal)}</strong>
+                    </div>
+                    <div className="meta-row">
+                      <span>{t("projects.config.themeCount")}</span>
+                      <strong>{activeThemeCount}</strong>
+                    </div>
+                    <div className="meta-row">
+                      <span>{t("projects.config.themeTotalSymbols")}</span>
+                      <strong>{themeSummary?.total_symbols ?? 0}</strong>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="grid-2">
+                  <div className="card">
+                    <div className="card-title">{t("projects.dataStatus.title")}</div>
+                    <div className="card-meta">{t("projects.dataStatus.meta")}</div>
+                    {!dataStatus ? (
+                      <div className="empty-state">{t("common.noneText")}</div>
+                    ) : (
+                      <div className="meta-list">
+                        <div className="meta-row">
+                          <span>{t("projects.dataStatus.universe")}</span>
+                          <strong>{dataStatus.universe.records}</strong>
+                        </div>
+                        <div className="meta-row">
+                          <span>{t("projects.dataStatus.prices")}</span>
+                          <strong>
+                            {dataStatus.prices.stooq_files + dataStatus.prices.yahoo_files}
+                          </strong>
+                        </div>
+                        <div className="meta-row">
+                          <span>{t("projects.dataStatus.metrics")}</span>
+                          <strong>{dataStatus.metrics.records}</strong>
+                        </div>
+                        <div className="meta-row">
+                          <span>{t("common.labels.updatedAt")}</span>
+                          <strong>{formatDateTime(dataStatus.prices.updated_at)}</strong>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="card">
+                    <div className="card-title">{t("projects.detail.performanceTitle")}</div>
+                    <div className="card-meta">{t("projects.detail.performanceMeta")}</div>
+                    {latestBacktest?.status === "success" && backtestSummary ? (
+                      <>
+                        <div className="metric-table">
+                          <div className="metric-header">
+                            <span>{t("projects.backtest.metric")}</span>
+                            <span>{t("projects.backtest.portfolio")}</span>
+                            <span>{t("projects.backtest.benchmark")}</span>
+                          </div>
+                          {metricRows.map((metric) => (
+                            <div className="metric-row" key={metric.key}>
+                              <span>{metric.label}</span>
+                              <span>{formatMetricValue(backtestSummary?.[metric.key])}</span>
+                              <span>{formatMetricValue(benchmarkSummary?.[metric.key])}</span>
+                            </div>
+                          ))}
+                        </div>
+                        <div className="meta-row" style={{ marginTop: "10px" }}>
+                          <span>{t("projects.backtest.priceMode")}</span>
+                          <strong>
+                            {formatPriceMode(
+                              (backtestSummary?.["Price Mode"] as string | undefined) ??
+                                (backtestSummary?.price_mode as string | undefined)
+                            )}
+                          </strong>
+                        </div>
+                  <div className="meta-row">
+                    <span>{t("projects.backtest.benchmarkMode")}</span>
+                    <strong>
+                      {formatPriceMode(
+                        (backtestSummary?.["Benchmark Price Mode"] as string | undefined) ??
+                          (backtestSummary?.benchmark_mode as string | undefined)
+                      )}
+                    </strong>
+                  </div>
+                  {missingScores.length > 0 && (
+                    <div className="missing-score-block">
+                      <div className="missing-score-title">
+                        {t("projects.backtest.missingScoresTitle", {
+                          count: missingScores.length,
+                        })}
+                      </div>
+                      <div className="missing-score-list">{missingScores.join(", ")}</div>
+                    </div>
+                  )}
+                </>
+              ) : latestBacktest?.status === "failed" && backtestErrorMessage ? (
+                      <div className="empty-state">
+                        {t("projects.backtest.failed", { message: backtestErrorMessage })}
+                      </div>
+                    ) : (
+                      <div className="empty-state">{t("projects.backtest.empty")}</div>
+                    )}
+                  </div>
+                </div>
+              </>
+            )}
+          </>
+        ) : (
           <div className="card">
+            <div className="empty-state">{t("projects.detail.empty")}</div>
+          </div>
+        )}
+
+        {selectedProject && (projectTab === "config" || projectTab === "algorithm") && (
+          <div className="grid-2">
+            {projectTab === "config" && (
+              <div className="card">
             <div className="card-title">{t("projects.config.title")}</div>
             <div className="card-meta">{t("projects.config.meta")}</div>
             {!configDraft ? (
@@ -1106,7 +1821,7 @@ export default function ProjectsPage() {
                       <div className="theme-summary-card">
                         <div className="theme-summary-label">{t("common.labels.updatedAt")}</div>
                         <div className="theme-summary-value">
-                          {themeSummary?.updated_at || t("common.none")}
+                          {formatDateTime(themeSummary?.updated_at)}
                         </div>
                       </div>
                       <div className="theme-summary-card theme-summary-chart-card">
@@ -1126,31 +1841,48 @@ export default function ProjectsPage() {
                               <th>{t("projects.config.themeKey")}</th>
                               <th>{t("projects.config.themeLabel")}</th>
                               <th>{t("projects.config.themeWeight")}</th>
+                              <th>{t("projects.config.themePriority")}</th>
                               <th>{t("projects.config.themeKeywords")}</th>
                               <th>{t("projects.config.themeManual")}</th>
+                              <th>{t("projects.config.themeExclude")}</th>
                               <th>{t("projects.config.themeActions")}</th>
                             </tr>
                           </thead>
                           <tbody>
                             {themeDrafts.length ? (
-                              themeDrafts.map((theme, index) => (
-                                <tr key={`${theme.key}-${index}`}>
-                                  <td>
-                                    <input
-                                      className="table-input"
-                                      value={theme.key}
-                                      onChange={(e) => updateTheme(index, "key", e.target.value)}
-                                      placeholder={t("projects.config.themeKey")}
-                                    />
-                                  </td>
-                                  <td>
-                                    <input
-                                      className="table-input"
-                                      value={theme.label}
-                                      onChange={(e) => updateTheme(index, "label", e.target.value)}
-                                      placeholder={t("projects.config.themeLabel")}
-                                    />
-                                  </td>
+                              themeDrafts.map((theme, index) => {
+                                const isSystemTheme = Boolean(theme.system || theme.system_base);
+                                return (
+                                  <tr key={`${theme.key}-${index}`}>
+                                    <td>
+                                      <input
+                                        className="table-input"
+                                        value={theme.key}
+                                        onChange={(e) =>
+                                          updateTheme(index, "key", e.target.value)
+                                        }
+                                        placeholder={t("projects.config.themeKey")}
+                                        disabled={isSystemTheme}
+                                      />
+                                    </td>
+                                    <td>
+                                      <div className="theme-label-input">
+                                        <input
+                                          className="table-input"
+                                          value={theme.label}
+                                          onChange={(e) =>
+                                            updateTheme(index, "label", e.target.value)
+                                          }
+                                          placeholder={t("projects.config.themeLabel")}
+                                          disabled={isSystemTheme}
+                                        />
+                                        {isSystemTheme && (
+                                          <span className="theme-badge">
+                                            {t("projects.config.themeSystem")}
+                                          </span>
+                                        )}
+                                      </div>
+                                    </td>
                                   <td>
                                     <input
                                       className="table-input"
@@ -1164,11 +1896,24 @@ export default function ProjectsPage() {
                                   <td>
                                     <input
                                       className="table-input"
+                                      type="number"
+                                      step="1"
+                                      value={theme.priority ?? 0}
+                                      onChange={(e) =>
+                                        updateTheme(index, "priority", e.target.value)
+                                      }
+                                      placeholder={t("projects.config.themePriority")}
+                                    />
+                                  </td>
+                                  <td>
+                                    <input
+                                      className="table-input"
                                       value={(theme.keywords || []).join(", ")}
                                       onChange={(e) =>
                                         updateTheme(index, "keywords", e.target.value)
                                       }
                                       placeholder={t("projects.config.themeKeywords")}
+                                      disabled={isSystemTheme}
                                     />
                                   </td>
                                   <td>
@@ -1181,6 +1926,16 @@ export default function ProjectsPage() {
                                       placeholder={t("projects.config.themeManual")}
                                     />
                                   </td>
+                                  <td>
+                                    <input
+                                      className="table-input"
+                                      value={(theme.exclude || []).join(", ")}
+                                      onChange={(e) =>
+                                        updateTheme(index, "exclude", e.target.value)
+                                      }
+                                      placeholder={t("projects.config.themeExclude")}
+                                    />
+                                  </td>
                                   <td className="theme-actions">
                                     <button
                                       type="button"
@@ -1190,11 +1945,12 @@ export default function ProjectsPage() {
                                       {t("projects.config.themeRemove")}
                                     </button>
                                   </td>
-                                </tr>
-                              ))
+                                  </tr>
+                                );
+                              })
                             ) : (
                               <tr>
-                                <td colSpan={6}>{t("projects.config.themesEmpty")}</td>
+                                <td colSpan={8}>{t("projects.config.themesEmpty")}</td>
                               </tr>
                             )}
                           </tbody>
@@ -1271,6 +2027,16 @@ export default function ProjectsPage() {
                       <div className="form-label">{t("projects.config.themeComposition")}</div>
                       <div className="theme-table-wrapper">
                         <table className="theme-table theme-composition-table">
+                          <colgroup>
+                            <col className="col-theme" />
+                            <col className="col-weight" />
+                            <col className="col-count" />
+                            <col className="col-distribution" />
+                            <col className="col-sample" />
+                            <col className="col-manual" />
+                            <col className="col-exclude" />
+                            <col className="col-actions" />
+                          </colgroup>
                           <thead>
                             <tr>
                               <th>{t("projects.config.themeLabel")}</th>
@@ -1279,6 +2045,7 @@ export default function ProjectsPage() {
                               <th>{t("projects.config.themeDistribution")}</th>
                               <th>{t("projects.config.themeSample")}</th>
                               <th>{t("projects.config.themeManual")}</th>
+                              <th>{t("projects.config.themeExcludeShort")}</th>
                               <th>{t("projects.config.themeActions")}</th>
                             </tr>
                           </thead>
@@ -1325,14 +2092,16 @@ export default function ProjectsPage() {
                                       <div className="theme-samples">
                                         {item.sample.length
                                           ? item.sample.map((symbol) => (
-                                              <button
+                                              <a
                                                 key={symbol}
-                                                type="button"
                                                 className="theme-chip"
+                                                href={yahooSymbolUrl(symbol)}
+                                                target="_blank"
+                                                rel="noreferrer"
                                                 onClick={() => applyThemeSymbolFilter(symbol)}
                                               >
-                                                {symbol}
-                                              </button>
+                                                {formatSymbolLabel(symbol, item.sample_types || {})}
+                                              </a>
                                             ))
                                           : "-"}
                                       </div>
@@ -1341,14 +2110,34 @@ export default function ProjectsPage() {
                                       <div className="theme-samples">
                                         {(item.manual_symbols || []).length
                                           ? (item.manual_symbols || []).map((symbol) => (
-                                              <button
+                                              <a
                                                 key={symbol}
-                                                type="button"
-                                                className="theme-chip manual"
+                                                className="theme-chip exclude"
+                                                href={yahooSymbolUrl(symbol)}
+                                                target="_blank"
+                                                rel="noreferrer"
                                                 onClick={() => applyThemeSymbolFilter(symbol)}
                                               >
-                                                {symbol}
-                                              </button>
+                                                {formatSymbolLabel(symbol, configSymbolTypes)}
+                                              </a>
+                                            ))
+                                          : "-"}
+                                      </div>
+                                    </td>
+                                    <td>
+                                      <div className="theme-samples">
+                                        {(item.exclude_symbols || []).length
+                                          ? (item.exclude_symbols || []).map((symbol) => (
+                                              <a
+                                                key={symbol}
+                                                className="theme-chip manual"
+                                                href={yahooSymbolUrl(symbol)}
+                                                target="_blank"
+                                                rel="noreferrer"
+                                                onClick={() => applyThemeSymbolFilter(symbol)}
+                                              >
+                                                {formatSymbolLabel(symbol, configSymbolTypes)}
+                                              </a>
                                             ))
                                           : "-"}
                                       </div>
@@ -1372,10 +2161,10 @@ export default function ProjectsPage() {
                                 </Fragment>
                               ))
                             ) : (
-                              <tr>
-                                <td colSpan={7}>{t("projects.config.themesEmpty")}</td>
-                              </tr>
-                            )}
+                            <tr>
+                              <td colSpan={8}>{t("projects.config.themesEmpty")}</td>
+                            </tr>
+                          )}
                           </tbody>
                         </table>
                       </div>
@@ -1390,8 +2179,9 @@ export default function ProjectsPage() {
                               </div>
                               <div className="theme-detail-meta">
                                 {t("projects.config.themeDetailMeta", {
-                                  total: activeThemeSymbols.symbols.length,
-                                  manual: activeManualSet.size,
+                                  total: activeCombinedSymbols.length,
+                                  manual: activeManualSymbols.length,
+                                  excluded: activeExcludeSymbols.length,
                                 })}
                               </div>
                             </div>
@@ -1417,26 +2207,152 @@ export default function ProjectsPage() {
                                 {t("projects.config.themeDetailExport")}
                               </button>
                             </div>
-                          </div>
-                          <div className="theme-detail-list">
-                            {filteredActiveSymbols.length ? (
-                              filteredActiveSymbols.map((symbol) => (
+                            <div className="theme-symbol-form">
+                              <input
+                                className="form-input"
+                                value={newThemeSymbol}
+                                onChange={(e) => {
+                                  setNewThemeSymbol(e.target.value.toUpperCase());
+                                  setThemeSymbolMessage("");
+      setBenchmarkMessage("");
+                                }}
+                                placeholder={t("projects.config.themeSymbolPlaceholder")}
+                              />
+                              <select
+                                className="form-select"
+                                value={newThemeSymbolType}
+                                onChange={(e) => setNewThemeSymbolType(e.target.value)}
+                              >
+                                {symbolTypeOptions.map((option) => (
+                                  <option key={option.value} value={option.value}>
+                                    {option.label}
+                                  </option>
+                                ))}
+                              </select>
+                              <div className="theme-symbol-actions">
                                 <button
-                                  key={symbol}
                                   type="button"
-                                  className={`theme-chip ${
-                                    activeManualSet.has(symbol) ? "manual" : ""
-                                  }`}
-                                  onClick={() => applyThemeSymbolFilter(symbol)}
+                                  className="button-secondary"
+                                  onClick={() => handleAddSymbol("manual")}
                                 >
-                                  {symbol}
+                                  {t("projects.config.themeSymbolAdd")}
                                 </button>
-                              ))
-                            ) : (
-                              <span className="theme-detail-empty">
-                                {t("projects.config.themeEmptySymbols")}
-                              </span>
+                                <button
+                                  type="button"
+                                  className="button-secondary"
+                                  onClick={() => handleAddSymbol("exclude")}
+                                >
+                                  {t("projects.config.themeSymbolExclude")}
+                                </button>
+                              </div>
+                            </div>
+                            {themeSymbolMessage && (
+                              <div className="form-hint">{themeSymbolMessage}</div>
                             )}
+                          </div>
+                          <div className="theme-detail-section">
+                            <div className="theme-detail-section-title">
+                              {t("projects.config.themeDetailAuto")}
+                            </div>
+                            <div className="theme-detail-list">
+                              {filteredAutoSymbols.length ? (
+                                filteredAutoSymbols.map((symbol) => (
+                                  <span key={symbol} className="theme-chip-group">
+                                    <a
+                                      className="theme-chip"
+                                      href={yahooSymbolUrl(symbol)}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      onClick={() => applyThemeSymbolFilter(symbol)}
+                                    >
+                                      {formatSymbolLabel(symbol, activeSymbolTypes)}
+                                    </a>
+                                    <button
+                                      type="button"
+                                      className="theme-chip-action"
+                                      onClick={() =>
+                                        addExcludeSymbol(
+                                          symbol,
+                                          activeSymbolTypes[symbol] || "UNKNOWN"
+                                        )
+                                      }
+                                    >
+                                      {t("projects.config.themeSymbolExcludeAction")}
+                                    </button>
+                                  </span>
+                                ))
+                              ) : (
+                                <span className="theme-detail-empty">
+                                  {t("projects.config.themeEmptySymbols")}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                          <div className="theme-detail-section">
+                            <div className="theme-detail-section-title">
+                              {t("projects.config.themeDetailManual")}
+                            </div>
+                            <div className="theme-detail-list">
+                              {filteredManualSymbols.length ? (
+                                filteredManualSymbols.map((symbol) => (
+                                  <span key={symbol} className="theme-chip-group">
+                                    <a
+                                      className="theme-chip exclude"
+                                      href={yahooSymbolUrl(symbol)}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      onClick={() => applyThemeSymbolFilter(symbol)}
+                                    >
+                                      {formatSymbolLabel(symbol, activeSymbolTypes)}
+                                    </a>
+                                    <button
+                                      type="button"
+                                      className="theme-chip-action"
+                                      onClick={() => removeManualSymbol(symbol)}
+                                    >
+                                      {t("projects.config.themeSymbolRemove")}
+                                    </button>
+                                  </span>
+                                ))
+                              ) : (
+                                <span className="theme-detail-empty">
+                                  {t("projects.config.themeEmptySymbols")}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                          <div className="theme-detail-section">
+                            <div className="theme-detail-section-title">
+                              {t("projects.config.themeDetailExcluded")}
+                            </div>
+                            <div className="theme-detail-list">
+                              {filteredExcludedSymbols.length ? (
+                                filteredExcludedSymbols.map((symbol) => (
+                                  <span key={symbol} className="theme-chip-group">
+                                    <a
+                                      className="theme-chip manual"
+                                      href={yahooSymbolUrl(symbol)}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      onClick={() => applyThemeSymbolFilter(symbol)}
+                                    >
+                                      {formatSymbolLabel(symbol, activeSymbolTypes)}
+                                    </a>
+                                    <button
+                                      type="button"
+                                      className="theme-chip-action theme-chip-action-neutral"
+                                      onClick={() => restoreExcludedSymbol(symbol)}
+                                    >
+                                      {t("projects.config.themeSymbolRestore")}
+                                    </button>
+                                  </span>
+                                ))
+                              ) : (
+                                <span className="theme-detail-empty">
+                                  {t("projects.config.themeEmptySymbols")}
+                                </span>
+                              )}
+                            </div>
                           </div>
                         </div>
                       )}
@@ -1499,14 +2415,16 @@ export default function ProjectsPage() {
                           <div className="theme-compare-list">
                             {compareSets.onlyA.length
                               ? compareSets.onlyA.map((symbol) => (
-                                  <button
+                                  <a
                                     key={symbol}
-                                    type="button"
                                     className="theme-chip"
+                                    href={yahooSymbolUrl(symbol)}
+                                    target="_blank"
+                                    rel="noreferrer"
                                     onClick={() => applyThemeSymbolFilter(symbol)}
                                   >
-                                    {symbol}
-                                  </button>
+                                    {formatSymbolLabel(symbol, compareSymbolTypes)}
+                                  </a>
                                 ))
                               : t("projects.config.themeEmptySymbols")}
                           </div>
@@ -1518,14 +2436,16 @@ export default function ProjectsPage() {
                           <div className="theme-compare-list">
                             {compareSets.shared.length
                               ? compareSets.shared.map((symbol) => (
-                                  <button
+                                  <a
                                     key={symbol}
-                                    type="button"
                                     className="theme-chip"
+                                    href={yahooSymbolUrl(symbol)}
+                                    target="_blank"
+                                    rel="noreferrer"
                                     onClick={() => applyThemeSymbolFilter(symbol)}
                                   >
-                                    {symbol}
-                                  </button>
+                                    {formatSymbolLabel(symbol, compareSymbolTypes)}
+                                  </a>
                                 ))
                               : t("projects.config.themeEmptySymbols")}
                           </div>
@@ -1537,14 +2457,16 @@ export default function ProjectsPage() {
                           <div className="theme-compare-list">
                             {compareSets.onlyB.length
                               ? compareSets.onlyB.map((symbol) => (
-                                  <button
+                                  <a
                                     key={symbol}
-                                    type="button"
                                     className="theme-chip"
+                                    href={yahooSymbolUrl(symbol)}
+                                    target="_blank"
+                                    rel="noreferrer"
                                     onClick={() => applyThemeSymbolFilter(symbol)}
                                   >
-                                    {symbol}
-                                  </button>
+                                    {formatSymbolLabel(symbol, compareSymbolTypes)}
+                                  </a>
                                 ))
                               : t("projects.config.themeEmptySymbols")}
                           </div>
@@ -1610,7 +2532,7 @@ export default function ProjectsPage() {
                 </div>
                 <div className="meta-row">
                   <span>{t("common.labels.updatedAt")}</span>
-                  <strong>{configMeta?.updated_at || t("common.none")}</strong>
+                  <strong>{formatDateTime(configMeta?.updated_at)}</strong>
                 </div>
                 {configMessage && <div className="form-hint">{configMessage}</div>}
                 <button className="button-primary" onClick={saveProjectConfig}>
@@ -1618,9 +2540,12 @@ export default function ProjectsPage() {
                 </button>
               </div>
             )}
-          </div>
+            </div>
+            )}
 
-          <div className="card">
+            {projectTab === "algorithm" && (
+              <>
+              <div className="card">
             <div className="card-title">{t("projects.algorithm.title")}</div>
             <div className="card-meta">{t("projects.algorithm.meta")}</div>
             <div className="form-grid">
@@ -1682,18 +2607,24 @@ export default function ProjectsPage() {
               </div>
               <div className="meta-row">
                 <span>{t("common.labels.updatedAt")}</span>
-                <strong>{binding?.updated_at || t("common.none")}</strong>
+                <strong>{formatDateTime(binding?.updated_at)}</strong>
               </div>
               {bindingMessage && <div className="form-hint">{bindingMessage}</div>}
               <button className="button-primary" onClick={saveAlgorithmBinding}>
                 {t("projects.algorithm.save")}
               </button>
             </div>
+            </div>
+              {renderBenchmarkEditor()}
+              </>
+            )}
           </div>
-        </div>
+        )}
 
-        <div className="grid-2">
-          <div className="card">
+        {selectedProject && (projectTab === "data" || projectTab === "backtest") && (
+          <div className="grid-2">
+            {projectTab === "data" && (
+              <div className="card">
             <div className="card-title">{t("projects.dataStatus.title")}</div>
             <div className="card-meta">{t("projects.dataStatus.meta")}</div>
             {!dataStatus ? (
@@ -1731,7 +2662,7 @@ export default function ProjectsPage() {
                 </div>
                 <div className="meta-row">
                   <span>{t("common.labels.updatedAt")}</span>
-                  <strong>{dataStatus.prices.updated_at || t("common.none")}</strong>
+                  <strong>{formatDateTime(dataStatus.prices.updated_at)}</strong>
                 </div>
                 <div className="meta-row">
                   <span>{t("projects.dataStatus.root")}</span>
@@ -1743,79 +2674,87 @@ export default function ProjectsPage() {
             <button className="button-secondary" onClick={refreshProjectData}>
               {t("projects.dataStatus.action")}
             </button>
-          </div>
+            </div>
+            )}
 
-          <div className="card">
+            {projectTab === "backtest" && (
+              <>
+              <div className="card">
             <div className="card-title">{t("projects.backtest.title")}</div>
             <div className="card-meta">{t("projects.backtest.meta")}</div>
-            {thematicBacktest?.summary ? (
-              <div className="metric-table">
-                <div className="metric-header">
-                  <span>{t("projects.backtest.metric")}</span>
-                  <span>{t("projects.backtest.portfolio")}</span>
-                  <span>{t("projects.backtest.benchmark")}</span>
-                </div>
-                {metricRows.map((metric) => (
-                  <div className="metric-row" key={metric.key}>
-                    <span>{metric.label}</span>
-                    <span>
-                      {metric.format(
-                        Number((thematicBacktest.summary?.portfolio || {})[metric.key])
-                      )}
-                    </span>
-                    <span>
-                      {metric.format(
-                        Number((thematicBacktest.summary?.benchmark || {})[metric.key])
-                      )}
-                    </span>
+            {latestBacktest?.status === "success" && backtestSummary ? (
+              <>
+                <div className="metric-table">
+                  <div className="metric-header">
+                    <span>{t("projects.backtest.metric")}</span>
+                    <span>{t("projects.backtest.portfolio")}</span>
+                    <span>{t("projects.backtest.benchmark")}</span>
                   </div>
-                ))}
+                  {metricRows.map((metric) => (
+                    <div className="metric-row" key={metric.key}>
+                      <span>{metric.label}</span>
+                      <span>{formatMetricValue(backtestSummary?.[metric.key])}</span>
+                      <span>{formatMetricValue(benchmarkSummary?.[metric.key])}</span>
+                    </div>
+                  ))}
+                </div>
+                <div className="meta-row" style={{ marginTop: "10px" }}>
+                  <span>{t("projects.backtest.priceMode")}</span>
+                  <strong>
+                    {formatPriceMode(
+                      (backtestSummary?.["Price Mode"] as string | undefined) ??
+                        (backtestSummary?.price_mode as string | undefined)
+                    )}
+                  </strong>
+                </div>
+                <div className="meta-row">
+                  <span>{t("projects.backtest.benchmarkMode")}</span>
+                  <strong>
+                    {formatPriceMode(
+                      (backtestSummary?.["Benchmark Price Mode"] as string | undefined) ??
+                        (backtestSummary?.benchmark_mode as string | undefined)
+                    )}
+                  </strong>
+                </div>
+                {missingScores.length > 0 && (
+                  <div className="missing-score-block">
+                    <div className="missing-score-title">
+                      {t("projects.backtest.missingScoresTitle", {
+                        count: missingScores.length,
+                      })}
+                    </div>
+                    <div className="missing-score-list">{missingScores.join(", ")}</div>
+                  </div>
+                )}
+              </>
+            ) : latestBacktest?.status === "failed" && backtestErrorMessage ? (
+              <div className="empty-state">
+                {t("projects.backtest.failed", { message: backtestErrorMessage })}
               </div>
             ) : (
               <div className="empty-state">{t("projects.backtest.empty")}</div>
             )}
             <div className="meta-row">
               <span>{t("common.labels.updatedAt")}</span>
-              <strong>{thematicBacktest?.updated_at || t("common.none")}</strong>
+              <strong>
+                {formatDateTime(latestBacktest?.ended_at || latestBacktest?.created_at)}
+              </strong>
             </div>
             {backtestMessage && <div className="form-hint">{backtestMessage}</div>}
             <button className="button-primary" onClick={runThematicBacktest}>
               {t("projects.backtest.action")}
             </button>
+            </div>
+              {renderBenchmarkEditor()}
+              </>
+            )}
           </div>
-        </div>
+        )}
 
-        <table className="table">
-          <thead>
-            <tr>
-              <th>{t("projects.table.project")}</th>
-              <th>{t("projects.table.description")}</th>
-              <th>{t("projects.table.createdAt")}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {projects.map((project) => (
-              <tr key={project.id}>
-                <td>{project.name}</td>
-                <td>{project.description || t("common.none")}</td>
-                <td>{new Date(project.created_at).toLocaleString()}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        <PaginationBar
-          page={projectPage}
-          pageSize={projectPageSize}
-          total={projectTotal}
-          onPageChange={setProjectPage}
-          onPageSizeChange={(size) => {
-            setProjectPage(1);
-            setProjectPageSize(size);
-          }}
-        />
-
-        <div className="grid-2">
-          <div className="card">
+        {selectedProject && (projectTab === "versions" || projectTab === "diff") && (
+          <div className="grid-2">
+            {projectTab === "versions" && (
+              <div className="card">
             <div className="card-title">{t("projects.versions.title")}</div>
             <div className="card-meta">{t("projects.versions.meta")}</div>
             <div style={{ marginTop: "12px", display: "grid", gap: "8px" }}>
@@ -1872,9 +2811,11 @@ export default function ProjectsPage() {
                 {t("common.actions.saveVersion")}
               </button>
             </div>
-          </div>
+            </div>
+            )}
 
-          <div className="card">
+            {projectTab === "diff" && (
+              <div className="card">
             <div className="card-title">{t("projects.diff.title")}</div>
             <div className="card-meta">{t("projects.diff.meta")}</div>
             <div style={{ marginTop: "12px", display: "grid", gap: "8px" }}>
@@ -1934,46 +2875,54 @@ export default function ProjectsPage() {
                 {diffResult || t("projects.diff.none")}
               </pre>
             </div>
+            </div>
+            )}
+          </div>
+        )}
+
+        {selectedProject && projectTab === "versions" && (
+          <>
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>{t("projects.versionsTable.id")}</th>
+                  <th>{t("projects.versionsTable.version")}</th>
+                  <th>{t("projects.versionsTable.summary")}</th>
+                  <th>{t("projects.versionsTable.hash")}</th>
+                  <th>{t("projects.versionsTable.createdAt")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {versions.length === 0 && (
+                  <tr>
+                    <td colSpan={5}>{t("projects.versionsTable.empty")}</td>
+                  </tr>
+                )}
+                {versions.map((ver) => (
+                  <tr key={ver.id}>
+                    <td>{ver.id}</td>
+                    <td>{ver.version || t("common.none")}</td>
+                    <td>{ver.description || t("common.none")}</td>
+                    <td>{ver.content_hash ? ver.content_hash.slice(0, 10) : t("common.none")}</td>
+                    <td>{formatDateTime(ver.created_at)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <PaginationBar
+              page={versionPage}
+              pageSize={versionPageSize}
+              total={versionTotal}
+              onPageChange={setVersionPage}
+              onPageSizeChange={(size) => {
+                setVersionPage(1);
+                setVersionPageSize(size);
+              }}
+            />
+          </>
+        )}
           </div>
         </div>
-
-        <table className="table">
-          <thead>
-            <tr>
-              <th>{t("projects.versionsTable.id")}</th>
-              <th>{t("projects.versionsTable.version")}</th>
-              <th>{t("projects.versionsTable.summary")}</th>
-              <th>{t("projects.versionsTable.hash")}</th>
-              <th>{t("projects.versionsTable.createdAt")}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {versions.length === 0 && (
-              <tr>
-                <td colSpan={5}>{t("projects.versionsTable.empty")}</td>
-              </tr>
-            )}
-            {versions.map((ver) => (
-              <tr key={ver.id}>
-                <td>{ver.id}</td>
-                <td>{ver.version || t("common.none")}</td>
-                <td>{ver.description || t("common.none")}</td>
-                <td>{ver.content_hash ? ver.content_hash.slice(0, 10) : t("common.none")}</td>
-                <td>{new Date(ver.created_at).toLocaleString()}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        <PaginationBar
-          page={versionPage}
-          pageSize={versionPageSize}
-          total={versionTotal}
-          onPageChange={setVersionPage}
-          onPageSizeChange={(size) => {
-            setVersionPage(1);
-            setVersionPageSize(size);
-          }}
-        />
       </div>
     </div>
   );

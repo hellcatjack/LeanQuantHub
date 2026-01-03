@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     python_dll: str = ""
     dotnet_path: str = "dotnet"
     dotnet_root: str = ""
+    alpha_vantage_api_key: str = ""
+    alpha_vantage_entitlement: str = "delayed"
+    ml_python_path: str = ""
 
     class Config:
         env_file = ".env"

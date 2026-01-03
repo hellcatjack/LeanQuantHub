@@ -1,10 +1,13 @@
 ﻿from __future__ import annotations
 
+import csv
 import json
 import os
 import subprocess
+import zipfile
 import time
 from datetime import datetime
+from datetime import date as date_type
 from pathlib import Path
 
 from app.core.config import settings
@@ -15,6 +18,100 @@ from app.services.audit_log import record_audit
 
 def _ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
+
+
+def _project_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
+def _resolve_ml_python() -> str:
+    if settings.ml_python_path:
+        return settings.ml_python_path
+    candidate = _project_root() / ".venv" / "bin" / "python"
+    if candidate.exists():
+        return str(candidate)
+    return "python3"
+
+
+def _read_score_symbols(score_path: str) -> set[str]:
+    path = Path(score_path)
+    if not path.exists():
+        return set()
+    symbols: set[str] = set()
+    with path.open("r", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            symbol = (row.get("symbol") or "").strip().upper()
+            if symbol:
+                symbols.add(symbol)
+    return symbols
+
+
+def _append_scores(score_path: str, extra_path: Path) -> None:
+    if not extra_path.exists():
+        return
+    if not Path(score_path).exists():
+        Path(score_path).write_text(extra_path.read_text(encoding="utf-8"), encoding="utf-8")
+        return
+    with extra_path.open("r", encoding="utf-8") as src, open(
+        score_path, "a", encoding="utf-8"
+    ) as dst:
+        header = src.readline()
+        if header and not header.endswith("\n"):
+            dst.write("\n")
+        for line in src:
+            if line.strip():
+                dst.write(line if line.endswith("\n") else f"{line}\n")
+
+
+def _parse_symbols(raw: str) -> list[str]:
+    return [item.strip().upper() for item in raw.split(",") if item.strip()]
+
+
+def _fill_missing_scores(
+    missing: list[str],
+    score_csv_path: str,
+    data_root: str,
+    output_dir: Path,
+    log_path: Path,
+) -> tuple[list[str], str | None]:
+    if not missing:
+        return missing, None
+    ml_root = _project_root() / "ml"
+    ml_config_path = ml_root / "config.json"
+    ml_script = ml_root / "predict_torch.py"
+    if not ml_config_path.exists() or not ml_script.exists():
+        return missing, "ml_config_or_script_missing"
+    if not data_root:
+        return missing, "data_root_missing"
+
+    tmp_config = output_dir / "scores_missing_config.json"
+    tmp_output = output_dir / "scores_missing.csv"
+    config = json.loads(ml_config_path.read_text(encoding="utf-8"))
+    config["symbols"] = missing
+    tmp_config.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    cmd = [
+        _resolve_ml_python(),
+        str(ml_script),
+        "--config",
+        str(tmp_config),
+        "--data-root",
+        data_root,
+        "--output",
+        str(tmp_output),
+        "--device",
+        "auto",
+    ]
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(f"\n[score-fill] running: {' '.join(cmd)}\n")
+        proc = subprocess.run(cmd, stdout=handle, stderr=subprocess.STDOUT, check=False)
+        handle.write(f"[score-fill] exit={proc.returncode}\n")
+    if proc.returncode != 0:
+        return missing, f"score_fill_failed:{proc.returncode}"
+    _append_scores(score_csv_path, tmp_output)
+    remaining = sorted(set(missing) - _read_score_symbols(score_csv_path))
+    return remaining, None
 
 
 def _parse_metric_value(value: object) -> tuple[float | None, str]:
@@ -60,6 +157,29 @@ def _format_number(value: float | None, unit: str) -> str:
     return f"{value:.4f}"
 
 
+def _format_metric_value(value: object) -> str:
+    if value is None:
+        return "-"
+    num, unit = _parse_metric_value(value)
+    if unit == "none":
+        return str(value)
+    return _format_number(num, unit)
+
+
+def _parse_iso_date(value: str | None) -> date_type | None:
+    if not value:
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = raw[:-1]
+    try:
+        return datetime.fromisoformat(raw).date()
+    except ValueError:
+        return None
+
+
 def _evaluate_risk(metrics: dict, risk_params: dict) -> tuple[str, list[str]]:
     warnings: list[str] = []
     status = "pass"
@@ -96,12 +216,15 @@ def _evaluate_risk(metrics: dict, risk_params: dict) -> tuple[str, list[str]]:
 
 def _write_report(
     run_id: int,
-    metrics: dict,
+    portfolio_metrics: dict,
+    benchmark_metrics: dict,
+    benchmark_symbol: str | None,
     output_dir: Path,
     risk_summary: dict,
     cost_summary: dict,
     params: dict,
     data_notes: str | None,
+    missing_scores: list[str] | None,
 ) -> Path:
     report_path = output_dir / "report.html"
     lines = [
@@ -115,11 +238,38 @@ def _write_report(
         "<body>",
         f"<h1>回测报告 #{run_id}</h1>",
         "<h2>核心指标</h2>",
-        "<table>",
     ]
-    for key, value in metrics.items():
-        lines.append(f"<tr><th>{key}</th><td>{value}</td></tr>")
-    lines.append("</table>")
+    if benchmark_metrics:
+        lines.append("<table>")
+        lines.append(
+            "<tr><th>指标</th><th>组合</th><th>基准"
+            + (f"（{benchmark_symbol}）" if benchmark_symbol else "")
+            + "</th></tr>"
+        )
+        metric_keys = [
+            "Compounding Annual Return",
+            "Drawdown",
+            "Sharpe Ratio",
+            "Net Profit",
+            "Portfolio Turnover",
+            "Total Fees",
+        ]
+        for key in metric_keys:
+            if key not in portfolio_metrics and key not in benchmark_metrics:
+                continue
+            lines.append(
+                "<tr>"
+                f"<th>{key}</th>"
+                f"<td>{_format_metric_value(portfolio_metrics.get(key))}</td>"
+                f"<td>{_format_metric_value(benchmark_metrics.get(key))}</td>"
+                "</tr>"
+            )
+        lines.append("</table>")
+    else:
+        lines.append("<table>")
+        for key, value in portfolio_metrics.items():
+            lines.append(f"<tr><th>{key}</th><td>{_format_metric_value(value)}</td></tr>")
+        lines.append("</table>")
 
     if risk_summary or cost_summary or params or data_notes:
         lines.append("<h2>成本与风控</h2>")
@@ -130,6 +280,12 @@ def _write_report(
         if risk_summary:
             for key, value in risk_summary.items():
                 lines.append(f"<tr><th>{key}</th><td>{value}</td></tr>")
+        if missing_scores:
+            lines.append(
+                "<tr><th>缺失清单</th><td>"
+                + ", ".join(missing_scores)
+                + "</td></tr>"
+            )
         if data_notes:
             lines.append(f"<tr><th>公司行为风险</th><td>{data_notes}</td></tr>")
         if params:
@@ -182,20 +338,216 @@ def _load_config(template_path: str) -> dict:
     }
 
 
-def _extract_metrics(summary: dict) -> dict:
+def _coerce_perf_value(perf: dict, keys: list[str]) -> object | None:
+    for key in keys:
+        if key in perf:
+            return perf.get(key)
+    return None
+
+
+def _map_perf_stats(perf: dict) -> dict:
+    if not perf:
+        return {}
+    mapping = {
+        "Compounding Annual Return": ["compoundingAnnualReturn", "compounding_annual_return"],
+        "Drawdown": ["drawdown"],
+        "Sharpe Ratio": ["sharpeRatio", "sharpe_ratio"],
+        "Net Profit": ["totalNetProfit", "netProfit", "total_net_profit"],
+        "Portfolio Turnover": ["portfolioTurnover", "portfolio_turnover"],
+        "Total Fees": ["totalFees", "total_fees"],
+        "Start Equity": ["startEquity", "start_equity"],
+    }
+    out: dict[str, object] = {}
+    for label, keys in mapping.items():
+        value = _coerce_perf_value(perf, keys)
+        if value is not None:
+            out[label] = value
+    return out
+
+
+def _extract_portfolio_metrics(summary: dict) -> dict:
     metrics = summary.get("statistics") or {}
     if metrics:
         return metrics
-    perf = summary.get("totalPerformance", {}).get("portfolioStatistics", {})
-    if not perf:
+    total_perf = summary.get("totalPerformance") or summary.get("total_performance") or {}
+    perf = total_perf.get("portfolioStatistics") or total_perf.get("portfolio_statistics") or {}
+    return _map_perf_stats(perf)
+
+
+def _extract_benchmark_metrics(summary: dict) -> dict:
+    total_perf = summary.get("totalPerformance") or summary.get("total_performance") or {}
+    bench = (
+        total_perf.get("benchmark")
+        or total_perf.get("benchmarkStatistics")
+        or summary.get("benchmark")
+        or summary.get("benchmarkStatistics")
+        or {}
+    )
+    if not isinstance(bench, dict):
         return {}
-    return {
-        "Compounding Annual Return": perf.get("compoundingAnnualReturn"),
-        "Drawdown": perf.get("drawdown"),
-        "Sharpe Ratio": perf.get("sharpeRatio"),
-        "Net Profit": perf.get("totalNetProfit"),
-        "Portfolio Turnover": perf.get("portfolioTurnover"),
+    return _map_perf_stats(bench)
+
+
+def _extract_benchmark_series(result_payload: dict) -> list[tuple[int, float]]:
+    charts = result_payload.get("Charts") or result_payload.get("charts") or {}
+    chart = charts.get("Benchmark") or charts.get("benchmark")
+    if not isinstance(chart, dict):
+        return []
+    series_map = chart.get("series") or chart.get("Series") or {}
+    series = (
+        series_map.get("Benchmark")
+        or series_map.get("benchmark")
+        or next(iter(series_map.values()), None)
+    )
+    if not isinstance(series, dict):
+        return []
+    values = series.get("values") or series.get("Values") or []
+    cleaned: list[tuple[int, float]] = []
+    for item in values:
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            continue
+        try:
+            ts = int(item[0])
+            val = float(item[1])
+        except (TypeError, ValueError):
+            continue
+        cleaned.append((ts, val))
+    return cleaned
+
+
+def _compute_benchmark_metrics_from_series(values: list[tuple[int, float]]) -> dict:
+    if len(values) < 2:
+        return {}
+    start_ts, start_val = values[0]
+    end_ts, end_val = values[-1]
+    if start_val <= 0:
+        return {}
+    net_profit = end_val / start_val - 1.0
+    years = (end_ts - start_ts) / (365.25 * 24 * 3600)
+    cagr = (end_val / start_val) ** (1 / years) - 1.0 if years > 0 else None
+
+    peak = start_val
+    max_dd = 0.0
+    returns: list[float] = []
+    prev = start_val
+    for _, val in values[1:]:
+        if val > peak:
+            peak = val
+        if peak > 0:
+            drawdown = (peak - val) / peak
+            if drawdown > max_dd:
+                max_dd = drawdown
+        if prev > 0:
+            returns.append(val / prev - 1.0)
+        prev = val
+
+    sharpe = None
+    if returns:
+        mean = sum(returns) / len(returns)
+        variance = sum((r - mean) ** 2 for r in returns) / len(returns)
+        if variance > 0:
+            sharpe = (mean / variance ** 0.5) * (252 ** 0.5)
+
+    metrics: dict[str, object] = {
+        "Compounding Annual Return": _format_percent(cagr) if cagr is not None else "-",
+        "Drawdown": _format_percent(max_dd),
+        "Net Profit": _format_percent(net_profit),
+        "Start Equity": f"{start_val:.2f}",
+        "End Equity": f"{end_val:.2f}",
     }
+    if sharpe is not None:
+        metrics["Sharpe Ratio"] = f"{sharpe:.3f}"
+    return metrics
+
+
+def _compute_benchmark_metrics_from_lean_data(
+    symbol: str,
+    data_folder: str,
+    start_date: date_type | None,
+    end_date: date_type | None,
+) -> dict:
+    if not symbol or not data_folder:
+        return {}
+    path = Path(data_folder) / "equity" / "usa" / "daily" / f"{symbol.lower()}.zip"
+    if not path.exists():
+        return {}
+    closes: list[float] = []
+    dates: list[date_type] = []
+    try:
+        with zipfile.ZipFile(path) as zf:
+            names = zf.namelist()
+            if not names:
+                return {}
+            target = f"{symbol.lower()}.csv"
+            name = target if target in names else names[0]
+            with zf.open(name) as handle:
+                for raw in handle:
+                    try:
+                        line = raw.decode("utf-8").strip()
+                    except UnicodeDecodeError:
+                        line = raw.decode("latin-1").strip()
+                    if not line:
+                        continue
+                    parts = line.split(",")
+                    if len(parts) < 5:
+                        continue
+                    date_str = parts[0].split()[0]
+                    try:
+                        row_date = datetime.strptime(date_str, "%Y%m%d").date()
+                        close_val = float(parts[4])
+                    except (ValueError, IndexError):
+                        continue
+                    if start_date and row_date < start_date:
+                        continue
+                    if end_date and row_date > end_date:
+                        continue
+                    dates.append(row_date)
+                    closes.append(close_val)
+    except (OSError, zipfile.BadZipFile):
+        return {}
+
+    if len(closes) < 2:
+        return {}
+    start_val = closes[0]
+    end_val = closes[-1]
+    if start_val <= 0:
+        return {}
+    net_profit = end_val / start_val - 1.0
+    years = (dates[-1] - dates[0]).days / 365.25 if dates[-1] > dates[0] else 0
+    cagr = (end_val / start_val) ** (1 / years) - 1.0 if years > 0 else None
+
+    peak = start_val
+    max_dd = 0.0
+    returns: list[float] = []
+    prev = start_val
+    for val in closes[1:]:
+        if val > peak:
+            peak = val
+        if peak > 0:
+            drawdown = (peak - val) / peak
+            if drawdown > max_dd:
+                max_dd = drawdown
+        if prev > 0:
+            returns.append(val / prev - 1.0)
+        prev = val
+
+    sharpe = None
+    if returns:
+        mean = sum(returns) / len(returns)
+        variance = sum((r - mean) ** 2 for r in returns) / len(returns)
+        if variance > 0:
+            sharpe = (mean / variance ** 0.5) * (252 ** 0.5)
+
+    metrics: dict[str, object] = {
+        "Compounding Annual Return": _format_percent(cagr) if cagr is not None else "-",
+        "Drawdown": _format_percent(max_dd),
+        "Net Profit": _format_percent(net_profit),
+        "Start Equity": f"{start_val:.2f}",
+        "End Equity": f"{end_val:.2f}",
+    }
+    if sharpe is not None:
+        metrics["Sharpe Ratio"] = f"{sharpe:.3f}"
+    return metrics
 
 
 def run_backtest(run_id: int) -> None:
@@ -234,6 +586,36 @@ def run_backtest(run_id: int) -> None:
         if algo_params:
             config["parameters"] = algo_params
 
+        missing_scores: list[str] = []
+        score_csv_path = ""
+        raw_symbols = algo_params.get("symbols")
+        if isinstance(algo_params.get("score_csv_path"), str):
+            score_csv_path = algo_params["score_csv_path"]
+        elif isinstance(params.get("score_csv_path"), str):
+            score_csv_path = params["score_csv_path"]
+        benchmark_symbol = str(params.get("benchmark") or algo_params.get("benchmark") or "").strip().upper()
+        if score_csv_path and isinstance(raw_symbols, str) and raw_symbols.strip():
+            symbols = _parse_symbols(raw_symbols)
+            missing_scores = sorted(set(symbols) - _read_score_symbols(score_csv_path))
+            if missing_scores:
+                missing_scores, _ = _fill_missing_scores(
+                    missing_scores,
+                    score_csv_path,
+                    settings.data_root or "",
+                    output_dir,
+                    log_path,
+                )
+            if missing_scores:
+                filtered = [
+                    symbol
+                    for symbol in symbols
+                    if symbol not in missing_scores or symbol == benchmark_symbol
+                ]
+                if not filtered and benchmark_symbol:
+                    filtered = [benchmark_symbol]
+                if filtered:
+                    algo_params["symbols"] = ",".join(filtered)
+
         if algo_language.lower() == "python":
             if not algo_path:
                 algo_path = settings.lean_algorithm_path
@@ -253,7 +635,12 @@ def run_backtest(run_id: int) -> None:
         data_folder_override = None
         if isinstance(params.get("data_folder"), str) and params["data_folder"].strip():
             data_folder_override = params["data_folder"].strip()
-        config["data-folder"] = data_folder_override or settings.lean_data_folder
+        default_data_folder = settings.lean_data_folder
+        if settings.data_root:
+            adjusted_root = Path(settings.data_root) / "lean_adjusted"
+            if adjusted_root.exists():
+                default_data_folder = str(adjusted_root)
+        config["data-folder"] = data_folder_override or default_data_folder
         config["results-destination-folder"] = str(lean_results_dir)
 
         config_path = output_dir / "lean_config.json"
@@ -301,7 +688,63 @@ def run_backtest(run_id: int) -> None:
             raise RuntimeError("Lean summary file not found.")
 
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
-        metrics = _extract_metrics(summary)
+        portfolio_metrics = _extract_portfolio_metrics(summary)
+        benchmark_metrics = _extract_benchmark_metrics(summary)
+
+        result_candidates = []
+        for candidate in lean_results_dir.glob("*.json"):
+            name = candidate.name
+            if name.endswith("-summary.json"):
+                continue
+            if "order-events" in name or "data-monitor-report" in name:
+                continue
+            if candidate.stat().st_size == 0:
+                continue
+            result_candidates.append(candidate)
+        result_path = max(result_candidates, key=lambda p: p.stat().st_size) if result_candidates else None
+
+        if not benchmark_metrics and result_path:
+            try:
+                result_payload = json.loads(result_path.read_text(encoding="utf-8"))
+                series = _extract_benchmark_series(result_payload)
+                benchmark_metrics = _compute_benchmark_metrics_from_series(series)
+            except (OSError, json.JSONDecodeError):
+                benchmark_metrics = benchmark_metrics or {}
+
+        benchmark_symbol = str(params.get("benchmark") or "").strip().upper()
+        flat_benchmark = (
+            benchmark_metrics
+            and benchmark_metrics.get("Net Profit") in {"0.00%", "0%"}
+            and benchmark_metrics.get("Drawdown") in {"0.00%", "0%"}
+        )
+        if (not benchmark_metrics or flat_benchmark) and benchmark_symbol:
+            algo_config = summary.get("algorithmConfiguration") or {}
+            start_date = _parse_iso_date(algo_config.get("startDate"))
+            end_date = _parse_iso_date(algo_config.get("endDate"))
+            data_folder_used = str(config.get("data-folder") or "")
+            fallback_metrics = _compute_benchmark_metrics_from_lean_data(
+                benchmark_symbol,
+                data_folder_used,
+                start_date,
+                end_date,
+            )
+            if fallback_metrics:
+                benchmark_metrics = fallback_metrics
+
+        metrics = dict(portfolio_metrics)
+        if benchmark_metrics:
+            metrics["benchmark"] = benchmark_metrics
+        if missing_scores:
+            metrics["Missing Scores"] = ",".join(missing_scores)
+            metrics["Missing Score Count"] = len(missing_scores)
+
+        price_mode = "raw"
+        if isinstance(config.get("data-folder"), str):
+            data_folder_value = config["data-folder"].lower()
+            if "lean_adjusted" in data_folder_value or "adjusted" in data_folder_value:
+                price_mode = "adjusted"
+        metrics["Price Mode"] = price_mode
+        metrics["Benchmark Price Mode"] = price_mode
 
         risk_params = params.get("risk", {}) if isinstance(params.get("risk"), dict) else {}
         risk_status, risk_warnings = _evaluate_risk(metrics, risk_params)
@@ -343,25 +786,16 @@ def run_backtest(run_id: int) -> None:
             data_notes = f"{data_notes} 数据目录：{data_folder_override}（{tag}）。"
         report_path = _write_report(
             run_id,
-            metrics,
+            portfolio_metrics,
+            benchmark_metrics,
+            str(params.get("benchmark") or ""),
             output_dir,
             risk_summary,
             cost_summary,
             params,
             data_notes,
+            missing_scores,
         )
-
-        result_candidates = []
-        for candidate in lean_results_dir.glob("*.json"):
-            name = candidate.name
-            if name.endswith("-summary.json"):
-                continue
-            if "order-events" in name or "data-monitor-report" in name:
-                continue
-            if candidate.stat().st_size == 0:
-                continue
-            result_candidates.append(candidate)
-        result_path = max(result_candidates, key=lambda p: p.stat().st_size) if result_candidates else None
 
         run.metrics = metrics
         run.status = "success"

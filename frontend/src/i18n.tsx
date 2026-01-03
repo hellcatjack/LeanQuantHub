@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useMemo, useState } from "react";
 
 export type Locale = "zh" | "en";
+export type TimeZone = "America/New_York" | "UTC" | "Asia/Shanghai" | "Asia/Hong_Kong";
 
 type MessageTree = Record<string, MessageTree | string>;
 
@@ -22,6 +23,13 @@ const messages: Record<Locale, MessageTree> = {
       localRunner: "本地执行器",
       leanEngine: "Lean 引擎",
       switchLanguage: "切换语言",
+      timezone: "时区",
+      timezoneOptions: {
+        et: "美国东部时间 (ET)",
+        utc: "协调世界时 (UTC)",
+        cn: "中国标准时间 (CST)",
+        hk: "香港时间 (HKT)",
+      },
       localeShort: {
         zh: "中文",
         en: "EN",
@@ -37,10 +45,13 @@ const messages: Record<Locale, MessageTree> = {
         failed: "失败",
         ok: "正常",
         warn: "警告",
+        rate_limited: "受限",
+        not_found: "未覆盖",
       },
       actions: {
         create: "创建",
         save: "保存",
+        saved: "已保存",
         saveVersion: "保存版本",
         start: "开始",
         compare: "开始对比",
@@ -58,6 +69,18 @@ const messages: Record<Locale, MessageTree> = {
         createdAt: "创建时间",
         updatedAt: "更新时间",
         endedAt: "结束时间",
+      },
+    },
+    symbols: {
+      types: {
+        stock: "股票",
+        etf: "ETF",
+        adr: "ADR",
+        reit: "REITs",
+        etn: "ETN",
+        fund: "基金",
+        index: "指数",
+        unknown: "未知",
       },
     },
     metrics: {
@@ -88,6 +111,32 @@ const messages: Record<Locale, MessageTree> = {
         title: "项目概览",
         meta: "当前项目数量",
       },
+      list: {
+        title: "项目列表",
+        meta: "选择项目进行管理",
+        search: "搜索项目名称",
+        empty: "暂无项目",
+      },
+      detail: {
+        empty: "请选择项目以查看详情",
+        projectId: "项目ID",
+        openThemes: "进入主题管理",
+        summaryTitle: "项目概览",
+        summaryMeta: "核心配置与资产覆盖",
+        themeTitle: "主题权重",
+        themeMeta: "按权重查看主题分布",
+        performanceTitle: "最新回测",
+        performanceMeta: "组合与基准关键指标",
+      },
+      tabs: {
+        overview: "概览",
+        config: "配置",
+        algorithm: "算法",
+        data: "数据",
+        backtest: "回测",
+        versions: "版本",
+        diff: "对比",
+      },
       table: {
         project: "项目",
         description: "描述",
@@ -111,25 +160,64 @@ const messages: Record<Locale, MessageTree> = {
         rebalanceMonthly: "每月",
         rebalanceQuarterly: "每季",
         weights: "主题权重",
-        themesTitle: "主题配置",
+        themesTitle: "主题篮子配置",
         themesEmpty: "暂无主题，请先添加",
-        themeKey: "主题编码",
+        themeKey: "主题代码",
         themeLabel: "主题名称",
-        themeWeight: "权重",
-        themeKeywords: "关键词（逗号分隔）",
-        themeManual: "手动股票（逗号分隔）",
-        themeManualShort: "手动股票",
+        themeWeight: "主题权重",
+        themePriority: "主题优先级",
+        themeKeywords: "关键词（用于筛选，逗号分隔）",
+        themeManual: "手动成分（逗号分隔）",
+        themeManualShort: "手动成分",
+        themeExclude: "排除成分（逗号分隔）",
+        themeExcludeShort: "排除成分",
         themeAdd: "添加主题",
         themeRemove: "删除主题",
-        themeHint: "关键词用于 Yahoo 搜索；手动股票会优先纳入。",
+        themeHint:
+          "关键词用于 Yahoo 搜索；手动成分强制纳入；排除优先级最高（自动/手动都会被移除）；重复成分按优先级归属。",
+        themeSystem: "系统主题",
+        systemThemeTitle: "系统主题库",
+        systemThemeMeta: "权威来源的主题篮子，可直接导入项目",
+        systemThemeLabel: "主题名称",
+        systemThemeSource: "来源",
+        systemThemeVersion: "最新版本",
+        systemThemeMode: "导入模式",
+        systemThemeWeight: "权重",
+        systemThemeActions: "操作",
+        systemThemeImport: "导入",
+        systemThemeReimport: "更新绑定",
+        systemThemeRefresh: "更新来源",
+        systemThemeEmpty: "暂无系统主题",
+        systemThemeError: "系统主题加载失败",
+        systemThemeImported: "系统主题已导入并保存",
+        systemThemeImportError: "系统主题导入失败",
+        systemThemeRefreshSuccess: "系统主题已更新",
+        systemThemeRefreshError: "系统主题更新失败",
+        systemThemeModeFollow: "跟随更新",
+        systemThemeModePin: "固定版本",
+        systemThemeModeSnapshot: "快照导入",
+        systemThemeReportTitle: "影响报告",
+        systemThemeReportMeta: "系统主题更新对项目的影响摘要",
+        systemThemeReportEmpty: "暂无影响报告",
+        systemThemeReportVersion: "版本变化",
+        systemThemeReportDiff: "变更摘要",
+        systemThemeReportTime: "生成时间",
+        systemThemeReportActions: "操作",
+        systemThemeReportExpand: "展开",
+        systemThemeReportCollapse: "收起",
+        systemThemeReportNone: "无变化",
+        systemThemeDiffSymbols: "成分",
+        systemThemeDiffKeywords: "关键词",
+        systemThemeDiffManual: "手动",
+        systemThemeDiffExclude: "排除",
         themeDuplicate: "主题编码重复，请修改后再保存",
         themeActions: "操作",
         themeCount: "主题数量",
         themeSummaryError: "主题构成读取失败",
-        themeTotalSymbols: "覆盖股票数",
+        themeTotalSymbols: "覆盖成分数",
         themeComposition: "主题构成",
-        themeSymbolCount: "股票数量",
-        themeSample: "样例股票",
+        themeSymbolCount: "成分数量",
+        themeSample: "样例成分",
         themeDistribution: "主题分布",
         themeWeightDistribution: "权重分布",
         themeExpand: "展开",
@@ -139,18 +227,28 @@ const messages: Record<Locale, MessageTree> = {
         themeClose: "收起详情",
         themeFilter: "主题过滤",
         themeFilterPlaceholder: "按主题名称或编码筛选",
-        themeSearchSymbol: "股票筛选",
-        themeSearchPlaceholder: "输入股票代码（例如 AAPL）",
-        themeSearchHint: "输入股票代码后筛选对应主题",
+        themeSearchSymbol: "成分筛选",
+        themeSearchPlaceholder: "输入证券代码（如 AAPL）",
+        themeSearchHint: "按成分筛选主题",
         themeSearchClear: "清除筛选",
-        themeSearchEmpty: "请输入股票代码后再筛选",
+        themeSearchEmpty: "请输入证券代码后再筛选",
         themeSearchError: "股票筛选失败",
         themeSearchMatches: "匹配主题 {count} 个",
         themeDetailTitle: "主题详情 · {name}",
-        themeDetailMeta: "共 {total} 只股票（手动 {manual}）",
-        themeDetailFilter: "筛选主题内股票（支持代码包含）",
+        themeDetailMeta: "共 {total} 只成分（手动 {manual} · 排除 {excluded}）",
+        themeDetailFilter: "筛选主题内成分（支持代码包含）",
         themeDetailClear: "清除",
         themeDetailExport: "导出列表",
+        themeDetailAuto: "自动成分",
+        themeDetailManual: "手动成分",
+        themeDetailExcluded: "排除成分",
+        themeSymbolPlaceholder: "输入股票代码",
+        themeSymbolAdd: "加入主题",
+        themeSymbolExclude: "从主题中排除",
+        themeSymbolExcludeAction: "排除",
+        themeSymbolRemove: "移除",
+        themeSymbolRestore: "恢复",
+        themeSymbolEmpty: "请输入股票代码",
         themeCompareTitle: "主题对比",
         themeCompareA: "主题 A",
         themeCompareB: "主题 B",
@@ -201,12 +299,21 @@ const messages: Record<Locale, MessageTree> = {
         errorSelect: "请选择算法与版本",
       },
       backtest: {
-        title: "主题回测",
-        meta: "基于 S&P500 + AI 主题权重的组合回测",
+        title: "项目回测",
+        meta: "使用 Lean 引擎运行项目绑定算法",
+        benchmarkTitle: "基准设置",
+        benchmarkMeta: "设置项目回测的对比基准（默认 SPY）",
         action: "运行回测",
         queued: "已提交回测任务",
         empty: "暂无回测结果",
         error: "回测触发失败",
+        failed: "回测失败：{message}",
+        priceMode: "价格类型",
+        benchmarkMode: "基准价格类型",
+        missingScoresTitle: "缺失清单（{count}）",
+        priceAdjusted: "复权",
+        priceRaw: "原始",
+        priceMixed: "混合",
         metric: "指标",
         portfolio: "组合",
         benchmark: "基准",
@@ -286,6 +393,113 @@ const messages: Record<Locale, MessageTree> = {
         title: "算法概览",
         meta: "当前已登记数量",
       },
+      list: {
+        title: "算法列表",
+        meta: "快速筛选与定位算法",
+        search: "搜索算法名称",
+        empty: "暂无算法",
+      },
+      detail: {
+        title: "算法详情",
+        meta: "编辑基础信息与版本统计",
+        latest: "最新版本 #{id}",
+        versions: "版本数 {count}",
+        name: "算法名称",
+        description: "算法说明",
+        language: "语言",
+        version: "默认版本",
+        path: "算法路径",
+        typeName: "类型名称",
+        empty: "请先选择算法",
+        error: "保存失败，请稍后重试",
+      },
+      tabs: {
+        params: "参数",
+        versions: "版本",
+        diff: "对比",
+        project: "项目",
+        selftest: "自测",
+      },
+      selftest: {
+        title: "算法自测",
+        meta: "使用 Lean 运行回测并与基准对比",
+        version: "算法版本",
+        benchmark: "基准指数/ETF",
+        hint: "推荐基准：SPY、QQQ、VTI、IWM、DIA，可自定义输入",
+        action: "发起自测",
+        running: "自测运行中...",
+        queued: "已提交回测，ID {id}",
+        lastRun: "最近回测 ID {id}",
+        viewReports: "查看报告",
+        error: "回测触发失败",
+        failed: "回测失败：{message}",
+        errorSelect: "请选择算法版本",
+      },
+      params: {
+        title: "算法参数",
+        meta: "周度选股与风控配置",
+        cadence: "调仓频率",
+        weekly: "每周",
+        monthly: "每月",
+        market: "市场",
+        us: "美股",
+        assetClass: "资产类型",
+        equity: "股票",
+        allowEtf: "允许 ETF",
+        coreTitle: "核心股票权重",
+        coreSymbols: "核心股票（逗号分隔）",
+        coreWeight: "核心权重",
+        coreFallback: "缺失时处理",
+        cash: "持有现金",
+        redistribute: "再分配到核心",
+        themeTitle: "主题权重",
+        themeKey: "主题代码",
+        themeWeight: "权重",
+        themeAdd: "添加主题权重",
+        themeRemove: "移除",
+        themeEmpty: "暂无主题权重，请先添加",
+        themeOptionHint: "可输入主题编码或从系统主题模板中选择",
+        selectionTitle: "筛选参数",
+        topN: "每主题入选数量",
+        topMomentum: "动量入选数",
+        topLowVol: "低波动入选数",
+        minPositions: "最小持仓数",
+        trendWeeks: "趋势窗口（周）",
+        riskOnWeeks: "风险开关均线（周）",
+        lowvolDays: "低波动窗口（天）",
+        momShortDays: "短动量窗口（天）",
+        momLongDays: "长动量窗口（天）",
+        mom12w: "12周动量权重",
+        mom4w: "4周动量权重",
+        vol20d: "20日波动惩罚",
+        blendTitle: "动量/低波动混合",
+        momentumWeight: "动量权重",
+        lowvolWeight: "低波动权重",
+        riskTitle: "风控参数",
+        maxWeight: "单股上限",
+        volTarget: "目标波动",
+        drawdown: "最大回撤阈值",
+        inverseVol: "逆波动率加权",
+        minVol: "最小波动率",
+        themeTilt: "主题权重倾斜",
+        defensiveTitle: "防御资产",
+        defensiveSymbols: "防御资产（逗号分隔）",
+        defensiveHint: "风险关闭时将仓位切换到防御资产",
+        advancedTitle: "高级参数",
+        advancedHint: "用于复合/低波动策略，按需填写",
+        coreEnable: "启用核心股票权重",
+        coreDisabledHint: "新建算法默认不使用核心权重，可按需开启",
+        modeForm: "结构化参数",
+        modeJson: "JSON 参数",
+        modeHint: "若算法参数与表单不匹配，可切换到 JSON 模式进行通用配置",
+        jsonTitle: "参数 JSON",
+        jsonPlaceholder: "{\n  \"selection\": {\n    \"top_n\": 20\n  }\n}",
+        jsonHint: "保存版本时将以此 JSON 为准",
+        jsonError: "参数 JSON 无效，请检查格式",
+        notes: "备注",
+        reset: "重置",
+        saveVersion: "保存为版本",
+      },
       table: {
         name: "名称",
         language: "语言",
@@ -297,6 +511,7 @@ const messages: Record<Locale, MessageTree> = {
         title: "版本管理",
         meta: "为算法登记版本快照并生成对比",
         empty: "暂无算法",
+        pick: "选择版本",
         version: "版本号 (v1.0.1)",
         description: "版本说明",
         language: "语言（默认 {language}）",
@@ -304,7 +519,7 @@ const messages: Record<Locale, MessageTree> = {
         filePath: "算法文件路径（留空则使用内容）",
         content: "算法内容（可选，用于生成 diff）",
         errorSelect: "请先选择算法",
-        errorContent: "请至少填写版本号或文件路径/内容",
+        errorContent: "请至少填写版本号、文件路径/内容或参数",
       },
       projectCreate: {
         title: "从算法创建项目",
@@ -385,6 +600,26 @@ const messages: Record<Locale, MessageTree> = {
         errorNotFound: "未找到结果文件，请确认回测已完成",
         errorLoad: "读取图表失败",
       },
+      trades: {
+        title: "交易图表",
+        meta: "叠加买卖点与行情走势，快速查看交易细节",
+        placeholder: "回测 ID",
+        symbolPlaceholder: "股票代码",
+        load: "加载交易图表",
+        loading: "交易数据加载中...",
+        error: "交易图表加载失败",
+        empty: "暂无交易数据或缺少行情数据",
+        buy: "买入",
+        sell: "卖出",
+        tradesCount: "{count} 笔",
+        summary: "买 {buys} / 卖 {sells} · 盈 {wins} / 亏 {losses}",
+        table: {
+          time: "时间",
+          side: "方向",
+          qty: "数量",
+          price: "价格",
+        },
+      },
       table: {
         id: "ID",
         runId: "回测 ID",
@@ -402,11 +637,14 @@ const messages: Record<Locale, MessageTree> = {
       },
       fetch: {
         title: "历史数据抓取",
-        meta: "默认 Stooq，快速拉取日线历史数据",
+        meta: "默认 Alpha，可切换 Stooq/Yahoo，当前仅支持日线历史数据。",
         symbol: "股票代码（如 AAPL）",
         vendor: {
-          stooq: "Stooq（默认）",
+          stooq: "Stooq",
+          yahoo: "Yahoo",
+          alpha: "Alpha Vantage（默认）",
         },
+        stooqOnly: "仅用 {vendor}（不回退 Yahoo）",
         region: {
           us: "美股",
           hk: "港股",
@@ -422,9 +660,9 @@ const messages: Record<Locale, MessageTree> = {
         preview: "将创建数据集 {dataset} · 来源 {source}",
         action: "抓取历史",
         loading: "抓取中",
-        hint: "Stooq 仅支持日线，系统会自动发起数据同步任务",
+        hint: "Stooq/Yahoo/Alpha 仅支持日线，系统会自动发起数据同步任务",
         errorSymbol: "请填写股票代码",
-        errorFrequency: "Stooq 仅支持日线数据",
+        errorFrequency: "当前数据源仅支持日线数据",
         error: "历史数据抓取失败",
         successCreated: "已创建数据集 {name}，同步任务 #{jobId} 已排队",
         successQueued: "已复用数据集 {name}，同步任务 #{jobId} 已排队",
@@ -433,6 +671,7 @@ const messages: Record<Locale, MessageTree> = {
       list: {
         title: "数据集列表",
         meta: "当前筛选 {totalSymbols} 只股票 / {totalDatasets} 个数据集 · 支持日线/分钟",
+        stooqOnly: "仅用 {vendor}",
         empty: "暂无数据集",
         filter: {
           label: "周期筛选",
@@ -440,16 +679,39 @@ const messages: Record<Locale, MessageTree> = {
           daily: "日线",
           minute: "分钟",
         },
+        theme: {
+          label: "主题",
+          all: "全部主题",
+          loading: "加载中",
+          error: "主题加载失败",
+          coverageTitle: "主题覆盖度 · {theme}",
+          coverageMeta: "已覆盖 {covered}/{total} · 缺口 {missing}",
+          coverageSample: "缺口样例：{symbols}",
+          coverageEmpty: "暂无主题覆盖信息",
+          coverageError: "主题覆盖读取失败",
+          fetch: "补齐主题成分数据",
+          fetching: "补齐中",
+          fetchSuccess: "已创建 {created} 个数据集，排队 {queued} 个同步任务",
+          fetchError: "补齐失败",
+          confirm: "将为主题补齐 {count} 只成分数据，是否继续？",
+          noMissing: "主题成分已齐全",
+        },
         update: {
           sync: "更新",
           syncing: "更新中",
           syncAll: "全部更新",
           syncingAll: "更新中",
+          reset: "全量重跑（清空后重抓）",
+          resetConfirm: "将清空本地历史数据并重新抓取，是否继续？",
+        },
+        chart: {
+          show: "图表",
+          hide: "收起图表",
         },
         delete: {
           action: "删除",
           deleting: "删除中",
-          confirm: "确认删除 {symbol} 的全部数据？该操作不可撤销。",
+          confirm: "将删除 {symbol} 的全部数据，是否继续？",
           prompt: "请输入 {symbol} 以确认删除",
           mismatch: "输入不匹配，已取消删除",
           error: "删除失败",
@@ -457,6 +719,7 @@ const messages: Record<Locale, MessageTree> = {
         quality: {
           loading: "加载中",
           error: "质量异常",
+          incomplete: "不完整",
           days: "天",
           issues: "问题 {count}",
         },
@@ -476,6 +739,32 @@ const messages: Record<Locale, MessageTree> = {
       frequency: {
         daily: "日线",
         minute: "分钟",
+      },
+      chart: {
+        title: "股票图表",
+        meta: "K线与复权对比 · {frequency} · {coverage}",
+        mode: {
+          both: "对比",
+          raw: "原始价格",
+          adjusted: "复权价格",
+        },
+        granularity: {
+          auto: "自动",
+          day: "日",
+          week: "周",
+          month: "月",
+        },
+        range: {
+          max: "全部",
+        },
+        open: "新窗口打开",
+        legend: {
+          raw: "实际价格（K线）",
+          adjusted: "复权价格（折线）",
+        },
+        loading: "图表加载中...",
+        empty: "暂无图表数据",
+        error: "图表加载失败",
       },
       register: {
         title: "登记数据集",
@@ -507,6 +796,8 @@ const messages: Record<Locale, MessageTree> = {
         days: "覆盖天数",
         frequency: "频率",
         expected: "预计数据点",
+        points: "数据点",
+        minInterval: "最小间隔(天)",
         issues: "问题",
       },
       scan: {
@@ -549,6 +840,13 @@ const messages: Record<Locale, MessageTree> = {
         outputs: "输出/归档",
         message: "消息",
         createdAt: "创建时间",
+        reason: {
+          stooqOnly: "仅 {vendor}",
+          rateLimited: "限流",
+          premium: "需付费",
+          notFound: "未覆盖",
+          failed: "失败",
+        },
         outputLabels: {
           curated: "curated",
           normalized: "normalized",
@@ -603,6 +901,13 @@ const messages: Record<Locale, MessageTree> = {
       localRunner: "Local Runner",
       leanEngine: "Lean Engine",
       switchLanguage: "Switch Language",
+      timezone: "Time Zone",
+      timezoneOptions: {
+        et: "US Eastern (ET)",
+        utc: "UTC",
+        cn: "China Standard (CST)",
+        hk: "Hong Kong (HKT)",
+      },
       localeShort: {
         zh: "中文",
         en: "EN",
@@ -618,10 +923,13 @@ const messages: Record<Locale, MessageTree> = {
         failed: "Failed",
         ok: "OK",
         warn: "Warning",
+        rate_limited: "Rate Limited",
+        not_found: "Not Found",
       },
       actions: {
         create: "Create",
         save: "Save",
+        saved: "Saved",
         saveVersion: "Save Version",
         start: "Start",
         compare: "Compare",
@@ -639,6 +947,18 @@ const messages: Record<Locale, MessageTree> = {
         createdAt: "Created At",
         updatedAt: "Updated At",
         endedAt: "Ended At",
+      },
+    },
+    symbols: {
+      types: {
+        stock: "Stock",
+        etf: "ETF",
+        adr: "ADR",
+        reit: "REITs",
+        etn: "ETN",
+        fund: "Fund",
+        index: "Index",
+        unknown: "Unknown",
       },
     },
     metrics: {
@@ -669,6 +989,32 @@ const messages: Record<Locale, MessageTree> = {
         title: "Project Overview",
         meta: "Total projects",
       },
+      list: {
+        title: "Project List",
+        meta: "Pick a project to manage",
+        search: "Search project name",
+        empty: "No projects found",
+      },
+      detail: {
+        empty: "Select a project to view details",
+        projectId: "Project ID",
+        openThemes: "Open Themes",
+        summaryTitle: "Project Overview",
+        summaryMeta: "Core setup and coverage",
+        themeTitle: "Theme Weights",
+        themeMeta: "Weight distribution snapshot",
+        performanceTitle: "Latest Backtest",
+        performanceMeta: "Portfolio vs benchmark key metrics",
+      },
+      tabs: {
+        overview: "Overview",
+        config: "Config",
+        algorithm: "Algorithm",
+        data: "Data",
+        backtest: "Backtest",
+        versions: "Versions",
+        diff: "Diff",
+      },
       table: {
         project: "Project",
         description: "Description",
@@ -692,25 +1038,64 @@ const messages: Record<Locale, MessageTree> = {
         rebalanceMonthly: "Monthly",
         rebalanceQuarterly: "Quarterly",
         weights: "Theme Weights",
-        themesTitle: "Themes",
+        themesTitle: "Theme Baskets",
         themesEmpty: "No themes yet. Add one to continue.",
-        themeKey: "Theme Key",
+        themeKey: "Theme Code",
         themeLabel: "Theme Name",
-        themeWeight: "Weight",
-        themeKeywords: "Keywords (comma-separated)",
-        themeManual: "Manual Symbols (comma-separated)",
-        themeManualShort: "Manual Symbols",
+        themeWeight: "Theme Weight",
+        themePriority: "Priority",
+        themeKeywords: "Keywords (for screening, comma-separated)",
+        themeManual: "Manual Constituents (comma-separated)",
+        themeManualShort: "Manual Constituents",
+        themeExclude: "Excluded Constituents (comma-separated)",
+        themeExcludeShort: "Excluded Constituents",
         themeAdd: "Add Theme",
         themeRemove: "Remove",
-        themeHint: "Keywords drive Yahoo search; manual symbols are always included.",
+        themeHint:
+          "Keywords drive Yahoo search; manual constituents are forced; exclusions override auto/manual; overlaps follow priority.",
+        themeSystem: "System Theme",
+        systemThemeTitle: "System Theme Library",
+        systemThemeMeta: "Authoritative theme baskets ready for project import.",
+        systemThemeLabel: "Theme",
+        systemThemeSource: "Source",
+        systemThemeVersion: "Latest Version",
+        systemThemeMode: "Import Mode",
+        systemThemeWeight: "Weight",
+        systemThemeActions: "Actions",
+        systemThemeImport: "Import",
+        systemThemeReimport: "Update Binding",
+        systemThemeRefresh: "Refresh",
+        systemThemeEmpty: "No system themes yet",
+        systemThemeError: "Failed to load system themes",
+        systemThemeImported: "System theme imported and saved",
+        systemThemeImportError: "Failed to import system theme",
+        systemThemeRefreshSuccess: "System theme refreshed",
+        systemThemeRefreshError: "Failed to refresh system theme",
+        systemThemeModeFollow: "Follow Latest",
+        systemThemeModePin: "Pin Version",
+        systemThemeModeSnapshot: "Snapshot",
+        systemThemeReportTitle: "Impact Reports",
+        systemThemeReportMeta: "Summaries for system theme updates.",
+        systemThemeReportEmpty: "No impact reports",
+        systemThemeReportVersion: "Version Change",
+        systemThemeReportDiff: "Delta",
+        systemThemeReportTime: "Created At",
+        systemThemeReportActions: "Actions",
+        systemThemeReportExpand: "Expand",
+        systemThemeReportCollapse: "Collapse",
+        systemThemeReportNone: "No changes",
+        systemThemeDiffSymbols: "Symbols",
+        systemThemeDiffKeywords: "Keywords",
+        systemThemeDiffManual: "Manual",
+        systemThemeDiffExclude: "Excluded",
         themeDuplicate: "Duplicate theme keys. Please fix before saving.",
         themeActions: "Actions",
         themeCount: "Themes",
         themeSummaryError: "Failed to load theme summary.",
-        themeTotalSymbols: "Total Symbols",
+        themeTotalSymbols: "Total Constituents",
         themeComposition: "Theme Composition",
-        themeSymbolCount: "Symbols",
-        themeSample: "Sample Symbols",
+        themeSymbolCount: "Constituents",
+        themeSample: "Sample Constituents",
         themeDistribution: "Distribution",
         themeWeightDistribution: "Weight Split",
         themeExpand: "Expand",
@@ -720,18 +1105,28 @@ const messages: Record<Locale, MessageTree> = {
         themeClose: "Hide",
         themeFilter: "Theme Filter",
         themeFilterPlaceholder: "Filter by theme name or key",
-        themeSearchSymbol: "Symbol Filter",
-        themeSearchPlaceholder: "Enter a symbol (e.g., AAPL)",
-        themeSearchHint: "Filter themes by stock symbol",
+        themeSearchSymbol: "Constituent Filter",
+        themeSearchPlaceholder: "Enter a security symbol (e.g., AAPL)",
+        themeSearchHint: "Filter themes by constituent",
         themeSearchClear: "Clear",
         themeSearchEmpty: "Enter a symbol to filter.",
         themeSearchError: "Symbol filter failed.",
         themeSearchMatches: "{count} themes matched",
         themeDetailTitle: "Theme Detail · {name}",
-        themeDetailMeta: "{total} symbols (manual {manual})",
-        themeDetailFilter: "Filter symbols in theme",
+        themeDetailMeta: "{total} constituents (manual {manual} · excluded {excluded})",
+        themeDetailFilter: "Filter constituents in theme",
         themeDetailClear: "Clear",
         themeDetailExport: "Export",
+        themeDetailAuto: "Auto Constituents",
+        themeDetailManual: "Manual Constituents",
+        themeDetailExcluded: "Excluded Constituents",
+        themeSymbolPlaceholder: "Enter symbol",
+        themeSymbolAdd: "Add to Theme",
+        themeSymbolExclude: "Exclude from Theme",
+        themeSymbolExcludeAction: "Exclude",
+        themeSymbolRemove: "Remove",
+        themeSymbolRestore: "Restore",
+        themeSymbolEmpty: "Please enter a symbol first.",
         themeCompareTitle: "Theme Comparison",
         themeCompareA: "Theme A",
         themeCompareB: "Theme B",
@@ -782,12 +1177,21 @@ const messages: Record<Locale, MessageTree> = {
         errorSelect: "Select algorithm and version",
       },
       backtest: {
-        title: "Thematic Backtest",
-        meta: "S&P500 + AI theme weighted portfolio",
+        title: "Project Backtest",
+        meta: "Run the project algorithm with Lean",
+        benchmarkTitle: "Benchmark",
+        benchmarkMeta: "Set the benchmark for project backtests (default SPY)",
         action: "Run Backtest",
         queued: "Backtest queued",
         empty: "No backtest result",
         error: "Backtest trigger failed",
+        failed: "Backtest failed: {message}",
+        priceMode: "Price mode",
+        benchmarkMode: "Benchmark price",
+        missingScoresTitle: "Missing scores ({count})",
+        priceAdjusted: "Adjusted",
+        priceRaw: "Raw",
+        priceMixed: "Mixed",
         metric: "Metric",
         portfolio: "Portfolio",
         benchmark: "Benchmark",
@@ -867,6 +1271,112 @@ const messages: Record<Locale, MessageTree> = {
         title: "Algorithm Overview",
         meta: "Total registered",
       },
+      list: {
+        title: "Algorithm List",
+        meta: "Find and filter algorithms",
+        search: "Search algorithm name",
+        empty: "No algorithms yet",
+      },
+      detail: {
+        title: "Algorithm Details",
+        meta: "Edit metadata and review version stats",
+        latest: "Latest #{id}",
+        versions: "Versions {count}",
+        name: "Algorithm name",
+        description: "Description",
+        language: "Language",
+        version: "Default version",
+        path: "File path",
+        typeName: "Type name",
+        empty: "Select an algorithm first",
+        error: "Save failed. Try again.",
+      },
+      tabs: {
+        params: "Parameters",
+        versions: "Versions",
+        diff: "Diff",
+        project: "Project",
+        selftest: "Self Test",
+      },
+      selftest: {
+        title: "Algorithm Self Test",
+        meta: "Run a Lean backtest and compare against a benchmark",
+        version: "Algorithm version",
+        benchmark: "Benchmark",
+        hint: "Suggested: SPY, QQQ, VTI, IWM, DIA. Custom symbols supported.",
+        action: "Run self test",
+        running: "Running...",
+        queued: "Backtest queued, ID {id}",
+        lastRun: "Latest run ID {id}",
+        viewReports: "View reports",
+        error: "Backtest failed to start",
+        errorSelect: "Select an algorithm version",
+      },
+      params: {
+        title: "Algorithm Parameters",
+        meta: "Weekly rotation and risk controls",
+        cadence: "Rebalance cadence",
+        weekly: "Weekly",
+        monthly: "Monthly",
+        market: "Market",
+        us: "US",
+        assetClass: "Asset class",
+        equity: "Equity",
+        allowEtf: "Allow ETFs",
+        coreTitle: "Core allocation",
+        coreSymbols: "Core symbols (comma separated)",
+        coreWeight: "Core weight",
+        coreFallback: "Missing handling",
+        cash: "Hold cash",
+        redistribute: "Redistribute to core",
+        themeTitle: "Theme weights",
+        themeKey: "Theme key",
+        themeWeight: "Weight",
+        themeAdd: "Add theme weight",
+        themeRemove: "Remove",
+        themeEmpty: "No theme weights yet. Add one to begin.",
+        themeOptionHint: "Type a theme key or pick from system themes",
+        selectionTitle: "Selection parameters",
+        topN: "Top N per theme",
+        topMomentum: "Top momentum",
+        topLowVol: "Top low-vol",
+        minPositions: "Minimum positions",
+        trendWeeks: "Trend window (weeks)",
+        riskOnWeeks: "Risk-on MA (weeks)",
+        lowvolDays: "Low-vol window (days)",
+        momShortDays: "Short momentum (days)",
+        momLongDays: "Long momentum (days)",
+        mom12w: "12w momentum weight",
+        mom4w: "4w momentum weight",
+        vol20d: "20d volatility penalty",
+        blendTitle: "Momentum/low-vol blend",
+        momentumWeight: "Momentum weight",
+        lowvolWeight: "Low-vol weight",
+        riskTitle: "Risk controls",
+        maxWeight: "Max position",
+        volTarget: "Volatility target",
+        drawdown: "Drawdown trigger",
+        inverseVol: "Inverse volatility weighting",
+        minVol: "Minimum volatility",
+        themeTilt: "Theme tilt",
+        defensiveTitle: "Defensive assets",
+        defensiveSymbols: "Defensive symbols (comma-separated)",
+        defensiveHint: "Rotate into defensive assets when risk is off",
+        advancedTitle: "Advanced parameters",
+        advancedHint: "Used by composite/low-vol strategies",
+        coreEnable: "Enable core allocation",
+        coreDisabledHint: "New algorithms default to no core allocation",
+        modeForm: "Structured",
+        modeJson: "JSON",
+        modeHint: "Use JSON mode for algorithms that don't match the form",
+        jsonTitle: "Parameters JSON",
+        jsonPlaceholder: "{\n  \"selection\": {\n    \"top_n\": 20\n  }\n}",
+        jsonHint: "Version will be saved with the JSON above",
+        jsonError: "Invalid JSON parameters",
+        notes: "Notes",
+        reset: "Reset",
+        saveVersion: "Save as version",
+      },
       table: {
         name: "Name",
         language: "Language",
@@ -878,6 +1388,7 @@ const messages: Record<Locale, MessageTree> = {
         title: "Version Management",
         meta: "Capture algorithm snapshots and diffs.",
         empty: "No algorithms yet",
+        pick: "Select a version",
         version: "Version (v1.0.1)",
         description: "Version Notes",
         language: "Language (default {language})",
@@ -885,7 +1396,7 @@ const messages: Record<Locale, MessageTree> = {
         filePath: "Algorithm file path (leave empty to use content)",
         content: "Algorithm content (optional, for diff)",
         errorSelect: "Select an algorithm first.",
-        errorContent: "Provide a version or file path/content.",
+        errorContent: "Provide a version, file path/content, or parameters.",
       },
       projectCreate: {
         title: "Create Project",
@@ -966,6 +1477,26 @@ const messages: Record<Locale, MessageTree> = {
         errorNotFound: "Result file not found. Ensure the backtest finished.",
         errorLoad: "Failed to load chart data",
       },
+      trades: {
+        title: "Trade Chart",
+        meta: "Overlay fills and price action for quick trade review.",
+        placeholder: "Backtest ID",
+        symbolPlaceholder: "Symbol",
+        load: "Load Trade Chart",
+        loading: "Loading trade data...",
+        error: "Failed to load trade chart",
+        empty: "No trades or missing price data.",
+        buy: "Buy",
+        sell: "Sell",
+        tradesCount: "{count} trades",
+        summary: "Buy {buys} / Sell {sells} | Win {wins} / Loss {losses}",
+        table: {
+          time: "Time",
+          side: "Side",
+          qty: "Qty",
+          price: "Price",
+        },
+      },
       table: {
         id: "ID",
         runId: "Backtest ID",
@@ -983,11 +1514,14 @@ const messages: Record<Locale, MessageTree> = {
       },
       fetch: {
         title: "Fetch History",
-        meta: "Default to Stooq for daily backfills.",
+        meta: "Default to Alpha, switch to Stooq/Yahoo. Daily only.",
         symbol: "Symbol (e.g., AAPL)",
         vendor: {
-          stooq: "Stooq (default)",
+          stooq: "Stooq",
+          yahoo: "Yahoo",
+          alpha: "Alpha Vantage (default)",
         },
+        stooqOnly: "Only {vendor} (no Yahoo fallback)",
         region: {
           us: "US",
           hk: "HK",
@@ -1003,9 +1537,9 @@ const messages: Record<Locale, MessageTree> = {
         preview: "Dataset {dataset} · Source {source}",
         action: "Fetch History",
         loading: "Fetching",
-        hint: "Stooq supports daily data only; a sync job will be queued.",
+        hint: "Stooq/Yahoo/Alpha support daily data only; a sync job will be queued.",
         errorSymbol: "Symbol is required.",
-        errorFrequency: "Stooq supports daily data only.",
+        errorFrequency: "Daily data only for the selected vendor.",
         error: "Fetch failed.",
         successCreated: "Created {name}, sync job #{jobId} queued.",
         successQueued: "Reused {name}, sync job #{jobId} queued.",
@@ -1014,6 +1548,7 @@ const messages: Record<Locale, MessageTree> = {
       list: {
         title: "Datasets",
         meta: "Filtered {totalSymbols} symbols / {totalDatasets} datasets · Daily/Minute supported",
+        stooqOnly: "Only {vendor}",
         empty: "No datasets",
         filter: {
           label: "Frequency",
@@ -1021,11 +1556,34 @@ const messages: Record<Locale, MessageTree> = {
           daily: "Daily",
           minute: "Minute",
         },
+        theme: {
+          label: "Theme",
+          all: "All Themes",
+          loading: "Loading",
+          error: "Failed to load themes",
+          coverageTitle: "Theme Coverage · {theme}",
+          coverageMeta: "{covered}/{total} covered · {missing} missing",
+          coverageSample: "Missing sample: {symbols}",
+          coverageEmpty: "No theme coverage available",
+          coverageError: "Failed to load theme coverage",
+          fetch: "Fetch missing constituents",
+          fetching: "Filling",
+          fetchSuccess: "Created {created} datasets, queued {queued} sync jobs",
+          fetchError: "Fill failed",
+          confirm: "Fetch {count} missing constituents for this theme?",
+          noMissing: "All constituents are covered",
+        },
         update: {
           sync: "Sync",
           syncing: "Syncing",
           syncAll: "Sync All",
           syncingAll: "Syncing",
+          reset: "Full rerun (clear & refetch)",
+          resetConfirm: "This will clear local history and refetch all data. Continue?",
+        },
+        chart: {
+          show: "Chart",
+          hide: "Hide Chart",
         },
         delete: {
           action: "Delete",
@@ -1038,6 +1596,7 @@ const messages: Record<Locale, MessageTree> = {
         quality: {
           loading: "Loading",
           error: "Quality error",
+          incomplete: "Incomplete",
           days: "d",
           issues: "Issues {count}",
         },
@@ -1057,6 +1616,32 @@ const messages: Record<Locale, MessageTree> = {
       frequency: {
         daily: "Daily",
         minute: "Minute",
+      },
+      chart: {
+        title: "Dataset Chart",
+        meta: "Candles vs Adjusted · {frequency} · {coverage}",
+        mode: {
+          both: "Compare",
+          raw: "Raw",
+          adjusted: "Adjusted",
+        },
+        granularity: {
+          auto: "Auto",
+          day: "Day",
+          week: "Week",
+          month: "Month",
+        },
+        range: {
+          max: "Max",
+        },
+        open: "Open in new tab",
+        legend: {
+          raw: "Raw price (candles)",
+          adjusted: "Adjusted price (line)",
+        },
+        loading: "Loading chart...",
+        empty: "No chart data",
+        error: "Failed to load chart",
       },
       register: {
         title: "Register Dataset",
@@ -1088,6 +1673,8 @@ const messages: Record<Locale, MessageTree> = {
         days: "Coverage Days",
         frequency: "Frequency",
         expected: "Expected Points",
+        points: "Data Points",
+        minInterval: "Min Interval (days)",
         issues: "Issues",
       },
       scan: {
@@ -1130,6 +1717,13 @@ const messages: Record<Locale, MessageTree> = {
         outputs: "Outputs/Archive",
         message: "Message",
         createdAt: "Created At",
+        reason: {
+          stooqOnly: "Only {vendor}",
+          rateLimited: "Rate limited",
+          premium: "Premium required",
+          notFound: "Not found",
+          failed: "Failed",
+        },
         outputLabels: {
           curated: "curated",
           normalized: "normalized",
@@ -1172,13 +1766,19 @@ const messages: Record<Locale, MessageTree> = {
 type I18nContextValue = {
   locale: Locale;
   setLocale: (locale: Locale) => void;
+  timeZone: TimeZone;
+  setTimeZone: (zone: TimeZone) => void;
   t: (key: string, vars?: Record<string, string | number>) => string;
+  formatDateTime: (value?: string | number | Date | null) => string;
 };
 
 const I18nContext = createContext<I18nContextValue>({
   locale: "zh",
   setLocale: () => undefined,
+  timeZone: "America/New_York",
+  setTimeZone: () => undefined,
   t: (key) => key,
+  formatDateTime: (value) => String(value ?? ""),
 });
 
 const resolveMessage = (obj: MessageTree, key: string): string | undefined => {
@@ -1217,12 +1817,39 @@ const detectLocale = (): Locale => {
   return browser.startsWith("zh") ? "zh" : "en";
 };
 
+const TIMEZONE_STORAGE_KEY = "timezone";
+const DEFAULT_TIMEZONE: TimeZone = "America/New_York";
+const TIMEZONE_OPTIONS: TimeZone[] = [
+  "America/New_York",
+  "UTC",
+  "Asia/Shanghai",
+  "Asia/Hong_Kong",
+];
+
+const detectTimeZone = (): TimeZone => {
+  if (typeof window === "undefined") {
+    return DEFAULT_TIMEZONE;
+  }
+  const stored = window.localStorage.getItem(TIMEZONE_STORAGE_KEY);
+  if (stored && TIMEZONE_OPTIONS.includes(stored as TimeZone)) {
+    return stored as TimeZone;
+  }
+  return DEFAULT_TIMEZONE;
+};
+
 export const I18nProvider = ({ children }: { children: React.ReactNode }) => {
   const [locale, setLocaleState] = useState<Locale>(detectLocale);
+  const [timeZone, setTimeZoneState] = useState<TimeZone>(detectTimeZone);
   const setLocale = (next: Locale) => {
     setLocaleState(next);
     if (typeof window !== "undefined") {
       window.localStorage.setItem("locale", next);
+    }
+  };
+  const setTimeZone = (next: TimeZone) => {
+    setTimeZoneState(next);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(TIMEZONE_STORAGE_KEY, next);
     }
   };
 
@@ -1231,8 +1858,52 @@ export const I18nProvider = ({ children }: { children: React.ReactNode }) => {
       const text = resolveMessage(messages[locale], key) || key;
       return applyVars(text, vars);
     };
-    return { locale, setLocale, t };
-  }, [locale]);
+    const formatDateTime = (value?: string | number | Date | null) => {
+      if (!value) {
+        return t("common.none");
+      }
+      const normalizeDate = () => {
+        if (value instanceof Date) {
+          return value;
+        }
+        if (typeof value === "number") {
+          return new Date(value);
+        }
+        if (typeof value === "string") {
+          const trimmed = value.trim();
+          if (!trimmed) {
+            return null;
+          }
+          const hasTimeZone = /[zZ]|[+-]\d{2}:?\d{2}$/.test(trimmed);
+          const hasTime = /T|\d{2}:\d{2}/.test(trimmed);
+          if (!hasTimeZone && hasTime) {
+            return new Date(`${trimmed}Z`);
+          }
+          return new Date(trimmed);
+        }
+        return null;
+      };
+      const date = normalizeDate();
+      if (!date || Number.isNaN(date.getTime())) {
+        return t("common.none");
+      }
+      const localeTag = locale === "zh" ? "zh-CN" : "en-US";
+      try {
+        return new Intl.DateTimeFormat(localeTag, {
+          timeZone,
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+        }).format(date);
+      } catch (err) {
+        return date.toLocaleString(localeTag, { timeZone });
+      }
+    };
+    return { locale, setLocale, timeZone, setTimeZone, t, formatDateTime };
+  }, [locale, timeZone]);
 
   return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
 };

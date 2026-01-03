@@ -19,7 +19,7 @@ interface Backtest {
 const apiBase = import.meta.env.VITE_API_BASE_URL || "";
 
 export default function BacktestsPage() {
-  const { t } = useI18n();
+  const { t, formatDateTime } = useI18n();
   const [runs, setRuns] = useState<Backtest[]>([]);
   const [runTotal, setRunTotal] = useState(0);
   const [runPage, setRunPage] = useState(1);
@@ -159,8 +159,8 @@ export default function BacktestsPage() {
                     t("common.none")
                   )}
                 </td>
-                <td>{new Date(run.created_at).toLocaleString()}</td>
-                <td>{run.ended_at ? new Date(run.ended_at).toLocaleString() : t("common.none")}</td>
+                <td>{formatDateTime(run.created_at)}</td>
+                <td>{run.ended_at ? formatDateTime(run.ended_at) : t("common.none")}</td>
               </tr>
             ))}
           </tbody>

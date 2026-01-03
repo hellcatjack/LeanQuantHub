@@ -1,13 +1,17 @@
 ﻿from __future__ import annotations
 
+import json
 import math
+from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 
+from app.core.config import settings
 from app.db import get_session
 from app.models import (
     AlgorithmVersion,
     BacktestRun,
+    Dataset,
     Project,
     ProjectAlgorithmBinding,
     Report,
@@ -16,12 +20,25 @@ from app.schemas import (
     BacktestCompareItem,
     BacktestCompareRequest,
     BacktestCreate,
+    BacktestChartOut,
     BacktestListOut,
     BacktestOut,
     BacktestPageOut,
+    BacktestPositionOut,
+    BacktestSymbolOut,
+    BacktestTradeOut,
+    DatasetOut,
 )
 from app.services.audit_log import record_audit
 from app.services.lean_runner import run_backtest
+from app.routes.projects import (
+    _build_theme_index,
+    _get_data_root,
+    _resolve_project_config,
+    _resolve_theme_memberships,
+    _safe_read_csv,
+)
+from app.routes.datasets import _dataset_symbol
 
 router = APIRouter(prefix="/api/backtests", tags=["backtests"])
 
@@ -36,6 +53,230 @@ def _coerce_pagination(page: int, page_size: int, total: int) -> tuple[int, int,
         safe_page = total_pages
     offset = (safe_page - 1) * safe_page_size
     return safe_page, safe_page_size, offset
+
+
+def _build_theme_weight_index(config: dict) -> dict[str, float]:
+    weights: dict[str, float] = {}
+    themes = config.get("themes") or []
+    if themes:
+        for item in themes:
+            key = str(item.get("key", "")).strip()
+            if not key:
+                continue
+            raw_weight = item.get("weight")
+            if raw_weight is None:
+                continue
+            try:
+                weights[key] = float(raw_weight)
+            except (TypeError, ValueError):
+                continue
+    else:
+        for key, raw_weight in (config.get("weights") or {}).items():
+            key = str(key).strip()
+            if not key:
+                continue
+            try:
+                weights[key] = float(raw_weight)
+            except (TypeError, ValueError):
+                continue
+    return weights
+
+
+def _collect_project_symbols(config: dict) -> list[str]:
+    theme_index = _build_theme_index(config)
+    if not theme_index:
+        return []
+    data_root = _get_data_root()
+    universe_path = data_root / "universe" / "universe.csv"
+    rows = _safe_read_csv(universe_path)
+    resolved = _resolve_theme_memberships(rows, theme_index)
+    weights = _build_theme_weight_index(config)
+    has_weights = bool(weights)
+    symbols: set[str] = set()
+    for key in theme_index.keys():
+        weight = weights.get(key)
+        if has_weights and weight is not None and weight <= 0:
+            continue
+        symbols.update(resolved.get(key, set()))
+    return sorted(symbols)
+
+
+def _collect_project_theme_map(config: dict) -> tuple[dict[str, str], dict[str, float]]:
+    theme_index = _build_theme_index(config)
+    if not theme_index:
+        return {}, {}
+    data_root = _get_data_root()
+    universe_path = data_root / "universe" / "universe.csv"
+    rows = _safe_read_csv(universe_path)
+    resolved = _resolve_theme_memberships(rows, theme_index)
+    symbol_theme_map: dict[str, str] = {}
+    for key, symbols in resolved.items():
+        for symbol in symbols:
+            if symbol:
+                symbol_theme_map[str(symbol).upper()] = str(key).upper()
+    weights = _build_theme_weight_index(config)
+    theme_weights = {str(k).upper(): float(v) for k, v in weights.items() if k}
+    return symbol_theme_map, theme_weights
+
+
+def _load_order_events(run_id: int) -> list[dict]:
+    results_dir = Path(settings.artifact_root) / f"run_{run_id}" / "lean_results"
+    if not results_dir.exists():
+        return []
+    candidates = list(results_dir.glob("*-order-events.json"))
+    if not candidates:
+        return []
+    path = max(candidates, key=lambda item: item.stat().st_mtime)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(payload, list):
+            return payload
+    except json.JSONDecodeError:
+        return []
+    return []
+
+
+def _event_symbol(event: dict) -> str:
+    for key in ("symbolValue", "symbolPermtick", "symbol"):
+        raw = event.get(key)
+        if raw:
+            text = str(raw).strip()
+            if text:
+                return text.split(" ")[0].upper()
+    return ""
+
+
+def _extract_trades(events: list[dict]) -> list[BacktestTradeOut]:
+    trades: list[BacktestTradeOut] = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        if str(event.get("status", "")).lower() != "filled":
+            continue
+        symbol = _event_symbol(event)
+        if not symbol:
+            continue
+        try:
+            time_val = int(float(event.get("time") or 0))
+            price = float(event.get("fillPrice") or 0.0)
+            quantity = float(event.get("fillQuantity") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if not time_val or quantity == 0:
+            continue
+        side = str(event.get("direction") or "").lower()
+        trades.append(
+            BacktestTradeOut(
+                symbol=symbol,
+                time=time_val,
+                price=price,
+                quantity=abs(quantity),
+                side="buy" if side == "buy" else "sell",
+            )
+        )
+    trades.sort(key=lambda item: (item.symbol, item.time))
+    return trades
+
+
+def _summarize_symbols(trades: list[BacktestTradeOut]) -> list[BacktestSymbolOut]:
+    counts: dict[str, int] = {}
+    for trade in trades:
+        counts[trade.symbol] = counts.get(trade.symbol, 0) + 1
+    return [
+        BacktestSymbolOut(symbol=symbol, trades=count)
+        for symbol, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    ]
+
+
+def _build_positions(trades: list[BacktestTradeOut]) -> list[BacktestPositionOut]:
+    if not trades:
+        return []
+    positions: list[BacktestPositionOut] = []
+    position = 0.0
+    entry_price = 0.0
+    entry_time = 0
+    entry_qty = 0.0
+    for trade in trades:
+        qty = trade.quantity if trade.side == "buy" else -trade.quantity
+        prev_position = position
+        position += qty
+        if prev_position == 0 and position != 0:
+            entry_price = trade.price
+            entry_time = trade.time
+            entry_qty = position
+            continue
+        if prev_position != 0 and position == 0:
+            pnl = (trade.price - entry_price) * (1 if prev_position > 0 else -1)
+            positions.append(
+                BacktestPositionOut(
+                    symbol=trade.symbol,
+                    start_time=entry_time,
+                    end_time=trade.time,
+                    entry_price=entry_price,
+                    exit_price=trade.price,
+                    quantity=abs(entry_qty),
+                    profit=pnl > 0,
+                )
+            )
+            entry_price = 0.0
+            entry_time = 0
+            entry_qty = 0.0
+        if prev_position > 0 and position < 0:
+            pnl = (trade.price - entry_price)
+            positions.append(
+                BacktestPositionOut(
+                    symbol=trade.symbol,
+                    start_time=entry_time,
+                    end_time=trade.time,
+                    entry_price=entry_price,
+                    exit_price=trade.price,
+                    quantity=abs(entry_qty),
+                    profit=pnl > 0,
+                )
+            )
+            entry_price = trade.price
+            entry_time = trade.time
+            entry_qty = position
+        if prev_position < 0 and position > 0:
+            pnl = (entry_price - trade.price)
+            positions.append(
+                BacktestPositionOut(
+                    symbol=trade.symbol,
+                    start_time=entry_time,
+                    end_time=trade.time,
+                    entry_price=entry_price,
+                    exit_price=trade.price,
+                    quantity=abs(entry_qty),
+                    profit=pnl > 0,
+                )
+            )
+            entry_price = trade.price
+            entry_time = trade.time
+            entry_qty = position
+    return positions
+
+
+def _resolve_dataset_for_symbol(session, symbol: str) -> Dataset | None:
+    if not symbol:
+        return None
+    target = symbol.strip().upper()
+    candidates = session.query(Dataset).all()
+    matched: list[Dataset] = []
+    for dataset in candidates:
+        if _dataset_symbol(dataset).upper() == target:
+            matched.append(dataset)
+    if not matched:
+        return None
+    vendor_rank = {"alpha": 0, "stooq": 1, "yahoo": 2}
+
+    def rank(item: Dataset) -> tuple[int, int]:
+        vendor = (item.vendor or "").strip().lower()
+        freq = (item.frequency or "").strip().lower()
+        freq_rank = 0 if "daily" in freq else 1
+        return (freq_rank, vendor_rank.get(vendor, 9))
+
+    matched.sort(key=rank)
+    return matched[0]
 
 
 @router.get("", response_model=list[BacktestOut])
@@ -90,6 +331,26 @@ def create_backtest(payload: BacktestCreate, background_tasks: BackgroundTasks):
         if not project:
             raise HTTPException(status_code=404, detail="项目不存在")
         params = payload.params.copy() if isinstance(payload.params, dict) else {}
+        config = _resolve_project_config(session, payload.project_id)
+        if not params.get("benchmark"):
+            params["benchmark"] = config.get("benchmark") or "SPY"
+        algo_params = params.get("algorithm_parameters")
+        if not isinstance(algo_params, dict):
+            algo_params = {}
+        if not str(algo_params.get("symbols") or "").strip():
+            theme_symbols = _collect_project_symbols(config)
+            if theme_symbols:
+                algo_params["symbols"] = ",".join(theme_symbols)
+        if not str(algo_params.get("theme_weights") or "").strip():
+            symbol_theme_map, theme_weights = _collect_project_theme_map(config)
+            if theme_weights:
+                algo_params["theme_weights"] = json.dumps(theme_weights, ensure_ascii=False)
+            if symbol_theme_map:
+                algo_params["symbol_theme_map"] = json.dumps(
+                    symbol_theme_map, ensure_ascii=False
+                )
+        if not str(algo_params.get("theme_tilt") or "").strip():
+            algo_params["theme_tilt"] = "0.5"
         binding = (
             session.query(ProjectAlgorithmBinding)
             .filter(ProjectAlgorithmBinding.project_id == payload.project_id)
@@ -107,6 +368,10 @@ def create_backtest(payload: BacktestCreate, background_tasks: BackgroundTasks):
             algo_version = session.get(AlgorithmVersion, algorithm_version_id)
             if not algo_version:
                 raise HTTPException(status_code=404, detail="算法版本不存在")
+            if isinstance(algo_version.params, dict):
+                for key, value in algo_version.params.items():
+                    if key not in algo_params or algo_params.get(key) in (None, ""):
+                        algo_params[key] = value
             params["algorithm_version_id"] = algo_version.id
             params["algorithm_id"] = algo_version.algorithm_id
             params["algorithm_version"] = algo_version.version
@@ -116,6 +381,8 @@ def create_backtest(payload: BacktestCreate, background_tasks: BackgroundTasks):
                 params["algorithm_path"] = algo_version.file_path
             if algo_version.type_name:
                 params["algorithm_type_name"] = algo_version.type_name
+        if algo_params:
+            params["algorithm_parameters"] = algo_params
         run = BacktestRun(project_id=payload.project_id, params=params)
         session.add(run)
         session.commit()
@@ -174,3 +441,33 @@ def compare_backtests(payload: BacktestCompareRequest):
             for run, project_name in runs
         }
         return [id_to_item[run_id] for run_id in run_ids]
+
+
+@router.get("/{run_id}/chart", response_model=BacktestChartOut)
+def get_backtest_chart(run_id: int, symbol: str | None = Query(None)):
+    with get_session() as session:
+        run = session.get(BacktestRun, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="回测不存在")
+        events = _load_order_events(run_id)
+        trades = _extract_trades(events)
+        symbol_items = _summarize_symbols(trades)
+        selected_symbol = symbol.strip().upper() if symbol else None
+        if not selected_symbol:
+            selected_symbol = symbol_items[0].symbol if symbol_items else None
+        filtered_trades = (
+            [trade for trade in trades if trade.symbol == selected_symbol]
+            if selected_symbol
+            else []
+        )
+        positions = _build_positions(filtered_trades)
+        dataset = _resolve_dataset_for_symbol(session, selected_symbol) if selected_symbol else None
+        dataset_out = DatasetOut.model_validate(dataset, from_attributes=True) if dataset else None
+        return BacktestChartOut(
+            run_id=run_id,
+            symbol=selected_symbol,
+            symbols=symbol_items,
+            trades=filtered_trades,
+            positions=positions,
+            dataset=dataset_out,
+        )

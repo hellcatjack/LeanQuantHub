@@ -1,49 +1,18 @@
-# Python
+.env
+.env.*
+!.env.example
+
 __pycache__/
-*.py[cod]
+*.pyc
+*.pyo
 *.pyd
-*.so
 .venv/
 venv/
 
-# Env files
-.env
-.env.*
-!**/.env.example
-backend/.env
-frontend/.env
-deploy/.env
-
-# Node
 node_modules/
-frontend/node_modules/
 frontend/dist/
-*.tsbuildinfo
 
-# Logs & artifacts
-logs/
 artifacts/
-*.log
-
-# Data outputs
-/data/
+logs/
 data/
-
-# Lean engine and exports (external)
-Lean/
-Lean_git/
-Lean_export/
-
-# OS/Editor
-.DS_Store
-Thumbs.db
-.idea/
-.vscode/
-
-# Temp & packages
-*.tgz
-*.zip
-
-# Script pid/lock files
-scripts/.restart-local.pids.json
-scripts/.restart-local.lock
+tmp/

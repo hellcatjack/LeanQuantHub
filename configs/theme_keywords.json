@@ -9,7 +9,18 @@
         "machine learning",
         "deep learning"
       ],
-      "manual": ["NVDA", "MSFT", "GOOGL", "META", "AMZN", "AAPL"]
+      "manualPinned": [
+        "NVDA",
+        "AMD"
+      ],
+      "manual": [
+        "NVDA",
+        "AMD",
+        "2807.HK",
+        "AIO",
+        "AIQ",
+        "BOTZ"
+      ]
     },
     {
       "key": "AI_INFRA",
@@ -22,7 +33,17 @@
         "networking",
         "server"
       ],
-      "manual": ["AMD", "AVGO", "TSM", "ASML", "MRVL", "SMCI"]
+      "manual": [
+        "2826.HK",
+        "DTCR",
+        "GPUS",
+        "GPUS-PD",
+        "NXPI",
+        "ON",
+        "TSEM",
+        "TSM",
+        "WCLD"
+      ]
     },
     {
       "key": "ENERGY_FUSION",
@@ -35,16 +56,50 @@
         "power grid",
         "utility"
       ],
-      "manual": ["CEG", "NEE", "DUK", "EXC", "ETR", "BWXT", "SMR"]
+      "manual": [
+        "1143.HK",
+        "2399.HK",
+        "BMEA",
+        "BUI",
+        "GUT",
+        "HTOO",
+        "IBAT",
+        "NNE",
+        "UEC",
+        "UROY",
+        "UTG"
+      ]
     }
   ],
   "defaults": {
     "region": "US",
     "asset_class": "Equity"
   },
+  "symbol_types": {
+    "AIO": "ETF",
+    "AIQ": "ETF",
+    "BOTZ": "ETF",
+    "WCLD": "ETF",
+    "GPUS": "ETF",
+    "GPUS-PD": "ETF",
+    "BUI": "ETF",
+    "GUT": "ETF",
+    "HTOO": "ETF",
+    "IBAT": "ETF",
+    "UTG": "ETF"
+  },
   "yahoo": {
     "quotesCount": 25,
     "pauseSeconds": 0.3,
-    "allowExchanges": ["NMS", "NYQ", "ASE", "NGM", "NCM", "NAS", "HKG"]
+    "manualMode": "replace",
+    "allowExchanges": [
+      "NMS",
+      "NYQ",
+      "ASE",
+      "NGM",
+      "NCM",
+      "NAS",
+      "HKG"
+    ]
   }
 }

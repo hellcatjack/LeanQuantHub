@@ -2,10 +2,20 @@
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.responses import Response
 
 from app.db import engine
 from app.models import Base
-from app.routes import algorithms, audit_logs, backtests, datasets, projects, reports
+from app.routes import (
+    algorithms,
+    audit_logs,
+    backtests,
+    datasets,
+    projects,
+    reports,
+    system_themes,
+    universe,
+)
 
 app = FastAPI(title="StockLean Platform API")
 
@@ -16,6 +26,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def enforce_utf8_json_charset(request, call_next):
+    response = await call_next(request)
+    content_type = response.headers.get("content-type", "")
+    if content_type.startswith("application/json") and "charset" not in content_type:
+        response.headers["content-type"] = f"{content_type}; charset=utf-8"
+    return response
 
 
 @app.on_event("startup")
@@ -29,3 +48,5 @@ app.include_router(backtests.router)
 app.include_router(reports.router)
 app.include_router(datasets.router)
 app.include_router(audit_logs.router)
+app.include_router(system_themes.router)
+app.include_router(universe.router)

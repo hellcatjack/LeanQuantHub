@@ -106,7 +106,9 @@ class ThemeSummaryItem(BaseModel):
     label: str
     symbols: int
     sample: list[str]
+    sample_types: dict[str, str] = {}
     manual_symbols: list[str] = []
+    exclude_symbols: list[str] = []
 
 
 class ProjectThemeSummaryOut(BaseModel):
@@ -121,13 +123,17 @@ class ProjectThemeSymbolsOut(BaseModel):
     category: str
     label: str | None = None
     symbols: list[str]
+    auto_symbols: list[str] = []
     manual_symbols: list[str] = []
+    exclude_symbols: list[str] = []
+    symbol_types: dict[str, str] = {}
 
 
 class ThemeSearchItem(BaseModel):
     key: str
     label: str
     is_manual: bool = False
+    is_excluded: bool = False
 
 
 class ProjectThemeSearchOut(BaseModel):
@@ -202,6 +208,38 @@ class BacktestCompareItem(BaseModel):
         from_attributes = True
 
 
+class BacktestTradeOut(BaseModel):
+    symbol: str
+    time: int
+    price: float
+    quantity: float
+    side: str
+
+
+class BacktestPositionOut(BaseModel):
+    symbol: str
+    start_time: int
+    end_time: int
+    entry_price: float
+    exit_price: float
+    quantity: float
+    profit: bool
+
+
+class BacktestSymbolOut(BaseModel):
+    symbol: str
+    trades: int
+
+
+class BacktestChartOut(BaseModel):
+    run_id: int
+    symbol: str | None = None
+    symbols: list[BacktestSymbolOut]
+    trades: list[BacktestTradeOut]
+    positions: list[BacktestPositionOut]
+    dataset: DatasetOut | None = None
+
+
 class ReportOut(BaseModel):
     id: int
     run_id: int
@@ -211,6 +249,101 @@ class ReportOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class SystemThemeOut(BaseModel):
+    id: int
+    key: str
+    label: str
+    source: str
+    description: str | None = None
+    latest_version_id: int | None = None
+    latest_version: str | None = None
+    updated_at: datetime | None = None
+
+
+class SystemThemeVersionOut(BaseModel):
+    id: int
+    theme_id: int
+    version: str | None = None
+    payload: dict[str, Any] | None = None
+    created_at: datetime
+
+
+class SystemThemePageOut(BaseModel):
+    items: list[SystemThemeOut]
+    total: int
+    page: int
+    page_size: int
+
+
+class SystemThemeVersionPageOut(BaseModel):
+    items: list[SystemThemeVersionOut]
+    total: int
+    page: int
+    page_size: int
+
+
+class SystemThemeImportRequest(BaseModel):
+    theme_id: int
+    mode: str = "follow_latest"
+    version_id: int | None = None
+    weight: float | None = None
+
+
+class SystemThemeImportOut(BaseModel):
+    project_id: int
+    theme_id: int
+    mode: str
+    version_id: int | None = None
+    project_version_id: int | None = None
+
+
+class SystemThemeRefreshOut(BaseModel):
+    theme_id: int
+    updated: bool
+    version_id: int | None = None
+    version: str | None = None
+    affected_projects: int = 0
+
+
+class ThemeChangeReportOut(BaseModel):
+    id: int
+    project_id: int
+    theme_id: int
+    from_version_id: int | None = None
+    to_version_id: int
+    diff: dict[str, Any] | None = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ThemeChangeReportPageOut(BaseModel):
+    items: list[ThemeChangeReportOut]
+    total: int
+    page: int
+    page_size: int
+
+
+class UniverseThemeOut(BaseModel):
+    key: str
+    label: str
+    symbols: int
+    updated_at: datetime | None = None
+
+
+class UniverseThemeListOut(BaseModel):
+    items: list[UniverseThemeOut]
+    updated_at: datetime | None = None
+
+
+class UniverseThemeSymbolsOut(BaseModel):
+    key: str
+    label: str | None = None
+    symbols: list[str]
+    updated_at: datetime | None = None
 
 
 class ReportPageOut(BaseModel):
@@ -234,6 +367,56 @@ class DatasetOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class DatasetCandleOut(BaseModel):
+    time: int
+    open: float | None = None
+    high: float | None = None
+    low: float | None = None
+    close: float | None = None
+    volume: float | None = None
+
+
+class DatasetLinePointOut(BaseModel):
+    time: int
+    value: float
+
+
+class DatasetSeriesOut(BaseModel):
+    dataset_id: int
+    mode: str
+    start: str | None = None
+    end: str | None = None
+    candles: list[DatasetCandleOut]
+    adjusted: list[DatasetLinePointOut]
+
+
+class DatasetThemeCoverageOut(BaseModel):
+    theme_key: str
+    theme_label: str | None = None
+    total_symbols: int
+    covered_symbols: int
+    missing_symbols: list[str]
+    updated_at: datetime | None = None
+
+
+class DatasetThemeFetchRequest(BaseModel):
+    theme_key: str
+    vendor: str | None = "stooq"
+    asset_class: str | None = "Equity"
+    region: str | None = "US"
+    frequency: str | None = "daily"
+    auto_sync: bool = True
+    only_missing: bool = True
+
+
+class DatasetThemeFetchOut(BaseModel):
+    theme_key: str
+    total_symbols: int
+    created: int
+    reused: int
+    queued: int
 
 
 class DatasetPageOut(BaseModel):
@@ -272,6 +455,8 @@ class DatasetQualityOut(BaseModel):
     coverage_end: str | None
     coverage_days: int | None
     expected_points_estimate: int | None
+    data_points: int | None = None
+    min_interval_days: int | None = None
     issues: list[str]
     status: str
 
@@ -310,12 +495,13 @@ class DatasetDeleteOut(BaseModel):
 
 class DatasetFetchRequest(BaseModel):
     symbol: str
-    vendor: str | None = "stooq"
+    vendor: str | None = "alpha"
     asset_class: str | None = "Equity"
     region: str | None = "US"
     frequency: str | None = "daily"
     name: str | None = None
     auto_sync: bool = True
+    stooq_only: bool = False
 
 
 class DatasetFetchOut(BaseModel):
@@ -327,6 +513,14 @@ class DatasetFetchOut(BaseModel):
 class DataSyncCreate(BaseModel):
     source_path: str | None = None
     date_column: str = "date"
+    stooq_only: bool = False
+    reset_history: bool = False
+
+
+class DataSyncBatchRequest(BaseModel):
+    stooq_only: bool = False
+    vendor: str | None = None
+    reset_history: bool = False
 
 
 class DataSyncOut(BaseModel):
@@ -335,6 +529,9 @@ class DataSyncOut(BaseModel):
     dataset_name: str | None = None
     source_path: str
     date_column: str
+    reset_history: bool
+    retry_count: int | None = None
+    next_retry_at: datetime | None = None
     status: str
     rows_scanned: int | None
     coverage_start: str | None
@@ -390,6 +587,15 @@ class AlgorithmCreate(BaseModel):
     version: str | None = None
 
 
+class AlgorithmUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    language: str | None = None
+    file_path: str | None = None
+    type_name: str | None = None
+    version: str | None = None
+
+
 class AlgorithmOut(BaseModel):
     id: int
     name: str
@@ -412,6 +618,7 @@ class AlgorithmVersionCreate(BaseModel):
     file_path: str | None = None
     type_name: str | None = None
     content: str | None = None
+    params: dict | None = None
 
 
 class AlgorithmVersionOut(BaseModel):
@@ -423,6 +630,23 @@ class AlgorithmVersionOut(BaseModel):
     file_path: str | None
     type_name: str | None
     content_hash: str | None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class AlgorithmVersionDetailOut(BaseModel):
+    id: int
+    algorithm_id: int
+    version: str | None
+    description: str | None
+    language: str
+    file_path: str | None
+    type_name: str | None
+    content_hash: str | None
+    content: str | None
+    params: dict | None
     created_at: datetime
 
     class Config:
@@ -454,3 +678,9 @@ class AlgorithmProjectCreate(BaseModel):
     name: str
     description: str | None = None
     lock_version: bool = True
+
+
+class AlgorithmSelfTestCreate(BaseModel):
+    version_id: int | None = None
+    benchmark: str | None = "SPY"
+    parameters: dict[str, Any] | None = None

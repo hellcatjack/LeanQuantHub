@@ -1,5 +1,6 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
+import PaginationBar from "../components/PaginationBar";
 import TopBar from "../components/TopBar";
 import { useI18n } from "../i18n";
 import { Paginated } from "../types";
@@ -11,12 +12,33 @@ interface Project {
   created_at: string;
 }
 
+interface ThemeSystemMeta {
+  theme_id: number;
+  version_id?: number | null;
+  version?: string | null;
+  source?: string | null;
+  mode?: string | null;
+}
+
+interface ThemeSystemBase {
+  label?: string | null;
+  keywords?: string[];
+  manual?: string[];
+  exclude?: string[];
+}
+
 interface ThemeConfigItem {
   key: string;
   label: string;
   weight: number;
+  priority?: number;
   keywords?: string[];
   manual?: string[];
+  exclude?: string[];
+  system?: ThemeSystemMeta | null;
+  system_base?: ThemeSystemBase | null;
+  source?: string | null;
+  snapshot?: { theme_id?: number; version_id?: number; version?: string } | null;
 }
 
 interface ProjectConfig {
@@ -29,6 +51,42 @@ interface ProjectConfig {
   risk_free_rate?: number;
   categories?: { key: string; label: string }[];
   themes?: ThemeConfigItem[];
+  symbol_types?: Record<string, string>;
+}
+
+interface SystemThemeItem {
+  id: number;
+  key: string;
+  label: string;
+  source: string;
+  description?: string | null;
+  latest_version_id?: number | null;
+  latest_version?: string | null;
+  updated_at?: string | null;
+}
+
+interface SystemThemePage {
+  items: SystemThemeItem[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+interface ThemeChangeReport {
+  id: number;
+  project_id: number;
+  theme_id: number;
+  from_version_id?: number | null;
+  to_version_id: number;
+  diff?: Record<string, { added?: string[]; removed?: string[] }>;
+  created_at: string;
+}
+
+interface ThemeChangeReportPage {
+  items: ThemeChangeReport[];
+  total: number;
+  page: number;
+  page_size: number;
 }
 
 interface ProjectConfigResponse {
@@ -44,7 +102,9 @@ interface ThemeSummaryItem {
   label: string;
   symbols: number;
   sample: string[];
+  sample_types?: Record<string, string>;
   manual_symbols?: string[];
+  exclude_symbols?: string[];
 }
 
 interface ProjectThemeSummary {
@@ -59,13 +119,17 @@ interface ProjectThemeSymbols {
   category: string;
   label?: string | null;
   symbols: string[];
+  auto_symbols?: string[];
   manual_symbols?: string[];
+  exclude_symbols?: string[];
+  symbol_types?: Record<string, string>;
 }
 
 interface ThemeSearchItem {
   key: string;
   label: string;
   is_manual?: boolean;
+  is_excluded?: boolean;
 }
 
 interface ProjectThemeSearch {
@@ -75,7 +139,7 @@ interface ProjectThemeSearch {
 }
 
 export default function ThemesPage() {
-  const { t } = useI18n();
+  const { t, formatDateTime } = useI18n();
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectPage] = useState(1);
   const [projectPageSize] = useState(200);
@@ -102,6 +166,33 @@ export default function ThemesPage() {
   const [compareThemeA, setCompareThemeA] = useState("");
   const [compareThemeB, setCompareThemeB] = useState("");
   const [compareMessage, setCompareMessage] = useState("");
+  const [newThemeSymbol, setNewThemeSymbol] = useState("");
+  const [newThemeSymbolType, setNewThemeSymbolType] = useState("STOCK");
+  const [themeSymbolMessage, setThemeSymbolMessage] = useState("");
+  const themeSaveTimer = useRef<number | null>(null);
+  const [systemThemes, setSystemThemes] = useState<SystemThemeItem[]>([]);
+  const [systemThemeMessage, setSystemThemeMessage] = useState("");
+  const [systemImportOptions, setSystemImportOptions] = useState<
+    Record<number, { mode: string; weight: string }>
+  >({});
+  const [systemReports, setSystemReports] = useState<ThemeChangeReport[]>([]);
+  const [systemReportTotal, setSystemReportTotal] = useState(0);
+  const [systemReportPage, setSystemReportPage] = useState(1);
+  const [systemReportPageSize, setSystemReportPageSize] = useState(5);
+  const [expandedReportIds, setExpandedReportIds] = useState<Record<number, boolean>>(
+    {}
+  );
+
+  const symbolTypeOptions = [
+    { value: "STOCK", label: t("symbols.types.stock") },
+    { value: "ETF", label: t("symbols.types.etf") },
+    { value: "ADR", label: t("symbols.types.adr") },
+    { value: "REIT", label: t("symbols.types.reit") },
+    { value: "ETN", label: t("symbols.types.etn") },
+    { value: "FUND", label: t("symbols.types.fund") },
+    { value: "INDEX", label: t("symbols.types.index") },
+    { value: "UNKNOWN", label: t("symbols.types.unknown") },
+  ];
 
   const normalizeThemeDrafts = (config: ProjectConfig): ThemeConfigItem[] => {
     if (config.themes && config.themes.length) {
@@ -109,8 +200,14 @@ export default function ThemesPage() {
         key: item.key || "",
         label: item.label || item.key || "",
         weight: Number(item.weight ?? config.weights?.[item.key] ?? 0),
+        priority: Number(item.priority ?? 0),
         keywords: item.keywords || [],
         manual: item.manual || [],
+        exclude: item.exclude || [],
+        system: item.system || null,
+        system_base: item.system_base || null,
+        source: item.source || null,
+        snapshot: item.snapshot || null,
       }));
     }
     const categoryList =
@@ -121,8 +218,10 @@ export default function ThemesPage() {
       key: category.key,
       label: category.label || category.key,
       weight: Number(config.weights?.[category.key] ?? 0),
+      priority: 0,
       keywords: [],
       manual: [],
+      exclude: [],
     }));
   };
 
@@ -176,9 +275,102 @@ export default function ThemesPage() {
     }
   };
 
+  const loadSystemThemes = async () => {
+    try {
+      const res = await api.get<SystemThemePage>("/api/system-themes", {
+        params: { page: 1, page_size: 200 },
+      });
+      setSystemThemes(res.data.items || []);
+      setSystemThemeMessage("");
+    } catch (err) {
+      setSystemThemes([]);
+      setSystemThemeMessage(t("projects.config.systemThemeError"));
+    }
+  };
+
+  const loadSystemReports = async (projectId: number) => {
+    try {
+      const res = await api.get<ThemeChangeReportPage>(
+        `/api/system-themes/projects/${projectId}/reports/page`,
+        { params: { page: systemReportPage, page_size: systemReportPageSize } }
+      );
+      setSystemReports(res.data.items || []);
+      setSystemReportTotal(res.data.total || 0);
+    } catch (err) {
+      setSystemReports([]);
+      setSystemReportTotal(0);
+    }
+  };
+
+  const updateSystemImportOption = (
+    themeId: number,
+    field: "mode" | "weight",
+    value: string
+  ) => {
+    setSystemImportOptions((prev) => ({
+      ...prev,
+      [themeId]: {
+        mode: prev[themeId]?.mode || "follow_latest",
+        weight: prev[themeId]?.weight || "",
+        [field]: value,
+      },
+    }));
+  };
+
+  const getSystemImportOption = (themeId: number) =>
+    systemImportOptions[themeId] || { mode: "follow_latest", weight: "" };
+
+  const importSystemTheme = async (themeId: number) => {
+    if (!selectedProjectId) {
+      return;
+    }
+    const option = getSystemImportOption(themeId);
+    const payload: {
+      theme_id: number;
+      mode: string;
+      weight?: number;
+    } = {
+      theme_id: themeId,
+      mode: option.mode,
+    };
+    if (option.weight.trim()) {
+      payload.weight = Number(option.weight);
+    }
+    try {
+      await api.post(`/api/system-themes/projects/${selectedProjectId}/import`, payload);
+      setSystemThemeMessage(t("projects.config.systemThemeImported"));
+      await loadProjectConfig(selectedProjectId);
+      await loadThemeSummary(selectedProjectId);
+      await loadSystemReports(selectedProjectId);
+    } catch (err) {
+      setSystemThemeMessage(t("projects.config.systemThemeImportError"));
+    }
+  };
+
+  const refreshSystemTheme = async (themeId: number) => {
+    try {
+      await api.post(`/api/system-themes/${themeId}/refresh`, {});
+      setSystemThemeMessage(t("projects.config.systemThemeRefreshSuccess"));
+      await loadSystemThemes();
+      if (selectedProjectId) {
+        await loadSystemReports(selectedProjectId);
+        await loadThemeSummary(selectedProjectId);
+      }
+    } catch (err) {
+      setSystemThemeMessage(t("projects.config.systemThemeRefreshError"));
+    }
+  };
+
   const updateTheme = (
     index: number,
-    field: "key" | "label" | "weight" | "keywords" | "manual",
+    field:
+      | "key"
+      | "label"
+      | "weight"
+      | "priority"
+      | "keywords"
+      | "manual"
+      | "exclude",
     value: string | number
   ) => {
     setThemeDrafts((prev) =>
@@ -186,11 +378,14 @@ export default function ThemesPage() {
         if (idx !== index) {
           return item;
         }
-        if (field === "keywords" || field === "manual") {
+        if (field === "keywords" || field === "manual" || field === "exclude") {
           return { ...item, [field]: parseListInput(String(value)) };
         }
         if (field === "weight") {
           return { ...item, weight: Number(value) || 0 };
+        }
+        if (field === "priority") {
+          return { ...item, priority: Number(value) || 0 };
         }
         return { ...item, [field]: String(value) };
       })
@@ -200,7 +395,7 @@ export default function ThemesPage() {
   const addTheme = () => {
     setThemeDrafts((prev) => [
       ...prev,
-      { key: "", label: "", weight: 0, keywords: [], manual: [] },
+      { key: "", label: "", weight: 0, priority: 0, keywords: [], manual: [], exclude: [] },
     ]);
   };
 
@@ -208,23 +403,41 @@ export default function ThemesPage() {
     setThemeDrafts((prev) => prev.filter((_, idx) => idx !== index));
   };
 
-  const saveProjectConfig = async () => {
-    if (!selectedProjectId || !configDraft) {
-      return;
-    }
-    const themePayload = themeDrafts
+  const buildThemePayload = (drafts: ThemeConfigItem[]) =>
+    drafts
       .map((theme) => ({
         key: theme.key.trim(),
         label: theme.label.trim() || theme.key.trim(),
         weight: Number(theme.weight) || 0,
+        priority: Number(theme.priority) || 0,
         keywords: theme.keywords || [],
         manual: theme.manual || [],
+        exclude: theme.exclude || [],
+        system: theme.system || undefined,
+        system_base: theme.system_base || undefined,
+        source: theme.source || undefined,
+        snapshot: theme.snapshot || undefined,
       }))
       .filter((theme) => theme.key);
+
+  const persistProjectConfig = async (
+    draftsOverride?: ThemeConfigItem[],
+    symbolTypesOverride?: Record<string, string>,
+    silent?: boolean
+  ) => {
+    if (!selectedProjectId || !configDraft) {
+      return false;
+    }
+    const themePayload = buildThemePayload(draftsOverride ?? themeDrafts);
     const keys = themePayload.map((theme) => theme.key);
     if (new Set(keys).size !== keys.length) {
-      setConfigMessage(t("projects.config.themeDuplicate"));
-      return;
+      const message = t("projects.config.themeDuplicate");
+      if (silent) {
+        setThemeSymbolMessage(message);
+      } else {
+        setConfigMessage(message);
+      }
+      return false;
     }
     const weights = themePayload.reduce<Record<string, number>>((acc, theme) => {
       acc[theme.key] = theme.weight;
@@ -240,17 +453,51 @@ export default function ThemesPage() {
       weights,
       categories,
     };
+    if (symbolTypesOverride) {
+      payloadConfig.symbol_types = symbolTypesOverride;
+    }
     try {
       await api.post(`/api/projects/${selectedProjectId}/config`, {
         config: payloadConfig,
         version: new Date().toISOString(),
       });
-      setConfigMessage(t("projects.config.saved"));
-      await loadProjectConfig(selectedProjectId);
-      await loadThemeSummary(selectedProjectId);
+      if (silent) {
+        setThemeSymbolMessage(t("projects.config.saved"));
+      } else {
+        setConfigMessage(t("projects.config.saved"));
+      }
+      if (silent) {
+        await loadThemeSummary(selectedProjectId);
+      } else {
+        await loadProjectConfig(selectedProjectId);
+        await loadThemeSummary(selectedProjectId);
+      }
+      return true;
     } catch (err) {
-      setConfigMessage(t("projects.config.error"));
+      const message = t("projects.config.error");
+      if (silent) {
+        setThemeSymbolMessage(message);
+      } else {
+        setConfigMessage(message);
+      }
+      return false;
     }
+  };
+
+  const saveProjectConfig = async () => {
+    await persistProjectConfig();
+  };
+
+  const scheduleThemeSave = (
+    draftsOverride?: ThemeConfigItem[],
+    symbolTypesOverride?: Record<string, string>
+  ) => {
+    if (themeSaveTimer.current !== null) {
+      window.clearTimeout(themeSaveTimer.current);
+    }
+    themeSaveTimer.current = window.setTimeout(() => {
+      void persistProjectConfig(draftsOverride, symbolTypesOverride, true);
+    }, 0);
   };
 
   const loadThemeSymbols = async (key: string) => {
@@ -265,6 +512,9 @@ export default function ThemesPage() {
       setActiveThemeKey(key);
       setActiveThemeSymbols(res.data);
       setThemeSymbolQuery("");
+      setNewThemeSymbol("");
+      setNewThemeSymbolType("STOCK");
+      setThemeSymbolMessage("");
       setThemeSymbolsCache((prev) => ({ ...prev, [key]: res.data }));
     } catch (err) {
       setActiveThemeKey("");
@@ -302,7 +552,7 @@ export default function ThemesPage() {
     if (!activeThemeKey || !activeThemeSymbols) {
       return;
     }
-    const rows = ["symbol", ...filteredActiveSymbols];
+    const rows = ["symbol", ...filteredCombinedSymbols];
     const blob = new Blob([rows.join("\n")], {
       type: "text/csv;charset=utf-8;",
     });
@@ -351,6 +601,118 @@ export default function ThemesPage() {
     await searchThemeSymbol(symbol);
   };
 
+  const normalizeSymbolInput = (value: string) => value.trim().toUpperCase();
+
+  const normalizeSymbolType = (value?: string | null) => {
+    const text = String(value || "").trim().toUpperCase();
+    if (!text) {
+      return "UNKNOWN";
+    }
+    if (text === "EQUITY") {
+      return "STOCK";
+    }
+    return text;
+  };
+
+  const updateSymbolTypeOverride = (symbol: string, type: string) => {
+    if (!configDraft) {
+      return undefined;
+    }
+    const nextTypes = { ...(configDraft.symbol_types || {}) };
+    nextTypes[symbol] = normalizeSymbolType(type);
+    setConfigDraft((prev) => (prev ? { ...prev, symbol_types: nextTypes } : prev));
+    return nextTypes;
+  };
+
+  const updateThemeSymbols = (
+    themeKey: string,
+    updater: (current: ThemeConfigItem) => ThemeConfigItem
+  ) => {
+    const nextDrafts = themeDrafts.map((item) =>
+      item.key === themeKey ? updater(item) : item
+    );
+    setThemeDrafts(nextDrafts);
+    return nextDrafts;
+  };
+
+  const addManualSymbol = (symbol: string, type: string) => {
+    if (!activeThemeKey) {
+      return;
+    }
+    const nextDrafts = updateThemeSymbols(activeThemeKey, (item) => {
+      const manual = new Set(item.manual || []);
+      manual.add(symbol);
+      const exclude = new Set(item.exclude || []);
+      exclude.delete(symbol);
+      return {
+        ...item,
+        manual: Array.from(manual),
+        exclude: Array.from(exclude),
+      };
+    });
+    const nextTypes = updateSymbolTypeOverride(symbol, type);
+    scheduleThemeSave(nextDrafts, nextTypes);
+  };
+
+  const addExcludeSymbol = (symbol: string, type: string) => {
+    if (!activeThemeKey) {
+      return;
+    }
+    const nextDrafts = updateThemeSymbols(activeThemeKey, (item) => {
+      const exclude = new Set(item.exclude || []);
+      exclude.add(symbol);
+      const manual = new Set(item.manual || []);
+      manual.delete(symbol);
+      return {
+        ...item,
+        manual: Array.from(manual),
+        exclude: Array.from(exclude),
+      };
+    });
+    const nextTypes = updateSymbolTypeOverride(symbol, type);
+    scheduleThemeSave(nextDrafts, nextTypes);
+  };
+
+  const removeManualSymbol = (symbol: string) => {
+    if (!activeThemeKey) {
+      return;
+    }
+    const nextDrafts = updateThemeSymbols(activeThemeKey, (item) => ({
+      ...item,
+      manual: (item.manual || []).filter((value) => value !== symbol),
+    }));
+    scheduleThemeSave(nextDrafts, undefined);
+  };
+
+  const restoreExcludedSymbol = (symbol: string) => {
+    if (!activeThemeKey) {
+      return;
+    }
+    const nextDrafts = updateThemeSymbols(activeThemeKey, (item) => ({
+      ...item,
+      exclude: (item.exclude || []).filter((value) => value !== symbol),
+    }));
+    scheduleThemeSave(nextDrafts, undefined);
+  };
+
+  const handleAddSymbol = (mode: "manual" | "exclude") => {
+    const symbol = normalizeSymbolInput(newThemeSymbol);
+    if (!symbol) {
+      setThemeSymbolMessage(t("projects.config.themeSymbolEmpty"));
+      return;
+    }
+    setThemeSymbolMessage("");
+    if (mode === "manual") {
+      addManualSymbol(symbol, newThemeSymbolType);
+    } else {
+      addExcludeSymbol(symbol, newThemeSymbolType);
+    }
+    setNewThemeSymbol("");
+  };
+
+  const yahooSymbolUrl = (symbol: string) =>
+    `https://finance.yahoo.com/quote/${encodeURIComponent(symbol)}`;
+
   const toggleHighlightTheme = (key: string) => {
     setHighlightThemeKey((prev) => (prev === key ? "" : key));
   };
@@ -372,6 +734,7 @@ export default function ThemesPage() {
 
   useEffect(() => {
     loadProjects();
+    loadSystemThemes();
   }, []);
 
   useEffect(() => {
@@ -390,6 +753,11 @@ export default function ThemesPage() {
       setCompareThemeA("");
       setCompareThemeB("");
       setCompareMessage("");
+      setNewThemeSymbol("");
+      setNewThemeSymbolType("STOCK");
+      setThemeSymbolMessage("");
+      setSystemReportPage(1);
+      setSystemThemeMessage("");
     } else {
       setConfigDraft(null);
       setConfigMeta(null);
@@ -409,8 +777,21 @@ export default function ThemesPage() {
       setCompareThemeA("");
       setCompareThemeB("");
       setCompareMessage("");
+      setNewThemeSymbol("");
+      setNewThemeSymbolType("STOCK");
+      setThemeSymbolMessage("");
+      setSystemThemeMessage("");
+      setSystemReports([]);
+      setSystemReportTotal(0);
+      setSystemReportPage(1);
     }
   }, [selectedProjectId]);
+
+  useEffect(() => {
+    if (selectedProjectId) {
+      loadSystemReports(selectedProjectId);
+    }
+  }, [selectedProjectId, systemReportPage, systemReportPageSize]);
 
   const selectedProject = useMemo(
     () => projects.find((item) => item.id === selectedProjectId),
@@ -462,18 +843,48 @@ export default function ThemesPage() {
       })),
     [themeRows]
   );
-  const activeManualSet = useMemo(
-    () => new Set(activeThemeSymbols?.manual_symbols || []),
-    [activeThemeSymbols]
+  const activeThemeDraft = useMemo(
+    () => themeDrafts.find((item) => item.key === activeThemeKey),
+    [themeDrafts, activeThemeKey]
   );
-  const activeSymbols = activeThemeSymbols?.symbols || [];
-  const filteredActiveSymbols = useMemo(() => {
+  const activeAutoSymbols = activeThemeSymbols?.auto_symbols || activeThemeSymbols?.symbols || [];
+  const activeManualSymbols =
+    activeThemeDraft?.manual || activeThemeSymbols?.manual_symbols || [];
+  const activeExcludeSymbols =
+    activeThemeDraft?.exclude || activeThemeSymbols?.exclude_symbols || [];
+  const activeExcludeSet = useMemo(
+    () => new Set(activeExcludeSymbols),
+    [activeExcludeSymbols]
+  );
+  const activeCombinedSymbols = useMemo(() => {
+    const combined = new Set(activeAutoSymbols);
+    activeManualSymbols.forEach((symbol) => combined.add(symbol));
+    activeExcludeSymbols.forEach((symbol) => combined.delete(symbol));
+    return Array.from(combined).sort();
+  }, [activeAutoSymbols, activeManualSymbols, activeExcludeSymbols]);
+  const filterSymbolsByQuery = (symbols: string[]) => {
     const keyword = themeSymbolQuery.trim().toUpperCase();
     if (!keyword) {
-      return activeSymbols;
+      return symbols;
     }
-    return activeSymbols.filter((symbol) => symbol.includes(keyword));
-  }, [activeSymbols, themeSymbolQuery]);
+    return symbols.filter((symbol) => symbol.includes(keyword));
+  };
+  const filteredAutoSymbols = useMemo(
+    () => filterSymbolsByQuery(activeAutoSymbols.filter((symbol) => !activeExcludeSet.has(symbol))),
+    [activeAutoSymbols, activeExcludeSet, themeSymbolQuery]
+  );
+  const filteredManualSymbols = useMemo(
+    () => filterSymbolsByQuery(activeManualSymbols.filter((symbol) => !activeExcludeSet.has(symbol))),
+    [activeManualSymbols, activeExcludeSet, themeSymbolQuery]
+  );
+  const filteredExcludedSymbols = useMemo(
+    () => filterSymbolsByQuery(activeExcludeSymbols),
+    [activeExcludeSymbols, themeSymbolQuery]
+  );
+  const filteredCombinedSymbols = useMemo(
+    () => filterSymbolsByQuery(activeCombinedSymbols),
+    [activeCombinedSymbols, themeSymbolQuery]
+  );
   const weightSegments = useMemo(() => {
     const palette = ["#0f62fe", "#35b9a3", "#f6ad55", "#ed5564", "#6f56d9", "#6b7280"];
     const total = themeDrafts.reduce((sum, item) => sum + (Number(item.weight) || 0), 0);
@@ -501,12 +912,151 @@ export default function ThemesPage() {
       onlyB: onlyB.sort(),
     };
   }, [compareSymbolsA, compareSymbolsB]);
+  const symbolTypeLabels = useMemo(
+    () => ({
+      STOCK: t("symbols.types.stock"),
+      ETF: t("symbols.types.etf"),
+      ADR: t("symbols.types.adr"),
+      REIT: t("symbols.types.reit"),
+      ETN: t("symbols.types.etn"),
+      FUND: t("symbols.types.fund"),
+      INDEX: t("symbols.types.index"),
+      UNKNOWN: t("symbols.types.unknown"),
+    }),
+    [t]
+  );
+  const configSymbolTypes = useMemo(() => {
+    const normalized: Record<string, string> = {};
+    Object.entries(configDraft?.symbol_types || {}).forEach(([symbol, type]) => {
+      normalized[symbol.toUpperCase()] = normalizeSymbolType(type);
+    });
+    return normalized;
+  }, [configDraft]);
+  const activeSymbolTypes = useMemo(() => {
+    const base = { ...(activeThemeSymbols?.symbol_types || {}) };
+    Object.entries(configSymbolTypes).forEach(([symbol, type]) => {
+      base[symbol.toUpperCase()] = normalizeSymbolType(type);
+    });
+    return base;
+  }, [activeThemeSymbols, configSymbolTypes]);
+  const compareSymbolTypes = useMemo(() => {
+    const base = {
+      ...(themeSymbolsCache[compareThemeA]?.symbol_types || {}),
+      ...(themeSymbolsCache[compareThemeB]?.symbol_types || {}),
+    };
+    Object.entries(configSymbolTypes).forEach(([symbol, type]) => {
+      base[symbol.toUpperCase()] = normalizeSymbolType(type);
+    });
+    return base;
+  }, [themeSymbolsCache, compareThemeA, compareThemeB, configSymbolTypes]);
+  const systemThemeMap = useMemo(
+    () => new Map(systemThemes.map((theme) => [theme.id, theme])),
+    [systemThemes]
+  );
+  const boundSystemThemeIds = useMemo(() => {
+    const ids = new Set<number>();
+    themeDrafts.forEach((theme) => {
+      const id = theme.system?.theme_id;
+      if (typeof id === "number") {
+        ids.add(id);
+      }
+    });
+    return ids;
+  }, [themeDrafts]);
+  const formatSymbolLabel = (symbol: string, types: Record<string, string>) => {
+    const raw = types[symbol];
+    if (!raw) {
+      return symbol;
+    }
+    const label = symbolTypeLabels[normalizeSymbolType(raw)] || symbolTypeLabels.UNKNOWN;
+    return `${symbol} · ${label}`;
+  };
 
   const formatPercent = (value?: number | null) => {
     if (value === null || value === undefined || Number.isNaN(value)) {
       return "-";
     }
     return `${(value * 100).toFixed(2)}%`;
+  };
+
+  const renderDiffSummary = (diff?: ThemeChangeReport["diff"]) => {
+    if (!diff) {
+      return t("projects.config.systemThemeReportNone");
+    }
+    const fields = [
+      { key: "symbols", label: t("projects.config.systemThemeDiffSymbols") },
+      { key: "keywords", label: t("projects.config.systemThemeDiffKeywords") },
+      { key: "manual", label: t("projects.config.systemThemeDiffManual") },
+      { key: "exclude", label: t("projects.config.systemThemeDiffExclude") },
+    ];
+    const parts = fields
+      .map(({ key, label }) => {
+        const added = diff[key]?.added?.length || 0;
+        const removed = diff[key]?.removed?.length || 0;
+        if (!added && !removed) {
+          return null;
+        }
+        return `${label} +${added}/-${removed}`;
+      })
+      .filter(Boolean);
+    if (!parts.length) {
+      return t("projects.config.systemThemeReportNone");
+    }
+    return parts.join(" · ");
+  };
+
+  const toggleReportExpanded = (reportId: number) => {
+    setExpandedReportIds((prev) => ({
+      ...prev,
+      [reportId]: !prev[reportId],
+    }));
+  };
+
+  const renderDiffList = (items: string[], variant: "added" | "removed") => {
+    if (!items.length) {
+      return null;
+    }
+    return (
+      <div className="report-diff-list">
+        {items.map((item) => (
+          <span key={`${variant}-${item}`} className={`theme-chip ${variant}`}>
+            {item}
+          </span>
+        ))}
+      </div>
+    );
+  };
+
+  const renderDiffDetails = (diff?: ThemeChangeReport["diff"]) => {
+    if (!diff) {
+      return <div className="form-hint">{t("projects.config.systemThemeReportNone")}</div>;
+    }
+    const fields = [
+      { key: "symbols", label: t("projects.config.systemThemeDiffSymbols") },
+      { key: "keywords", label: t("projects.config.systemThemeDiffKeywords") },
+      { key: "manual", label: t("projects.config.systemThemeDiffManual") },
+      { key: "exclude", label: t("projects.config.systemThemeDiffExclude") },
+    ];
+    const blocks = fields
+      .map(({ key, label }) => {
+        const added = diff[key]?.added || [];
+        const removed = diff[key]?.removed || [];
+        if (!added.length && !removed.length) {
+          return null;
+        }
+        return (
+          <div key={key} className="report-diff-block">
+            <div className="report-diff-header">{label}</div>
+            {renderDiffList(added, "added")}
+            {renderDiffList(removed, "removed")}
+          </div>
+        );
+      })
+      .filter(Boolean);
+    if (!blocks.length) {
+      return <div className="form-hint">{t("projects.config.systemThemeReportNone")}</div>;
+    }
+    return <div className="report-diff-grid">{blocks}</div>;
   };
 
   const renderWeightDonut = (value: number) => {
@@ -631,7 +1181,7 @@ export default function ThemesPage() {
               </div>
               <div className="meta-row">
                 <span>{t("common.labels.updatedAt")}</span>
-                <strong>{configMeta?.updated_at || t("common.none")}</strong>
+                <strong>{formatDateTime(configMeta?.updated_at)}</strong>
               </div>
             </div>
           </div>
@@ -658,7 +1208,7 @@ export default function ThemesPage() {
                 <div className="theme-summary-card">
                   <div className="theme-summary-label">{t("common.labels.updatedAt")}</div>
                   <div className="theme-summary-value">
-                    {themeSummary?.updated_at || t("common.none")}
+                    {formatDateTime(themeSummary?.updated_at)}
                   </div>
                 </div>
                 <div className="theme-summary-card theme-summary-chart-card">
@@ -678,31 +1228,44 @@ export default function ThemesPage() {
                         <th>{t("projects.config.themeKey")}</th>
                         <th>{t("projects.config.themeLabel")}</th>
                         <th>{t("projects.config.themeWeight")}</th>
+                        <th>{t("projects.config.themePriority")}</th>
                         <th>{t("projects.config.themeKeywords")}</th>
                         <th>{t("projects.config.themeManual")}</th>
+                        <th>{t("projects.config.themeExclude")}</th>
                         <th>{t("projects.config.themeActions")}</th>
                       </tr>
                     </thead>
                     <tbody>
                       {themeDrafts.length ? (
-                        themeDrafts.map((theme, index) => (
-                          <tr key={`${theme.key}-${index}`}>
-                            <td>
-                              <input
-                                className="table-input"
-                                value={theme.key}
-                                onChange={(e) => updateTheme(index, "key", e.target.value)}
-                                placeholder={t("projects.config.themeKey")}
-                              />
-                            </td>
-                            <td>
-                              <input
-                                className="table-input"
-                                value={theme.label}
-                                onChange={(e) => updateTheme(index, "label", e.target.value)}
-                                placeholder={t("projects.config.themeLabel")}
-                              />
-                            </td>
+                        themeDrafts.map((theme, index) => {
+                          const isSystemTheme = Boolean(theme.system || theme.system_base);
+                          return (
+                            <tr key={`${theme.key}-${index}`}>
+                              <td>
+                                <input
+                                  className="table-input"
+                                  value={theme.key}
+                                  onChange={(e) => updateTheme(index, "key", e.target.value)}
+                                  placeholder={t("projects.config.themeKey")}
+                                  disabled={isSystemTheme}
+                                />
+                              </td>
+                              <td>
+                                <div className="theme-label-input">
+                                  <input
+                                    className="table-input"
+                                    value={theme.label}
+                                    onChange={(e) => updateTheme(index, "label", e.target.value)}
+                                    placeholder={t("projects.config.themeLabel")}
+                                    disabled={isSystemTheme}
+                                  />
+                                  {isSystemTheme && (
+                                    <span className="theme-badge">
+                                      {t("projects.config.themeSystem")}
+                                    </span>
+                                  )}
+                                </div>
+                              </td>
                             <td>
                               <input
                                 className="table-input"
@@ -716,9 +1279,20 @@ export default function ThemesPage() {
                             <td>
                               <input
                                 className="table-input"
+                                type="number"
+                                step="1"
+                                value={theme.priority ?? 0}
+                                onChange={(e) => updateTheme(index, "priority", e.target.value)}
+                                placeholder={t("projects.config.themePriority")}
+                              />
+                            </td>
+                            <td>
+                              <input
+                                className="table-input"
                                 value={(theme.keywords || []).join(", ")}
                                 onChange={(e) => updateTheme(index, "keywords", e.target.value)}
                                 placeholder={t("projects.config.themeKeywords")}
+                                disabled={isSystemTheme}
                               />
                             </td>
                             <td>
@@ -727,6 +1301,14 @@ export default function ThemesPage() {
                                 value={(theme.manual || []).join(", ")}
                                 onChange={(e) => updateTheme(index, "manual", e.target.value)}
                                 placeholder={t("projects.config.themeManual")}
+                              />
+                            </td>
+                            <td>
+                              <input
+                                className="table-input"
+                                value={(theme.exclude || []).join(", ")}
+                                onChange={(e) => updateTheme(index, "exclude", e.target.value)}
+                                placeholder={t("projects.config.themeExclude")}
                               />
                             </td>
                             <td className="theme-actions">
@@ -739,10 +1321,11 @@ export default function ThemesPage() {
                               </button>
                             </td>
                           </tr>
-                        ))
+                          );
+                        })
                       ) : (
                         <tr>
-                          <td colSpan={6}>{t("projects.config.themesEmpty")}</td>
+                          <td colSpan={8}>{t("projects.config.themesEmpty")}</td>
                         </tr>
                       )}
                     </tbody>
@@ -763,6 +1346,182 @@ export default function ThemesPage() {
               <button className="button-primary" onClick={saveProjectConfig}>
                 {t("projects.config.save")}
               </button>
+            </div>
+          )}
+        </div>
+
+        <div className="card">
+          <div className="card-title">{t("projects.config.systemThemeTitle")}</div>
+          <div className="card-meta">{t("projects.config.systemThemeMeta")}</div>
+          {systemThemeMessage && <div className="form-hint">{systemThemeMessage}</div>}
+          {!systemThemes.length ? (
+            <div className="empty-state">{t("projects.config.systemThemeEmpty")}</div>
+          ) : (
+            <div className="theme-table-wrapper">
+              <table className="theme-table system-theme-table">
+                <thead>
+                  <tr>
+                    <th>{t("projects.config.systemThemeLabel")}</th>
+                    <th>{t("projects.config.systemThemeSource")}</th>
+                    <th>{t("projects.config.systemThemeVersion")}</th>
+                    <th>{t("projects.config.systemThemeMode")}</th>
+                    <th>{t("projects.config.systemThemeWeight")}</th>
+                    <th>{t("projects.config.systemThemeActions")}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {systemThemes.map((theme) => {
+                    const option = getSystemImportOption(theme.id);
+                    const bound = boundSystemThemeIds.has(theme.id);
+                    return (
+                      <tr key={theme.id}>
+                        <td>
+                          <div className="theme-name">
+                            <span className="theme-label">{theme.label}</span>
+                            <span className="theme-key">{theme.key}</span>
+                          </div>
+                        </td>
+                        <td>{theme.source || "-"}</td>
+                        <td>{formatDateTime(theme.latest_version)}</td>
+                        <td>
+                          <select
+                            className="table-select"
+                            value={option.mode}
+                            onChange={(e) =>
+                              updateSystemImportOption(theme.id, "mode", e.target.value)
+                            }
+                          >
+                            <option value="follow_latest">
+                              {t("projects.config.systemThemeModeFollow")}
+                            </option>
+                            <option value="pin_version">
+                              {t("projects.config.systemThemeModePin")}
+                            </option>
+                            <option value="snapshot">
+                              {t("projects.config.systemThemeModeSnapshot")}
+                            </option>
+                          </select>
+                        </td>
+                        <td>
+                          <input
+                            className="table-input"
+                            type="number"
+                            step="0.01"
+                            value={option.weight}
+                            onChange={(e) =>
+                              updateSystemImportOption(theme.id, "weight", e.target.value)
+                            }
+                            placeholder="0"
+                          />
+                        </td>
+                        <td className="theme-actions">
+                          <button
+                            type="button"
+                            className="button-secondary"
+                            disabled={!selectedProjectId}
+                            onClick={() => importSystemTheme(theme.id)}
+                          >
+                            {bound
+                              ? t("projects.config.systemThemeReimport")
+                              : t("projects.config.systemThemeImport")}
+                          </button>
+                          <button
+                            type="button"
+                            className="link-button"
+                            onClick={() => refreshSystemTheme(theme.id)}
+                          >
+                            {t("projects.config.systemThemeRefresh")}
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        <div className="card">
+          <div className="card-title">{t("projects.config.systemThemeReportTitle")}</div>
+          <div className="card-meta">{t("projects.config.systemThemeReportMeta")}</div>
+          {!selectedProjectId ? (
+            <div className="empty-state">{t("projects.config.systemThemeReportEmpty")}</div>
+          ) : (
+            <div className="form-grid">
+              <div className="theme-table-wrapper">
+                <table className="theme-table system-theme-report-table">
+                  <thead>
+                    <tr>
+                      <th>{t("projects.config.systemThemeLabel")}</th>
+                      <th>{t("projects.config.systemThemeReportVersion")}</th>
+                      <th>{t("projects.config.systemThemeReportDiff")}</th>
+                      <th>{t("projects.config.systemThemeReportTime")}</th>
+                      <th>{t("projects.config.systemThemeReportActions")}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {systemReports.length ? (
+                      systemReports.map((report) => {
+                        const theme = systemThemeMap.get(report.theme_id);
+                        const isExpanded = Boolean(expandedReportIds[report.id]);
+                        return (
+                          <Fragment key={report.id}>
+                            <tr>
+                              <td>
+                                <div className="theme-name">
+                                  <span className="theme-label">
+                                    {theme?.label || `#${report.theme_id}`}
+                                  </span>
+                                  <span className="theme-key">{theme?.key || "-"}</span>
+                                </div>
+                              </td>
+                              <td>
+                                {report.from_version_id
+                                  ? `${report.from_version_id} → ${report.to_version_id}`
+                                  : `→ ${report.to_version_id}`}
+                              </td>
+                              <td>{renderDiffSummary(report.diff)}</td>
+                              <td>{formatDateTime(report.created_at)}</td>
+                              <td className="theme-actions">
+                                <button
+                                  type="button"
+                                  className="link-button"
+                                  onClick={() => toggleReportExpanded(report.id)}
+                                >
+                                  {isExpanded
+                                    ? t("projects.config.systemThemeReportCollapse")
+                                    : t("projects.config.systemThemeReportExpand")}
+                                </button>
+                              </td>
+                            </tr>
+                            {isExpanded && (
+                              <tr className="theme-expand-row report-detail-row">
+                                <td colSpan={5}>{renderDiffDetails(report.diff)}</td>
+                              </tr>
+                            )}
+                          </Fragment>
+                        );
+                      })
+                    ) : (
+                      <tr>
+                        <td colSpan={5}>{t("projects.config.systemThemeReportEmpty")}</td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+              <PaginationBar
+                page={systemReportPage}
+                pageSize={systemReportPageSize}
+                total={systemReportTotal}
+                onPageChange={setSystemReportPage}
+                onPageSizeChange={(size) => {
+                  setSystemReportPage(1);
+                  setSystemReportPageSize(size);
+                }}
+                pageSizeOptions={[5, 10, 20]}
+              />
             </div>
           )}
         </div>
@@ -838,6 +1597,7 @@ export default function ThemesPage() {
                       <col className="col-distribution" />
                       <col className="col-sample" />
                       <col className="col-manual" />
+                      <col className="col-exclude" />
                       <col className="col-actions" />
                     </colgroup>
                     <thead>
@@ -848,6 +1608,7 @@ export default function ThemesPage() {
                         <th>{t("projects.config.themeDistribution")}</th>
                         <th>{t("projects.config.themeSample")}</th>
                         <th>{t("projects.config.themeManualShort")}</th>
+                        <th>{t("projects.config.themeExcludeShort")}</th>
                         <th>{t("projects.config.themeActions")}</th>
                       </tr>
                     </thead>
@@ -893,14 +1654,16 @@ export default function ThemesPage() {
                                 <div className="theme-samples">
                                   {item.sample.length
                                     ? item.sample.map((symbol) => (
-                                        <button
+                                        <a
                                           key={symbol}
-                                          type="button"
                                           className="theme-chip"
+                                          href={yahooSymbolUrl(symbol)}
+                                          target="_blank"
+                                          rel="noreferrer"
                                           onClick={() => applyThemeSymbolFilter(symbol)}
                                         >
-                                          {symbol}
-                                        </button>
+                                          {formatSymbolLabel(symbol, item.sample_types || {})}
+                                        </a>
                                       ))
                                     : "-"}
                                 </div>
@@ -909,14 +1672,34 @@ export default function ThemesPage() {
                                 <div className="theme-samples">
                                   {(item.manual_symbols || []).length
                                     ? (item.manual_symbols || []).map((symbol) => (
-                                        <button
+                                        <a
                                           key={symbol}
-                                          type="button"
-                                          className="theme-chip manual"
+                                          className="theme-chip exclude"
+                                          href={yahooSymbolUrl(symbol)}
+                                          target="_blank"
+                                          rel="noreferrer"
                                           onClick={() => applyThemeSymbolFilter(symbol)}
                                         >
-                                          {symbol}
-                                        </button>
+                                          {formatSymbolLabel(symbol, configSymbolTypes)}
+                                        </a>
+                                      ))
+                                    : "-"}
+                                </div>
+                              </td>
+                              <td>
+                                <div className="theme-samples">
+                                  {(item.exclude_symbols || []).length
+                                    ? (item.exclude_symbols || []).map((symbol) => (
+                                        <a
+                                          key={symbol}
+                                          className="theme-chip manual"
+                                          href={yahooSymbolUrl(symbol)}
+                                          target="_blank"
+                                          rel="noreferrer"
+                                          onClick={() => applyThemeSymbolFilter(symbol)}
+                                        >
+                                          {formatSymbolLabel(symbol, configSymbolTypes)}
+                                        </a>
                                       ))
                                     : "-"}
                                 </div>
@@ -941,7 +1724,7 @@ export default function ThemesPage() {
                         ))
                       ) : (
                         <tr>
-                          <td colSpan={7}>{t("projects.config.themesEmpty")}</td>
+                          <td colSpan={8}>{t("projects.config.themesEmpty")}</td>
                         </tr>
                       )}
                     </tbody>
@@ -958,8 +1741,9 @@ export default function ThemesPage() {
                         </div>
                         <div className="theme-detail-meta">
                           {t("projects.config.themeDetailMeta", {
-                            total: activeThemeSymbols.symbols.length,
-                            manual: activeManualSet.size,
+                            total: activeCombinedSymbols.length,
+                            manual: activeManualSymbols.length,
+                            excluded: activeExcludeSymbols.length,
                           })}
                         </div>
                       </div>
@@ -985,24 +1769,151 @@ export default function ThemesPage() {
                           {t("projects.config.themeDetailExport")}
                         </button>
                       </div>
-                    </div>
-                    <div className="theme-detail-list">
-                      {filteredActiveSymbols.length ? (
-                        filteredActiveSymbols.map((symbol) => (
+                      <div className="theme-symbol-form">
+                        <input
+                          className="form-input"
+                          value={newThemeSymbol}
+                          onChange={(e) => {
+                            setNewThemeSymbol(e.target.value.toUpperCase());
+                            setThemeSymbolMessage("");
+                          }}
+                          placeholder={t("projects.config.themeSymbolPlaceholder")}
+                        />
+                        <select
+                          className="form-select"
+                          value={newThemeSymbolType}
+                          onChange={(e) => setNewThemeSymbolType(e.target.value)}
+                        >
+                          {symbolTypeOptions.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                        <div className="theme-symbol-actions">
                           <button
-                            key={symbol}
                             type="button"
-                            className={`theme-chip ${activeManualSet.has(symbol) ? "manual" : ""}`}
-                            onClick={() => applyThemeSymbolFilter(symbol)}
+                            className="button-secondary"
+                            onClick={() => handleAddSymbol("manual")}
                           >
-                            {symbol}
+                            {t("projects.config.themeSymbolAdd")}
                           </button>
-                        ))
-                      ) : (
-                        <span className="theme-detail-empty">
-                          {t("projects.config.themeEmptySymbols")}
-                        </span>
+                          <button
+                            type="button"
+                            className="button-secondary"
+                            onClick={() => handleAddSymbol("exclude")}
+                          >
+                            {t("projects.config.themeSymbolExclude")}
+                          </button>
+                        </div>
+                      </div>
+                      {themeSymbolMessage && (
+                        <div className="form-hint">{themeSymbolMessage}</div>
                       )}
+                    </div>
+                    <div className="theme-detail-section">
+                      <div className="theme-detail-section-title">
+                        {t("projects.config.themeDetailAuto")}
+                      </div>
+                      <div className="theme-detail-list">
+                        {filteredAutoSymbols.length ? (
+                          filteredAutoSymbols.map((symbol) => (
+                            <span key={symbol} className="theme-chip-group">
+                              <a
+                                className="theme-chip"
+                                href={yahooSymbolUrl(symbol)}
+                                target="_blank"
+                                rel="noreferrer"
+                                onClick={() => applyThemeSymbolFilter(symbol)}
+                              >
+                                {formatSymbolLabel(symbol, activeSymbolTypes)}
+                              </a>
+                              <button
+                                type="button"
+                                className="theme-chip-action"
+                                onClick={() =>
+                                  addExcludeSymbol(
+                                    symbol,
+                                    activeSymbolTypes[symbol] || "UNKNOWN"
+                                  )
+                                }
+                              >
+                                {t("projects.config.themeSymbolExcludeAction")}
+                              </button>
+                            </span>
+                          ))
+                        ) : (
+                          <span className="theme-detail-empty">
+                            {t("projects.config.themeEmptySymbols")}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="theme-detail-section">
+                      <div className="theme-detail-section-title">
+                        {t("projects.config.themeDetailManual")}
+                      </div>
+                      <div className="theme-detail-list">
+                        {filteredManualSymbols.length ? (
+                          filteredManualSymbols.map((symbol) => (
+                            <span key={symbol} className="theme-chip-group">
+                              <a
+                                className="theme-chip exclude"
+                                href={yahooSymbolUrl(symbol)}
+                                target="_blank"
+                                rel="noreferrer"
+                                onClick={() => applyThemeSymbolFilter(symbol)}
+                              >
+                                {formatSymbolLabel(symbol, activeSymbolTypes)}
+                              </a>
+                              <button
+                                type="button"
+                                className="theme-chip-action"
+                                onClick={() => removeManualSymbol(symbol)}
+                              >
+                                {t("projects.config.themeSymbolRemove")}
+                              </button>
+                            </span>
+                          ))
+                        ) : (
+                          <span className="theme-detail-empty">
+                            {t("projects.config.themeEmptySymbols")}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="theme-detail-section">
+                      <div className="theme-detail-section-title">
+                        {t("projects.config.themeDetailExcluded")}
+                      </div>
+                      <div className="theme-detail-list">
+                        {filteredExcludedSymbols.length ? (
+                          filteredExcludedSymbols.map((symbol) => (
+                            <span key={symbol} className="theme-chip-group">
+                              <a
+                                className="theme-chip manual"
+                                href={yahooSymbolUrl(symbol)}
+                                target="_blank"
+                                rel="noreferrer"
+                                onClick={() => applyThemeSymbolFilter(symbol)}
+                              >
+                                {formatSymbolLabel(symbol, activeSymbolTypes)}
+                              </a>
+                              <button
+                                type="button"
+                                className="theme-chip-action theme-chip-action-neutral"
+                                onClick={() => restoreExcludedSymbol(symbol)}
+                              >
+                                {t("projects.config.themeSymbolRestore")}
+                              </button>
+                            </span>
+                          ))
+                        ) : (
+                          <span className="theme-detail-empty">
+                            {t("projects.config.themeEmptySymbols")}
+                          </span>
+                        )}
+                      </div>
                     </div>
                   </div>
                 )}
@@ -1068,14 +1979,16 @@ export default function ThemesPage() {
                 <div className="theme-compare-list">
                   {compareSets.onlyA.length
                     ? compareSets.onlyA.map((symbol) => (
-                        <button
+                        <a
                           key={symbol}
-                          type="button"
                           className="theme-chip"
+                          href={yahooSymbolUrl(symbol)}
+                          target="_blank"
+                          rel="noreferrer"
                           onClick={() => applyThemeSymbolFilter(symbol)}
                         >
-                          {symbol}
-                        </button>
+                          {formatSymbolLabel(symbol, compareSymbolTypes)}
+                        </a>
                       ))
                     : t("projects.config.themeEmptySymbols")}
                 </div>
@@ -1087,14 +2000,16 @@ export default function ThemesPage() {
                 <div className="theme-compare-list">
                   {compareSets.shared.length
                     ? compareSets.shared.map((symbol) => (
-                        <button
+                        <a
                           key={symbol}
-                          type="button"
                           className="theme-chip"
+                          href={yahooSymbolUrl(symbol)}
+                          target="_blank"
+                          rel="noreferrer"
                           onClick={() => applyThemeSymbolFilter(symbol)}
                         >
-                          {symbol}
-                        </button>
+                          {formatSymbolLabel(symbol, compareSymbolTypes)}
+                        </a>
                       ))
                     : t("projects.config.themeEmptySymbols")}
                 </div>
@@ -1104,14 +2019,16 @@ export default function ThemesPage() {
                 <div className="theme-compare-list">
                   {compareSets.onlyB.length
                     ? compareSets.onlyB.map((symbol) => (
-                        <button
+                        <a
                           key={symbol}
-                          type="button"
                           className="theme-chip"
+                          href={yahooSymbolUrl(symbol)}
+                          target="_blank"
+                          rel="noreferrer"
                           onClick={() => applyThemeSymbolFilter(symbol)}
                         >
-                          {symbol}
-                        </button>
+                          {formatSymbolLabel(symbol, compareSymbolTypes)}
+                        </a>
                       ))
                     : t("projects.config.themeEmptySymbols")}
                 </div>

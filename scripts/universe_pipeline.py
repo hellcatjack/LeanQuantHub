@@ -353,6 +353,12 @@ def load_theme_config(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def write_theme_config(path: Path, payload: dict) -> None:
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
 def load_benchmark_symbols(base_dir: Path, config_path: Path | None = None) -> list[str]:
     if config_path is None:
         env_path = os.environ.get("WEIGHTS_CONFIG_PATH")
@@ -388,6 +394,45 @@ def normalize_symbol(symbol: str) -> str:
     return symbol.strip().upper()
 
 
+def normalize_symbol_list(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        items = value
+    else:
+        items = [value]
+    result = []
+    for item in items:
+        symbol = normalize_symbol(str(item))
+        if symbol:
+            result.append(symbol)
+    return result
+
+
+def coerce_priority(value: object, default: int = 0) -> int:
+    if value is None:
+        return default
+    try:
+        return int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        return default
+
+
+def build_symbol_type_map(config: dict) -> dict[str, str]:
+    raw_map = config.get("symbol_types") or {}
+    if not isinstance(raw_map, dict):
+        return {}
+    result: dict[str, str] = {}
+    for key, value in raw_map.items():
+        symbol = normalize_symbol(str(key))
+        if not symbol:
+            continue
+        kind = str(value or "").strip().upper()
+        if kind:
+            result[symbol] = kind
+    return result
+
+
 def infer_region(symbol: str, default: str) -> str:
     symbol = symbol.upper()
     if symbol.endswith(".HK"):
@@ -403,18 +448,33 @@ def build_theme_candidates(config: dict) -> list[dict[str, str]]:
     pause = float(yahoo_cfg.get("pauseSeconds") or 0)
     default_region = config.get("defaults", {}).get("region", "US")
     default_asset = config.get("defaults", {}).get("asset_class", "Equity")
-    seen: dict[str, dict[str, str]] = {}
+    symbol_types = build_symbol_type_map(config)
+    candidates: dict[str, list[dict[str, str]]] = {}
 
-    for category in categories:
+    def add_candidate(symbol: str, payload: dict[str, str]) -> None:
+        candidates.setdefault(symbol, []).append(payload)
+
+    for order, category in enumerate(categories):
         key = category.get("key", "").strip()
         label = category.get("label", key)
         if not key:
             continue
-        for manual in category.get("manual", []) or []:
+        priority = coerce_priority(category.get("priority"), 0)
+        exclude_symbols = set(normalize_symbol_list(category.get("exclude") or []))
+        pinned_symbols = normalize_symbol_list(category.get("manualPinned") or [])
+        manual_symbols = normalize_symbol_list(category.get("manual") or [])
+        ordered_manuals: list[str] = []
+        for symbol in pinned_symbols + manual_symbols:
+            normalized = normalize_symbol(symbol)
+            if normalized and normalized not in ordered_manuals:
+                ordered_manuals.append(normalized)
+        category_seen: set[str] = set()
+        for manual in ordered_manuals:
             symbol = normalize_symbol(manual)
-            if not symbol:
+            if not symbol or symbol in exclude_symbols or symbol in category_seen:
                 continue
-            seen.setdefault(
+            asset_class = symbol_types.get(symbol) or default_asset
+            add_candidate(
                 symbol,
                 {
                     "symbol": symbol,
@@ -423,9 +483,13 @@ def build_theme_candidates(config: dict) -> list[dict[str, str]]:
                     "source": "manual",
                     "keyword": "manual",
                     "region": infer_region(symbol, default_region),
-                    "asset_class": default_asset,
+                    "asset_class": asset_class,
+                    "priority": str(priority),
+                    "source_rank": "1",
+                    "order": str(order),
                 },
             )
+            category_seen.add(symbol)
         for keyword in category.get("keywords", []) or []:
             try:
                 quotes = yahoo_search(keyword, count)
@@ -439,26 +503,141 @@ def build_theme_candidates(config: dict) -> list[dict[str, str]]:
                 if allow_exchanges and exchange and exchange not in allow_exchanges:
                     continue
                 symbol = normalize_symbol(quote.get("symbol") or "")
-                if not symbol or symbol in seen:
+                if not symbol or symbol in exclude_symbols or symbol in category_seen:
                     continue
-                seen[symbol] = {
-                    "symbol": symbol,
-                    "category": key,
-                    "category_label": label,
-                    "source": "yahoo",
-                    "keyword": keyword,
-                    "region": infer_region(symbol, default_region),
-                    "asset_class": default_asset,
-                }
+                asset_class = symbol_types.get(symbol)
+                if not asset_class:
+                    if quote_type == "ETF":
+                        asset_class = "ETF"
+                    elif quote_type == "EQUITY":
+                        asset_class = "Equity"
+                    else:
+                        asset_class = default_asset
+                add_candidate(
+                    symbol,
+                    {
+                        "symbol": symbol,
+                        "category": key,
+                        "category_label": label,
+                        "source": "yahoo",
+                        "keyword": keyword,
+                        "region": infer_region(symbol, default_region),
+                        "asset_class": asset_class,
+                        "priority": str(priority),
+                        "source_rank": "0",
+                        "order": str(order),
+                    },
+                )
+                category_seen.add(symbol)
             if pause:
                 time.sleep(pause)
-    return list(seen.values())
+
+    winners: list[dict[str, str]] = []
+
+    def rank(item: dict[str, str]) -> tuple[int, int, int]:
+        return (
+            coerce_priority(item.get("priority"), 0),
+            coerce_priority(item.get("source_rank"), 0),
+            -coerce_priority(item.get("order"), 0),
+        )
+
+    for symbol, items in candidates.items():
+        if not items:
+            continue
+        winner = max(items, key=rank)
+        winner.pop("priority", None)
+        winner.pop("source_rank", None)
+        winner.pop("order", None)
+        winners.append(winner)
+    return winners
+
+
+def refresh_theme_manuals(
+    config_path: Path,
+    keys: list[str],
+    manual_limit: int | None,
+) -> dict[str, list[str]]:
+    config = load_theme_config(config_path)
+    categories = config.get("categories", [])
+    yahoo_cfg = config.get("yahoo", {})
+    allow_exchanges = set(yahoo_cfg.get("allowExchanges") or [])
+    count = int(yahoo_cfg.get("quotesCount") or 25)
+    pause = float(yahoo_cfg.get("pauseSeconds") or 0)
+    default_limit = int(yahoo_cfg.get("manualMax") or 40)
+    limit = manual_limit if manual_limit and manual_limit > 0 else default_limit
+    manual_mode = str(yahoo_cfg.get("manualMode") or "merge").strip().lower()
+    selected = {key.strip().upper() for key in keys if key.strip()}
+    updated: dict[str, list[str]] = {}
+
+    def collect_symbols(category: dict) -> list[str]:
+        keywords = category.get("keywords", []) or []
+        exclude_symbols = set(normalize_symbol_list(category.get("exclude") or []))
+        pinned = [
+            symbol
+            for symbol in normalize_symbol_list(category.get("manualPinned") or [])
+            if symbol not in exclude_symbols
+        ]
+        base_manual = [
+            symbol
+            for symbol in normalize_symbol_list(category.get("manual") or [])
+            if symbol not in exclude_symbols
+        ]
+        if manual_mode == "replace":
+            base_manual = []
+        merged_base: list[str] = []
+        for symbol in pinned + base_manual:
+            if symbol not in merged_base:
+                merged_base.append(symbol)
+        scores: dict[str, int] = {}
+        for keyword in keywords:
+            try:
+                quotes = yahoo_search(keyword, count)
+            except Exception:
+                continue
+            for quote in quotes:
+                quote_type = (quote.get("quoteType") or "").upper()
+                exchange = (quote.get("exchange") or "").upper()
+                if quote_type not in {"EQUITY", "ETF"}:
+                    continue
+                if allow_exchanges and exchange and exchange not in allow_exchanges:
+                    continue
+                symbol = normalize_symbol(quote.get("symbol") or "")
+                if not symbol or symbol in exclude_symbols:
+                    continue
+                scores[symbol] = scores.get(symbol, 0) + 1
+            if pause:
+                time.sleep(pause)
+        ranked = sorted(scores.items(), key=lambda item: (-item[1], item[0]))
+        symbols = [symbol for symbol, _ in ranked if symbol not in exclude_symbols]
+        merged = merged_base + [
+            symbol for symbol in symbols if symbol not in merged_base
+        ]
+        if limit and len(merged) > limit:
+            merged = merged[:limit]
+        return merged
+
+    for category in categories:
+        key = str(category.get("key", "")).strip().upper()
+        if not key or (selected and key not in selected):
+            continue
+        symbols = collect_symbols(category)
+        category["manual"] = symbols
+        updated[key] = symbols
+
+    write_theme_config(config_path, config)
+    return updated
 
 
 def build_universe(
     data_root: Path, config_path: Path, history_path: Path | None
 ) -> Path:
     membership = build_membership(data_root, history_path)
+    current_symbols = {
+        entry["symbol"]
+        for entry in membership
+        if entry.get("symbol")
+        and not (entry.get("end_date") or "").strip()
+    }
     theme_cfg = load_theme_config(config_path)
     themes = build_theme_candidates(theme_cfg)
     theme_by_symbol = {item["symbol"]: item for item in themes}
@@ -489,8 +668,12 @@ def build_universe(
             category = theme["category"]
             label = theme["category_label"]
         else:
-            category = "SP500_OTHER"
-            label = "S&P500其他"
+            if symbol in current_symbols:
+                category = "SP500_CURRENT"
+                label = "S&P500现有成分"
+            else:
+                category = "SP500_FORMER"
+                label = "S&P500历史成分（现存）"
         rows.append(
             {
                 "symbol": symbol,
@@ -846,25 +1029,61 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
     }
     stooq_dir = data_root / "prices" / "stooq"
     yahoo_dir = data_root / "prices" / "yahoo"
+    curated_dir = data_root / "curated"
+    curated_adjusted_dir = data_root / "curated_adjusted"
+    normalized_dir = data_root / "normalized"
+
+    def build_symbol_map(source_dir: Path) -> dict[str, Path]:
+        symbol_map: dict[str, Path] = {}
+        if not source_dir.exists():
+            return symbol_map
+        for file in source_dir.glob("*.csv"):
+            parts = file.stem.split("_")
+            if len(parts) < 3:
+                continue
+            symbol = parts[-2].strip().upper()
+            if symbol and symbol not in symbol_map:
+                symbol_map[symbol] = file
+        return symbol_map
+
+    curated_map = build_symbol_map(curated_dir)
+    curated_adjusted_map = build_symbol_map(curated_adjusted_dir)
+    normalized_map = build_symbol_map(normalized_dir)
+
+    def resolve_symbol_path(symbol: str) -> tuple[Path | None, str]:
+        adjusted_path = curated_adjusted_map.get(symbol)
+        if adjusted_path:
+            return adjusted_path, "adjusted"
+        curated_path = curated_map.get(symbol) or normalized_map.get(symbol)
+        if curated_path:
+            return curated_path, "raw"
+        stooq_path = stooq_dir / f"{symbol}.csv"
+        if stooq_path.exists():
+            return stooq_path, "raw"
+        yahoo_path = yahoo_dir / f"{symbol}.csv"
+        if yahoo_path.exists():
+            return yahoo_path, "raw"
+        return None, "raw"
 
     frames = []
+    used_modes: set[str] = set()
     for row in universe:
         symbol = row.get("symbol", "").strip().upper()
         if not symbol:
             continue
-        path = stooq_dir / f"{symbol}.csv"
-        if not path.exists():
-            alt_path = yahoo_dir / f"{symbol}.csv"
-            if alt_path.exists():
-                path = alt_path
-            else:
-                continue
-        df = pd.read_csv(path)
-        if "Date" not in df.columns or "Close" not in df.columns:
+        path, mode = resolve_symbol_path(symbol)
+        if not path or not path.exists():
             continue
-        df = df[["Date", "Close"]].rename(columns={"Date": "date", "Close": symbol})
+        df = pd.read_csv(path)
+        column_map = {col.lower(): col for col in df.columns}
+        date_col = column_map.get("date")
+        close_col = column_map.get("close")
+        if not date_col or not close_col:
+            continue
+        df = df[[date_col, close_col]].rename(columns={date_col: "date", close_col: symbol})
         df["date"] = pd.to_datetime(df["date"], utc=True).dt.tz_convert(None)
         frames.append(df.set_index("date"))
+        used_modes.add(mode)
 
     if not frames:
         raise SystemExit("未找到可用的价格数据")
@@ -896,7 +1115,7 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
             continue
         symbols_by_category: dict[str, list[str]] = {}
         for symbol in active_symbols:
-            category = category_by_symbol.get(symbol, "SP500_OTHER") or "SP500_OTHER"
+            category = category_by_symbol.get(symbol) or "SP500_FORMER"
             symbols_by_category.setdefault(category, []).append(symbol)
         available_categories = {
             key: value for key, value in symbols_by_category.items() if value
@@ -928,16 +1147,15 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
     portfolio_returns = (weights.shift(1) * returns).sum(axis=1)
     portfolio_equity = (1 + portfolio_returns).cumprod()
 
-    benchmark_path = stooq_dir / f"{benchmark.upper()}.csv"
-    if not benchmark_path.exists():
-        alt_path = yahoo_dir / f"{benchmark.upper()}.csv"
-        if alt_path.exists():
-            benchmark_path = alt_path
-    if benchmark.upper() not in prices.columns and benchmark_path.exists():
+    benchmark_path, benchmark_mode = resolve_symbol_path(benchmark.upper())
+    if benchmark.upper() not in prices.columns and benchmark_path and benchmark_path.exists():
         bench_df = pd.read_csv(benchmark_path)
-        if "Date" in bench_df.columns and "Close" in bench_df.columns:
-            bench_df = bench_df[["Date", "Close"]].rename(
-                columns={"Date": "date", "Close": benchmark.upper()}
+        bench_column_map = {col.lower(): col for col in bench_df.columns}
+        bench_date_col = bench_column_map.get("date")
+        bench_close_col = bench_column_map.get("close")
+        if bench_date_col and bench_close_col:
+            bench_df = bench_df[[bench_date_col, bench_close_col]].rename(
+                columns={bench_date_col: "date", bench_close_col: benchmark.upper()}
             )
             bench_df["date"] = pd.to_datetime(bench_df["date"], utc=True).dt.tz_convert(None)
             bench_series = bench_df.set_index("date")[benchmark.upper()].sort_index()
@@ -966,12 +1184,19 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
     )
     equity_df.to_csv(equity_path, index=False, encoding="utf-8")
 
+    price_mode = "raw"
+    if used_modes == {"adjusted"}:
+        price_mode = "adjusted"
+    elif used_modes and "adjusted" in used_modes:
+        price_mode = "mixed"
     summary = {
         "portfolio": calc_metrics(portfolio_equity, risk_free),
         "benchmark": calc_metrics(benchmark_equity, risk_free),
         "start": str(portfolio_equity.index[0].date()),
         "end": str(portfolio_equity.index[-1].date()),
         "benchmark_symbol": benchmark,
+        "price_mode": price_mode,
+        "benchmark_mode": benchmark_mode if benchmark_mode else price_mode,
     }
     summary_path = out_dir / "summary.json"
     summary_path.write_text(
@@ -995,6 +1220,19 @@ def main() -> None:
     fetch_prices_cmd.add_argument("--overwrite", action="store_true")
     fetch_prices_cmd.add_argument("--limit", type=int, default=0, help="限制处理条数")
     sub.add_parser("backtest")
+    refresh_theme_cmd = sub.add_parser("refresh-theme-manuals")
+    refresh_theme_cmd.add_argument(
+        "--keys",
+        type=str,
+        default="AI_CORE,AI_INFRA,ENERGY_FUSION",
+        help="更新的主题组合（逗号分隔）",
+    )
+    refresh_theme_cmd.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="每个主题保留的最大成分数（0 代表使用配置默认值）",
+    )
 
     args = parser.parse_args()
     base = Path(__file__).resolve().parents[1]
@@ -1024,6 +1262,13 @@ def main() -> None:
             data_root, universe_path, overwrite=getattr(args, "overwrite", False), limit=limit
         )
         print(f"Price fetch status: {status_path}")
+    elif args.command == "refresh-theme-manuals":
+        keys = [key.strip().upper() for key in args.keys.split(",") if key.strip()]
+        updated = refresh_theme_manuals(config_path, keys, args.limit)
+        for key, symbols in updated.items():
+            print(f"{key}: {len(symbols)} symbols")
+        print(f"Theme config updated: {config_path}")
+
     elif args.command == "backtest":
         universe_path = data_root / "universe" / "universe.csv"
         if not universe_path.exists():

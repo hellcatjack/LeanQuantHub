@@ -6,6 +6,7 @@
     "AI_CORE": 0.45,
     "AI_INFRA": 0.25,
     "ENERGY_FUSION": 0.2,
-    "SP500_OTHER": 0.1
+    "SP500_CURRENT": 0.1,
+    "SP500_FORMER": 0.0
   }
 }

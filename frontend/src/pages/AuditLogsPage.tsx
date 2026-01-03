@@ -16,7 +16,7 @@ interface AuditLog {
 }
 
 export default function AuditLogsPage() {
-  const { t } = useI18n();
+  const { t, formatDateTime } = useI18n();
   const [logs, setLogs] = useState<AuditLog[]>([]);
   const [logTotal, setLogTotal] = useState(0);
   const [logPage, setLogPage] = useState(1);
@@ -125,7 +125,7 @@ export default function AuditLogsPage() {
             {logs.map((log) => (
               <tr key={log.id}>
                 <td>{log.id}</td>
-                <td>{new Date(log.created_at).toLocaleString()}</td>
+                <td>{formatDateTime(log.created_at)}</td>
                 <td>{log.action}</td>
                 <td>
                   {log.resource_type}

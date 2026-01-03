@@ -1,63 +1,70 @@
 # LeanQuantHub
 
-LeanQuantHub 是基于 Lean 引擎的本地化量化研究与回测平台，提供项目管理、算法版本、数据管线、回测与报告的一体化协作体验。前端参考 QuantConnect 交互风格，后端基于 FastAPI + MySQL，核心回测由 Lean Runner 触发。
+本项目用于量化交易学习与研究，不构成任何投资建议。
 
-> 项目声明：本项目仅用于量化交易学习与研究，不构成任何投资建议。
-
-## 核心能力
-- 项目/算法/回测/报告的完整链路管理
-- 主题化投资组合配置（可编辑主题、权重、关键词与手动股票）
-- 数据管线：成分构建、指标抓取、价格下载与质量查看
-- Lean 回测集成与报告归档
+LeanQuantHub 是一套本地化多用户量化平台：前端参考 QuantConnect 风格，后端基于 Lean Runner 的任务执行模型，支持主题管理、数据管理、回测与报告归档。
 
 ## 目录结构
-- backend/：FastAPI API + MySQL 元数据
-- frontend/：React + Vite 前端
-- scripts/：数据管线与工具脚本
-- configs/：默认主题与权重模板
-- algorithms/：Lean 策略脚本
-- deploy/：部署与数据库脚本
-
-## 快速开始（服务器）
-1. 初始化数据库
-   ```
-   mysql -u <user> -p < /app/stocklean/deploy/mysql/schema.sql
-   ```
-2. 配置环境变量
-   ```
-   cp /app/stocklean/backend/.env.example /app/stocklean/backend/.env
-   # 填写 DB_* 与 Lean 路径
-   ```
-3. 启动服务（systemd 用户服务）
-   ```
-   systemctl --user restart stocklean-backend stocklean-frontend
-   ```
-4. 访问
-   - 前端：http://<server>:8081
-   - 后端：http://<server>:8021
+- `backend/`：FastAPI + MySQL 元数据服务
+- `frontend/`：React + Vite 前端
+- `algorithms/`：Lean 算法脚本
+- `ml/`：ML 评分与推理工具
+- `configs/`：Lean 配置模板与主题权重
+- `deploy/`：systemd 与部署脚本
 
 ## 本地开发
-后端：
-```
+
+### 后端
+```bash
 cd backend
+cp .env.example .env
+# 填写 DB_* / LEAN_* / ML_* 等环境变量
 python -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app.main:app --host 0.0.0.0 --port 8021
+.venv/bin/pip install -r requirements.txt
+.venv/bin/uvicorn app.main:app --reload --host 0.0.0.0 --port 8021
 ```
-前端：
-```
+
+### 前端
+```bash
 cd frontend
+cp .env.example .env
 npm install
 npm run dev
 ```
 
-## 配置与安全
-- 所有敏感配置使用 .env，请勿提交到仓库。
-- .env.example 提供模板，默认已去敏。
+默认前端：http://localhost:5173  
+默认后端：http://localhost:8021
 
-## 项目地址
-- GitHub：https://github.com/hellcatjack/LeanQuantHub
+## 服务器部署（systemd）
+```bash
+cd frontend
+npm install
+npm run build
 
-## 许可协议
-- MIT License
+# 部署 systemd
+cp deploy/systemd/*.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user restart stocklean-backend stocklean-frontend
+```
+
+默认前端：http://<host>:8081  
+默认后端：http://<host>:8021
+
+## Lean Runner 配置
+在后端 `.env` 中设置：
+- `LEAN_LAUNCHER_PATH`：Lean Launcher csproj 路径
+- `LEAN_CONFIG_TEMPLATE`：Lean 配置模板 JSON
+- `LEAN_ALGORITHM_PATH`：算法脚本路径
+- `LEAN_DATA_FOLDER`：Lean 数据目录
+- `LEAN_PYTHON_VENV`：**Lean 专用 Python 3.11 venv**
+- `PYTHON_DLL`：Python 3.11 的 `libpython` 路径
+- `DOTNET_PATH` / `DOTNET_ROOT`
+
+## ML 评分（双 venv）
+- Lean 使用 Python 3.11（兼容 Python.NET）
+- ML 推理使用独立 Python（推荐 3.12），在 `.env` 中配置：
+  - `ML_PYTHON_PATH=/app/stocklean/.venv/bin/python`
+
+## 安全与提交
+- 禁止提交 `.env`、数据目录、日志与构建产物
+- 使用 `.env.example` 提供模板，不暴露真实密钥或内网地址

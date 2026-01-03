@@ -9,7 +9,11 @@ class AaplBuyHold(QCAlgorithm):
 
         equity = self.add_equity("AAPL", Resolution.DAILY)
         self.symbol = equity.symbol
-        self.set_benchmark(self.symbol)
+        benchmark = (self.get_parameter("benchmark") or "").strip()
+        if benchmark:
+            self.set_benchmark(benchmark)
+        else:
+            self.set_benchmark(self.symbol)
 
     def on_data(self, data) -> None:
         if self.portfolio[self.symbol].invested:

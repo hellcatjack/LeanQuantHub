@@ -1,0 +1,12 @@
+[
+    {
+        "port":  8021,
+        "pid":  27064,
+        "name":  "backend"
+    },
+    {
+        "port":  5173,
+        "pid":  40152,
+        "name":  "frontend"
+    }
+]
