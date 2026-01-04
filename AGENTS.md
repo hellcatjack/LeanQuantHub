@@ -13,6 +13,24 @@
 - `configs/`：主题模板与权重配置。
 - `deploy/mysql/`：数据库初始化脚本。
 
+## 服务器数据目录（/data/share/stock）
+- `.venv`：软链接到 `/data/anomalib/.venv`（ROCm/PyTorch 环境）。
+- `lean-py311/`：Lean 的 Python 运行环境与依赖。
+- `data/`：主数据目录：
+  - `raw/`：原始抓取数据。
+  - `normalized/`：清洗标准化数据。
+  - `curated/`：统一格式数据。
+  - `curated_adjusted/`：复权后的统一数据（训练/回测优先）。
+  - `curated_versions/`：按版本归档的数据快照。
+  - `lean/`、`lean_adjusted/`：Lean 格式数据与复权版本。
+  - `factors/`：复权因子与公司行为辅助文件。
+  - `prices/`：价格快照与聚合结果。
+  - `universe/`：股票池与主题成分数据。
+  - `ml/`：训练数据与中间产物缓存。
+  - `backtest/`：回测输出文件。
+  - `stream/`：增量更新缓存。
+- `assets/`、`docs/`、`scripts/`、`logs/`：资源、文档、脚本与日志。
+
 ## 运行与构建
 - 后端：`uvicorn app.main:app --host 0.0.0.0 --port 8021`
 - 前端：`npm run dev` / `npm run build`
