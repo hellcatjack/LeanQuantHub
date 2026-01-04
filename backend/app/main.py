@@ -11,6 +11,7 @@ from app.routes import (
     audit_logs,
     backtests,
     datasets,
+    ml,
     projects,
     reports,
     system_themes,
@@ -50,3 +51,4 @@ app.include_router(datasets.router)
 app.include_router(audit_logs.router)
 app.include_router(system_themes.router)
 app.include_router(universe.router)
+app.include_router(ml.router)

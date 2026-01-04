@@ -46,6 +46,24 @@ interface AlgorithmVersion {
   created_at: string;
 }
 
+interface MLTrainJob {
+  id: number;
+  project_id: number;
+  status: string;
+  config?: Record<string, any> | null;
+  metrics?: Record<string, any> | null;
+  output_dir?: string | null;
+  model_path?: string | null;
+  payload_path?: string | null;
+  scores_path?: string | null;
+  log_path?: string | null;
+  message?: string | null;
+  is_active?: boolean;
+  created_at: string;
+  started_at?: string | null;
+  ended_at?: string | null;
+}
+
 interface ThemeSystemMeta {
   theme_id: number;
   version_id?: number | null;
@@ -246,6 +264,16 @@ export default function ProjectsPage() {
   });
   const [bindingMessage, setBindingMessage] = useState("");
   const [benchmarkMessage, setBenchmarkMessage] = useState("");
+  const [mlJobs, setMlJobs] = useState<MLTrainJob[]>([]);
+  const [mlMessage, setMlMessage] = useState("");
+  const [mlLoading, setMlLoading] = useState(false);
+  const [mlDetailId, setMlDetailId] = useState<number | null>(null);
+  const [mlForm, setMlForm] = useState({
+    device: "auto",
+    trainYears: "8",
+    validMonths: "12",
+    labelHorizonDays: "20",
+  });
   const [projectTab, setProjectTab] = useState<
     "overview" | "config" | "algorithm" | "data" | "backtest" | "versions" | "diff"
   >("overview");
@@ -432,6 +460,60 @@ export default function ProjectsPage() {
     }
   };
 
+  const loadMlJobs = async (projectId: number) => {
+    try {
+      const res = await api.get<MLTrainJob[]>("/api/ml/train-jobs", {
+        params: { project_id: projectId },
+      });
+      setMlJobs(res.data || []);
+      setMlMessage("");
+    } catch (err) {
+      setMlJobs([]);
+      setMlMessage(t("projects.ml.error"));
+    }
+  };
+
+  const createMlJob = async () => {
+    if (!selectedProjectId) {
+      return;
+    }
+    const toNumber = (value: string) => {
+      const num = Number(value);
+      return Number.isFinite(num) ? num : undefined;
+    };
+    setMlLoading(true);
+    setMlMessage("");
+    try {
+      await api.post("/api/ml/train-jobs", {
+        project_id: selectedProjectId,
+        device: mlForm.device,
+        train_years: toNumber(mlForm.trainYears),
+        valid_months: toNumber(mlForm.validMonths),
+        label_horizon_days: toNumber(mlForm.labelHorizonDays),
+      });
+      await loadMlJobs(selectedProjectId);
+      setMlMessage(t("projects.ml.queued"));
+    } catch (err) {
+      setMlMessage(t("projects.ml.error"));
+    } finally {
+      setMlLoading(false);
+    }
+  };
+
+  const activateMlJob = async (jobId: number) => {
+    if (!selectedProjectId) {
+      return;
+    }
+    setMlMessage("");
+    try {
+      await api.post(`/api/ml/train-jobs/${jobId}/activate`);
+      await loadMlJobs(selectedProjectId);
+      setMlMessage(t("projects.ml.activated"));
+    } catch (err) {
+      setMlMessage(t("projects.ml.activateError"));
+    }
+  };
+
   useEffect(() => {
     loadProjects();
   }, [projectPage, projectPageSize]);
@@ -450,6 +532,7 @@ export default function ProjectsPage() {
       loadLatestBacktest(selectedProjectId);
       loadThemeSummary(selectedProjectId);
       loadProjectBinding(selectedProjectId);
+      loadMlJobs(selectedProjectId);
       setConfigMessage("");
       setDataMessage("");
       setBacktestMessage("");
@@ -482,6 +565,9 @@ export default function ProjectsPage() {
       setCompareThemeB("");
       setCompareMessage("");
       setBinding(null);
+      setMlJobs([]);
+      setMlMessage("");
+      setMlDetailId(null);
       setNewThemeSymbol("");
       setNewThemeSymbolType("STOCK");
       setThemeSymbolMessage("");
@@ -1013,6 +1099,14 @@ export default function ProjectsPage() {
     () => projects.find((item) => item.id === selectedProjectId),
     [projects, selectedProjectId]
   );
+  const mlActiveJob = useMemo(
+    () => mlJobs.find((job) => job.is_active) || mlJobs[0] || null,
+    [mlJobs]
+  );
+  const mlDetailJob = useMemo(
+    () => mlJobs.find((job) => job.id === mlDetailId) || mlActiveJob,
+    [mlJobs, mlDetailId, mlActiveJob]
+  );
   const filteredProjects = useMemo(() => {
     const keyword = projectSearch.trim().toLowerCase();
     if (!keyword) {
@@ -1037,6 +1131,25 @@ export default function ProjectsPage() {
       return "-";
     }
     return `${(value * 100).toFixed(2)}%`;
+  };
+
+  const mlStatusLabel = (status?: string) => {
+    const key = `projects.ml.status.${status || "unknown"}`;
+    const label = t(key);
+    return label === key ? status || t("common.none") : label;
+  };
+
+  const mlStatusClass = (status?: string) => {
+    if (status === "success") {
+      return "success";
+    }
+    if (status === "failed") {
+      return "danger";
+    }
+    if (status === "running" || status === "queued") {
+      return "warn";
+    }
+    return "";
   };
 
   const formatNumber = (value?: number | null) => {
@@ -1778,26 +1891,24 @@ export default function ProjectsPage() {
                       <label className="form-label">{t("projects.config.vendorPrimary")}</label>
                       <select
                         className="form-select"
-                        value={configDraft.data?.primary_vendor || "stooq"}
+                        value={configDraft.data?.primary_vendor || "alpha"}
                         onChange={(e) =>
                           updateConfigSection("data", "primary_vendor", e.target.value)
                         }
                       >
-                        <option value="stooq">Stooq</option>
-                        <option value="yahoo">Yahoo</option>
+                        <option value="alpha">Alpha</option>
                       </select>
                     </div>
                     <div className="form-row">
                       <label className="form-label">{t("projects.config.vendorFallback")}</label>
                       <select
                         className="form-select"
-                        value={configDraft.data?.fallback_vendor || "yahoo"}
+                        value={configDraft.data?.fallback_vendor || "alpha"}
                         onChange={(e) =>
                           updateConfigSection("data", "fallback_vendor", e.target.value)
                         }
                       >
-                        <option value="yahoo">Yahoo</option>
-                        <option value="stooq">Stooq</option>
+                        <option value="alpha">Alpha</option>
                       </select>
                     </div>
                   </div>
@@ -2616,6 +2727,184 @@ export default function ProjectsPage() {
             </div>
             </div>
               {renderBenchmarkEditor()}
+              <div className="card">
+                <div className="card-title">{t("projects.ml.title")}</div>
+                <div className="card-meta">{t("projects.ml.meta")}</div>
+                <div className="meta-list" style={{ marginBottom: "12px" }}>
+                  <div className="meta-row">
+                    <span>{t("projects.ml.symbolCount")}</span>
+                    <strong>{themeSummary?.total_symbols ?? 0}</strong>
+                  </div>
+                  <div className="meta-row">
+                    <span>{t("projects.ml.benchmark")}</span>
+                    <strong>{configDraft?.benchmark || "SPY"}</strong>
+                  </div>
+                  <div className="meta-row">
+                    <span>{t("projects.ml.current")}</span>
+                    <strong>
+                      {mlActiveJob?.id
+                        ? t("projects.ml.currentJob", { id: mlActiveJob.id })
+                        : t("common.noneText")}
+                    </strong>
+                  </div>
+                </div>
+                <div className="form-grid">
+                  <div className="form-row">
+                    <label className="form-label">{t("projects.ml.device")}</label>
+                    <select
+                      className="form-select"
+                      value={mlForm.device}
+                      onChange={(e) =>
+                        setMlForm((prev) => ({ ...prev, device: e.target.value }))
+                      }
+                    >
+                      <option value="auto">{t("projects.ml.deviceAuto")}</option>
+                      <option value="cpu">{t("projects.ml.deviceCpu")}</option>
+                      <option value="cuda">{t("projects.ml.deviceCuda")}</option>
+                    </select>
+                  </div>
+                  <div className="form-row">
+                    <label className="form-label">{t("projects.ml.trainYears")}</label>
+                    <input
+                      type="number"
+                      className="form-input"
+                      value={mlForm.trainYears}
+                      onChange={(e) =>
+                        setMlForm((prev) => ({ ...prev, trainYears: e.target.value }))
+                      }
+                    />
+                  </div>
+                  <div className="form-row">
+                    <label className="form-label">{t("projects.ml.validMonths")}</label>
+                    <input
+                      type="number"
+                      className="form-input"
+                      value={mlForm.validMonths}
+                      onChange={(e) =>
+                        setMlForm((prev) => ({ ...prev, validMonths: e.target.value }))
+                      }
+                    />
+                  </div>
+                  <div className="form-row">
+                    <label className="form-label">{t("projects.ml.horizonDays")}</label>
+                    <input
+                      type="number"
+                      className="form-input"
+                      value={mlForm.labelHorizonDays}
+                      onChange={(e) =>
+                        setMlForm((prev) => ({
+                          ...prev,
+                          labelHorizonDays: e.target.value,
+                        }))
+                      }
+                    />
+                  </div>
+                  {mlMessage && <div className="form-hint">{mlMessage}</div>}
+                  <button className="button-primary" onClick={createMlJob} disabled={mlLoading}>
+                    {mlLoading ? t("common.actions.loading") : t("projects.ml.train")}
+                  </button>
+                </div>
+                <div className="section-divider" />
+                {mlJobs.length ? (
+                  <div className="table-scroll">
+                    <table className="table">
+                      <thead>
+                        <tr>
+                          <th>{t("projects.ml.table.status")}</th>
+                          <th>{t("projects.ml.table.window")}</th>
+                          <th>{t("projects.ml.table.horizon")}</th>
+                          <th>{t("projects.ml.table.symbols")}</th>
+                          <th>{t("projects.ml.table.device")}</th>
+                          <th>{t("projects.ml.table.createdAt")}</th>
+                          <th>{t("projects.ml.table.actions")}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {mlJobs.map((job) => {
+                          const cfg = job.config || {};
+                          const walk = (cfg.walk_forward || {}) as Record<string, any>;
+                          const symbolCount =
+                            cfg.meta?.symbol_count ?? (cfg.symbols?.length ?? 0);
+                          return (
+                            <tr key={job.id}>
+                              <td>
+                                <span className={`pill ${mlStatusClass(job.status)}`.trim()}>
+                                  {mlStatusLabel(job.status)}
+                                </span>
+                                {job.is_active && (
+                                  <span className="badge" style={{ marginLeft: 8 }}>
+                                    {t("projects.ml.active")}
+                                  </span>
+                                )}
+                              </td>
+                              <td>
+                                {walk.train_years ? `${walk.train_years}Y` : "-"} /{" "}
+                                {walk.valid_months ? `${walk.valid_months}M` : "-"}
+                              </td>
+                              <td>{cfg.label_horizon_days ?? "-"}</td>
+                              <td>{symbolCount || "-"}</td>
+                              <td>{cfg.device || "auto"}</td>
+                              <td>{formatDateTime(job.created_at)}</td>
+                              <td className="table-actions">
+                                <button
+                                  className="link-button"
+                                  type="button"
+                                  onClick={() => setMlDetailId(job.id)}
+                                >
+                                  {t("projects.ml.detail")}
+                                </button>
+                                {job.status === "success" && !job.is_active && (
+                                  <button
+                                    className="link-button"
+                                    type="button"
+                                    onClick={() => activateMlJob(job.id)}
+                                  >
+                                    {t("projects.ml.activate")}
+                                  </button>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="empty-state">{t("projects.ml.empty")}</div>
+                )}
+                {mlDetailJob && (
+                  <div style={{ marginTop: "12px" }} className="meta-list">
+                    <div className="meta-row">
+                      <span>{t("projects.ml.detailTitle")}</span>
+                      <strong>
+                        {t("projects.ml.currentJob", { id: mlDetailJob.id })}
+                      </strong>
+                    </div>
+                    <div className="meta-row">
+                      <span>{t("projects.ml.detailStatus")}</span>
+                      <strong>{mlStatusLabel(mlDetailJob.status)}</strong>
+                    </div>
+                    <div className="meta-row">
+                      <span>{t("projects.ml.detailOutput")}</span>
+                      <strong>{mlDetailJob.output_dir || "-"}</strong>
+                    </div>
+                    <div className="meta-row">
+                      <span>{t("projects.ml.detailScores")}</span>
+                      <strong>{mlDetailJob.scores_path || "-"}</strong>
+                    </div>
+                    <div className="meta-row">
+                      <span>{t("projects.ml.detailLog")}</span>
+                      <strong>{mlDetailJob.log_path || "-"}</strong>
+                    </div>
+                    {mlDetailJob.message && (
+                      <div className="meta-row">
+                        <span>{t("projects.ml.detailMessage")}</span>
+                        <strong>{mlDetailJob.message}</strong>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
               </>
             )}
           </div>

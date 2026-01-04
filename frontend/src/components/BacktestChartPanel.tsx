@@ -89,12 +89,16 @@ export default function BacktestChartPanel({ runId }: BacktestChartPanelProps) {
     if (!trades.length) {
       return [];
     }
+    const shortBuy = t("reports.trades.buyShort");
+    const shortSell = t("reports.trades.sellShort");
+    const buyLabel = shortBuy.includes("reports.trades") ? t("reports.trades.buy") : shortBuy;
+    const sellLabel = shortSell.includes("reports.trades") ? t("reports.trades.sell") : shortSell;
     return trades.slice(-MAX_MARKERS).map((trade) => ({
       time: trade.time,
       position: trade.side === "buy" ? "belowBar" : "aboveBar",
       color: trade.side === "buy" ? "#16a34a" : "#ef4444",
       shape: trade.side === "buy" ? "arrowUp" : "arrowDown",
-      text: `${trade.side === "buy" ? t("reports.trades.buy") : t("reports.trades.sell")} ${trade.quantity}`,
+      label: `${trade.side === "buy" ? buyLabel : sellLabel}@${trade.price.toFixed(2)}`,
     }));
   }, [trades, t]);
 

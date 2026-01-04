@@ -1328,6 +1328,134 @@ a {
   background: #fff;
 }
 
+.table-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.backtest-preview {
+  margin-top: 18px;
+}
+
+.backtest-preview-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.backtest-preview-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.backtest-preview-tabs {
+  margin-top: 12px;
+  margin-bottom: 12px;
+}
+
+.report-drawer-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  z-index: 2000;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.report-drawer {
+  width: min(920px, 92vw);
+  height: 100%;
+  background: #ffffff;
+  box-shadow: -12px 0 28px rgba(15, 23, 42, 0.12);
+  display: flex;
+  flex-direction: column;
+  padding: 20px 22px;
+  gap: 14px;
+}
+
+.report-drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.report-drawer-title {
+  font-weight: 700;
+  font-size: 18px;
+}
+
+.report-drawer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.report-drawer-frame {
+  flex: 1;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fff;
+}
+
+.chart-tooltip {
+  position: absolute;
+  pointer-events: none;
+  background: rgba(15, 23, 42, 0.9);
+  color: #ffffff;
+  padding: 6px 8px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.18);
+  z-index: 5;
+  max-width: 240px;
+}
+
+.chart-tooltip-price {
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.chart-tooltip-label {
+  margin-top: 2px;
+  color: #e2e8f0;
+}
+
+.chart-tooltip-time {
+  margin-top: 2px;
+  color: #cbd5f5;
+  font-size: 11px;
+}
+
+.chart-label-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 4;
+}
+
+.chart-marker-label {
+  position: absolute;
+  padding: 1px 3px;
+  border-radius: 3px;
+  font-size: 9px;
+  line-height: 1;
+  font-weight: 600;
+  color: #ffffff;
+  white-space: nowrap;
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.18);
+}
+
 .empty-state {
   margin-top: 12px;
   font-size: 14px;
@@ -1530,6 +1658,10 @@ a {
 .form-hint {
   font-size: 12px;
   color: var(--muted);
+}
+
+.form-hint.danger {
+  color: #d64545;
 }
 
 .form-note {
@@ -1809,6 +1941,7 @@ a {
   margin-top: 12px;
   width: 100%;
   height: 320px;
+  position: relative;
 }
 
 .dataset-chart-status {
@@ -1843,6 +1976,28 @@ a {
 .pill.warn {
   background: rgba(245, 158, 11, 0.18);
   color: #b45309;
+}
+
+.table-scroll {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.table-scroll .table {
+  min-width: 520px;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.section-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 16px 0;
 }
 
 @media (max-width: 960px) {

@@ -46,6 +46,7 @@ interface DatasetChartPanelProps {
     color: string;
     shape: "arrowUp" | "arrowDown";
     text?: string;
+    label?: string;
   }>;
 }
 
@@ -126,6 +127,22 @@ export default function DatasetChartPanel({
   const candleRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const lineRef = useRef<ISeriesApi<"Line"> | null>(null);
   const volumeRef = useRef<ISeriesApi<"Histogram"> | null>(null);
+  const tooltipRef = useRef<HTMLDivElement | null>(null);
+  const markerLabelRef = useRef<Map<number, string[]>>(new Map());
+  const labelLayerRef = useRef<HTMLDivElement | null>(null);
+  const markersRef = useRef<
+    Array<{
+      time: number;
+      position: "aboveBar" | "belowBar";
+      color: string;
+      shape: "arrowUp" | "arrowDown";
+      label?: string;
+      text?: string;
+    }>
+  >([]);
+  const priceMapRef = useRef<Map<number, number>>(new Map());
+  const timeListRef = useRef<number[]>([]);
+  const renderLabelsRef = useRef<() => void>(() => {});
   const [mode, setMode] = useState<ChartMode>("both");
   const [preset, setPreset] = useState("1Y");
   const [granularity, setGranularity] = useState<Granularity>("auto");
@@ -268,6 +285,7 @@ export default function DatasetChartPanel({
       return;
     }
     const container = containerRef.current;
+    container.style.position = "relative";
     const chart = createChart(container, {
       layout: {
         background: { color: "#ffffff" },
@@ -306,9 +324,21 @@ export default function DatasetChartPanel({
     lineRef.current = lineSeries;
     volumeRef.current = volumeSeries;
 
+    const tooltip = document.createElement("div");
+    tooltip.className = "chart-tooltip";
+    tooltip.style.display = "none";
+    container.appendChild(tooltip);
+    tooltipRef.current = tooltip;
+
+    const labelLayer = document.createElement("div");
+    labelLayer.className = "chart-label-layer";
+    container.appendChild(labelLayer);
+    labelLayerRef.current = labelLayer;
+
     const resizeObserver = new ResizeObserver((entries) => {
       for (const entry of entries) {
         chart.applyOptions({ width: entry.contentRect.width });
+        renderLabelsRef.current();
       }
     });
     resizeObserver.observe(container);
@@ -316,10 +346,202 @@ export default function DatasetChartPanel({
     return () => {
       resizeObserver.disconnect();
       chart.remove();
+      tooltip.remove();
+      labelLayer.remove();
       chartRef.current = null;
       candleRef.current = null;
       lineRef.current = null;
       volumeRef.current = null;
+      tooltipRef.current = null;
+      labelLayerRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    const timeScale = chart?.timeScale();
+    if (!chart || !timeScale) {
+      return;
+    }
+    const handler = () => renderLabelsRef.current();
+    timeScale.subscribeVisibleTimeRangeChange(handler);
+    return () => {
+      timeScale.unsubscribeVisibleTimeRangeChange(handler);
+    };
+  }, []);
+
+  const renderLabels = () => {
+    const layer = labelLayerRef.current;
+    const chart = chartRef.current;
+    const lineSeries = lineRef.current;
+    if (!layer || !chart || !lineSeries) {
+      return;
+    }
+    layer.innerHTML = "";
+    const markers = markersRef.current || [];
+    if (!markers.length) {
+      return;
+    }
+    const times = timeListRef.current;
+    const priceMap = priceMapRef.current;
+    const timeScale = chart.timeScale();
+    const range = timeScale.getVisibleRange();
+    const from = range ? Number(range.from) : null;
+    const to = range ? Number(range.to) : null;
+
+    const findNearestTime = (time: number) => {
+      if (!times.length) {
+        return null;
+      }
+      let lo = 0;
+      let hi = times.length - 1;
+      while (lo <= hi) {
+        const mid = Math.floor((lo + hi) / 2);
+        const value = times[mid];
+        if (value === time) {
+          return value;
+        }
+        if (value < time) {
+          lo = mid + 1;
+        } else {
+          hi = mid - 1;
+        }
+      }
+      if (hi < 0) {
+        return times[0];
+      }
+      if (lo >= times.length) {
+        return times[times.length - 1];
+      }
+      return time - times[hi] <= times[lo] - time ? times[hi] : times[lo];
+    };
+
+    for (const marker of markers) {
+      const label = marker.label ?? marker.text;
+      if (!label) {
+        continue;
+      }
+      if (from !== null && to !== null && (marker.time < from || marker.time > to)) {
+        continue;
+      }
+      const mappedTime = priceMap.has(marker.time)
+        ? marker.time
+        : findNearestTime(marker.time);
+      if (mappedTime == null) {
+        continue;
+      }
+      const price = priceMap.get(mappedTime);
+      if (price == null) {
+        continue;
+      }
+      const x = timeScale.timeToCoordinate(mappedTime);
+      const y = lineSeries.priceToCoordinate(price);
+      if (x == null || y == null) {
+        continue;
+      }
+      const tag = document.createElement("div");
+      const sideClass = marker.shape === "arrowUp" ? "buy" : "sell";
+      tag.className = `chart-marker-label ${sideClass}`.trim();
+      tag.textContent = label;
+      tag.style.background = marker.color;
+      layer.appendChild(tag);
+      const tagRect = tag.getBoundingClientRect();
+      const layerRect = layer.getBoundingClientRect();
+      let left = x - tagRect.width / 2;
+      let top = marker.position === "aboveBar" ? y - tagRect.height - 6 : y + 6;
+      left = Math.min(Math.max(4, left), layerRect.width - tagRect.width - 4);
+      top = Math.min(Math.max(4, top), layerRect.height - tagRect.height - 4);
+      tag.style.left = `${left}px`;
+      tag.style.top = `${top}px`;
+    }
+  };
+
+  renderLabelsRef.current = renderLabels;
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    const candleSeries = candleRef.current;
+    const lineSeries = lineRef.current;
+    const tooltip = tooltipRef.current;
+    const container = containerRef.current;
+    if (!chart || !tooltip || !container) {
+      return;
+    }
+
+    const toEpoch = (time: any) => {
+      if (time == null) {
+        return null;
+      }
+      if (typeof time === "number") {
+        return time;
+      }
+      if (typeof time === "object" && "year" in time) {
+        const year = Number(time.year);
+        const month = Number(time.month || 1);
+        const day = Number(time.day || 1);
+        return Math.floor(Date.UTC(year, month - 1, day) / 1000);
+      }
+      return null;
+    };
+
+    const formatPrice = (value: number) => {
+      if (!Number.isFinite(value)) {
+        return "";
+      }
+      if (value >= 100) {
+        return value.toFixed(2);
+      }
+      if (value >= 1) {
+        return value.toFixed(4);
+      }
+      return value.toFixed(6);
+    };
+
+    const handler = (param: any) => {
+      if (!param?.time || !param?.point) {
+        tooltip.style.display = "none";
+        return;
+      }
+      const lineData = lineSeries ? param.seriesData.get(lineSeries) : null;
+      const candleData = candleSeries ? param.seriesData.get(candleSeries) : null;
+      const price =
+        typeof lineData?.value === "number"
+          ? lineData.value
+          : typeof candleData?.close === "number"
+            ? candleData.close
+            : null;
+      if (price == null) {
+        tooltip.style.display = "none";
+        return;
+      }
+      const timeKey = toEpoch(param.time);
+      const labels = timeKey != null ? markerLabelRef.current.get(timeKey) : undefined;
+      const labelText = labels && labels.length ? labels.join(" / ") : "";
+      const timeValue = toEpoch(param.time);
+      const timeText = timeValue ? new Date(timeValue * 1000).toISOString().slice(0, 10) : "";
+      tooltip.innerHTML = `
+        <div class="chart-tooltip-price">${formatPrice(price)}</div>
+        ${timeText ? `<div class="chart-tooltip-time">${timeText}</div>` : ""}
+        ${labelText ? `<div class="chart-tooltip-label">${labelText}</div>` : ""}
+      `;
+      tooltip.style.display = "block";
+      const containerRect = container.getBoundingClientRect();
+      const tooltipRect = tooltip.getBoundingClientRect();
+      const x = Math.min(
+        Math.max(8, param.point.x + 12),
+        containerRect.width - tooltipRect.width - 8
+      );
+      const y = Math.min(
+        Math.max(8, param.point.y + 12),
+        containerRect.height - tooltipRect.height - 8
+      );
+      tooltip.style.left = `${x}px`;
+      tooltip.style.top = `${y}px`;
+    };
+
+    chart.subscribeCrosshairMove(handler);
+    return () => {
+      chart.unsubscribeCrosshairMove(handler);
     };
   }, []);
 
@@ -441,13 +663,51 @@ export default function DatasetChartPanel({
           }) satisfies HistogramData
       );
 
+    const markerRangeSource =
+      displaySeries.adjusted && displaySeries.adjusted.length
+        ? displaySeries.adjusted
+        : displaySeries.candles || [];
+    const markerTimes = markerRangeSource.map((item) => item.time);
+    const minMarkerTime = markerTimes.length ? Math.min(...markerTimes) : null;
+    const maxMarkerTime = markerTimes.length ? Math.max(...markerTimes) : null;
+    const filteredMarkers =
+      markers && minMarkerTime !== null && maxMarkerTime !== null
+        ? markers.filter(
+            (marker) => marker.time >= minMarkerTime && marker.time <= maxMarkerTime
+          )
+        : markers || [];
+    const normalizedMarkers = filteredMarkers.map((marker) => ({
+      ...marker,
+      text: undefined,
+    }));
+    const priceMap = new Map<number, number>();
+    for (const point of lineData) {
+      priceMap.set(point.time as number, point.value as number);
+    }
+    priceMapRef.current = priceMap;
+    timeListRef.current = lineData.map((point) => point.time as number);
+    markersRef.current = normalizedMarkers;
+    const labelMap = new Map<number, string[]>();
+    for (const marker of normalizedMarkers) {
+      const label = marker.label ?? marker.text;
+      if (!label) {
+        continue;
+      }
+      const list = labelMap.get(marker.time) || [];
+      list.push(label);
+      labelMap.set(marker.time, list);
+    }
+    markerLabelRef.current = labelMap;
+
     candleSeries.setData(candleData);
     lineSeries.setData(lineData);
     volumeSeries.setData(volumeData);
     candleSeries.applyOptions({ visible: mode !== "adjusted" });
     lineSeries.applyOptions({ visible: mode !== "raw" });
-    candleSeries.setMarkers(markers || []);
+    candleSeries.setMarkers([]);
+    lineSeries.setMarkers(normalizedMarkers);
     chart.timeScale().fitContent();
+    renderLabelsRef.current();
   }, [displaySeries, mode, markers]);
 
   const canSelect = datasets && datasets.length > 1 && onSelect;

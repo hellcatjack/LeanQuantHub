@@ -130,7 +130,6 @@ export default function DataPage() {
     region: "US",
     frequency: "daily",
   });
-  const [stooqOnly, setStooqOnly] = useState(false);
   const [resetHistory, setResetHistory] = useState(false);
   const [fetchLoading, setFetchLoading] = useState(false);
   const [fetchError, setFetchError] = useState("");
@@ -348,7 +347,6 @@ export default function DataPage() {
       await api.post(`/api/datasets/${dataset.id}/sync`, {
         source_path: dataset.source_path || null,
         date_column: "date",
-        stooq_only: stooqOnly,
         reset_history: resetHistory,
       });
       loadSyncJobs();
@@ -476,7 +474,6 @@ export default function DataPage() {
       await api.post(`/api/datasets/${Number(syncForm.dataset_id)}/sync`, {
         source_path: syncForm.source_path.trim() || null,
         date_column: syncForm.date_column || "date",
-        stooq_only: stooqOnly,
         reset_history: resetHistory,
       });
       setSyncForm({ dataset_id: "", source_path: "", date_column: "date" });
@@ -496,7 +493,6 @@ export default function DataPage() {
         return;
       }
       await api.post("/api/datasets/sync-all", {
-        stooq_only: stooqOnly,
         vendor: fetchForm.vendor,
         reset_history: resetHistory,
       });
@@ -516,10 +512,7 @@ export default function DataPage() {
       setFetchError(t("data.fetch.errorSymbol"));
       return;
     }
-    if (
-      fetchForm.frequency === "minute" &&
-      ["stooq", "yahoo", "alpha"].includes(fetchForm.vendor)
-    ) {
+    if (fetchForm.frequency === "minute" && fetchForm.vendor === "alpha") {
       setFetchError(t("data.fetch.errorFrequency"));
       return;
     }
@@ -534,7 +527,6 @@ export default function DataPage() {
         region: fetchForm.region,
         frequency: fetchForm.frequency,
         auto_sync: true,
-        stooq_only: stooqOnly && fetchForm.vendor === "stooq",
       });
       setFetchResult(res.data);
       setDatasetPage(1);
@@ -665,9 +657,6 @@ export default function DataPage() {
   const resolveJobReason = (job: DataSyncJob) => {
     const normalized = normalizeJobStatus(job);
     const message = (job.message || "").toLowerCase();
-    if (message.includes("stooq_only")) {
-      return t("data.jobs.reason.stooqOnly");
-    }
     if (message.includes("premium") || message.includes("付费")) {
       return t("data.jobs.reason.premium");
     }
@@ -802,31 +791,17 @@ export default function DataPage() {
       .toUpperCase()
       .replace(/[^A-Z0-9.]/g, "");
     const vendorLabelMap: Record<string, string> = {
-      stooq: "Stooq",
-      yahoo: "Yahoo",
       alpha: "Alpha",
     };
     const vendorLabel =
       vendorLabelMap[fetchForm.vendor] || fetchForm.vendor.toUpperCase();
     const frequencyLabel = fetchForm.frequency === "minute" ? "Minute" : "Daily";
-    const stooqOnlyActive = stooqOnly && fetchForm.vendor === "stooq";
-    const sourceVendor = stooqOnlyActive ? "stooq-only" : fetchForm.vendor;
     return {
       symbol,
       datasetName: symbol ? `${vendorLabel}_${symbol}_${frequencyLabel}` : t("common.none"),
-      sourcePath: symbol ? `${sourceVendor}:${symbol}` : t("common.none"),
+      sourcePath: symbol ? `${fetchForm.vendor}:${symbol}` : t("common.none"),
     };
-  }, [fetchForm, stooqOnly, t]);
-
-  const sourceOnlyVendorLabel = useMemo(() => {
-    if (fetchForm.vendor === "alpha") {
-      return "Alpha";
-    }
-    if (fetchForm.vendor === "yahoo") {
-      return "Yahoo";
-    }
-    return "Stooq";
-  }, [fetchForm.vendor]);
+  }, [fetchForm, t]);
 
   const latestSyncByDataset = useMemo(() => {
     const map = new Map<number, DataSyncJob>();
@@ -1026,39 +1001,28 @@ export default function DataPage() {
                 onChange={(e) => updateFetchForm("symbol", e.target.value)}
                 placeholder={t("data.fetch.symbol")}
               />
-              <div className="form-grid two-col">
-                <select
-                  className="form-select"
-                  value={fetchForm.vendor}
-                  onChange={(e) => updateFetchForm("vendor", e.target.value)}
-                >
-                  <option value="stooq">{t("data.fetch.vendor.stooq")}</option>
-                  <option value="yahoo">{t("data.fetch.vendor.yahoo")}</option>
-                  <option value="alpha">{t("data.fetch.vendor.alpha")}</option>
-                </select>
-                <select
-                  className="form-select"
-                  value={fetchForm.frequency}
-                  onChange={(e) => updateFetchForm("frequency", e.target.value)}
-                >
-                  <option value="daily">{t("data.fetch.frequency.daily")}</option>
-                  <option
-                    value="minute"
-                    disabled={["stooq", "yahoo", "alpha"].includes(fetchForm.vendor)}
+                <div className="form-grid two-col">
+                  <select
+                    className="form-select"
+                    value={fetchForm.vendor}
+                    onChange={(e) => updateFetchForm("vendor", e.target.value)}
                   >
-                    {t("data.fetch.frequency.minute")}
-                  </option>
-                </select>
+                    <option value="alpha">{t("data.fetch.vendor.alpha")}</option>
+                  </select>
+                  <select
+                    className="form-select"
+                    value={fetchForm.frequency}
+                    onChange={(e) => updateFetchForm("frequency", e.target.value)}
+                  >
+                    <option value="daily">{t("data.fetch.frequency.daily")}</option>
+                    <option
+                      value="minute"
+                      disabled={fetchForm.vendor === "alpha"}
+                    >
+                      {t("data.fetch.frequency.minute")}
+                    </option>
+                  </select>
               </div>
-              <label className="checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={stooqOnly}
-                  onChange={(e) => setStooqOnly(e.target.checked)}
-                  disabled={fetchForm.vendor === "yahoo"}
-                />
-                <span>{t("data.fetch.stooqOnly", { vendor: sourceOnlyVendorLabel })}</span>
-              </label>
               <div className="form-grid two-col">
                 <select
                   className="form-select"
@@ -1213,14 +1177,6 @@ export default function DataPage() {
               >
                 {syncAllLoading ? t("data.list.update.syncingAll") : t("data.list.update.syncAll")}
               </button>
-              <label className="market-toolbar-checkbox">
-                <input
-                  type="checkbox"
-                  checked={stooqOnly}
-                  onChange={(e) => setStooqOnly(e.target.checked)}
-                />
-                <span>{t("data.list.stooqOnly", { vendor: sourceOnlyVendorLabel })}</span>
-              </label>
               <label className="market-toolbar-checkbox">
                 <input
                   type="checkbox"

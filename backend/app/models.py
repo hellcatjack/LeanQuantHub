@@ -23,6 +23,7 @@ class Project(Base):
     algorithm_binding: Mapped["ProjectAlgorithmBinding | None"] = relationship(
         back_populates="project", uselist=False
     )
+    ml_train_jobs: Mapped[list["MLTrainJob"]] = relationship(back_populates="project")
 
 
 class BacktestRun(Base):
@@ -51,6 +52,28 @@ class Report(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     run: Mapped[BacktestRun] = relationship(back_populates="reports")
+
+
+class MLTrainJob(Base):
+    __tablename__ = "ml_train_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="queued")
+    config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    metrics: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    output_dir: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    model_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    payload_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    scores_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    log_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    project: Mapped[Project] = relationship(back_populates="ml_train_jobs")
 
 
 class Dataset(Base):

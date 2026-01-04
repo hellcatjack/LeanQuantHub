@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
+import BacktestInlinePreview from "../components/BacktestInlinePreview";
 import PaginationBar from "../components/PaginationBar";
+import ReportsPanel from "../components/ReportsPanel";
 import TopBar from "../components/TopBar";
 import { useI18n } from "../i18n";
 import { Paginated } from "../types";
@@ -16,10 +18,18 @@ interface Backtest {
   ended_at?: string | null;
 }
 
+interface BacktestProgress {
+  run_id: number;
+  status?: string | null;
+  progress?: number | null;
+  as_of?: string | null;
+}
+
 const apiBase = import.meta.env.VITE_API_BASE_URL || "";
 
 export default function BacktestsPage() {
   const { t, formatDateTime } = useI18n();
+  const [activeTab, setActiveTab] = useState<"runs" | "reports">("runs");
   const [runs, setRuns] = useState<Backtest[]>([]);
   const [runTotal, setRunTotal] = useState(0);
   const [runPage, setRunPage] = useState(1);
@@ -27,6 +37,10 @@ export default function BacktestsPage() {
   const [projectId, setProjectId] = useState("");
   const [params, setParams] = useState("{}");
   const [previewReportId, setPreviewReportId] = useState<number | null>(null);
+  const [progressMap, setProgressMap] = useState<Record<number, BacktestProgress>>({});
+  const [previewRunId, setPreviewRunId] = useState<number | null>(null);
+  const [previewTab, setPreviewTab] = useState<"charts" | "trades">("charts");
+  const previewRef = useRef<HTMLDivElement | null>(null);
 
   const metricItems = useMemo(
     () => [
@@ -41,6 +55,33 @@ export default function BacktestsPage() {
     [t]
   );
 
+  const loadProgress = async (items: Backtest[]) => {
+    const activeRuns = items.filter(
+      (run) => run.status !== "success" && run.status !== "failed"
+    );
+    if (!activeRuns.length) {
+      setProgressMap({});
+      return;
+    }
+    const progressItems = await Promise.all(
+      activeRuns.map(async (run) => {
+        try {
+          const res = await api.get<BacktestProgress>(`/api/backtests/${run.id}/progress`);
+          return res.data;
+        } catch {
+          return null;
+        }
+      })
+    );
+    const nextMap: Record<number, BacktestProgress> = {};
+    progressItems.forEach((item) => {
+      if (item) {
+        nextMap[item.run_id] = item;
+      }
+    });
+    setProgressMap(nextMap);
+  };
+
   const loadRuns = async (pageOverride?: number, pageSizeOverride?: number) => {
     const nextPage = pageOverride ?? runPage;
     const nextSize = pageSizeOverride ?? runPageSize;
@@ -49,6 +90,7 @@ export default function BacktestsPage() {
     });
     setRuns(res.data.items);
     setRunTotal(res.data.total);
+    await loadProgress(res.data.items);
   };
 
   useEffect(() => {
@@ -80,11 +122,50 @@ export default function BacktestsPage() {
   };
 
   const renderStatus = (value: string) => t(`common.status.${value}`) || value;
+  const renderProgress = (run: Backtest) => {
+    const progress = progressMap[run.id];
+    if (!progress || progress.progress == null) {
+      return t("common.none");
+    }
+    const percent = `${(progress.progress * 100).toFixed(2)}%`;
+    return (
+      <div>
+        <div>{percent}</div>
+        {progress.as_of && <div className="form-hint">{progress.as_of}</div>}
+      </div>
+    );
+  };
+
+  const openPreview = (runId: number, tab: "charts" | "trades") => {
+    setPreviewRunId(runId);
+    setPreviewTab(tab);
+    window.setTimeout(() => {
+      previewRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 0);
+  };
 
   return (
     <div className="main">
       <TopBar title={t("backtests.title")} />
       <div className="content">
+        <div className="project-tabs">
+          {[
+            { key: "runs", label: t("backtests.tabs.runs") },
+            { key: "reports", label: t("backtests.tabs.reports") },
+          ].map((tab) => (
+            <button
+              key={tab.key}
+              className={activeTab === tab.key ? "tab-button active" : "tab-button"}
+              onClick={() => setActiveTab(tab.key as "runs" | "reports")}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+        {activeTab === "reports" ? (
+          <ReportsPanel />
+        ) : (
+          <>
         <div className="card">
           <div className="card-title">{t("backtests.launch.title")}</div>
           <div className="card-meta">{t("backtests.launch.meta")}</div>
@@ -125,10 +206,12 @@ export default function BacktestsPage() {
               <th>{t("backtests.table.id")}</th>
               <th>{t("backtests.table.project")}</th>
               <th>{t("backtests.table.status")}</th>
+              <th>{t("backtests.table.progress")}</th>
               {metricItems.map((item) => (
                 <th key={item.key}>{item.label}</th>
               ))}
               <th>{t("backtests.table.report")}</th>
+              <th>{t("backtests.table.actions")}</th>
               <th>{t("backtests.table.createdAt")}</th>
               <th>{t("backtests.table.endedAt")}</th>
             </tr>
@@ -143,6 +226,7 @@ export default function BacktestsPage() {
                     {renderStatus(run.status)}
                   </span>
                 </td>
+                <td>{renderProgress(run)}</td>
                 {metricItems.map((item) => (
                   <td key={item.key}>{run.metrics?.[item.key] ?? t("common.none")}</td>
                 ))}
@@ -158,6 +242,24 @@ export default function BacktestsPage() {
                   ) : (
                     t("common.none")
                   )}
+                </td>
+                <td>
+                  <div className="table-actions">
+                    <button
+                      type="button"
+                      className="link-button"
+                      onClick={() => openPreview(run.id, "charts")}
+                    >
+                      {t("backtests.actions.viewCharts")}
+                    </button>
+                    <button
+                      type="button"
+                      className="link-button"
+                      onClick={() => openPreview(run.id, "trades")}
+                    >
+                      {t("backtests.actions.viewTrades")}
+                    </button>
+                  </div>
                 </td>
                 <td>{formatDateTime(run.created_at)}</td>
                 <td>{run.ended_at ? formatDateTime(run.ended_at) : t("common.none")}</td>
@@ -200,6 +302,15 @@ export default function BacktestsPage() {
             <div className="empty-state">{t("reports.preview.empty")}</div>
           )}
         </div>
+        <div ref={previewRef}>
+          <BacktestInlinePreview
+            runId={previewRunId}
+            activeTab={previewTab}
+            onTabChange={setPreviewTab}
+          />
+        </div>
+          </>
+        )}
       </div>
     </div>
   );

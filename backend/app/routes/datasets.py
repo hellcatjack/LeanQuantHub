@@ -273,8 +273,8 @@ def sync_all(background_tasks: BackgroundTasks, payload: DataSyncBatchRequest = 
     stooq_only = payload.stooq_only
     reset_history = bool(payload.reset_history)
     vendor_override = (payload.vendor or "").strip().lower()
-    if vendor_override and vendor_override not in {"stooq", "yahoo", "alpha"}:
-        raise HTTPException(status_code=400, detail="当前仅支持 Stooq、Yahoo 或 Alpha Vantage 数据源")
+    if vendor_override and vendor_override != "alpha":
+        raise HTTPException(status_code=400, detail="当前仅支持 Alpha Vantage 数据源")
     with get_session() as session:
         datasets = session.query(Dataset).order_by(Dataset.updated_at.desc()).all()
         for dataset in datasets:
@@ -859,23 +859,21 @@ def _normalize_symbol_for_vendor(symbol: str, region: str | None) -> str:
 
 
 def _resolve_market_source(dataset: Dataset, source_path: str | None) -> str:
-    if source_path and _is_stooq_only_source(source_path):
-        return f"stooq-only:{_stooq_symbol(source_path, dataset)}"
     if source_path and _is_stooq_source(source_path):
-        return f"stooq:{_stooq_symbol(source_path, dataset)}"
+        raise HTTPException(status_code=400, detail="Stooq 数据源已禁用")
     if source_path and _is_yahoo_source(source_path):
-        return f"yahoo:{_yahoo_source_symbol(source_path, dataset)}"
+        raise HTTPException(status_code=400, detail="Yahoo 数据源已禁用")
     if source_path and _is_alpha_source(source_path):
         return f"alpha:{_alpha_source_symbol(source_path, dataset)}"
     symbol = _normalize_symbol_for_vendor(_dataset_symbol(dataset), dataset.region)
     if not symbol or symbol == "UNKNOWN":
         raise HTTPException(status_code=400, detail="无法解析股票代码")
     vendor = (dataset.vendor or "").strip().lower()
-    if vendor == "yahoo":
-        return f"yahoo:{_yahoo_symbol(symbol, dataset)}"
     if vendor == "alpha":
         return f"alpha:{_alpha_symbol(symbol, dataset)}"
-    return f"stooq:{_stooq_symbol(f'stooq:{symbol}', dataset)}"
+    if vendor in {"stooq", "yahoo"}:
+        raise HTTPException(status_code=400, detail="非 Alpha 数据源已禁用")
+    return f"alpha:{_alpha_symbol(symbol, dataset)}"
 
 
 def _log_stooq_event(
@@ -1348,6 +1346,41 @@ def _apply_price_factors(
     return adjusted
 
 
+def _sanitize_cliffs(
+    records: dict[datetime, dict], threshold: float = 0.6
+) -> tuple[dict[datetime, dict], int]:
+    if not records:
+        return {}, 0
+    sanitized: dict[datetime, dict] = {}
+    count = 0
+    prev_close: float | None = None
+    scale = 1.0
+    for timestamp, row in sorted(records.items(), key=lambda item: item[0]):
+        close_raw = _parse_float(row.get("close"))
+        if close_raw is None:
+            sanitized[timestamp] = row
+            continue
+        scaled_close = close_raw * scale
+        if prev_close is not None and prev_close > 0:
+            pct = (scaled_close - prev_close) / prev_close
+            if abs(pct) >= threshold and scaled_close != 0:
+                scale *= prev_close / scaled_close
+                count += 1
+                scaled_close = close_raw * scale
+        open_raw = _parse_float(row.get("open"))
+        high_raw = _parse_float(row.get("high"))
+        low_raw = _parse_float(row.get("low"))
+        sanitized[timestamp] = {
+            **row,
+            "open": _format_price(open_raw * scale if open_raw is not None else None),
+            "high": _format_price(high_raw * scale if high_raw is not None else None),
+            "low": _format_price(low_raw * scale if low_raw is not None else None),
+            "close": _format_price(scaled_close),
+        }
+        prev_close = scaled_close
+    return sanitized, count
+
+
 def _should_export_lean(dataset: Dataset | None) -> bool:
     if not dataset:
         return False
@@ -1540,6 +1573,7 @@ def run_data_sync(job_id: int) -> None:
             if not reset_history and coverage_end and coverage_end >= latest_complete:
                 curated_records = _load_curated(curated_path) if curated_path.exists() else {}
                 needs_adjusted = bool(curated_records) and not adjusted_path.exists()
+                cliff_count = 0
                 if needs_adjusted:
                     symbol_hint = _dataset_symbol(dataset) or dataset_name
                     lean_root = _get_lean_root()
@@ -1557,6 +1591,7 @@ def run_data_sync(job_id: int) -> None:
                             factor_source = "yahoo"
                             _write_factor_file(_factor_cache_path(canonical_symbol), factors)
                     adjusted_records = _apply_price_factors(curated_records, factors)
+                    adjusted_records, cliff_count = _sanitize_cliffs(adjusted_records)
                     if adjusted_records:
                         _write_curated(adjusted_path, adjusted_records)
                         lean_adjusted_root = _get_data_root() / "lean_adjusted"
@@ -1584,6 +1619,8 @@ def run_data_sync(job_id: int) -> None:
                     message_parts.append("factor=ok")
                 else:
                     message_parts.append("factor=missing")
+                if cliff_count:
+                    message_parts.append(f"cliff_sanitized={cliff_count}")
                 _log_stooq_event(
                     job.id,
                     job.dataset_id,
@@ -1876,6 +1913,7 @@ def run_data_sync(job_id: int) -> None:
                 curated_records[timestamp] = row
         _write_curated(curated_path, curated_records)
         adjusted_records = _apply_price_factors(curated_records, factors)
+        adjusted_records, cliff_count = _sanitize_cliffs(adjusted_records)
         lean_adjusted_path = None
         if adjusted_records:
             _write_curated(adjusted_path, adjusted_records)
@@ -1926,6 +1964,8 @@ def run_data_sync(job_id: int) -> None:
             message_parts.append("adjusted=ok")
         if lean_adjusted_path:
             message_parts.append("lean_adjusted=ok")
+        if cliff_count:
+            message_parts.append(f"cliff_sanitized={cliff_count}")
         if issues:
             message_parts.append("issues=" + "；".join(issues))
         job.message = "; ".join(message_parts)
@@ -1992,13 +2032,13 @@ def fetch_dataset(payload: DatasetFetchRequest, background_tasks: BackgroundTask
         raise HTTPException(status_code=400, detail="股票代码无效")
 
     vendor = (payload.vendor or "alpha").strip().lower()
-    if vendor not in {"stooq", "yahoo", "alpha"}:
-        raise HTTPException(status_code=400, detail="当前仅支持 Stooq、Yahoo 或 Alpha Vantage 数据源")
+    if vendor != "alpha":
+        raise HTTPException(status_code=400, detail="当前仅支持 Alpha Vantage 数据源")
 
     frequency = (payload.frequency or "daily").strip().lower()
     if frequency not in {"daily", "minute"}:
         raise HTTPException(status_code=400, detail="不支持的频率")
-    if vendor in {"stooq", "yahoo", "alpha"} and frequency != "daily":
+    if frequency != "daily":
         raise HTTPException(status_code=400, detail="当前数据源仅支持日线数据")
 
     region = (payload.region or "US").strip().upper()

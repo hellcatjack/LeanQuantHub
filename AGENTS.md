@@ -1,33 +1,32 @@
 # Repository Guidelines
 
+## 当前状态
+- 项目页「算法」已集成模型训练区块，可在同一页完成参数配置、训练任务查看与模型激活。
+- 后端新增训练作业接口与执行器，训练产物统一输出到 `ml/models/`（`torch_model.pt`、`torch_payload.json`、`scores.csv`）。
+- 数据源默认使用 Alpha，训练与回测均基于 `data_root/curated_adjusted` 的复权数据。
+
 ## 项目结构
-- ackend/：FastAPI + MySQL 元数据与任务触发
-- rontend/：React + Vite 前端
-- scripts/：数据构建与回测管线
-- deploy/：部署与数据库脚本
+- `backend/`：FastAPI + MySQL，负责配置、数据同步、回测与训练任务。
+- `frontend/`：React + Vite 前端界面。
+- `ml/`：特征工程、训练与预测脚本（`train_torch.py`、`predict_torch.py`）。
+- `algorithms/`：Lean 策略脚本。
+- `configs/`：主题模板与权重配置。
+- `deploy/mysql/`：数据库初始化脚本。
 
-## 开发命令
-- 后端启动：uvicorn app.main:app --host 0.0.0.0 --port 8021
-- 前端启动：
-pm run dev
-- 前端构建：
-pm run build
+## 运行与构建
+- 后端：`uvicorn app.main:app --host 0.0.0.0 --port 8021`
+- 前端：`npm run dev` / `npm run build`
+- 服务器（systemd 用户服务）：`systemctl --user restart stocklean-backend stocklean-frontend`
 
-## 编码与命名
-- Python：保持类型注解与现有风格一致，避免引入新框架
-- 前端：遵循现有 React 组件与 CSS 命名规则
-- 文件命名：小写+短横线（如 schema.sql、	heme_keywords.json）
+## 模型训练
+- 入口：项目页 → 算法 → 模型训练。
+- 训练参数：训练年限、验证月份、预测期（天）、设备（auto/CPU/GPU）。
+- 产物：`/app/stocklean/artifacts/ml_job_{id}/` 日志与输出，激活后覆盖 `ml/models/`。
 
 ## 测试与验证
-- 目前无自动化测试；提交前请至少验证：
-  - 前端页面可访问（/projects）
-  - 后端 openapi.json 可用
-  - 数据刷新与主题回测能触发
+- 关键流程需手动验证：项目选择、算法绑定、训练任务创建、回测触发、报告显示。
+- 如需自动化回归，优先使用 Playwright。
 
-## 提交规范
-- 当前无强制规范，建议使用 eat: / ix: / chore: 前缀
-- 提交前确认 .env、数据目录与构建产物未被纳入
-
-## 机密与安全
-- 禁止提交 .env、API Key、数据库口令
-- 如需共享配置，请更新 .env.example
+## 编码与安全
+- 保持 UTF-8，前后端新增文案同步在 `frontend/src/i18n.tsx`。
+- 禁止提交 `.env`、API Key、数据库口令与数据文件；配置示例写入 `.env.example`。

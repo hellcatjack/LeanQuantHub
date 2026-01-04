@@ -38,6 +38,28 @@ CREATE TABLE IF NOT EXISTS reports (
 
 CREATE INDEX idx_reports_run ON reports(run_id);
 
+CREATE TABLE IF NOT EXISTS ml_train_jobs (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  project_id INT NOT NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'queued',
+  config JSON NULL,
+  metrics JSON NULL,
+  output_dir VARCHAR(255) NULL,
+  model_path VARCHAR(255) NULL,
+  payload_path VARCHAR(255) NULL,
+  scores_path VARCHAR(255) NULL,
+  log_path VARCHAR(255) NULL,
+  message TEXT NULL,
+  is_active TINYINT(1) NOT NULL DEFAULT 0,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  started_at DATETIME NULL,
+  ended_at DATETIME NULL,
+  CONSTRAINT fk_ml_train_jobs_project FOREIGN KEY (project_id)
+    REFERENCES projects(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE INDEX idx_ml_train_jobs_project ON ml_train_jobs(project_id);
+
 CREATE TABLE IF NOT EXISTS datasets (
   id INT AUTO_INCREMENT PRIMARY KEY,
   name VARCHAR(120) NOT NULL,

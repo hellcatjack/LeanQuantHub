@@ -180,6 +180,49 @@ class BacktestOut(BaseModel):
         from_attributes = True
 
 
+class BacktestProgressOut(BaseModel):
+    run_id: int
+    status: str | None = None
+    progress: float | None = None
+    as_of: str | None = None
+
+
+class MLTrainCreate(BaseModel):
+    project_id: int
+    device: str = "auto"
+    train_years: int | None = None
+    valid_months: int | None = None
+    label_horizon_days: int | None = None
+
+
+class MLTrainOut(BaseModel):
+    id: int
+    project_id: int
+    status: str
+    config: dict[str, Any] | None = None
+    metrics: dict[str, Any] | None = None
+    output_dir: str | None = None
+    model_path: str | None = None
+    payload_path: str | None = None
+    scores_path: str | None = None
+    log_path: str | None = None
+    message: str | None = None
+    is_active: bool = False
+    created_at: datetime
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+
+    class Config:
+        from_attributes = True
+
+
+class MLTrainPageOut(BaseModel):
+    items: list[MLTrainOut]
+    total: int
+    page: int
+    page_size: int
+
+
 class BacktestListOut(BacktestOut):
     report_id: int | None = None
 
@@ -403,7 +446,7 @@ class DatasetThemeCoverageOut(BaseModel):
 
 class DatasetThemeFetchRequest(BaseModel):
     theme_key: str
-    vendor: str | None = "stooq"
+    vendor: str | None = "alpha"
     asset_class: str | None = "Equity"
     region: str | None = "US"
     frequency: str | None = "daily"

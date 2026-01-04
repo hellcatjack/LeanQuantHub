@@ -2,6 +2,7 @@
 
 import json
 import math
+import os
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
@@ -24,6 +25,7 @@ from app.schemas import (
     BacktestListOut,
     BacktestOut,
     BacktestPageOut,
+    BacktestProgressOut,
     BacktestPositionOut,
     BacktestSymbolOut,
     BacktestTradeOut,
@@ -134,6 +136,39 @@ def _load_order_events(run_id: int) -> list[dict]:
     except json.JSONDecodeError:
         return []
     return []
+
+
+def _read_progress(log_path: Path) -> tuple[float | None, str | None]:
+    if not log_path.exists():
+        return None, None
+    try:
+        with log_path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            offset = max(size - 65536, 0)
+            handle.seek(offset)
+            text = handle.read().decode("utf-8", errors="ignore")
+    except OSError:
+        return None, None
+    lines = [line for line in text.splitlines() if "[progress]" in line]
+    if not lines:
+        return None, None
+    line = lines[-1]
+    marker = line.find("[progress]")
+    if marker == -1:
+        return None, None
+    payload = line[marker + len("[progress]") :].strip()
+    parts = payload.split()
+    if len(parts) < 2:
+        return None, None
+    date_text = parts[0]
+    percent_text = parts[1].strip().rstrip("%")
+    try:
+        progress = float(percent_text) / 100.0
+    except ValueError:
+        return None, None
+    progress = min(max(progress, 0.0), 1.0)
+    return progress, date_text
 
 
 def _event_symbol(event: dict) -> str:
@@ -407,6 +442,22 @@ def get_backtest(run_id: int):
         if not run:
             raise HTTPException(status_code=404, detail="回测不存在")
         return run
+
+
+@router.get("/{run_id}/progress", response_model=BacktestProgressOut)
+def get_backtest_progress(run_id: int):
+    with get_session() as session:
+        run = session.get(BacktestRun, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="回测不存在")
+        log_path = Path(settings.artifact_root) / f"run_{run_id}" / "lean_run.log"
+        progress, as_of = _read_progress(log_path)
+        return BacktestProgressOut(
+            run_id=run_id,
+            status=run.status,
+            progress=progress,
+            as_of=as_of,
+        )
 
 
 @router.post("/compare", response_model=list[BacktestCompareItem])

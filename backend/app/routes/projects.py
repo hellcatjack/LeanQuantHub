@@ -183,7 +183,7 @@ def _load_default_config(session=None) -> dict[str, Any]:
     return {
         "template": "sp500_current",
         "universe": {"mode": "sp500_current", "include_history": False},
-        "data": {"primary_vendor": "stooq", "fallback_vendor": "yahoo", "frequency": "daily"},
+        "data": {"primary_vendor": "alpha", "fallback_vendor": "alpha", "frequency": "daily"},
         "weights": weights,
         "benchmark": benchmark,
         "rebalance": rebalance,
