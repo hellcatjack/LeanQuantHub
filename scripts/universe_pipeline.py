@@ -9,6 +9,7 @@ import re
 import time
 import urllib.parse
 import urllib.request
+from bisect import bisect_right
 from datetime import date, datetime
 from pathlib import Path
 from typing import Iterable
@@ -968,6 +969,111 @@ def parse_date(value: str) -> date | None:
     return None
 
 
+def load_symbol_map(
+    path: Path,
+) -> dict[str, list[tuple[date | None, date | None, str]]]:
+    symbol_map: dict[str, list[tuple[date | None, date | None, str]]] = {}
+    if not path.exists():
+        return symbol_map
+    with path.open("r", encoding="utf-8", errors="ignore") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            symbol = (row.get("symbol") or "").strip().upper()
+            canonical = (row.get("canonical") or "").strip().upper()
+            if not symbol or not canonical:
+                continue
+            start = parse_date(row.get("start_date") or row.get("from_date") or "")
+            end = parse_date(row.get("end_date") or row.get("to_date") or "")
+            symbol_map.setdefault(symbol, []).append((start, end, canonical))
+    for entries in symbol_map.values():
+        entries.sort(key=lambda item: item[0] or date.min)
+    return symbol_map
+
+
+def resolve_symbol_alias(
+    symbol: str,
+    as_of: date | None,
+    symbol_map: dict[str, list[tuple[date | None, date | None, str]]],
+) -> str:
+    entries = symbol_map.get(symbol)
+    if not entries:
+        return symbol
+    if as_of:
+        match = None
+        for start, end, canonical in entries:
+            if start and as_of < start:
+                continue
+            if end and as_of > end:
+                continue
+            match = canonical
+        if match:
+            return match
+    return entries[-1][2]
+
+
+def build_alias_map(
+    symbol_map: dict[str, list[tuple[date | None, date | None, str]]],
+) -> dict[str, set[str]]:
+    alias_map: dict[str, set[str]] = {}
+    for alias, entries in symbol_map.items():
+        for _, _, canonical in entries:
+            alias_map.setdefault(canonical, set()).add(alias)
+    return alias_map
+
+
+def merge_symbol_life(
+    symbol_life: dict[str, tuple[date | None, date | None]],
+    symbol_map: dict[str, list[tuple[date | None, date | None, str]]],
+) -> dict[str, tuple[date | None, date | None]]:
+    merged = dict(symbol_life)
+    for alias, entries in symbol_map.items():
+        life = symbol_life.get(alias)
+        if not life:
+            continue
+        for _, _, canonical in entries:
+            existing = merged.get(canonical)
+            if not existing:
+                merged[canonical] = life
+                continue
+            ipo = min([d for d in (existing[0], life[0]) if d], default=None)
+            delist = max([d for d in (existing[1], life[1]) if d], default=None)
+            merged[canonical] = (ipo, delist)
+    return merged
+
+
+def remap_membership_ranges(
+    ranges: dict[str, list[tuple[date | None, date | None]]],
+    symbol_map: dict[str, list[tuple[date | None, date | None, str]]],
+) -> dict[str, list[tuple[date | None, date | None]]]:
+    if not symbol_map:
+        return ranges
+    remapped: dict[str, list[tuple[date | None, date | None]]] = {}
+    for symbol, items in ranges.items():
+        for start, end in items:
+            pivot = start or end
+            mapped = resolve_symbol_alias(symbol, pivot, symbol_map)
+            remapped.setdefault(mapped, []).append((start, end))
+    return remapped
+
+
+def load_symbol_life(path: Path) -> dict[str, tuple[date | None, date | None]]:
+    life: dict[str, tuple[date | None, date | None]] = {}
+    if not path.exists():
+        return life
+    with path.open("r", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            symbol = (row.get("symbol") or "").strip().upper()
+            if not symbol:
+                continue
+            ipo = parse_date(row.get("ipoDate") or row.get("ipo_date") or row.get("ipo") or "")
+            delist = parse_date(
+                row.get("delistingDate") or row.get("delisting_date") or row.get("delist") or ""
+            )
+            life[symbol] = (ipo, delist)
+    return life
+
+
 def load_membership_ranges(rows: list[dict[str, str]]) -> dict[str, list[tuple[date | None, date | None]]]:
     ranges: dict[str, list[tuple[date | None, date | None]]] = {}
     for row in rows:
@@ -1017,16 +1123,101 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
 
     weights_cfg = json.loads(config_path.read_text(encoding="utf-8"))
     benchmark = weights_cfg.get("benchmark", "SPY")
+    rebalance_cfg = str(weights_cfg.get("rebalance", "W")).strip().upper()
+    rebalance_mode = str(weights_cfg.get("rebalance_mode", "week_open")).strip().lower()
+    use_pit = bool(weights_cfg.get("use_pit_weekly", True))
     category_weights: dict[str, float] = weights_cfg.get("category_weights", {})
     risk_free = float(weights_cfg.get("risk_free_rate", 0.0))
+    price_source_policy = str(weights_cfg.get("price_source_policy", "adjusted_only")).strip().lower()
+    if price_source_policy not in {"adjusted_only", "adjusted_prefer", "raw_only"}:
+        raise SystemExit("price_source_policy must be adjusted_only, adjusted_prefer, or raw_only")
+    signal_mode = str(weights_cfg.get("signal_mode") or "theme_weights").strip().lower()
+    if signal_mode not in {"theme_weights", "ml_scores"}:
+        raise SystemExit("signal_mode must be theme_weights or ml_scores")
+    project_root = Path(__file__).resolve().parents[1]
+    score_path_raw = str(weights_cfg.get("score_csv_path") or "").strip()
+    score_path = Path(score_path_raw) if score_path_raw else project_root / "ml" / "models" / "scores.csv"
+    if not score_path.is_absolute():
+        score_path = project_root / score_path
+    score_top_n = int(weights_cfg.get("score_top_n") or 0)
+    score_weighting = str(weights_cfg.get("score_weighting") or "score").strip().lower()
+    if score_weighting not in {"score", "equal"}:
+        raise SystemExit("score_weighting must be score or equal")
+    score_min_raw = weights_cfg.get("score_min")
+    if score_min_raw in (None, ""):
+        score_min = None
+    else:
+        score_min = float(score_min_raw)
+    score_max_raw = weights_cfg.get("score_max_weight")
+    if score_max_raw in (None, ""):
+        score_max_weight = None
+    else:
+        score_max_weight = float(score_max_raw)
+    score_fallback = str(weights_cfg.get("score_fallback") or "theme_weights").strip().lower()
+    if score_fallback not in {"theme_weights", "universe", "skip"}:
+        raise SystemExit("score_fallback must be theme_weights, universe, or skip")
+    min_avg_volume = max(float(weights_cfg.get("min_avg_volume") or 0.0), 0.0)
+    min_avg_dollar_volume = max(float(weights_cfg.get("min_avg_dollar_volume") or 0.0), 0.0)
+    liquidity_window_days = max(int(weights_cfg.get("liquidity_window_days") or 20), 1)
+    halt_volume_threshold = max(float(weights_cfg.get("halt_volume_threshold") or 0.0), 0.0)
+    record_universe = bool(weights_cfg.get("record_universe", True))
+    universe_output_dir = str(weights_cfg.get("universe_output_dir") or "").strip()
+    execution_cfg = weights_cfg.get("execution", {}) if isinstance(weights_cfg.get("execution"), dict) else {}
+    max_holdings = int(execution_cfg.get("max_holdings") or weights_cfg.get("max_holdings") or 0)
+    max_position_raw = execution_cfg.get("max_position_weight", weights_cfg.get("max_position_weight"))
+    if max_position_raw in (None, ""):
+        max_position_weight = None
+    else:
+        max_position_weight = float(max_position_raw)
+    turnover_raw = execution_cfg.get("turnover_limit", weights_cfg.get("turnover_limit"))
+    if turnover_raw in (None, ""):
+        turnover_limit = None
+    else:
+        turnover_limit = float(turnover_raw)
+    trade_weekdays_raw = execution_cfg.get("trade_weekdays", weights_cfg.get("trade_weekdays"))
+    trade_day_policy = str(
+        execution_cfg.get(
+            "trade_day_policy", weights_cfg.get("trade_day_policy", "shift")
+        )
+    ).strip().lower()
+    if trade_day_policy not in {"shift", "skip"}:
+        raise SystemExit("trade_day_policy must be shift or skip")
+    max_shift_raw = execution_cfg.get("max_shift_days", weights_cfg.get("max_shift_days"))
+    if max_shift_raw in (None, ""):
+        max_shift_days = None
+    else:
+        max_shift_days = max(int(max_shift_raw), 0)
 
     universe = read_csv(universe_path)
+    symbol_map_path = str(weights_cfg.get("symbol_map_path") or "").strip()
+    symbol_map_file = (
+        Path(symbol_map_path).expanduser().resolve()
+        if symbol_map_path
+        else data_root / "universe" / "symbol_map.csv"
+    )
+    symbol_map = load_symbol_map(symbol_map_file) if symbol_map_file.exists() else {}
+    alias_map = build_alias_map(symbol_map)
+
     membership_rows = read_csv(data_root / "universe" / "sp500_membership.csv")
     membership_ranges = load_membership_ranges(membership_rows)
-    category_by_symbol = {
-        row.get("symbol", "").strip().upper(): row.get("category", "")
-        for row in universe
-    }
+    if symbol_map:
+        membership_ranges = remap_membership_ranges(membership_ranges, symbol_map)
+    symbol_life_path = weights_cfg.get("symbol_life_path")
+    life_path = (
+        Path(symbol_life_path).expanduser().resolve()
+        if symbol_life_path
+        else data_root / "universe" / "alpha_symbol_life.csv"
+    )
+    symbol_life = load_symbol_life(life_path) if life_path.exists() else {}
+    if symbol_map:
+        symbol_life = merge_symbol_life(symbol_life, symbol_map)
+    category_by_symbol: dict[str, str] = {}
+    for row in universe:
+        raw_symbol = row.get("symbol", "").strip().upper()
+        if not raw_symbol:
+            continue
+        mapped = resolve_symbol_alias(raw_symbol, None, symbol_map)
+        category_by_symbol[mapped] = row.get("category", "")
     stooq_dir = data_root / "prices" / "stooq"
     yahoo_dir = data_root / "prices" / "yahoo"
     curated_dir = data_root / "curated"
@@ -1039,9 +1230,12 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
             return symbol_map
         for file in source_dir.glob("*.csv"):
             parts = file.stem.split("_")
-            if len(parts) < 3:
+            if len(parts) < 4:
                 continue
-            symbol = parts[-2].strip().upper()
+            symbol_parts = parts[2:-1]
+            if not symbol_parts:
+                continue
+            symbol = "_".join(symbol_parts).strip().upper()
             if symbol and symbol not in symbol_map:
                 symbol_map[symbol] = file
         return symbol_map
@@ -1050,127 +1244,733 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
     curated_adjusted_map = build_symbol_map(curated_adjusted_dir)
     normalized_map = build_symbol_map(normalized_dir)
 
-    def resolve_symbol_path(symbol: str) -> tuple[Path | None, str]:
-        adjusted_path = curated_adjusted_map.get(symbol)
-        if adjusted_path:
-            return adjusted_path, "adjusted"
-        curated_path = curated_map.get(symbol) or normalized_map.get(symbol)
-        if curated_path:
-            return curated_path, "raw"
-        stooq_path = stooq_dir / f"{symbol}.csv"
-        if stooq_path.exists():
-            return stooq_path, "raw"
-        yahoo_path = yahoo_dir / f"{symbol}.csv"
-        if yahoo_path.exists():
-            return yahoo_path, "raw"
-        return None, "raw"
+    def resolve_symbol_path(symbol: str, mapped_symbol: str) -> tuple[Path | None, str, str]:
+        candidates = []
+        if mapped_symbol:
+            candidates.append(mapped_symbol)
+        if symbol and symbol != mapped_symbol:
+            candidates.append(symbol)
+        candidates.extend(sorted(alias_map.get(mapped_symbol, set())))
+        candidates.extend(sorted(alias_map.get(symbol, set())))
+        seen = set()
+        for candidate in candidates:
+            if not candidate or candidate in seen:
+                continue
+            seen.add(candidate)
+            adjusted_path = curated_adjusted_map.get(candidate)
+            if price_source_policy != "raw_only" and adjusted_path:
+                return adjusted_path, "adjusted", candidate
+            if price_source_policy == "adjusted_only":
+                continue
+            curated_path = curated_map.get(candidate) or normalized_map.get(candidate)
+            if curated_path:
+                return curated_path, "raw", candidate
+            stooq_path = stooq_dir / f"{candidate}.csv"
+            if stooq_path.exists():
+                return stooq_path, "raw", candidate
+            yahoo_path = yahoo_dir / f"{candidate}.csv"
+            if yahoo_path.exists():
+                return yahoo_path, "raw", candidate
+        return None, "raw", mapped_symbol or symbol
 
     frames = []
+    open_frames = []
+    volume_frames = []
     used_modes: set[str] = set()
+    seen_symbols: set[str] = set()
+    price_source_counts = {"adjusted": 0, "raw": 0}
+    missing_adjusted: list[str] = []
+    volume_missing: set[str] = set()
+    open_missing: set[str] = set()
+    need_volume = any(
+        value > 0 for value in (min_avg_volume, min_avg_dollar_volume, halt_volume_threshold)
+    )
     for row in universe:
-        symbol = row.get("symbol", "").strip().upper()
-        if not symbol:
+        raw_symbol = row.get("symbol", "").strip().upper()
+        if not raw_symbol:
             continue
-        path, mode = resolve_symbol_path(symbol)
+        mapped_symbol = resolve_symbol_alias(raw_symbol, None, symbol_map)
+        if mapped_symbol in seen_symbols:
+            continue
+        path, mode, resolved_symbol = resolve_symbol_path(raw_symbol, mapped_symbol)
         if not path or not path.exists():
+            if price_source_policy == "adjusted_only":
+                missing_adjusted.append(mapped_symbol)
             continue
         df = pd.read_csv(path)
         column_map = {col.lower(): col for col in df.columns}
         date_col = column_map.get("date")
         close_col = column_map.get("close")
+        open_col = column_map.get("open")
         if not date_col or not close_col:
             continue
-        df = df[[date_col, close_col]].rename(columns={date_col: "date", close_col: symbol})
+        columns = [date_col, close_col]
+        if open_col:
+            columns.append(open_col)
+        volume_col = column_map.get("volume") if need_volume else None
+        if volume_col:
+            columns.append(volume_col)
+        df = df[columns]
+        df = df.rename(columns={date_col: "date"})
         df["date"] = pd.to_datetime(df["date"], utc=True).dt.tz_convert(None)
-        frames.append(df.set_index("date"))
+        df = df.set_index("date")
+        frames.append(df[[close_col]].rename(columns={close_col: mapped_symbol}))
+        if open_col:
+            open_frames.append(df[[open_col]].rename(columns={open_col: mapped_symbol}))
+        else:
+            open_missing.add(mapped_symbol)
+        if need_volume:
+            if volume_col:
+                volume_frames.append(df[[volume_col]].rename(columns={volume_col: mapped_symbol}))
+            else:
+                volume_missing.add(mapped_symbol)
         used_modes.add(mode)
+        if mode in price_source_counts:
+            price_source_counts[mode] += 1
+        seen_symbols.add(mapped_symbol)
 
     if not frames:
         raise SystemExit("未找到可用的价格数据")
 
     prices = pd.concat(frames, axis=1).sort_index()
     prices = prices.dropna(how="all")
-    returns = prices.pct_change(fill_method=None).fillna(0.0)
+    if open_frames:
+        open_prices = pd.concat(open_frames, axis=1).sort_index()
+        open_prices = open_prices.reindex(prices.index)
+    else:
+        open_prices = pd.DataFrame(index=prices.index)
+    open_prices = open_prices.reindex(columns=prices.columns)
+    if open_missing:
+        for symbol in open_missing:
+            if symbol in prices.columns:
+                open_prices[symbol] = prices[symbol]
+    if open_prices.empty:
+        open_prices = prices.copy()
+    else:
+        open_prices = open_prices.combine_first(prices)
+    volumes = None
+    if need_volume and volume_frames:
+        volumes = pd.concat(volume_frames, axis=1).sort_index()
+        volumes = volumes.reindex(prices.index)
+    trade_price_mode = str(weights_cfg.get("trade_price") or weights_cfg.get("trade_price_mode") or "").strip().lower()
+    if not trade_price_mode:
+        trade_price_mode = "open" if "open" in rebalance_mode else "close"
+    if trade_price_mode not in {"open", "close"}:
+        raise SystemExit("trade_price must be open or close")
+    trade_prices = open_prices if trade_price_mode == "open" else prices
+    returns = trade_prices.shift(-1) / trade_prices - 1
+    returns = returns.fillna(0.0)
+    min_history_days = int(weights_cfg.get("min_history_days") or 0)
+    min_price = float(weights_cfg.get("min_price") or 0.0)
+    valid_counts = prices.notna().cumsum()
+    cost_cfg = weights_cfg.get("costs", {}) if isinstance(weights_cfg.get("costs"), dict) else {}
+    fee_bps = float(cost_cfg.get("fee_bps", weights_cfg.get("fee_bps", 0.0)) or 0.0)
+    slippage_bps = float(
+        cost_cfg.get("slippage_bps", weights_cfg.get("slippage_bps", 0.0)) or 0.0
+    )
+    impact_bps = float(
+        cost_cfg.get("impact_bps", weights_cfg.get("impact_bps", 0.0)) or 0.0
+    )
+    total_cost_bps = max(fee_bps + slippage_bps + impact_bps, 0.0)
+    cost_rate = total_cost_bps / 10000.0
 
-    raw_rebalance = prices.resample("ME").last().index
-    rebalance_dates = []
-    for ts in raw_rebalance:
-        idx = prices.index.get_indexer([ts], method="pad")
-        if idx.size and idx[0] >= 0:
-            rebalance_dates.append(prices.index[idx[0]])
-    rebalance_dates = sorted(set(rebalance_dates))
+    def load_pit_weekly_snapshots() -> tuple[dict[date, set[str]], dict[date, date]]:
+        pit_dir = weights_cfg.get("pit_weekly_dir")
+        pit_root = Path(pit_dir).expanduser().resolve() if pit_dir else data_root / "universe" / "pit_weekly"
+        if not pit_root.exists():
+            return {}, {}
+        pit_map: dict[date, set[str]] = {}
+        snapshot_map: dict[date, date] = {}
+        for path in pit_root.glob("pit_*.csv"):
+            with path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
+                reader = csv.DictReader(handle)
+                for row in reader:
+                    symbol = (row.get("symbol") or "").strip().upper()
+                    rebalance_raw = (row.get("rebalance_date") or "").strip()
+                    snapshot_raw = (row.get("snapshot_date") or "").strip()
+                    if not symbol or not rebalance_raw:
+                        continue
+                    try:
+                        rebalance_date = datetime.strptime(rebalance_raw, "%Y-%m-%d").date()
+                    except ValueError:
+                        continue
+                    snapshot_date = None
+                    if snapshot_raw:
+                        try:
+                            snapshot_date = datetime.strptime(snapshot_raw, "%Y-%m-%d").date()
+                            snapshot_map[rebalance_date] = snapshot_date
+                        except ValueError:
+                            pass
+                    mapped_symbol = resolve_symbol_alias(
+                        symbol, snapshot_date or rebalance_date, symbol_map
+                    )
+                    pit_map.setdefault(rebalance_date, set()).add(mapped_symbol)
+        return pit_map, snapshot_map
+
+    def _load_scores(path: Path) -> tuple[dict[date, dict[str, float]], list[date]]:
+        scores: dict[date, dict[str, float]] = {}
+        if not path.exists():
+            return scores, []
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                date_str = (row.get("date") or "").strip()
+                symbol = (row.get("symbol") or "").strip().upper()
+                if not date_str or not symbol:
+                    continue
+                try:
+                    score_val = float(row.get("score", ""))
+                except ValueError:
+                    continue
+                try:
+                    score_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                except ValueError:
+                    continue
+                mapped_symbol = resolve_symbol_alias(symbol, score_date, symbol_map)
+                scores.setdefault(score_date, {})[mapped_symbol] = score_val
+        score_dates = sorted(scores.keys())
+        return scores, score_dates
+
+    def _closest_score_date(dates: list[date], target: date) -> date | None:
+        if not dates:
+            return None
+        idx = bisect_right(dates, target) - 1
+        if idx < 0:
+            return None
+        return dates[idx]
+
+    def _cap_and_normalize(weights: dict[str, float], cap: float) -> dict[str, float]:
+        capped: dict[str, float] = {}
+        remaining = dict(weights)
+        for _ in range(len(remaining) + 1):
+            over = {symbol: w for symbol, w in remaining.items() if w > cap}
+            if not over:
+                break
+            for symbol in over:
+                capped[symbol] = cap
+                remaining.pop(symbol, None)
+            remainder = 1.0 - sum(capped.values())
+            if remainder <= 0 or not remaining:
+                remaining = {}
+                break
+            total = sum(remaining.values())
+            if total <= 0:
+                remaining = {}
+                break
+            for symbol in list(remaining.keys()):
+                remaining[symbol] = remaining[symbol] / total * remainder
+        merged = {**remaining, **capped}
+        total = sum(merged.values())
+        if total > 0:
+            merged = {symbol: weight / total for symbol, weight in merged.items()}
+        return merged
+
+    def _parse_weekdays(value) -> set[int]:
+        if value is None or value == "":
+            return set()
+        if isinstance(value, list):
+            tokens = value
+        elif isinstance(value, str):
+            tokens = [token.strip().lower() for token in value.split(",") if token.strip()]
+        else:
+            tokens = [value]
+        mapping = {
+            "mon": 0,
+            "monday": 0,
+            "tue": 1,
+            "tues": 1,
+            "tuesday": 1,
+            "wed": 2,
+            "wednesday": 2,
+            "thu": 3,
+            "thurs": 3,
+            "thursday": 3,
+            "fri": 4,
+            "friday": 4,
+            "sat": 5,
+            "saturday": 5,
+            "sun": 6,
+            "sunday": 6,
+        }
+        weekdays: set[int] = set()
+        for token in tokens:
+            if isinstance(token, int):
+                if 0 <= token <= 6:
+                    weekdays.add(token)
+                continue
+            if isinstance(token, str):
+                if token.isdigit():
+                    num = int(token)
+                    if 0 <= num <= 6:
+                        weekdays.add(num)
+                    continue
+                mapped = mapping.get(token)
+                if mapped is not None:
+                    weekdays.add(mapped)
+        return weekdays
+
+    def _adjust_rebalance_dates(
+        dates: list[date],
+        trading_index: pd.DatetimeIndex,
+        allowed_weekdays: set[int],
+        policy: str,
+        max_shift: int | None,
+        pit_map: dict[date, set[str]] | None = None,
+        pit_snapshot_map: dict[date, date] | None = None,
+    ) -> tuple[list[date], dict[date, set[str]] | None, dict[date, date] | None, int, int]:
+        if not allowed_weekdays:
+            return dates, pit_map, pit_snapshot_map, 0, 0
+        trading_days = [ts.date() for ts in trading_index]
+        by_week: dict[tuple[int, int], list[date]] = {}
+        for day in trading_days:
+            by_week.setdefault(day.isocalendar()[:2], []).append(day)
+        for key in by_week:
+            by_week[key].sort()
+        shifted = 0
+        skipped = 0
+        adjusted: list[date] = []
+        new_pit = {} if pit_map is not None else None
+        new_snapshots = {} if pit_snapshot_map is not None else None
+        for rebalance in dates:
+            target = rebalance
+            if rebalance.weekday() not in allowed_weekdays:
+                if policy == "skip":
+                    skipped += 1
+                    continue
+                week_key = rebalance.isocalendar()[:2]
+                candidates = [
+                    day
+                    for day in by_week.get(week_key, [])
+                    if day.weekday() in allowed_weekdays and day >= rebalance
+                ]
+                if not candidates:
+                    skipped += 1
+                    continue
+                target = candidates[0]
+                if max_shift is not None:
+                    shift_days = (target - rebalance).days
+                    if shift_days > max_shift:
+                        skipped += 1
+                        continue
+                if target != rebalance:
+                    shifted += 1
+            adjusted.append(target)
+            if new_pit is not None and pit_map is not None:
+                new_pit.setdefault(target, set()).update(pit_map.get(rebalance, set()))
+            if new_snapshots is not None and pit_snapshot_map is not None:
+                if rebalance in pit_snapshot_map:
+                    new_snapshots[target] = pit_snapshot_map[rebalance]
+        adjusted = sorted(set(adjusted))
+        if new_pit is not None:
+            new_pit = {key: new_pit.get(key, set()) for key in adjusted}
+        if new_snapshots is not None:
+            new_snapshots = {key: new_snapshots.get(key, key) for key in adjusted}
+        return adjusted, new_pit, new_snapshots, shifted, skipped
+
+    def _apply_max_holdings(
+        weights: dict[str, float], limit: int
+    ) -> tuple[dict[str, float], list[str]]:
+        if limit <= 0 or len(weights) <= limit:
+            return weights, []
+        ranked = sorted(weights.items(), key=lambda item: (-item[1], item[0]))
+        keep = dict(ranked[:limit])
+        dropped = [symbol for symbol, _ in ranked[limit:]]
+        total = sum(keep.values())
+        if total > 0:
+            keep = {symbol: weight / total for symbol, weight in keep.items()}
+        return keep, dropped
+
+    def _apply_turnover_limit(
+        target: pd.Series, prev: pd.Series, limit: float
+    ) -> tuple[pd.Series, float, float]:
+        delta = target - prev
+        buy_turnover = float(delta.clip(lower=0.0).sum())
+        if limit <= 0 or buy_turnover <= limit:
+            return target, buy_turnover, 1.0
+        scale = limit / buy_turnover if buy_turnover > 0 else 1.0
+        adjusted = prev + delta * scale
+        return adjusted, buy_turnover, scale
+
+    def pick_week_open_dates(index: pd.DatetimeIndex) -> list[pd.Timestamp]:
+        if index.empty:
+            return []
+        dates = []
+        last_week: tuple[int, int] | None = None
+        for ts in index:
+            week_key = ts.isocalendar()[:2]
+            if week_key != last_week:
+                dates.append(ts)
+                last_week = week_key
+        return dates
+
+    scores_by_date: dict[date, dict[str, float]] = {}
+    score_dates: list[date] = []
+    if signal_mode == "ml_scores":
+        scores_by_date, score_dates = _load_scores(score_path)
+
+    pit_map, pit_snapshot_map = load_pit_weekly_snapshots() if use_pit else ({}, {})
+    if pit_map:
+        rebalance_dates = sorted(pit_map.keys())
+        pit_used = True
+    else:
+        pit_used = False
+        if rebalance_cfg == "W":
+            raw_rebalance = pick_week_open_dates(prices.index)
+        else:
+            raw_rebalance = prices.resample("ME").last().index
+        rebalance_dates = []
+        for ts in raw_rebalance:
+            idx = prices.index.get_indexer([ts], method="pad")
+            if idx.size and idx[0] >= 0:
+                rebalance_dates.append(prices.index[idx[0]].date())
+        rebalance_dates = sorted(set(rebalance_dates))
+    allowed_weekdays = _parse_weekdays(trade_weekdays_raw)
+    trade_day_shifted = 0
+    trade_day_skipped = 0
+    if allowed_weekdays:
+        rebalance_dates, pit_map, pit_snapshot_map, trade_day_shifted, trade_day_skipped = (
+            _adjust_rebalance_dates(
+                rebalance_dates,
+                prices.index,
+                allowed_weekdays,
+                trade_day_policy,
+                max_shift_days,
+                pit_map if pit_used else None,
+                pit_snapshot_map if pit_used else None,
+            )
+        )
+        if not pit_used and pit_map is None:
+            pit_map = {}
     weights = pd.DataFrame(0.0, index=prices.index, columns=prices.columns)
+    signal_rows: list[dict[str, str]] = []
+    weight_rows: list[dict[str, str]] = []
+
+    universe_records: list[dict[str, str]] = []
+    universe_excluded: list[dict[str, str]] = []
+    universe_dir = None
+    if record_universe:
+        universe_dir = Path(universe_output_dir) if universe_output_dir else data_root / "backtest" / "thematic" / "universe"
+        if not universe_dir.is_absolute():
+            universe_dir = data_root / universe_dir
+        ensure_dir(universe_dir)
+
+    filter_counts: dict[str, int] = {}
+    prev_weights_row = pd.Series(0.0, index=prices.columns)
+    max_holdings_trimmed = 0
+    turnover_limited = 0
+    turnover_scale_sum = 0.0
+    cash_weight_sum = 0.0
 
     for idx, rebalance in enumerate(rebalance_dates):
-        check_date = rebalance.date()
+        snapshot_date = pit_snapshot_map.get(rebalance, rebalance)
+        check_date = snapshot_date
+        snapshot_ts = pd.Timestamp(snapshot_date)
+        snapshot_idx = prices.index.get_indexer([snapshot_ts], method="pad")
+        if not snapshot_idx.size or snapshot_idx[0] < 0:
+            continue
+        snapshot_pos = snapshot_idx[0]
+        counts_at_snapshot = (
+            valid_counts.iloc[snapshot_pos] if min_history_days > 0 else None
+        )
+        snapshot_prices = prices.iloc[snapshot_pos]
+        window_start = max(0, snapshot_pos - liquidity_window_days + 1)
+        window_prices = prices.iloc[window_start : snapshot_pos + 1]
+        avg_volume = None
+        avg_dollar = None
+        snapshot_volumes = None
+        if need_volume and volumes is not None and not volumes.empty:
+            window_volumes = volumes.iloc[window_start : snapshot_pos + 1]
+            avg_volume = window_volumes.mean()
+            avg_dollar = (window_volumes * window_prices).mean()
+            snapshot_volumes = volumes.iloc[snapshot_pos]
         active_symbols = []
         for symbol in prices.columns:
+            reasons: list[str] = []
+            if pit_used and symbol not in pit_map.get(rebalance, set()):
+                reasons.append("not_in_pit")
+            life = symbol_life.get(symbol)
+            if life:
+                ipo, delist = life
+                if ipo and check_date < ipo:
+                    reasons.append("before_ipo")
+                if delist and check_date > delist:
+                    reasons.append("after_delist")
             ranges = membership_ranges.get(symbol)
             if ranges and not active_in_ranges(ranges, check_date):
-                continue
-            if math.isnan(prices.at[rebalance, symbol]):
+                reasons.append("not_in_membership")
+            rebalance_ts = pd.Timestamp(rebalance)
+            if rebalance_ts not in trade_prices.index:
+                reasons.append("missing_rebalance_price")
+            price = (
+                trade_prices.at[rebalance_ts, symbol]
+                if rebalance_ts in trade_prices.index and symbol in trade_prices.columns
+                else float("nan")
+            )
+            if math.isnan(price):
+                reasons.append("missing_rebalance_price")
+            snapshot_price = snapshot_prices.get(symbol)
+            if snapshot_price is None or math.isnan(snapshot_price):
+                reasons.append("missing_snapshot_price")
+            if min_price > 0 and snapshot_price is not None and not math.isnan(snapshot_price):
+                if snapshot_price < min_price:
+                    reasons.append("min_price")
+            if min_history_days > 0 and counts_at_snapshot is not None:
+                if counts_at_snapshot.get(symbol, 0) < min_history_days:
+                    reasons.append("min_history")
+            if need_volume:
+                if symbol in volume_missing or volumes is None or symbol not in volumes.columns:
+                    reasons.append("volume_missing")
+                else:
+                    snapshot_volume = (
+                        snapshot_volumes.get(symbol) if snapshot_volumes is not None else None
+                    )
+                    if snapshot_volume is None or math.isnan(snapshot_volume):
+                        reasons.append("volume_missing")
+                    if (
+                        halt_volume_threshold > 0
+                        and snapshot_volume is not None
+                        and not math.isnan(snapshot_volume)
+                        and snapshot_volume <= halt_volume_threshold
+                    ):
+                        reasons.append("halted")
+                    if min_avg_volume > 0 and avg_volume is not None:
+                        avg_vol = avg_volume.get(symbol)
+                        if avg_vol is None or math.isnan(avg_vol) or avg_vol < min_avg_volume:
+                            reasons.append("min_avg_volume")
+                    if min_avg_dollar_volume > 0 and avg_dollar is not None:
+                        avg_dv = avg_dollar.get(symbol)
+                        if avg_dv is None or math.isnan(avg_dv) or avg_dv < min_avg_dollar_volume:
+                            reasons.append("min_avg_dollar_volume")
+
+            if reasons:
+                for reason in reasons:
+                    filter_counts[reason] = filter_counts.get(reason, 0) + 1
+                if record_universe:
+                    universe_excluded.append(
+                        {
+                            "symbol": symbol,
+                            "snapshot_date": snapshot_date.isoformat(),
+                            "rebalance_date": rebalance.isoformat(),
+                            "reason": "|".join(sorted(set(reasons))),
+                            "snapshot_price": f"{snapshot_price:.6f}"
+                            if snapshot_price is not None and not math.isnan(snapshot_price)
+                            else "",
+                        }
+                    )
                 continue
             active_symbols.append(symbol)
+            if record_universe:
+                universe_records.append(
+                    {
+                        "symbol": symbol,
+                        "snapshot_date": snapshot_date.isoformat(),
+                        "rebalance_date": rebalance.isoformat(),
+                    }
+                )
         if not active_symbols:
             continue
-        symbols_by_category: dict[str, list[str]] = {}
-        for symbol in active_symbols:
-            category = category_by_symbol.get(symbol) or "SP500_FORMER"
-            symbols_by_category.setdefault(category, []).append(symbol)
-        available_categories = {
-            key: value for key, value in symbols_by_category.items() if value
-        }
-        raw_weight_sum = sum(
-            category_weights.get(key, 0.0) for key in available_categories
-        )
-        if raw_weight_sum <= 0:
-            continue
-        normalized_weights = {
-            key: category_weights.get(key, 0.0) / raw_weight_sum
-            for key in available_categories
-        }
-        weight_row = {symbol: 0.0 for symbol in prices.columns}
-        for category, symbols in available_categories.items():
-            if not symbols:
+        weights_for_symbols: dict[str, float] = {}
+        signal_mode_used = signal_mode
+        score_date = None
+        selected_symbols: list[str] = []
+        selected_scores: dict[str, float] = {}
+
+        if signal_mode == "ml_scores" and scores_by_date:
+            score_date = _closest_score_date(score_dates, snapshot_date)
+            if score_date:
+                scores_for_date = scores_by_date.get(score_date, {})
+                ranked = [
+                    (symbol, scores_for_date[symbol])
+                    for symbol in active_symbols
+                    if symbol in scores_for_date
+                ]
+                ranked.sort(key=lambda item: item[1], reverse=True)
+                for symbol, score in ranked:
+                    if score_min is not None and score < score_min:
+                        continue
+                    selected_symbols.append(symbol)
+                    selected_scores[symbol] = score
+                    if score_top_n > 0 and len(selected_symbols) >= score_top_n:
+                        break
+            if not selected_symbols:
+                if score_fallback == "theme_weights":
+                    signal_mode_used = "theme_weights"
+                elif score_fallback == "universe":
+                    selected_symbols = list(active_symbols)
+                else:
+                    continue
+            if signal_mode_used == "ml_scores":
+                if not selected_symbols:
+                    continue
+                if score_weighting == "score":
+                    min_score = score_min if score_min is not None else 0.0
+                    raw = [
+                        max(float(selected_scores.get(symbol, 0.0)) - min_score, 0.0)
+                        for symbol in selected_symbols
+                    ]
+                    total = sum(raw)
+                    if total <= 0:
+                        weights_for_symbols = {
+                            symbol: 1.0 / len(selected_symbols) for symbol in selected_symbols
+                        }
+                    else:
+                        weights_for_symbols = {
+                            symbol: raw[idx] / total
+                            for idx, symbol in enumerate(selected_symbols)
+                        }
+                else:
+                    weights_for_symbols = {
+                        symbol: 1.0 / len(selected_symbols) for symbol in selected_symbols
+                    }
+                if score_max_weight and score_max_weight > 0:
+                    weights_for_symbols = _cap_and_normalize(
+                        weights_for_symbols, float(score_max_weight)
+                    )
+
+        if signal_mode_used != "ml_scores":
+            symbols_by_category: dict[str, list[str]] = {}
+            for symbol in active_symbols:
+                category = category_by_symbol.get(symbol) or "SP500_FORMER"
+                symbols_by_category.setdefault(category, []).append(symbol)
+            available_categories = {
+                key: value for key, value in symbols_by_category.items() if value
+            }
+            raw_weight_sum = sum(
+                category_weights.get(key, 0.0) for key in available_categories
+            )
+            if raw_weight_sum <= 0:
                 continue
-            share = normalized_weights.get(category, 0.0) / len(symbols)
-            for symbol in symbols:
-                weight_row[symbol] = share
-        start_idx = prices.index.get_loc(rebalance)
+            normalized_weights = {
+                key: category_weights.get(key, 0.0) / raw_weight_sum
+                for key in available_categories
+            }
+            for category, symbols in available_categories.items():
+                if not symbols:
+                    continue
+                share = normalized_weights.get(category, 0.0) / len(symbols)
+                for symbol in symbols:
+                    weights_for_symbols[symbol] = share
+
+        if not weights_for_symbols:
+            continue
+
+        if max_holdings > 0:
+            weights_for_symbols, dropped_symbols = _apply_max_holdings(
+                weights_for_symbols, max_holdings
+            )
+            max_holdings_trimmed += len(dropped_symbols)
+            if not weights_for_symbols:
+                continue
+        if max_position_weight and max_position_weight > 0:
+            weights_for_symbols = _cap_and_normalize(
+                weights_for_symbols, max_position_weight
+            )
+        total_weight = sum(weights_for_symbols.values())
+        if total_weight <= 0:
+            continue
+        weights_for_symbols = {
+            symbol: weight / total_weight for symbol, weight in weights_for_symbols.items()
+        }
+
+        weight_row = {symbol: 0.0 for symbol in prices.columns}
+        for symbol, weight in weights_for_symbols.items():
+            weight_row[symbol] = weight
+            score_value = ""
+            if signal_mode_used == "ml_scores":
+                score_value = (
+                    f"{selected_scores.get(symbol, 0.0):.6f}"
+                    if symbol in selected_scores
+                    else ""
+                )
+            signal_rows.append(
+                {
+                    "symbol": symbol,
+                    "snapshot_date": snapshot_date.isoformat(),
+                    "rebalance_date": rebalance.isoformat(),
+                    "signal_mode": signal_mode_used,
+                    "score_date": score_date.isoformat() if score_date else "",
+                    "score": score_value,
+                }
+            )
+        weight_series = pd.Series(weight_row)
+        if turnover_limit and turnover_limit > 0:
+            weight_series, planned_turnover, scale = _apply_turnover_limit(
+                weight_series, prev_weights_row, turnover_limit
+            )
+            if scale < 1.0:
+                turnover_limited += 1
+                turnover_scale_sum += scale
+            cash_weight_sum += max(0.0, 1.0 - float(weight_series.sum()))
+        for symbol, weight in weight_series.items():
+            if weight <= 0:
+                continue
+            score_value = ""
+            if signal_mode_used == "ml_scores":
+                score_value = (
+                    f"{selected_scores.get(symbol, 0.0):.6f}"
+                    if symbol in selected_scores
+                    else ""
+                )
+            weight_rows.append(
+                {
+                    "symbol": symbol,
+                    "snapshot_date": snapshot_date.isoformat(),
+                    "rebalance_date": rebalance.isoformat(),
+                    "signal_mode": signal_mode_used,
+                    "weight": f"{weight:.8f}",
+                    "score": score_value,
+                }
+            )
+        start_idx = prices.index.get_loc(pd.Timestamp(rebalance))
         end_idx = (
-            prices.index.get_loc(rebalance_dates[idx + 1])
+            prices.index.get_loc(pd.Timestamp(rebalance_dates[idx + 1]))
             if idx + 1 < len(rebalance_dates)
             else len(prices.index)
         )
-        weights.iloc[start_idx:end_idx] = pd.Series(weight_row)
+        weights.iloc[start_idx:end_idx] = weight_series
+        prev_weights_row = weight_series
 
-    portfolio_returns = (weights.shift(1) * returns).sum(axis=1)
+    portfolio_returns = (weights * returns).sum(axis=1)
+    turnover_by_date: dict[str, float] = {}
+    if cost_rate > 0 and rebalance_dates:
+        prev_weights = pd.Series(0.0, index=weights.columns)
+        for rebalance in rebalance_dates:
+            ts = pd.Timestamp(rebalance)
+            if ts not in weights.index:
+                continue
+            new_weights = weights.loc[ts].fillna(0.0)
+            delta = new_weights - prev_weights
+            trade_notional = float(delta.clip(lower=0.0).sum())
+            if trade_notional > 0:
+                portfolio_returns.loc[ts] -= trade_notional * cost_rate
+            turnover_by_date[rebalance.isoformat()] = trade_notional
+            prev_weights = new_weights
     portfolio_equity = (1 + portfolio_returns).cumprod()
 
-    benchmark_path, benchmark_mode = resolve_symbol_path(benchmark.upper())
-    if benchmark.upper() not in prices.columns and benchmark_path and benchmark_path.exists():
+    benchmark_symbol = resolve_symbol_alias(benchmark.upper(), None, symbol_map)
+    benchmark_path, benchmark_mode, _ = resolve_symbol_path(benchmark.upper(), benchmark_symbol)
+    if benchmark_symbol not in prices.columns and benchmark_path and benchmark_path.exists():
         bench_df = pd.read_csv(benchmark_path)
         bench_column_map = {col.lower(): col for col in bench_df.columns}
         bench_date_col = bench_column_map.get("date")
-        bench_close_col = bench_column_map.get("close")
-        if bench_date_col and bench_close_col:
-            bench_df = bench_df[[bench_date_col, bench_close_col]].rename(
-                columns={bench_date_col: "date", bench_close_col: benchmark.upper()}
+        bench_price_col = bench_column_map.get(trade_price_mode)
+        if bench_date_col and bench_price_col:
+            bench_df = bench_df[[bench_date_col, bench_price_col]].rename(
+                columns={bench_date_col: "date", bench_price_col: benchmark_symbol}
             )
             bench_df["date"] = pd.to_datetime(bench_df["date"], utc=True).dt.tz_convert(None)
-            bench_series = bench_df.set_index("date")[benchmark.upper()].sort_index()
+            bench_series = bench_df.set_index("date")[benchmark_symbol].sort_index()
             bench_series = bench_series.reindex(portfolio_equity.index).ffill()
         else:
             bench_series = None
     else:
-        bench_series = prices.get(benchmark.upper())
+        bench_series = trade_prices.get(benchmark_symbol)
         if bench_series is not None:
             bench_series = bench_series.reindex(portfolio_equity.index).ffill()
     if bench_series is None:
         bench_series = portfolio_equity.copy()
-    benchmark_equity = (
-        1 + bench_series.pct_change(fill_method=None).fillna(0.0)
-    ).cumprod()
+    benchmark_returns = bench_series.shift(-1) / bench_series - 1
+    benchmark_equity = (1 + benchmark_returns.fillna(0.0)).cumprod()
 
     out_dir = data_root / "backtest" / "thematic"
     ensure_dir(out_dir)
@@ -1189,15 +1989,101 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
         price_mode = "adjusted"
     elif used_modes and "adjusted" in used_modes:
         price_mode = "mixed"
+    rebalance_label = "weekly" if pit_used or rebalance_cfg == "W" else "monthly"
     summary = {
         "portfolio": calc_metrics(portfolio_equity, risk_free),
         "benchmark": calc_metrics(benchmark_equity, risk_free),
         "start": str(portfolio_equity.index[0].date()),
         "end": str(portfolio_equity.index[-1].date()),
-        "benchmark_symbol": benchmark,
+        "benchmark_symbol": benchmark_symbol,
         "price_mode": price_mode,
         "benchmark_mode": benchmark_mode if benchmark_mode else price_mode,
+        "trade_price": trade_price_mode,
+        "open_fallback_count": len(open_missing),
+        "signal_mode": signal_mode,
+        "score_csv_path": str(score_path) if signal_mode == "ml_scores" else "",
+        "score_top_n": score_top_n,
+        "score_weighting": score_weighting,
+        "score_min": score_min if score_min is not None else "",
+        "score_max_weight": score_max_weight if score_max_weight is not None else "",
+        "score_fallback": score_fallback,
+        "price_source_policy": price_source_policy,
+        "price_source_counts": price_source_counts,
+        "missing_adjusted_count": len(missing_adjusted),
+        "rebalance": rebalance_label,
+        "rebalance_mode": rebalance_mode,
+        "pit_weekly": pit_used,
+        "min_history_days": min_history_days,
+        "min_price": min_price,
+        "min_avg_volume": min_avg_volume,
+        "min_avg_dollar_volume": min_avg_dollar_volume,
+        "liquidity_window_days": liquidity_window_days,
+        "halt_volume_threshold": halt_volume_threshold,
+        "record_universe": record_universe,
+        "fee_bps": fee_bps,
+        "slippage_bps": slippage_bps,
+        "impact_bps": impact_bps,
+        "total_cost_bps": total_cost_bps,
+        "max_holdings": max_holdings,
+        "max_position_weight": max_position_weight if max_position_weight is not None else "",
+        "turnover_limit": turnover_limit if turnover_limit is not None else "",
+        "trade_weekdays": sorted(allowed_weekdays) if allowed_weekdays else "",
+        "trade_day_policy": trade_day_policy,
+        "trade_day_max_shift_days": max_shift_days if max_shift_days is not None else "",
+        "trade_day_shifted": trade_day_shifted,
+        "trade_day_skipped": trade_day_skipped,
+        "turnover_limited_count": turnover_limited,
+        "turnover_limit_avg_scale": (
+            turnover_scale_sum / turnover_limited if turnover_limited else 1.0
+        ),
+        "cash_weight_avg": (
+            cash_weight_sum / len(rebalance_dates) if rebalance_dates else 0.0
+        ),
+        "max_holdings_trimmed": max_holdings_trimmed,
+        "turnover_avg": (
+            sum(turnover_by_date.values()) / len(turnover_by_date)
+            if turnover_by_date
+            else 0.0
+        ),
     }
+    if missing_adjusted:
+        missing_path = out_dir / "missing_adjusted.csv"
+        write_csv(missing_path, [{"symbol": s} for s in missing_adjusted], ["symbol"])
+        summary["missing_adjusted_path"] = str(missing_path)
+    if record_universe and universe_dir:
+        active_path = universe_dir / "universe_active.csv"
+        excluded_path = universe_dir / "universe_excluded.csv"
+        write_csv(
+            active_path,
+            universe_records,
+            ["symbol", "snapshot_date", "rebalance_date"],
+        )
+        write_csv(
+            excluded_path,
+            universe_excluded,
+            ["symbol", "snapshot_date", "rebalance_date", "reason", "snapshot_price"],
+        )
+        summary["universe_active_path"] = str(active_path)
+        summary["universe_excluded_path"] = str(excluded_path)
+        summary["filter_counts"] = filter_counts
+    if signal_rows:
+        signals_path = out_dir / "signals.csv"
+        write_csv(
+            signals_path,
+            signal_rows,
+            ["symbol", "snapshot_date", "rebalance_date", "signal_mode", "score_date", "score"],
+        )
+        summary["signals_path"] = str(signals_path)
+        summary["signals_count"] = len(signal_rows)
+    if weight_rows:
+        weights_path = out_dir / "weights.csv"
+        write_csv(
+            weights_path,
+            weight_rows,
+            ["symbol", "snapshot_date", "rebalance_date", "signal_mode", "weight", "score"],
+        )
+        summary["weights_path"] = str(weights_path)
+        summary["weights_count"] = len(weight_rows)
     summary_path = out_dir / "summary.json"
     summary_path.write_text(
         json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"

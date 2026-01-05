@@ -12,6 +12,7 @@ from app.routes import (
     backtests,
     datasets,
     ml,
+    pit,
     projects,
     reports,
     system_themes,
@@ -41,6 +42,7 @@ async def enforce_utf8_json_charset(request, call_next):
 @app.on_event("startup")
 def on_startup() -> None:
     Base.metadata.create_all(bind=engine)
+    datasets.resume_bulk_sync_jobs()
 
 
 app.include_router(projects.router)
@@ -52,3 +54,4 @@ app.include_router(audit_logs.router)
 app.include_router(system_themes.router)
 app.include_router(universe.router)
 app.include_router(ml.router)
+app.include_router(pit.router)

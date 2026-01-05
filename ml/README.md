@@ -1,10 +1,10 @@
 # 机器学习叠加（日线）
 
 本目录提供可落地的 ML 训练脚本与模型输出格式，用于在规则策略之上叠加 ML 打分。
-当前支持 **PyTorch 推理**（推荐使用服务器 `/data/anomalib/.venv/bin/python`）。
+当前支持 **PyTorch 推理**（推荐使用服务器 `/app/stocklean/.venv/bin/python`）。
 
 ## 目录结构
-- `config.json`：训练配置（特征窗口、标签周期、walk-forward 设置）
+- `config.json`：训练配置（特征窗口、标签周期、walk-forward 设置，含 PIT 基本面快照与标签对齐）
 - `feature_engineering.py`：特征与标签生成
 - `train.py`：训练脚本（线性模型 + walk-forward 输出）
 - `train_torch.py`：PyTorch 训练脚本（MLP）
@@ -24,11 +24,15 @@ ml/models/linear_model.json
 ml/models/metrics.csv
 ```
 
+## PIT 周度因子与标签对齐
+- `pit_fundamentals.enabled=true` 启用周度基本面快照特征（默认目录 `DATA_ROOT/factors/pit_weekly_fundamentals`）。
+- `label_price=open` + `label_start_offset=1` 表示标签从下一交易日开盘起算。
+
 ## PyTorch 训练与推理
 建议使用服务器已部署的 venv：
 ```bash
-/data/anomalib/.venv/bin/python ml/train_torch.py --config ml/config.json --data-root /data/share/stock/data
-/data/anomalib/.venv/bin/python ml/predict_torch.py --config ml/config.json --data-root /data/share/stock/data --output ml/models/scores.csv
+/app/stocklean/.venv/bin/python ml/train_torch.py --config ml/config.json --data-root /data/share/stock/data
+/app/stocklean/.venv/bin/python ml/predict_torch.py --config ml/config.json --data-root /data/share/stock/data --output ml/models/scores.csv
 ```
 
 输出：

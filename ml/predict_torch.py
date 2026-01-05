@@ -10,6 +10,7 @@ import pandas as pd
 import torch
 
 from feature_engineering import FeatureConfig, compute_features, required_lookback
+from pit_features import apply_pit_features, load_pit_fundamentals
 from model_io import load_linear_model
 from torch_model import TorchMLP
 
@@ -29,6 +30,51 @@ def _load_series(path: Path) -> pd.DataFrame:
     df = df[["open", "high", "low", "close", "volume"]]
     df = df.dropna(subset=["close"])
     df = df[~df.index.duplicated(keep="last")]
+    return df
+
+
+def _load_symbol_life(
+    data_root: Path, config: dict
+) -> dict[str, tuple[pd.Timestamp | None, pd.Timestamp | None]]:
+    raw_path = str(config.get("symbol_life_path") or "").strip()
+    if not raw_path:
+        default_path = data_root / "universe" / "alpha_symbol_life.csv"
+        if default_path.exists():
+            raw_path = str(default_path)
+    if not raw_path:
+        return {}
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = data_root / path
+    if not path.exists():
+        return {}
+
+    df = pd.read_csv(path)
+    life: dict[str, tuple[pd.Timestamp | None, pd.Timestamp | None]] = {}
+    for _, row in df.iterrows():
+        symbol = str(row.get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        ipo_raw = row.get("ipoDate")
+        delist_raw = row.get("delistingDate")
+        ipo = pd.to_datetime(ipo_raw, errors="coerce") if ipo_raw else None
+        delist = pd.to_datetime(delist_raw, errors="coerce") if delist_raw else None
+        if ipo is not None and pd.isna(ipo):
+            ipo = None
+        if delist is not None and pd.isna(delist):
+            delist = None
+        life[symbol] = (ipo, delist)
+    return life
+
+
+def _apply_symbol_life(
+    df: pd.DataFrame, life: tuple[pd.Timestamp | None, pd.Timestamp | None]
+) -> pd.DataFrame:
+    ipo, delist = life
+    if ipo is not None:
+        df = df[df.index >= ipo]
+    if delist is not None:
+        df = df[df.index <= delist]
     return df
 
 
@@ -126,14 +172,19 @@ def main() -> None:
     if not adjusted_dir.exists():
         raise RuntimeError(f"缺少目录: {adjusted_dir}")
 
-    payload = load_linear_model(Path("ml/models/torch_payload.json"))
+    symbol_life = _load_symbol_life(data_root, config)
+
+    model_dir = Path(config.get("output_dir") or "ml/models")
+    payload_path = model_dir / "torch_payload.json"
+    model_path = model_dir / "torch_model.pt"
+    payload = load_linear_model(payload_path)
     torch_config = config.get("torch", {})
     model = TorchMLP(
         input_dim=len(payload.features),
         hidden=torch_config.get("hidden", [64, 32]),
         dropout=float(torch_config.get("dropout", 0.1)),
     )
-    state = torch.load("ml/models/torch_model.pt", map_location="cpu")
+    state = torch.load(model_path, map_location="cpu")
     model.load_state_dict(state)
     model.eval()
 
@@ -153,11 +204,38 @@ def main() -> None:
         vol_windows=list(feature_windows.get("vol", [10, 20, 60])),
     )
     lookback = required_lookback(feat_config, payload.label_horizon_days)
+    pit_cfg = config.get("pit_fundamentals", {})
+    if not isinstance(pit_cfg, dict):
+        pit_cfg = {}
+    pit_enabled = bool(pit_cfg.get("enabled", False))
+    pit_sample_on_snapshot = bool(pit_cfg.get("sample_on_snapshot", True))
+    pit_missing_policy = str(pit_cfg.get("missing_policy", "fill_zero"))
+    pit_fields: list[str] = []
+    pit_map: dict[str, pd.DataFrame] = {}
+    if pit_enabled:
+        pit_dir = Path(pit_cfg.get("dir") or data_root / "factors" / "pit_weekly_fundamentals")
+        if not pit_dir.is_absolute():
+            pit_dir = data_root / pit_dir
+        pit_min_coverage = float(pit_cfg.get("min_coverage", 0.05))
+        pit_coverage_action = str(pit_cfg.get("coverage_action", "warn"))
+        pit_start = pit_cfg.get("start")
+        pit_end = pit_cfg.get("end")
+        pit_map, pit_fields, _ = load_pit_fundamentals(
+            pit_dir,
+            symbols,
+            start=pit_start,
+            end=pit_end,
+            min_coverage=pit_min_coverage,
+            coverage_action=pit_coverage_action,
+        )
 
     spy_path = _pick_dataset_file(benchmark_symbol, adjusted_dir, vendor_pref)
     if not spy_path:
         raise RuntimeError("缺少基准数据")
     spy_df = _load_series(spy_path)
+    life = symbol_life.get(benchmark_symbol)
+    if life:
+        spy_df = _apply_symbol_life(spy_df, life)
 
     rows: list[pd.DataFrame] = []
     batch_size = int(torch_config.get("batch_size", 4096)) or 4096
@@ -171,11 +249,27 @@ def main() -> None:
         if not symbol_path:
             continue
         df = _load_series(symbol_path)
+        life = symbol_life.get(symbol)
+        if life:
+            df = _apply_symbol_life(df, life)
+            if df.empty:
+                continue
+        if len(df) < lookback:
+            continue
         features = compute_features(df, spy_df, feat_config)
+        if pit_enabled:
+            pit_frame = pit_map.get(symbol)
+            features = apply_pit_features(
+                features,
+                pit_frame,
+                pit_fields,
+                pit_sample_on_snapshot,
+                pit_missing_policy,
+            )
         if "vol_z_20" in features.columns:
             features["vol_z_20"] = features["vol_z_20"].fillna(0.0)
         features = features.dropna()
-        if features.empty or len(features) < lookback:
+        if features.empty:
             continue
         feature_frame = features.reindex(columns=payload.features).dropna()
         if feature_frame.empty:

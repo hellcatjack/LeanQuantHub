@@ -297,6 +297,69 @@ class DataSyncJob(Base):
     dataset: Mapped[Dataset] = relationship(back_populates="sync_jobs")
 
 
+class BulkSyncJob(Base):
+    __tablename__ = "bulk_sync_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    status: Mapped[str] = mapped_column(String(32), default="queued")
+    phase: Mapped[str] = mapped_column(String(32), default="listing_refresh")
+    params: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    pause_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    errors: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    total_symbols: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    processed_symbols: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_datasets: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reused_datasets: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    queued_jobs: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    offset: Mapped[int] = mapped_column(Integer, default=0)
+    batch_size: Mapped[int] = mapped_column(Integer, default=200)
+    enqueued_start_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    enqueued_end_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    queue_started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    queue_ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class PitWeeklyJob(Base):
+    __tablename__ = "pit_weekly_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    status: Mapped[str] = mapped_column(String(32), default="queued")
+    params: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    output_dir: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    log_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    snapshot_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_snapshot_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class PitFundamentalJob(Base):
+    __tablename__ = "pit_fundamental_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    status: Mapped[str] = mapped_column(String(32), default="queued")
+    params: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    output_dir: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    log_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    snapshot_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_snapshot_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class AuditLog(Base):
     __tablename__ = "audit_logs"
 

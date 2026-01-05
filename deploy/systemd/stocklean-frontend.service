@@ -5,7 +5,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=/app/stocklean/frontend
-ExecStart=/usr/bin/python3 /app/stocklean/frontend/scripts/spa_server.py --dir /app/stocklean/frontend/dist --bind 0.0.0.0 --port 8081
+ExecStart=/app/stocklean/.venv/bin/python /app/stocklean/frontend/scripts/spa_server.py --dir /app/stocklean/frontend/dist --bind 0.0.0.0 --port 8081
 Restart=always
 RestartSec=5
 

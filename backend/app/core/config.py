@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     alpha_vantage_api_key: str = ""
     alpha_vantage_entitlement: str = "delayed"
     ml_python_path: str = ""
+    market_timezone: str = "America/New_York"
+    market_session_open: str = "09:30"
+    market_session_close: str = "16:00"
 
     class Config:
         env_file = ".env"

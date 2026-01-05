@@ -14,7 +14,6 @@
 - `deploy/mysql/`：数据库初始化脚本。
 
 ## 服务器数据目录（/data/share/stock）
-- `.venv`：软链接到 `/data/anomalib/.venv`（ROCm/PyTorch 环境）。
 - `lean-py311/`：Lean 的 Python 运行环境与依赖。
 - `data/`：主数据目录：
   - `raw/`：原始抓取数据。

@@ -24,6 +24,45 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
+def _normalize_price_policy(value: str | None) -> str | None:
+    if not value:
+        return None
+    key = str(value).strip().lower()
+    if not key:
+        return None
+    if key in {"adjusted", "adjusted_only", "adjusted_prefer"}:
+        return "adjusted_only"
+    if key in {"raw", "raw_only"}:
+        return "raw_only"
+    return key
+
+
+def _resolve_price_policy(params: dict[str, object]) -> str | None:
+    for key in ("price_source_policy", "price_policy", "price_mode", "corporate_action_policy"):
+        if isinstance(params.get(key), str):
+            policy = _normalize_price_policy(params[key])
+            if policy:
+                return policy
+    weights_path = os.environ.get("WEIGHTS_CONFIG_PATH")
+    if not weights_path:
+        candidate = _project_root() / "configs" / "portfolio_weights.json"
+        if candidate.exists():
+            weights_path = str(candidate)
+    if weights_path:
+        try:
+            cfg = json.loads(Path(weights_path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            cfg = {}
+        if isinstance(cfg, dict):
+            policy = _normalize_price_policy(cfg.get("price_source_policy"))
+            if policy:
+                return policy
+            policy = _normalize_price_policy(cfg.get("corporate_action_policy"))
+            if policy:
+                return policy
+    return None
+
+
 def _resolve_ml_python() -> str:
     if settings.ml_python_path:
         return settings.ml_python_path
@@ -569,6 +608,7 @@ def run_backtest(run_id: int) -> None:
 
         config = _load_config(settings.lean_config_template)
         params = run.params if isinstance(run.params, dict) else {}
+        price_policy = _resolve_price_policy(params)
         algo_language = (params.get("algorithm_language") or "Python").strip()
         config["algorithm-language"] = algo_language
         algo_path = params.get("algorithm_path") or params.get("algorithm")
@@ -638,8 +678,14 @@ def run_backtest(run_id: int) -> None:
         default_data_folder = settings.lean_data_folder
         if settings.data_root:
             adjusted_root = Path(settings.data_root) / "lean_adjusted"
-            if adjusted_root.exists():
-                default_data_folder = str(adjusted_root)
+            raw_root = Path(settings.data_root) / "lean"
+            if price_policy == "raw_only":
+                if not default_data_folder or "adjusted" in default_data_folder.lower():
+                    if raw_root.exists():
+                        default_data_folder = str(raw_root)
+            else:
+                if adjusted_root.exists():
+                    default_data_folder = str(adjusted_root)
         config["data-folder"] = data_folder_override or default_data_folder
         config["results-destination-folder"] = str(lean_results_dir)
 
@@ -743,8 +789,15 @@ def run_backtest(run_id: int) -> None:
             data_folder_value = config["data-folder"].lower()
             if "lean_adjusted" in data_folder_value or "adjusted" in data_folder_value:
                 price_mode = "adjusted"
+        if not price_policy:
+            if price_mode == "adjusted":
+                price_policy = "adjusted_only"
+            elif price_mode == "raw":
+                price_policy = "raw_only"
         metrics["Price Mode"] = price_mode
         metrics["Benchmark Price Mode"] = price_mode
+        if price_policy:
+            metrics["Price Policy"] = price_policy
 
         risk_params = params.get("risk", {}) if isinstance(params.get("risk"), dict) else {}
         risk_status, risk_warnings = _evaluate_risk(metrics, risk_params)
@@ -781,6 +834,10 @@ def run_backtest(run_id: int) -> None:
         data_notes = (
             "公司行为映射依赖本地 map_files/factor_files；若缺失将导致更名、拆分处理不完整。"
         )
+        if price_policy == "adjusted_only":
+            data_notes = f"{data_notes} 回测使用复权价，分红/拆分已计入价格。"
+        elif price_policy == "raw_only":
+            data_notes = f"{data_notes} 回测使用原始价，分红/拆分需结合公司行为文件。"
         if data_folder_override:
             tag = "复权版" if "lean_adjusted" in data_folder_override else "原始数据"
             data_notes = f"{data_notes} 数据目录：{data_folder_override}（{tag}）。"

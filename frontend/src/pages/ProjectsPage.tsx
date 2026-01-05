@@ -59,6 +59,8 @@ interface MLTrainJob {
   log_path?: string | null;
   message?: string | null;
   is_active?: boolean;
+  progress?: number | null;
+  progress_detail?: Record<string, any> | null;
   created_at: string;
   started_at?: string | null;
   ended_at?: string | null;
@@ -574,6 +576,22 @@ export default function ProjectsPage() {
       setBenchmarkMessage("");
     }
   }, [selectedProjectId]);
+
+  useEffect(() => {
+    if (!selectedProjectId) {
+      return;
+    }
+    const hasActiveJob = mlJobs.some(
+      (job) => job.status === "running" || job.status === "queued"
+    );
+    if (!hasActiveJob) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      loadMlJobs(selectedProjectId);
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [selectedProjectId, mlJobs]);
 
   useEffect(() => {
     const selectedId = Number(bindingForm.algorithmId);
@@ -1139,6 +1157,15 @@ export default function ProjectsPage() {
     return label === key ? status || t("common.none") : label;
   };
 
+  const mlProgressLabel = (job: MLTrainJob) => {
+    const value = job.progress_detail?.progress ?? job.progress;
+    if (value === null || value === undefined || Number.isNaN(value)) {
+      return "-";
+    }
+    const pct = Math.max(0, Math.min(1, Number(value))) * 100;
+    return `${pct.toFixed(0)}%`;
+  };
+
   const mlStatusClass = (status?: string) => {
     if (status === "success") {
       return "success";
@@ -1440,6 +1467,19 @@ export default function ProjectsPage() {
       return t("projects.backtest.priceMixed");
     }
     return String(mode);
+  };
+  const formatPricePolicy = (policy?: string | null) => {
+    if (!policy) {
+      return t("common.none");
+    }
+    const value = String(policy).toLowerCase();
+    if (value.includes("adjusted")) {
+      return t("projects.backtest.policyAdjusted");
+    }
+    if (value.includes("raw")) {
+      return t("projects.backtest.policyRaw");
+    }
+    return String(policy);
   };
   const formatMetricValue = (value: unknown) => {
     if (value === null || value === undefined || value === "") {
@@ -1780,15 +1820,25 @@ export default function ProjectsPage() {
                             )}
                           </strong>
                         </div>
-                  <div className="meta-row">
-                    <span>{t("projects.backtest.benchmarkMode")}</span>
-                    <strong>
-                      {formatPriceMode(
-                        (backtestSummary?.["Benchmark Price Mode"] as string | undefined) ??
-                          (backtestSummary?.benchmark_mode as string | undefined)
-                      )}
-                    </strong>
-                  </div>
+                        <div className="meta-row">
+                          <span>{t("projects.backtest.benchmarkMode")}</span>
+                          <strong>
+                            {formatPriceMode(
+                              (backtestSummary?.["Benchmark Price Mode"] as string | undefined) ??
+                                (backtestSummary?.benchmark_mode as string | undefined)
+                            )}
+                          </strong>
+                        </div>
+                        <div className="meta-row">
+                          <span>{t("projects.backtest.pricePolicy")}</span>
+                          <strong>
+                            {formatPricePolicy(
+                              (backtestSummary?.["Price Policy"] as string | undefined) ??
+                                (backtestSummary?.price_policy as string | undefined) ??
+                                (backtestSummary?.price_source_policy as string | undefined)
+                            )}
+                          </strong>
+                        </div>
                   {missingScores.length > 0 && (
                     <div className="missing-score-block">
                       <div className="missing-score-title">
@@ -2811,6 +2861,7 @@ export default function ProjectsPage() {
                       <thead>
                         <tr>
                           <th>{t("projects.ml.table.status")}</th>
+                          <th>{t("projects.ml.table.progress")}</th>
                           <th>{t("projects.ml.table.window")}</th>
                           <th>{t("projects.ml.table.horizon")}</th>
                           <th>{t("projects.ml.table.symbols")}</th>
@@ -2837,6 +2888,7 @@ export default function ProjectsPage() {
                                   </span>
                                 )}
                               </td>
+                              <td>{mlProgressLabel(job)}</td>
                               <td>
                                 {walk.train_years ? `${walk.train_years}Y` : "-"} /{" "}
                                 {walk.valid_months ? `${walk.valid_months}M` : "-"}
@@ -2884,6 +2936,34 @@ export default function ProjectsPage() {
                       <span>{t("projects.ml.detailStatus")}</span>
                       <strong>{mlStatusLabel(mlDetailJob.status)}</strong>
                     </div>
+                    <div className="meta-row">
+                      <span>{t("projects.ml.detailProgress")}</span>
+                      <strong>{mlProgressLabel(mlDetailJob)}</strong>
+                    </div>
+                    {mlDetailJob.progress_detail?.phase && (
+                      <div className="meta-row">
+                        <span>{t("projects.ml.detailPhase")}</span>
+                        <strong>{String(mlDetailJob.progress_detail.phase)}</strong>
+                      </div>
+                    )}
+                    {mlDetailJob.progress_detail?.window_total && (
+                      <div className="meta-row">
+                        <span>{t("projects.ml.detailWindow")}</span>
+                        <strong>
+                          {String(mlDetailJob.progress_detail.window || 0)}/
+                          {String(mlDetailJob.progress_detail.window_total)}
+                        </strong>
+                      </div>
+                    )}
+                    {mlDetailJob.progress_detail?.epoch_total && (
+                      <div className="meta-row">
+                        <span>{t("projects.ml.detailEpoch")}</span>
+                        <strong>
+                          {String(mlDetailJob.progress_detail.epoch || 0)}/
+                          {String(mlDetailJob.progress_detail.epoch_total)}
+                        </strong>
+                      </div>
+                    )}
                     <div className="meta-row">
                       <span>{t("projects.ml.detailOutput")}</span>
                       <strong>{mlDetailJob.output_dir || "-"}</strong>
@@ -3002,6 +3082,16 @@ export default function ProjectsPage() {
                     {formatPriceMode(
                       (backtestSummary?.["Benchmark Price Mode"] as string | undefined) ??
                         (backtestSummary?.benchmark_mode as string | undefined)
+                    )}
+                  </strong>
+                </div>
+                <div className="meta-row">
+                  <span>{t("projects.backtest.pricePolicy")}</span>
+                  <strong>
+                    {formatPricePolicy(
+                      (backtestSummary?.["Price Policy"] as string | undefined) ??
+                        (backtestSummary?.price_policy as string | undefined) ??
+                        (backtestSummary?.price_source_policy as string | undefined)
                     )}
                   </strong>
                 </div>

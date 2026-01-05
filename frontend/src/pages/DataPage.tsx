@@ -58,11 +58,98 @@ interface DataSyncJob {
   ended_at?: string | null;
 }
 
-interface DatasetFetchResult {
-  dataset: DatasetSummary;
-  job?: DataSyncJob | null;
-  created: boolean;
+interface DataSyncSpeed {
+  window_seconds: number;
+  completed: number;
+  rate_per_min: number;
+  running: number;
+  pending: number;
 }
+
+interface DataSyncQueueClearOut {
+  deleted: number;
+  statuses: string[];
+  only_alpha: boolean;
+}
+
+interface BulkSyncJob {
+  id: number;
+  status: string;
+  phase: string;
+  total_symbols?: number | null;
+  processed_symbols?: number | null;
+  created_datasets?: number | null;
+  reused_datasets?: number | null;
+  queued_jobs?: number | null;
+  offset?: number | null;
+  batch_size?: number | null;
+  pending_sync_jobs?: number | null;
+  running_sync_jobs?: number | null;
+  completed_sync_jobs?: number | null;
+  message?: string | null;
+  error?: string | null;
+  updated_at?: string;
+  started_at?: string | null;
+  ended_at?: string | null;
+}
+
+interface PitWeeklyJob {
+  id: number;
+  status: string;
+  params?: Record<string, unknown> | null;
+  output_dir?: string | null;
+  log_path?: string | null;
+  snapshot_count?: number | null;
+  last_snapshot_path?: string | null;
+  message?: string | null;
+  created_at: string;
+  started_at?: string | null;
+  ended_at?: string | null;
+}
+
+interface PitWeeklyQuality {
+  available?: boolean;
+  status?: string;
+  snapshots?: number;
+  symbols?: number;
+  duplicates?: number;
+  invalid_rows?: number;
+  date_mismatches?: number;
+  out_of_life?: number;
+  no_data?: number;
+  fixed_files?: number;
+  updated_at?: string;
+}
+
+interface PitFundamentalJob {
+  id: number;
+  status: string;
+  params?: Record<string, unknown> | null;
+  output_dir?: string | null;
+  log_path?: string | null;
+  snapshot_count?: number | null;
+  last_snapshot_path?: string | null;
+  message?: string | null;
+  created_at: string;
+  started_at?: string | null;
+  ended_at?: string | null;
+}
+
+interface PitFundamentalProgress {
+  stage?: string;
+  status?: string;
+  total?: number;
+  done?: number;
+  pending?: number;
+  ok?: number;
+  partial?: number;
+  rate_limited?: number;
+  current_symbol?: string;
+  updated_at?: string;
+  snapshot_count?: number | null;
+  message?: string | null;
+}
+
 
 interface UniverseTheme {
   key: string;
@@ -87,13 +174,6 @@ interface ThemeCoverage {
   updated_at?: string | null;
 }
 
-interface ThemeFetchResult {
-  theme_key: string;
-  total_symbols: number;
-  created: number;
-  reused: number;
-  queued: number;
-}
 
 export default function DataPage() {
   const { t, formatDateTime } = useI18n();
@@ -110,9 +190,6 @@ export default function DataPage() {
   const [themeCoverage, setThemeCoverage] = useState<ThemeCoverage | null>(null);
   const [themeCoverageLoading, setThemeCoverageLoading] = useState(false);
   const [themeCoverageError, setThemeCoverageError] = useState("");
-  const [themeFetchLoading, setThemeFetchLoading] = useState(false);
-  const [themeFetchResult, setThemeFetchResult] = useState<ThemeFetchResult | null>(null);
-  const [themeFetchError, setThemeFetchError] = useState("");
   const [form, setForm] = useState({
     name: "",
     vendor: "",
@@ -123,17 +200,7 @@ export default function DataPage() {
     coverage_end: "",
     source_path: "",
   });
-  const [fetchForm, setFetchForm] = useState({
-    symbol: "",
-    vendor: "alpha",
-    asset_class: "Equity",
-    region: "US",
-    frequency: "daily",
-  });
   const [resetHistory, setResetHistory] = useState(false);
-  const [fetchLoading, setFetchLoading] = useState(false);
-  const [fetchError, setFetchError] = useState("");
-  const [fetchResult, setFetchResult] = useState<DatasetFetchResult | null>(null);
   const [formError, setFormError] = useState("");
   const [qualityMap, setQualityMap] = useState<Record<number, DatasetQuality>>({});
   const [qualityLoading, setQualityLoading] = useState<Record<number, boolean>>({});
@@ -163,6 +230,50 @@ export default function DataPage() {
   const [syncTotal, setSyncTotal] = useState(0);
   const [syncPage, setSyncPage] = useState(1);
   const [syncPageSize, setSyncPageSize] = useState(10);
+  const [syncSpeed, setSyncSpeed] = useState<DataSyncSpeed | null>(null);
+  const [clearQueueLoading, setClearQueueLoading] = useState(false);
+  const [clearQueueResult, setClearQueueResult] = useState("");
+  const [clearQueueError, setClearQueueError] = useState("");
+  const [bulkAutoForm, setBulkAutoForm] = useState({
+    status: "all",
+    batch_size: "200",
+    only_missing: true,
+    min_delay_seconds: "0.1",
+  });
+  const [bulkJob, setBulkJob] = useState<BulkSyncJob | null>(null);
+  const [bulkJobLoading, setBulkJobLoading] = useState(false);
+  const [bulkJobError, setBulkJobError] = useState("");
+  const [bulkHistory, setBulkHistory] = useState<BulkSyncJob[]>([]);
+  const [bulkHistoryTotal, setBulkHistoryTotal] = useState(0);
+  const [bulkHistoryPage, setBulkHistoryPage] = useState(1);
+  const [bulkHistoryPageSize, setBulkHistoryPageSize] = useState(5);
+  const [bulkActionLoading, setBulkActionLoading] = useState<Record<number, boolean>>({});
+  const [pitForm, setPitForm] = useState({
+    start: "",
+    end: "",
+    require_data: false,
+  });
+  const [pitJobs, setPitJobs] = useState<PitWeeklyJob[]>([]);
+  const [pitLoadError, setPitLoadError] = useState("");
+  const [pitActionLoading, setPitActionLoading] = useState(false);
+  const [pitActionError, setPitActionError] = useState("");
+  const [pitActionResult, setPitActionResult] = useState("");
+  const [pitQuality, setPitQuality] = useState<PitWeeklyQuality | null>(null);
+  const [pitQualityError, setPitQualityError] = useState("");
+  const [pitFundForm, setPitFundForm] = useState({
+    start: "",
+    end: "",
+    report_delay_days: "1",
+    min_delay_seconds: "0.8",
+    refresh_fundamentals: false,
+  });
+  const [pitFundJobs, setPitFundJobs] = useState<PitFundamentalJob[]>([]);
+  const [pitFundLoadError, setPitFundLoadError] = useState("");
+  const [pitFundActionLoading, setPitFundActionLoading] = useState(false);
+  const [pitFundActionError, setPitFundActionError] = useState("");
+  const [pitFundActionResult, setPitFundActionResult] = useState("");
+  const [pitFundProgress, setPitFundProgress] = useState<PitFundamentalProgress | null>(null);
+  const [pitFundProgressError, setPitFundProgressError] = useState("");
   const [expandedGroupKey, setExpandedGroupKey] = useState<string | null>(null);
   const [chartSelection, setChartSelection] = useState<Record<string, number>>({});
 
@@ -180,6 +291,116 @@ export default function DataPage() {
     });
     setSyncJobs(res.data.items);
     setSyncTotal(res.data.total);
+  };
+
+  const loadBulkHistory = async () => {
+    const res = await api.get<Paginated<BulkSyncJob>>("/api/datasets/bulk-sync-jobs/page", {
+      params: { page: bulkHistoryPage, page_size: bulkHistoryPageSize },
+    });
+    setBulkHistory(res.data.items);
+    setBulkHistoryTotal(res.data.total);
+  };
+
+  const loadPitWeeklyJobs = async () => {
+    try {
+      const res = await api.get<PitWeeklyJob[]>("/api/pit/weekly-jobs", {
+        params: { limit: 5, offset: 0 },
+      });
+      setPitJobs(res.data);
+      setPitLoadError("");
+      return res.data;
+    } catch (err: any) {
+      if (err?.response?.status === 404) {
+        setPitJobs([]);
+        setPitLoadError("");
+        return [];
+      }
+      const detail = err?.response?.data?.detail || t("data.pit.loadError");
+      setPitLoadError(String(detail));
+      return [];
+    }
+  };
+
+  const loadPitQuality = async (jobId: number) => {
+    try {
+      const res = await api.get<PitWeeklyQuality>(`/api/pit/weekly-jobs/${jobId}/quality`);
+      setPitQuality(res.data);
+      setPitQualityError("");
+    } catch (err: any) {
+      if (err?.response?.status === 404) {
+        setPitQuality(null);
+        setPitQualityError("");
+        return;
+      }
+      const detail = err?.response?.data?.detail || t("data.pit.qualityError");
+      setPitQualityError(String(detail));
+    }
+  };
+
+  const loadPitFundJobs = async () => {
+    try {
+      const res = await api.get<PitFundamentalJob[]>("/api/pit/fundamental-jobs", {
+        params: { limit: 5, offset: 0 },
+      });
+      setPitFundJobs(res.data);
+      setPitFundLoadError("");
+      return res.data;
+    } catch (err: any) {
+      if (err?.response?.status === 404) {
+        setPitFundJobs([]);
+        setPitFundLoadError("");
+        return [];
+      }
+      const detail = err?.response?.data?.detail || t("data.pitFund.loadError");
+      setPitFundLoadError(String(detail));
+      return [];
+    }
+  };
+
+  const loadPitFundProgress = async (jobId: number) => {
+    try {
+      const res = await api.get<PitFundamentalProgress>(
+        `/api/pit/fundamental-jobs/${jobId}/progress`
+      );
+      setPitFundProgress(res.data);
+      setPitFundProgressError("");
+    } catch (err: any) {
+      if (err?.response?.status === 404) {
+        setPitFundProgress(null);
+        setPitFundProgressError("");
+        return;
+      }
+      const detail = err?.response?.data?.detail || t("data.pitFund.progressError");
+      setPitFundProgressError(String(detail));
+    }
+  };
+
+  const loadSyncSpeed = async () => {
+    const res = await api.get<DataSyncSpeed>("/api/datasets/sync-jobs/speed", {
+      params: { window_seconds: 60 },
+    });
+    return res.data;
+  };
+
+  const clearSyncQueue = async () => {
+    if (!window.confirm(t("data.jobs.clearConfirm"))) {
+      return;
+    }
+    setClearQueueLoading(true);
+    setClearQueueResult("");
+    setClearQueueError("");
+    try {
+      const res = await api.post<DataSyncQueueClearOut>("/api/datasets/sync-jobs/clear");
+      setClearQueueResult(t("data.jobs.clearDone", { count: res.data.deleted }));
+      await loadSyncJobs();
+      const data = await loadSyncSpeed();
+      setSyncSpeed(data);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("data.jobs.clearError");
+      setClearQueueError(detail);
+    } finally {
+      setClearQueueLoading(false);
+    }
   };
 
   const loadThemeOptions = async () => {
@@ -235,45 +456,6 @@ export default function DataPage() {
     }
   };
 
-  const fetchThemeData = async () => {
-    if (!themeFilter || themeFilter === "all") {
-      return;
-    }
-    const missing = themeCoverage?.missing_symbols?.length ?? 0;
-    if (missing === 0) {
-      setThemeFetchResult(null);
-      setThemeFetchError(t("data.list.theme.noMissing"));
-      return;
-    }
-    const confirmed = window.confirm(
-      t("data.list.theme.confirm", { count: missing })
-    );
-    if (!confirmed) {
-      return;
-    }
-    setThemeFetchError("");
-    setThemeFetchResult(null);
-    setThemeFetchLoading(true);
-    try {
-      const res = await api.post<ThemeFetchResult>("/api/datasets/actions/fetch-theme", {
-        theme_key: themeFilter,
-        vendor: "alpha",
-        asset_class: "Equity",
-        region: "US",
-        frequency: "daily",
-        auto_sync: true,
-        only_missing: true,
-      });
-      setThemeFetchResult(res.data);
-      loadDatasets();
-      loadThemeCoverage(themeFilter);
-    } catch (err) {
-      setThemeFetchError(t("data.list.theme.fetchError"));
-    } finally {
-      setThemeFetchLoading(false);
-    }
-  };
-
   useEffect(() => {
     loadDatasets();
   }, [datasetPage, datasetPageSize]);
@@ -281,6 +463,68 @@ export default function DataPage() {
   useEffect(() => {
     loadSyncJobs();
   }, [syncPage, syncPageSize]);
+
+  useEffect(() => {
+    loadBulkHistory();
+  }, [bulkHistoryPage, bulkHistoryPageSize]);
+
+  useEffect(() => {
+    let mounted = true;
+    const refresh = async () => {
+      try {
+        const data = await loadSyncSpeed();
+        if (mounted) {
+          setSyncSpeed(data);
+        }
+      } catch (err) {
+        if (mounted) {
+          setSyncSpeed(null);
+        }
+      }
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 5000);
+    return () => {
+      mounted = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    const refresh = async () => {
+      try {
+        await loadBulkJob();
+        await loadBulkHistory();
+        const weeklyJobs = await loadPitWeeklyJobs();
+        const latestWeeklyJob = weeklyJobs && weeklyJobs.length > 0 ? weeklyJobs[0] : null;
+        if (latestWeeklyJob) {
+          await loadPitQuality(latestWeeklyJob.id);
+        } else {
+          setPitQuality(null);
+          setPitQualityError("");
+        }
+        const fundJobs = await loadPitFundJobs();
+        const latestFundJob = fundJobs && fundJobs.length > 0 ? fundJobs[0] : null;
+        if (latestFundJob) {
+          await loadPitFundProgress(latestFundJob.id);
+        } else {
+          setPitFundProgress(null);
+          setPitFundProgressError("");
+        }
+      } finally {
+        if (!mounted) {
+          return;
+        }
+      }
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 5000);
+    return () => {
+      mounted = false;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   useEffect(() => {
     loadThemeOptions();
@@ -296,10 +540,6 @@ export default function DataPage() {
 
   const updateForm = (key: keyof typeof form, value: string) => {
     setForm((prev) => ({ ...prev, [key]: value }));
-  };
-
-  const updateFetchForm = (key: keyof typeof fetchForm, value: string) => {
-    setFetchForm((prev) => ({ ...prev, [key]: value }));
   };
 
   const createDataset = async () => {
@@ -337,6 +577,77 @@ export default function DataPage() {
 
   const updateSyncForm = (key: keyof typeof syncForm, value: string) => {
     setSyncForm((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const updateBulkAutoForm = (key: keyof typeof bulkAutoForm, value: string | boolean) => {
+    setBulkAutoForm((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const updatePitForm = (key: keyof typeof pitForm, value: string | boolean) => {
+    setPitForm((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const getParamString = (
+    params: Record<string, unknown> | null | undefined,
+    key: string
+  ): string => {
+    const value = params?.[key];
+    return typeof value === "string" ? value : "";
+  };
+
+  const updatePitFundForm = (key: keyof typeof pitFundForm, value: string | boolean) => {
+    setPitFundForm((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const pitParams = pitJobs[0]?.params || null;
+  const pitTimezone = getParamString(pitParams, "market_timezone");
+  const pitSessionOpen = getParamString(pitParams, "market_session_open");
+  const pitSessionClose = getParamString(pitParams, "market_session_close");
+
+  const createPitWeeklyJob = async () => {
+    setPitActionLoading(true);
+    setPitActionError("");
+    setPitActionResult("");
+    try {
+      const payload = {
+        start: pitForm.start || null,
+        end: pitForm.end || null,
+        require_data: pitForm.require_data,
+      };
+      const res = await api.post<PitWeeklyJob>("/api/pit/weekly-jobs", payload);
+      setPitActionResult(t("data.pit.created", { id: res.data.id }));
+      await loadPitWeeklyJobs();
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("data.pit.error");
+      setPitActionError(String(detail));
+    } finally {
+      setPitActionLoading(false);
+    }
+  };
+
+  const createPitFundJob = async () => {
+    setPitFundActionLoading(true);
+    setPitFundActionError("");
+    setPitFundActionResult("");
+    try {
+      const delayDays = Math.max(Number.parseInt(pitFundForm.report_delay_days, 10) || 1, 0);
+      const minDelay = Math.max(Number.parseFloat(pitFundForm.min_delay_seconds) || 0, 0);
+      const payload = {
+        start: pitFundForm.start || null,
+        end: pitFundForm.end || null,
+        report_delay_days: delayDays,
+        min_delay_seconds: minDelay,
+        refresh_fundamentals: pitFundForm.refresh_fundamentals,
+      };
+      const res = await api.post<PitFundamentalJob>("/api/pit/fundamental-jobs", payload);
+      setPitFundActionResult(t("data.pitFund.created", { id: res.data.id }));
+      await loadPitFundJobs();
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("data.pitFund.error");
+      setPitFundActionError(String(detail));
+    } finally {
+      setPitFundActionLoading(false);
+    }
   };
 
   const syncDataset = async (dataset: DatasetSummary) => {
@@ -493,7 +804,6 @@ export default function DataPage() {
         return;
       }
       await api.post("/api/datasets/sync-all", {
-        vendor: fetchForm.vendor,
         reset_history: resetHistory,
       });
       loadSyncJobs();
@@ -503,41 +813,6 @@ export default function DataPage() {
       setListError(String(detail));
     } finally {
       setSyncAllLoading(false);
-    }
-  };
-
-  const fetchHistory = async () => {
-    const symbol = normalizeSymbolInput(fetchForm.symbol);
-    if (!symbol) {
-      setFetchError(t("data.fetch.errorSymbol"));
-      return;
-    }
-    if (fetchForm.frequency === "minute" && fetchForm.vendor === "alpha") {
-      setFetchError(t("data.fetch.errorFrequency"));
-      return;
-    }
-    setFetchError("");
-    setFetchResult(null);
-    setFetchLoading(true);
-    try {
-      const res = await api.post<DatasetFetchResult>("/api/datasets/actions/fetch", {
-        symbol,
-        vendor: fetchForm.vendor,
-        asset_class: fetchForm.asset_class,
-        region: fetchForm.region,
-        frequency: fetchForm.frequency,
-        auto_sync: true,
-      });
-      setFetchResult(res.data);
-      setDatasetPage(1);
-      setSyncPage(1);
-      await loadDatasets();
-      await loadSyncJobs();
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail || t("data.fetch.error");
-      setFetchError(String(detail));
-    } finally {
-      setFetchLoading(false);
     }
   };
 
@@ -640,6 +915,66 @@ export default function DataPage() {
     return "";
   };
 
+  const loadBulkJob = async () => {
+    try {
+      const res = await api.get<BulkSyncJob>("/api/datasets/bulk-sync-jobs/latest");
+      setBulkJob(res.data);
+      setBulkJobError("");
+    } catch (err: any) {
+      if (err?.response?.status === 404) {
+        setBulkJob(null);
+        setBulkJobError("");
+        return;
+      }
+      const detail = err?.response?.data?.detail || t("data.bulk.autoError");
+      setBulkJobError(String(detail));
+    }
+  };
+
+  const startBulkSync = async () => {
+    setBulkJobError("");
+    setBulkJobLoading(true);
+    try {
+      const batchSize = Math.max(Number.parseInt(bulkAutoForm.batch_size, 10) || 1, 1);
+      const minDelay = Math.max(
+        Number.parseFloat(bulkAutoForm.min_delay_seconds) || 0,
+        0
+      );
+      const res = await api.post<BulkSyncJob>("/api/datasets/actions/bulk-sync", {
+        status: bulkAutoForm.status,
+        batch_size: batchSize,
+        only_missing: bulkAutoForm.only_missing,
+        min_delay_seconds: minDelay,
+        refresh_listing: true,
+        auto_sync: true,
+      });
+      setBulkJob(res.data);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("data.bulk.autoError");
+      setBulkJobError(String(detail));
+    } finally {
+      setBulkJobLoading(false);
+    }
+  };
+
+  const runBulkAction = async (jobId: number, action: "pause" | "resume" | "cancel") => {
+    setBulkActionLoading((prev) => ({ ...prev, [jobId]: true }));
+    try {
+      await api.post(`/api/datasets/bulk-sync-jobs/${jobId}/${action}`);
+      await loadBulkJob();
+      await loadBulkHistory();
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("data.bulk.actionError");
+      setBulkJobError(String(detail));
+    } finally {
+      setBulkActionLoading((prev) => {
+        const next = { ...prev };
+        delete next[jobId];
+        return next;
+      });
+    }
+  };
+
   const normalizeJobStatus = (job: DataSyncJob) => {
     if (job.status !== "failed" || !job.message) {
       return job.status;
@@ -657,6 +992,9 @@ export default function DataPage() {
   const resolveJobReason = (job: DataSyncJob) => {
     const normalized = normalizeJobStatus(job);
     const message = (job.message || "").toLowerCase();
+    if (message.includes("stooq_only")) {
+      return t("data.jobs.reason.stooqOnly");
+    }
     if (message.includes("premium") || message.includes("付费")) {
       return t("data.jobs.reason.premium");
     }
@@ -680,6 +1018,37 @@ export default function DataPage() {
       return "warn";
     }
     return "";
+  };
+
+  const renderBulkStatus = (value: string) => {
+    const key = `data.bulk.statusLabel.${value}`;
+    const text = t(key);
+    return text === key ? value : text;
+  };
+
+  const renderBulkPhase = (value: string) => {
+    const key = `data.bulk.phaseLabel.${value}`;
+    const text = t(key);
+    return text === key ? value : text;
+  };
+
+  const bulkErrorSummary = (errors?: Array<{ message?: string; phase?: string }>) => {
+    if (!errors || errors.length === 0) {
+      return t("common.none");
+    }
+    const last = errors[errors.length - 1];
+    const prefix = last?.phase ? `${last.phase}: ` : "";
+    return `${errors.length} · ${prefix}${last?.message || ""}`.trim();
+  };
+
+  const bulkErrorTooltip = (errors?: Array<{ message?: string; phase?: string }>) => {
+    if (!errors || errors.length === 0) {
+      return "";
+    }
+    return errors
+      .slice(-5)
+      .map((err) => `${err.phase ? `${err.phase}: ` : ""}${err.message || ""}`)
+      .join("\n");
   };
 
   const normalizeFrequency = (value?: string | null) => {
@@ -785,23 +1154,15 @@ export default function DataPage() {
     return `${start || t("common.none")} ~ ${end || t("common.none")}`;
   };
 
-  const fetchPreview = useMemo(() => {
-    const symbol = fetchForm.symbol
-      .trim()
-      .toUpperCase()
-      .replace(/[^A-Z0-9.]/g, "");
-    const vendorLabelMap: Record<string, string> = {
-      alpha: "Alpha",
-    };
-    const vendorLabel =
-      vendorLabelMap[fetchForm.vendor] || fetchForm.vendor.toUpperCase();
-    const frequencyLabel = fetchForm.frequency === "minute" ? "Minute" : "Daily";
-    return {
-      symbol,
-      datasetName: symbol ? `${vendorLabel}_${symbol}_${frequencyLabel}` : t("common.none"),
-      sourcePath: symbol ? `${fetchForm.vendor}:${symbol}` : t("common.none"),
-    };
-  }, [fetchForm, t]);
+  const bulkJobProgress = useMemo(() => {
+    if (!bulkJob) {
+      return null;
+    }
+    const total = bulkJob.total_symbols || 0;
+    const processed = bulkJob.processed_symbols ?? bulkJob.offset ?? 0;
+    const percent = total ? (processed / total) * 100 : 0;
+    return { processed, total, percent };
+  }, [bulkJob]);
 
   const latestSyncByDataset = useMemo(() => {
     const map = new Map<number, DataSyncJob>();
@@ -983,180 +1344,6 @@ export default function DataPage() {
     <div className="main">
       <TopBar title={t("data.title")} />
       <div className="content">
-        <div className="grid-2">
-          <div className="card">
-            <div className="card-title">{t("data.coverage.title")}</div>
-            <div className="card-meta">{t("data.coverage.meta")}</div>
-            <div style={{ fontSize: "32px", fontWeight: 600, marginTop: "12px" }}>
-              {datasetTotal}
-            </div>
-          </div>
-          <div className="card">
-            <div className="card-title">{t("data.fetch.title")}</div>
-            <div className="card-meta">{t("data.fetch.meta")}</div>
-            <div className="form-grid">
-              <input
-                className="form-input"
-                value={fetchForm.symbol}
-                onChange={(e) => updateFetchForm("symbol", e.target.value)}
-                placeholder={t("data.fetch.symbol")}
-              />
-                <div className="form-grid two-col">
-                  <select
-                    className="form-select"
-                    value={fetchForm.vendor}
-                    onChange={(e) => updateFetchForm("vendor", e.target.value)}
-                  >
-                    <option value="alpha">{t("data.fetch.vendor.alpha")}</option>
-                  </select>
-                  <select
-                    className="form-select"
-                    value={fetchForm.frequency}
-                    onChange={(e) => updateFetchForm("frequency", e.target.value)}
-                  >
-                    <option value="daily">{t("data.fetch.frequency.daily")}</option>
-                    <option
-                      value="minute"
-                      disabled={fetchForm.vendor === "alpha"}
-                    >
-                      {t("data.fetch.frequency.minute")}
-                    </option>
-                  </select>
-              </div>
-              <div className="form-grid two-col">
-                <select
-                  className="form-select"
-                  value={fetchForm.region}
-                  onChange={(e) => updateFetchForm("region", e.target.value)}
-                >
-                  <option value="US">{t("data.fetch.region.us")}</option>
-                  <option value="HK">{t("data.fetch.region.hk")}</option>
-                </select>
-                <select
-                  className="form-select"
-                  value={fetchForm.asset_class}
-                  onChange={(e) => updateFetchForm("asset_class", e.target.value)}
-                >
-                  <option value="Equity">{t("data.fetch.asset.equity")}</option>
-                  <option value="ETF">{t("data.fetch.asset.etf")}</option>
-                </select>
-              </div>
-              <div className="form-hint">
-                {t("data.fetch.preview", {
-                  dataset: fetchPreview.datasetName,
-                  source: fetchPreview.sourcePath,
-                })}
-              </div>
-              {fetchError && <div className="form-error">{fetchError}</div>}
-              {fetchResult && (
-                <div className="form-success">
-                  {fetchResult.job
-                    ? t(
-                        fetchResult.created
-                          ? "data.fetch.successCreated"
-                          : "data.fetch.successQueued",
-                        {
-                          name: fetchResult.dataset.name,
-                          jobId: fetchResult.job.id,
-                        }
-                      )
-                    : t("data.fetch.successNoJob", { name: fetchResult.dataset.name })}
-                </div>
-              )}
-              <div className="form-actions">
-                <button
-                  type="button"
-                  className="primary-button large"
-                  onClick={fetchHistory}
-                  disabled={fetchLoading}
-                >
-                  {fetchLoading ? t("data.fetch.loading") : t("data.fetch.action")}
-                </button>
-                <span className="form-note">{t("data.fetch.hint")}</span>
-              </div>
-            </div>
-          </div>
-          <div className="card">
-            <div className="card-title">{t("data.register.title")}</div>
-            <div className="card-meta">{t("data.register.meta")}</div>
-            <div style={{ marginTop: "12px", display: "grid", gap: "8px" }}>
-              <input
-                value={form.name}
-                onChange={(e) => updateForm("name", e.target.value)}
-                placeholder={t("data.register.name")}
-                style={{ padding: "10px", borderRadius: "10px", border: "1px solid #e3e6ee" }}
-              />
-              <div style={{ display: "grid", gap: "8px", gridTemplateColumns: "1fr 1fr" }}>
-                <input
-                  value={form.vendor}
-                  onChange={(e) => updateForm("vendor", e.target.value)}
-                  placeholder={t("data.register.vendor")}
-                  style={{ padding: "10px", borderRadius: "10px", border: "1px solid #e3e6ee" }}
-                />
-                <input
-                  value={form.frequency}
-                  onChange={(e) => updateForm("frequency", e.target.value)}
-                  placeholder={t("data.register.frequency")}
-                  style={{ padding: "10px", borderRadius: "10px", border: "1px solid #e3e6ee" }}
-                />
-              </div>
-              <div style={{ display: "grid", gap: "8px", gridTemplateColumns: "1fr 1fr" }}>
-                <input
-                  value={form.asset_class}
-                  onChange={(e) => updateForm("asset_class", e.target.value)}
-                  placeholder={t("data.register.asset")}
-                  style={{ padding: "10px", borderRadius: "10px", border: "1px solid #e3e6ee" }}
-                />
-                <input
-                  value={form.region}
-                  onChange={(e) => updateForm("region", e.target.value)}
-                  placeholder={t("data.register.region")}
-                  style={{ padding: "10px", borderRadius: "10px", border: "1px solid #e3e6ee" }}
-                />
-              </div>
-              <div style={{ display: "grid", gap: "8px", gridTemplateColumns: "1fr 1fr" }}>
-                <input
-                  value={form.coverage_start}
-                  onChange={(e) => updateForm("coverage_start", e.target.value)}
-                  placeholder={t("data.register.start")}
-                  style={{ padding: "10px", borderRadius: "10px", border: "1px solid #e3e6ee" }}
-                />
-                <input
-                  value={form.coverage_end}
-                  onChange={(e) => updateForm("coverage_end", e.target.value)}
-                  placeholder={t("data.register.end")}
-                  style={{ padding: "10px", borderRadius: "10px", border: "1px solid #e3e6ee" }}
-                />
-              </div>
-              <input
-                value={form.source_path}
-                onChange={(e) => updateForm("source_path", e.target.value)}
-                placeholder={t("data.register.path")}
-                style={{ padding: "10px", borderRadius: "10px", border: "1px solid #e3e6ee" }}
-              />
-              {formError && (
-                <div style={{ color: "#d64545", fontSize: "13px" }}>{formError}</div>
-              )}
-              <button
-                onClick={createDataset}
-                style={{
-                  padding: "10px",
-                  borderRadius: "10px",
-                  border: "none",
-                  background: "#0f62fe",
-                  color: "#fff",
-                  fontWeight: 600,
-                  cursor: "pointer",
-                }}
-              >
-                {t("common.actions.save")}
-              </button>
-            </div>
-          </div>
-        </div>
-
-
-
         <div className="card market-card">
           <div className="market-header">
             <div>
@@ -1266,29 +1453,6 @@ export default function DataPage() {
                 {themeCoverageError && (
                   <div className="market-coverage-error">{themeCoverageError}</div>
                 )}
-                {themeFetchError && (
-                  <div className="market-coverage-error">{themeFetchError}</div>
-                )}
-                {themeFetchResult && (
-                  <div className="market-coverage-success">
-                    {t("data.list.theme.fetchSuccess", {
-                      created: themeFetchResult.created,
-                      queued: themeFetchResult.queued,
-                    })}
-                  </div>
-                )}
-              </div>
-              <div className="market-coverage-actions">
-                <button
-                  type="button"
-                  className="button-secondary"
-                  onClick={fetchThemeData}
-                  disabled={themeFetchLoading || themeCoverageLoading}
-                >
-                  {themeFetchLoading
-                    ? t("data.list.theme.fetching")
-                    : t("data.list.theme.fetch")}
-                </button>
               </div>
             </div>
           )}
@@ -1459,6 +1623,93 @@ export default function DataPage() {
             }}
           />
         </div>
+
+        <div className="data-columns">
+          <div className="data-stack">
+            <div className="card">
+              <div className="card-title">{t("data.coverage.title")}</div>
+              <div className="card-meta">{t("data.coverage.meta")}</div>
+              <div style={{ fontSize: "32px", fontWeight: 600, marginTop: "12px" }}>
+                {datasetTotal}
+              </div>
+            </div>
+            <div className="card">
+            <div className="card-title">{t("data.register.title")}</div>
+            <div className="card-meta">{t("data.register.meta")}</div>
+            <div style={{ marginTop: "12px", display: "grid", gap: "8px" }}>
+              <input
+                value={form.name}
+                onChange={(e) => updateForm("name", e.target.value)}
+                placeholder={t("data.register.name")}
+                style={{ padding: "10px", borderRadius: "10px", border: "1px solid #e3e6ee" }}
+              />
+              <div style={{ display: "grid", gap: "8px", gridTemplateColumns: "1fr 1fr" }}>
+                <input
+                  value={form.vendor}
+                  onChange={(e) => updateForm("vendor", e.target.value)}
+                  placeholder={t("data.register.vendor")}
+                  style={{ padding: "10px", borderRadius: "10px", border: "1px solid #e3e6ee" }}
+                />
+                <input
+                  value={form.frequency}
+                  onChange={(e) => updateForm("frequency", e.target.value)}
+                  placeholder={t("data.register.frequency")}
+                  style={{ padding: "10px", borderRadius: "10px", border: "1px solid #e3e6ee" }}
+                />
+              </div>
+              <div style={{ display: "grid", gap: "8px", gridTemplateColumns: "1fr 1fr" }}>
+                <input
+                  value={form.asset_class}
+                  onChange={(e) => updateForm("asset_class", e.target.value)}
+                  placeholder={t("data.register.asset")}
+                  style={{ padding: "10px", borderRadius: "10px", border: "1px solid #e3e6ee" }}
+                />
+                <input
+                  value={form.region}
+                  onChange={(e) => updateForm("region", e.target.value)}
+                  placeholder={t("data.register.region")}
+                  style={{ padding: "10px", borderRadius: "10px", border: "1px solid #e3e6ee" }}
+                />
+              </div>
+              <div style={{ display: "grid", gap: "8px", gridTemplateColumns: "1fr 1fr" }}>
+                <input
+                  value={form.coverage_start}
+                  onChange={(e) => updateForm("coverage_start", e.target.value)}
+                  placeholder={t("data.register.start")}
+                  style={{ padding: "10px", borderRadius: "10px", border: "1px solid #e3e6ee" }}
+                />
+                <input
+                  value={form.coverage_end}
+                  onChange={(e) => updateForm("coverage_end", e.target.value)}
+                  placeholder={t("data.register.end")}
+                  style={{ padding: "10px", borderRadius: "10px", border: "1px solid #e3e6ee" }}
+                />
+              </div>
+              <input
+                value={form.source_path}
+                onChange={(e) => updateForm("source_path", e.target.value)}
+                placeholder={t("data.register.path")}
+                style={{ padding: "10px", borderRadius: "10px", border: "1px solid #e3e6ee" }}
+              />
+              {formError && (
+                <div style={{ color: "#d64545", fontSize: "13px" }}>{formError}</div>
+              )}
+              <button
+                onClick={createDataset}
+                style={{
+                  padding: "10px",
+                  borderRadius: "10px",
+                  border: "none",
+                  background: "#0f62fe",
+                  color: "#fff",
+                  fontWeight: 600,
+                  cursor: "pointer",
+                }}
+              >
+                {t("common.actions.save")}
+              </button>
+            </div>
+          </div>
 
         <div className="card">
           <div className="card-title">{t("data.scan.title")}</div>
@@ -1631,8 +1882,592 @@ export default function DataPage() {
         </div>
 
         <div className="card">
+          <div className="card-title">{t("data.pit.title")}</div>
+          <div className="card-meta">{t("data.pit.meta")}</div>
+          <div className="form-grid">
+            <div className="form-grid two-col">
+              <input
+                type="date"
+                className="form-input"
+                value={pitForm.start}
+                onChange={(e) => updatePitForm("start", e.target.value)}
+                placeholder={t("data.pit.start")}
+              />
+              <input
+                type="date"
+                className="form-input"
+                value={pitForm.end}
+                onChange={(e) => updatePitForm("end", e.target.value)}
+                placeholder={t("data.pit.end")}
+              />
+            </div>
+            <label className="checkbox-row" style={{ marginTop: 0 }}>
+              <input
+                type="checkbox"
+                checked={pitForm.require_data}
+                onChange={(e) => updatePitForm("require_data", e.target.checked)}
+              />
+              <span>{t("data.pit.requireData")}</span>
+            </label>
+            {pitActionError && <div className="form-error">{pitActionError}</div>}
+            {pitActionResult && <div className="form-success">{pitActionResult}</div>}
+            {pitJobs[0] && (
+              <div className="form-success">
+                <div>
+                  {t("data.pit.latest", {
+                    id: pitJobs[0].id,
+                    status: renderStatus(pitJobs[0].status),
+                  })}
+                </div>
+                {(pitTimezone || pitSessionOpen || pitSessionClose) && (
+                  <div>
+                    {t("data.pit.calendar", {
+                      tz: pitTimezone || "-",
+                      session: `${pitSessionOpen || "-"}-${pitSessionClose || "-"}`,
+                    })}
+                  </div>
+                )}
+                {pitQuality?.available && (
+                  <div className="progress-block">
+                    <div className="progress-meta">
+                      <span>
+                        {t("data.pit.quality.snapshots", {
+                          count: pitQuality.snapshots ?? 0,
+                        })}
+                      </span>
+                      <span>
+                        {t("data.pit.quality.symbols", { count: pitQuality.symbols ?? 0 })}
+                      </span>
+                      <span>
+                        {t("data.pit.quality.fixed", { count: pitQuality.fixed_files ?? 0 })}
+                      </span>
+                    </div>
+                    <div className="progress-meta">
+                      <span>{t("data.pit.quality.dup", { count: pitQuality.duplicates ?? 0 })}</span>
+                      <span>
+                        {t("data.pit.quality.invalid", { count: pitQuality.invalid_rows ?? 0 })}
+                      </span>
+                      <span>
+                        {t("data.pit.quality.mismatch", {
+                          count: pitQuality.date_mismatches ?? 0,
+                        })}
+                      </span>
+                      <span>
+                        {t("data.pit.quality.life", { count: pitQuality.out_of_life ?? 0 })}
+                      </span>
+                      <span>
+                        {t("data.pit.quality.noData", { count: pitQuality.no_data ?? 0 })}
+                      </span>
+                    </div>
+                    {pitQuality.updated_at && (
+                      <div className="progress-meta">
+                        {t("data.pit.quality.updated", {
+                          at: formatDateTime(pitQuality.updated_at),
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {pitQualityError && <div className="form-error">{pitQualityError}</div>}
+                {pitJobs[0].snapshot_count !== null && pitJobs[0].snapshot_count !== undefined && (
+                  <div>{t("data.pit.snapshotCount", { count: pitJobs[0].snapshot_count })}</div>
+                )}
+                {pitJobs[0].last_snapshot_path && (
+                  <div>{t("data.pit.lastSnapshot", { path: pitJobs[0].last_snapshot_path })}</div>
+                )}
+                {pitJobs[0].output_dir && (
+                  <div>{t("data.pit.output", { path: pitJobs[0].output_dir })}</div>
+                )}
+                {pitJobs[0].log_path && (
+                  <div>{t("data.pit.log", { path: pitJobs[0].log_path })}</div>
+                )}
+              </div>
+            )}
+            <div className="form-actions">
+              <button
+                type="button"
+                className="primary-button large"
+                onClick={createPitWeeklyJob}
+                disabled={pitActionLoading}
+              >
+                {pitActionLoading ? t("data.pit.loading") : t("data.pit.action")}
+              </button>
+              <span className="form-note">{t("data.pit.note")}</span>
+            </div>
+            <div className="section-divider" />
+            <div className="form-hint">{t("data.pit.historyTitle")}</div>
+            {pitLoadError && <div className="form-error">{pitLoadError}</div>}
+            {pitJobs.length === 0 ? (
+              <div className="form-hint">{t("data.pit.historyEmpty")}</div>
+            ) : (
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>{t("data.pit.history.id")}</th>
+                    <th>{t("data.pit.history.status")}</th>
+                    <th>{t("data.pit.history.count")}</th>
+                    <th>{t("common.labels.createdAt")}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pitJobs.map((job) => (
+                    <tr key={job.id}>
+                      <td>{job.id}</td>
+                      <td>{renderStatus(job.status)}</td>
+                      <td>{job.snapshot_count ?? t("common.none")}</td>
+                      <td>{formatDateTime(job.created_at)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
+
+        <div className="card">
+          <div className="card-title">{t("data.pitFund.title")}</div>
+          <div className="card-meta">{t("data.pitFund.meta")}</div>
+          <div className="form-grid">
+            <div className="form-grid two-col">
+              <div>
+                <input
+                  type="date"
+                  className="form-input"
+                  value={pitFundForm.start}
+                  onChange={(e) => updatePitFundForm("start", e.target.value)}
+                  placeholder={t("data.pitFund.start")}
+                />
+                <div className="form-hint">{t("data.pitFund.startHint")}</div>
+              </div>
+              <div>
+                <input
+                  type="date"
+                  className="form-input"
+                  value={pitFundForm.end}
+                  onChange={(e) => updatePitFundForm("end", e.target.value)}
+                  placeholder={t("data.pitFund.end")}
+                />
+                <div className="form-hint">{t("data.pitFund.endHint")}</div>
+              </div>
+            </div>
+            <div className="form-grid two-col">
+              <div>
+                <input
+                  type="number"
+                  min="0"
+                  className="form-input"
+                  value={pitFundForm.report_delay_days}
+                  onChange={(e) => updatePitFundForm("report_delay_days", e.target.value)}
+                  placeholder={t("data.pitFund.delay")}
+                />
+                <div className="form-hint">{t("data.pitFund.delayHint")}</div>
+              </div>
+              <div>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.1"
+                  className="form-input"
+                  value={pitFundForm.min_delay_seconds}
+                  onChange={(e) => updatePitFundForm("min_delay_seconds", e.target.value)}
+                  placeholder={t("data.pitFund.minDelay")}
+                />
+                <div className="form-hint">{t("data.pitFund.minDelayHint")}</div>
+              </div>
+            </div>
+            <div className="form-grid two-col">
+              <div>
+                <label className="checkbox-row" style={{ marginTop: 0 }}>
+                  <input
+                    type="checkbox"
+                    checked={pitFundForm.refresh_fundamentals}
+                    onChange={(e) => updatePitFundForm("refresh_fundamentals", e.target.checked)}
+                  />
+                  <span>{t("data.pitFund.refresh")}</span>
+                </label>
+                <div className="form-hint">{t("data.pitFund.refreshHint")}</div>
+              </div>
+            </div>
+            {pitFundActionError && <div className="form-error">{pitFundActionError}</div>}
+            {pitFundActionResult && <div className="form-success">{pitFundActionResult}</div>}
+            {pitFundJobs[0] && (
+              <div className="form-success">
+                <div>
+                  {t("data.pitFund.latest", {
+                    id: pitFundJobs[0].id,
+                    status: renderStatus(pitFundJobs[0].status),
+                  })}
+                </div>
+                {pitFundProgress && (
+                  <div className="progress-block">
+                    <div className="progress-meta">
+                      <span>
+                        {t("data.pitFund.progress.stage", {
+                          stage: pitFundProgress.stage || "-",
+                        })}
+                      </span>
+                      {pitFundProgress.total ? (
+                        <span>
+                          {t("data.pitFund.progress.count", {
+                            done: pitFundProgress.done ?? 0,
+                            total: pitFundProgress.total ?? 0,
+                          })}
+                        </span>
+                      ) : null}
+                    </div>
+                    {pitFundProgress.total ? (
+                      <div className="progress-bar">
+                        <div
+                          className="progress-bar-fill"
+                          style={{
+                            width: `${Math.min(
+                              100,
+                              Math.max(
+                                0,
+                                Math.round(
+                                  ((pitFundProgress.done ?? 0) /
+                                    Math.max(pitFundProgress.total ?? 1, 1)) *
+                                    100
+                                )
+                              )
+                            )}%`,
+                          }}
+                        />
+                      </div>
+                    ) : null}
+                    <div className="progress-meta">
+                      <span>
+                        {t("data.pitFund.progress.ok", { count: pitFundProgress.ok ?? 0 })}
+                      </span>
+                      <span>
+                        {t("data.pitFund.progress.partial", {
+                          count: pitFundProgress.partial ?? 0,
+                        })}
+                      </span>
+                      <span>
+                        {t("data.pitFund.progress.rate", {
+                          count: pitFundProgress.rate_limited ?? 0,
+                        })}
+                      </span>
+                    </div>
+                    {pitFundProgress.current_symbol ? (
+                      <div className="progress-meta">
+                        {t("data.pitFund.progress.current", {
+                          symbol: pitFundProgress.current_symbol,
+                        })}
+                      </div>
+                    ) : null}
+                  </div>
+                )}
+                {pitFundProgressError && (
+                  <div className="form-error">{pitFundProgressError}</div>
+                )}
+                {pitFundJobs[0].snapshot_count !== null &&
+                  pitFundJobs[0].snapshot_count !== undefined && (
+                    <div>
+                      {t("data.pitFund.snapshotCount", { count: pitFundJobs[0].snapshot_count })}
+                    </div>
+                  )}
+                {pitFundJobs[0].last_snapshot_path && (
+                  <div>
+                    {t("data.pitFund.lastSnapshot", { path: pitFundJobs[0].last_snapshot_path })}
+                  </div>
+                )}
+                {pitFundJobs[0].output_dir && (
+                  <div>{t("data.pitFund.output", { path: pitFundJobs[0].output_dir })}</div>
+                )}
+                {pitFundJobs[0].log_path && (
+                  <div>{t("data.pitFund.log", { path: pitFundJobs[0].log_path })}</div>
+                )}
+              </div>
+            )}
+            <div className="form-actions">
+              <button
+                type="button"
+                className="primary-button large"
+                onClick={createPitFundJob}
+                disabled={pitFundActionLoading}
+              >
+                {pitFundActionLoading ? t("data.pitFund.loading") : t("data.pitFund.action")}
+              </button>
+              <span className="form-note">{t("data.pitFund.note")}</span>
+            </div>
+            <div className="section-divider" />
+            <div className="form-hint">{t("data.pitFund.historyTitle")}</div>
+            {pitFundLoadError && <div className="form-error">{pitFundLoadError}</div>}
+            {pitFundJobs.length === 0 ? (
+              <div className="form-hint">{t("data.pitFund.historyEmpty")}</div>
+            ) : (
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>{t("data.pitFund.history.id")}</th>
+                    <th>{t("data.pitFund.history.status")}</th>
+                    <th>{t("data.pitFund.history.count")}</th>
+                    <th>{t("common.labels.createdAt")}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pitFundJobs.map((job) => (
+                    <tr key={job.id}>
+                      <td>{job.id}</td>
+                      <td>{renderStatus(job.status)}</td>
+                      <td>{job.snapshot_count ?? t("common.none")}</td>
+                      <td>{formatDateTime(job.created_at)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
+
+          </div>
+          <div className="data-stack">
+            <div className="card">
+              <div className="card-title">{t("data.bulk.title")}</div>
+              <div className="card-meta">{t("data.bulk.meta")}</div>
+              <div className="form-grid">
+                <div className="form-hint">{t("data.bulk.autoTitle")}</div>
+                <div className="form-grid two-col">
+                  <select
+                    className="form-select"
+                    value={bulkAutoForm.status}
+                    onChange={(e) => updateBulkAutoForm("status", e.target.value)}
+                  >
+                    <option value="all">{t("data.bulk.status.all")}</option>
+                    <option value="active">{t("data.bulk.status.active")}</option>
+                    <option value="delisted">{t("data.bulk.status.delisted")}</option>
+                  </select>
+                  <input
+                    className="form-input"
+                    value={bulkAutoForm.batch_size}
+                    onChange={(e) => updateBulkAutoForm("batch_size", e.target.value)}
+                    placeholder={t("data.bulk.auto.batch")}
+                  />
+                </div>
+                <div className="form-grid two-col">
+                  <input
+                    className="form-input"
+                    value={bulkAutoForm.min_delay_seconds}
+                    onChange={(e) => updateBulkAutoForm("min_delay_seconds", e.target.value)}
+                    placeholder={t("data.bulk.auto.delay")}
+                  />
+                  <label className="checkbox-row" style={{ marginTop: 0 }}>
+                    <input
+                      type="checkbox"
+                      checked={bulkAutoForm.only_missing}
+                      onChange={(e) => updateBulkAutoForm("only_missing", e.target.checked)}
+                    />
+                    <span>{t("data.bulk.onlyMissing")}</span>
+                  </label>
+                </div>
+                <div className="form-hint">{t("data.bulk.autoHint")}</div>
+                {bulkJobError && <div className="form-error">{bulkJobError}</div>}
+                {bulkJob && (
+                  <div className="form-success">
+                    {t("data.bulk.autoStatus", {
+                      id: bulkJob.id,
+                      status: renderBulkStatus(bulkJob.status),
+                      phase: renderBulkPhase(bulkJob.phase),
+                    })}
+                    {bulkJobProgress && (
+                      <div>
+                        {t("data.bulk.progress", {
+                          processed: bulkJobProgress.processed,
+                          total: bulkJobProgress.total,
+                          percent: bulkJobProgress.percent.toFixed(1),
+                        })}
+                      </div>
+                    )}
+                    <div>
+                      {t("data.bulk.autoCounts", {
+                        created: bulkJob.created_datasets ?? 0,
+                        reused: bulkJob.reused_datasets ?? 0,
+                        queued: bulkJob.queued_jobs ?? 0,
+                        running: bulkJob.running_sync_jobs ?? 0,
+                        pending: bulkJob.pending_sync_jobs ?? 0,
+                      })}
+                    </div>
+                    {bulkJob.errors && bulkJob.errors.length > 0 && (
+                      <div title={bulkErrorTooltip(bulkJob.errors)}>
+                        {t("data.bulk.errorDetail", {
+                          detail: bulkErrorSummary(bulkJob.errors),
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+                <div className="form-actions">
+                  <button
+                    type="button"
+                    className="primary-button large"
+                    onClick={startBulkSync}
+                    disabled={bulkJobLoading}
+                  >
+                    {bulkJobLoading ? t("data.bulk.autoLoading") : t("data.bulk.autoAction")}
+                  </button>
+                  <span className="form-note">{t("data.bulk.autoNote")}</span>
+                </div>
+                <div className="section-divider" />
+                <div className="section-divider" />
+                <div className="form-hint">{t("data.bulk.history.title")}</div>
+                {bulkHistory.length === 0 ? (
+                  <div className="form-hint">{t("data.bulk.history.empty")}</div>
+                ) : (
+                  <table className="table">
+                    <thead>
+                      <tr>
+                        <th>{t("data.bulk.history.id")}</th>
+                        <th>{t("data.bulk.history.status")}</th>
+                        <th>{t("data.bulk.history.phase")}</th>
+                        <th>{t("data.bulk.history.progress")}</th>
+                        <th>{t("data.bulk.history.counts")}</th>
+                        <th>{t("data.bulk.history.error")}</th>
+                        <th>{t("data.bulk.history.updatedAt")}</th>
+                        <th>{t("data.bulk.history.actions")}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {bulkHistory.map((item) => (
+                        <tr key={item.id}>
+                          <td>{item.id}</td>
+                          <td>{renderBulkStatus(item.status)}</td>
+                          <td>{renderBulkPhase(item.phase)}</td>
+                          <td>
+                            {t("data.bulk.history.progressValue", {
+                              processed: item.processed_symbols ?? item.offset ?? 0,
+                              total: item.total_symbols ?? 0,
+                            })}
+                          </td>
+                          <td>
+                            {t("data.bulk.history.countsValue", {
+                              created: item.created_datasets ?? 0,
+                              reused: item.reused_datasets ?? 0,
+                              queued: item.queued_jobs ?? 0,
+                            })}
+                          </td>
+                          <td title={bulkErrorTooltip(item.errors)}>
+                            {bulkErrorSummary(item.errors)}
+                          </td>
+                          <td>{item.updated_at ? formatDateTime(item.updated_at) : "-"}</td>
+                          <td>
+                            <div className="table-actions">
+                              {item.status === "running" || item.status === "queued" ? (
+                                <>
+                                  <button
+                                    type="button"
+                                    className="link-button"
+                                    onClick={() => runBulkAction(item.id, "pause")}
+                                    disabled={!!bulkActionLoading[item.id]}
+                                  >
+                                    {t("data.bulk.actions.pause")}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="link-button"
+                                    onClick={() => runBulkAction(item.id, "cancel")}
+                                    disabled={!!bulkActionLoading[item.id]}
+                                  >
+                                    {t("data.bulk.actions.cancel")}
+                                  </button>
+                                </>
+                              ) : item.status === "paused" ? (
+                                <>
+                                  <button
+                                    type="button"
+                                    className="link-button"
+                                    onClick={() => runBulkAction(item.id, "resume")}
+                                    disabled={!!bulkActionLoading[item.id]}
+                                  >
+                                    {t("data.bulk.actions.resume")}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="link-button"
+                                    onClick={() => runBulkAction(item.id, "cancel")}
+                                    disabled={!!bulkActionLoading[item.id]}
+                                  >
+                                    {t("data.bulk.actions.cancel")}
+                                  </button>
+                                </>
+                              ) : (
+                                <span className="market-subtle">{t("common.none")}</span>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+                <PaginationBar
+                  page={bulkHistoryPage}
+                  pageSize={bulkHistoryPageSize}
+                  total={bulkHistoryTotal}
+                  onPageChange={setBulkHistoryPage}
+                  onPageSizeChange={(size) => {
+                    setBulkHistoryPage(1);
+                    setBulkHistoryPageSize(size);
+                  }}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="card">
           <div className="card-title">{t("data.jobs.title")}</div>
-          <div className="card-meta">{t("data.jobs.meta", { total: syncTotal })}</div>
+          <div className="card-meta">
+            {t("data.jobs.meta", { total: syncTotal })}
+            {syncSpeed ? (
+              <>
+                {" · "}
+                {t("data.jobs.speed", {
+                  rate: syncSpeed.rate_per_min.toFixed(1),
+                  window: syncSpeed.window_seconds,
+                  running: syncSpeed.running,
+                  pending: syncSpeed.pending,
+                })}
+              </>
+            ) : (
+              <>
+                {" · "}
+                {t("data.jobs.speedEmpty")}
+              </>
+            )}
+          </div>
+          <div
+            style={{
+              marginTop: "8px",
+              display: "flex",
+              gap: "8px",
+              alignItems: "center",
+              flexWrap: "wrap",
+            }}
+          >
+            <button
+              onClick={clearSyncQueue}
+              disabled={clearQueueLoading}
+              style={{
+                padding: "8px 12px",
+                borderRadius: "10px",
+                border: "1px solid #e3e6ee",
+                background: "#fff",
+                color: "#d64545",
+                fontWeight: 600,
+                cursor: clearQueueLoading ? "not-allowed" : "pointer",
+              }}
+            >
+              {clearQueueLoading ? t("data.jobs.clearing") : t("data.jobs.clear")}
+            </button>
+            {clearQueueResult && (
+              <span style={{ fontSize: "12px", color: "#2e7d32" }}>{clearQueueResult}</span>
+            )}
+            {clearQueueError && (
+              <span style={{ fontSize: "12px", color: "#d64545" }}>{clearQueueError}</span>
+            )}
+          </div>
           <table className="table">
             <thead>
               <tr>

@@ -4,9 +4,9 @@ import argparse
 import json
 import os
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 import numpy as np
 import pandas as pd
@@ -15,6 +15,7 @@ from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from feature_engineering import FeatureConfig, compute_features, compute_label, required_lookback
+from pit_features import apply_pit_features, load_pit_fundamentals
 from model_io import LinearModelPayload, save_linear_model
 from torch_model import TorchMLP
 
@@ -25,6 +26,16 @@ class Window:
     train_end: pd.Timestamp
     valid_start: pd.Timestamp
     valid_end: pd.Timestamp
+
+
+@dataclass
+class WalkForwardWindow:
+    train_start: pd.Timestamp
+    train_end: pd.Timestamp
+    valid_start: pd.Timestamp
+    valid_end: pd.Timestamp
+    test_start: pd.Timestamp
+    test_end: pd.Timestamp
 
 
 def _parse_config(path: Path) -> dict:
@@ -97,6 +108,51 @@ def _load_series(path: Path) -> pd.DataFrame:
     return df
 
 
+def _load_symbol_life(
+    data_root: Path, config: dict
+) -> dict[str, tuple[pd.Timestamp | None, pd.Timestamp | None]]:
+    raw_path = str(config.get("symbol_life_path") or "").strip()
+    if not raw_path:
+        default_path = data_root / "universe" / "alpha_symbol_life.csv"
+        if default_path.exists():
+            raw_path = str(default_path)
+    if not raw_path:
+        return {}
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = data_root / path
+    if not path.exists():
+        return {}
+
+    df = pd.read_csv(path)
+    life: dict[str, tuple[pd.Timestamp | None, pd.Timestamp | None]] = {}
+    for _, row in df.iterrows():
+        symbol = str(row.get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        ipo_raw = row.get("ipoDate")
+        delist_raw = row.get("delistingDate")
+        ipo = pd.to_datetime(ipo_raw, errors="coerce") if ipo_raw else None
+        delist = pd.to_datetime(delist_raw, errors="coerce") if delist_raw else None
+        if ipo is not None and pd.isna(ipo):
+            ipo = None
+        if delist is not None and pd.isna(delist):
+            delist = None
+        life[symbol] = (ipo, delist)
+    return life
+
+
+def _apply_symbol_life(
+    df: pd.DataFrame, life: tuple[pd.Timestamp | None, pd.Timestamp | None]
+) -> pd.DataFrame:
+    ipo, delist = life
+    if ipo is not None:
+        df = df[df.index >= ipo]
+    if delist is not None:
+        df = df[df.index <= delist]
+    return df
+
+
 def _build_window(dates: Iterable[pd.Timestamp], config: dict, warmup_days: int) -> Window:
     dates = sorted(set(dates))
     if not dates:
@@ -117,6 +173,72 @@ def _build_window(dates: Iterable[pd.Timestamp], config: dict, warmup_days: int)
     )
 
 
+def _coerce_int(value: object, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _build_walk_forward_windows(
+    dates: Iterable[pd.Timestamp],
+    config: dict,
+    warmup_days: int,
+    horizon_days: int,
+    max_test_date: pd.Timestamp | None = None,
+) -> list[WalkForwardWindow]:
+    dates = sorted(set(dates))
+    if not dates:
+        raise RuntimeError("样本为空")
+
+    min_date = dates[0] + pd.Timedelta(days=warmup_days)
+    last_date = max_test_date or dates[-1]
+
+    train_years = _coerce_int(config.get("train_years"), 8)
+    valid_months = _coerce_int(config.get("valid_months"), 12)
+    test_months = _coerce_int(config.get("test_months"), 0)
+    step_months = _coerce_int(config.get("step_months"), test_months)
+
+    if test_months <= 0 or step_months <= 0:
+        return []
+
+    anchor = min_date + pd.DateOffset(years=train_years, months=valid_months)
+    windows: list[WalkForwardWindow] = []
+    gap_days = max(int(horizon_days), 0)
+
+    while anchor < last_date:
+        valid_end = anchor
+        valid_start = max(min_date, valid_end - pd.DateOffset(months=valid_months))
+        train_end = valid_start
+        train_start = max(min_date, train_end - pd.DateOffset(years=train_years))
+        test_start = valid_end + pd.Timedelta(days=gap_days)
+        test_end = test_start + pd.DateOffset(months=test_months)
+        if test_end > last_date:
+            test_end = last_date
+
+        if train_start >= train_end or valid_start >= valid_end:
+            anchor += pd.DateOffset(months=step_months)
+            continue
+        if test_end <= test_start:
+            break
+
+        windows.append(
+            WalkForwardWindow(
+                train_start=train_start,
+                train_end=train_end,
+                valid_start=valid_start,
+                valid_end=valid_end,
+                test_start=test_start,
+                test_end=test_end,
+            )
+        )
+        if test_end >= last_date:
+            break
+        anchor += pd.DateOffset(months=step_months)
+
+    return windows
+
+
 def _standardize(
     df: pd.DataFrame, feature_cols: list[str]
 ) -> tuple[pd.DataFrame, dict[str, float], dict[str, float]]:
@@ -128,12 +250,38 @@ def _standardize(
     return scaled, mean, std
 
 
+def _predict_scores(
+    model: nn.Module, features: np.ndarray, device: torch.device, batch_size: int
+) -> np.ndarray:
+    if features.size == 0:
+        return np.array([], dtype=np.float32)
+    scores: list[np.ndarray] = []
+    total = len(features)
+    for start in range(0, total, batch_size):
+        batch = torch.tensor(features[start : start + batch_size], dtype=torch.float32)
+        batch = batch.to(device)
+        with torch.no_grad():
+            output = model(batch).squeeze(-1).detach().cpu().numpy()
+        scores.append(output.astype(np.float32, copy=False))
+    return np.concatenate(scores) if scores else np.array([], dtype=np.float32)
+
+
+def _write_progress(path: Path | None, payload: dict) -> None:
+    if not path:
+        return
+    data = dict(payload)
+    data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def _train_loop(
     model: nn.Module,
     train_loader: DataLoader,
     valid_loader: DataLoader,
     config: dict,
     device: torch.device,
+    progress_cb: Callable[[int, int], None] | None = None,
 ) -> dict:
     lr = float(config.get("lr", 1e-3))
     weight_decay = float(config.get("weight_decay", 1e-4))
@@ -170,6 +318,8 @@ def _train_loop(
                 losses.append(loss.item())
         valid_loss = float(np.mean(losses)) if losses else float("inf")
         history.append({"epoch": epoch, "valid_loss": valid_loss})
+        if progress_cb:
+            progress_cb(epoch, epochs)
 
         if best_loss is None or valid_loss < best_loss:
             best_loss = valid_loss
@@ -190,14 +340,20 @@ def main() -> None:
     parser.add_argument("--config", default="ml/config.json")
     parser.add_argument("--data-root", default="")
     parser.add_argument("--device", default="auto")
+    parser.add_argument("--scores-output", default="")
+    parser.add_argument("--progress-path", default="")
     args = parser.parse_args()
 
     config_path = Path(args.config)
     config = _parse_config(config_path)
+    progress_path = Path(args.progress_path) if args.progress_path else None
+    _write_progress(progress_path, {"phase": "prepare", "progress": 0.0})
     data_root = Path(args.data_root) if args.data_root else _data_root_from_config(config)
     adjusted_dir = data_root / "curated_adjusted"
     if not adjusted_dir.exists():
         raise RuntimeError(f"缺少目录: {adjusted_dir}")
+
+    symbol_life = _load_symbol_life(data_root, config)
 
     vendor_pref = config.get("vendor_preference", ["Alpha", "Stooq", "Lean"])
     benchmark_symbol = config.get("benchmark_symbol", "SPY")
@@ -212,20 +368,86 @@ def main() -> None:
         vol_windows=list(feature_windows.get("vol", [10, 20, 60])),
     )
     horizon = int(config.get("label_horizon_days", 20))
+    label_price = str(config.get("label_price", "open")).strip().lower()
+    if label_price not in {"open", "close"}:
+        label_price = "close"
+    label_start_offset = int(config.get("label_start_offset", 1))
+
+    pit_cfg = config.get("pit_fundamentals", {})
+    if not isinstance(pit_cfg, dict):
+        pit_cfg = {}
+    pit_enabled = bool(pit_cfg.get("enabled", False))
+    pit_sample_on_snapshot = bool(pit_cfg.get("sample_on_snapshot", True))
+    pit_missing_policy = str(pit_cfg.get("missing_policy", "fill_zero"))
+    pit_fields: list[str] = []
+    pit_map: dict[str, pd.DataFrame] = {}
+    pit_summary: dict[str, float] = {}
+    if pit_enabled:
+        pit_dir = Path(pit_cfg.get("dir") or data_root / "factors" / "pit_weekly_fundamentals")
+        if not pit_dir.is_absolute():
+            pit_dir = data_root / pit_dir
+        pit_min_coverage = float(pit_cfg.get("min_coverage", 0.05))
+        pit_coverage_action = str(pit_cfg.get("coverage_action", "warn"))
+        pit_start = pit_cfg.get("start")
+        pit_end = pit_cfg.get("end")
+        pit_map, pit_fields, pit_summary = load_pit_fundamentals(
+            pit_dir,
+            symbols,
+            start=pit_start,
+            end=pit_end,
+            min_coverage=pit_min_coverage,
+            coverage_action=pit_coverage_action,
+        )
+        print(
+            "pit fundamentals: rows={total_rows} coverage={coverage:.4f}".format(
+                **{
+                    "total_rows": pit_summary.get("total_rows", 0.0),
+                    "coverage": pit_summary.get("coverage", 0.0),
+                }
+            )
+        )
 
     spy_path = _pick_dataset_file(benchmark_symbol, adjusted_dir, vendor_pref)
     if not spy_path:
         raise RuntimeError(f"未找到基准数据: {benchmark_symbol}")
     spy_df = _load_series(spy_path)
+    life = symbol_life.get(benchmark_symbol)
+    if life:
+        spy_df = _apply_symbol_life(spy_df, life)
 
     dataset = []
+    features_map: dict[str, pd.DataFrame] = {}
     for symbol in symbols:
         symbol_path = _pick_dataset_file(symbol, adjusted_dir, vendor_pref)
         if not symbol_path:
             continue
         df = _load_series(symbol_path)
+        life = symbol_life.get(symbol)
+        if life:
+            df = _apply_symbol_life(df, life)
+            if df.empty:
+                continue
         features = compute_features(df, spy_df, feat_config)
-        label = compute_label(df, spy_df, horizon)
+        if pit_enabled:
+            pit_frame = pit_map.get(symbol)
+            features = apply_pit_features(
+                features,
+                pit_frame,
+                pit_fields,
+                pit_sample_on_snapshot,
+                pit_missing_policy,
+            )
+        score_features = features.copy()
+        if "vol_z_20" in score_features.columns:
+            score_features["vol_z_20"] = score_features["vol_z_20"].fillna(0.0)
+        features_map[symbol] = score_features
+        label = compute_label(
+            df,
+            spy_df,
+            horizon,
+            start_offset=label_start_offset,
+            price_column=label_price,
+        )
         merged = features.join(label.rename("label")).dropna()
         if merged.empty:
             continue
@@ -239,71 +461,291 @@ def main() -> None:
     feature_cols = [col for col in data.columns if col not in {"label", "symbol"}]
 
     lookback = required_lookback(feat_config, horizon)
-    window = _build_window(data.index, config.get("walk_forward", {}), lookback)
-    train_df = data[(data.index >= window.train_start) & (data.index < window.train_end)]
-    valid_df = data[(data.index >= window.valid_start) & (data.index <= window.valid_end)]
-    if train_df.empty or valid_df.empty:
-        raise RuntimeError("训练/验证窗口为空，请检查时间跨度")
+    walk_config = config.get("walk_forward", {})
+    max_feature_date = None
+    if features_map:
+        feature_maxes = [frame.index.max() for frame in features_map.values() if not frame.empty]
+        if feature_maxes:
+            max_feature_date = max(feature_maxes)
 
-    scaled_train, mean, std = _standardize(train_df, feature_cols)
-    scaled_valid = valid_df.copy()
-    for col in feature_cols:
-        scaled_valid[col] = (scaled_valid[col] - mean[col]) / (std[col] if std[col] else 1.0)
-
-    x_train = scaled_train[feature_cols].values.astype(np.float32)
-    y_train = scaled_train["label"].values.astype(np.float32)
-    x_valid = scaled_valid[feature_cols].values.astype(np.float32)
-    y_valid = scaled_valid["label"].values.astype(np.float32)
+    windows = _build_walk_forward_windows(
+        data.index, walk_config, lookback, horizon, max_test_date=max_feature_date
+    )
+    if windows:
+        _write_progress(
+            progress_path,
+            {
+                "phase": "train",
+                "progress": 0.0,
+                "window": 0,
+                "window_total": len(windows),
+            },
+        )
 
     batch_size = int(config.get("torch", {}).get("batch_size", 512))
-    train_loader = DataLoader(
-        TensorDataset(torch.from_numpy(x_train), torch.from_numpy(y_train)),
-        batch_size=batch_size,
-        shuffle=True,
-    )
-    valid_loader = DataLoader(
-        TensorDataset(torch.from_numpy(x_valid), torch.from_numpy(y_valid)),
-        batch_size=batch_size,
-        shuffle=False,
-    )
-
     device = torch.device("cuda" if (args.device == "auto" and torch.cuda.is_available()) else "cpu")
     torch_config = config.get("torch", {})
-    model = TorchMLP(
-        input_dim=len(feature_cols),
-        hidden=torch_config.get("hidden", [64, 32]),
-        dropout=float(torch_config.get("dropout", 0.1)),
-    ).to(device)
-
-    metrics = _train_loop(model, train_loader, valid_loader, torch_config, device)
-
     output_dir = Path(config.get("output_dir", "ml/models"))
     output_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(model.state_dict(), output_dir / "torch_model.pt")
 
-    payload = LinearModelPayload(
-        model_type="torch_mlp",
-        features=feature_cols,
-        coef=[],
-        intercept=0.0,
-        mean={k: float(v) for k, v in mean.items()},
-        std={k: float(v) for k, v in std.items()},
-        label_horizon_days=horizon,
-        trained_at=datetime.utcnow().isoformat(),
-        train_window={
-            "train_start": window.train_start.date().isoformat(),
-            "train_end": window.train_end.date().isoformat(),
-            "valid_end": window.valid_end.date().isoformat(),
-            "test_end": window.valid_end.date().isoformat(),
-        },
-    )
-    save_linear_model(output_dir / "torch_payload.json", payload)
+    if not windows:
+        window = _build_window(data.index, walk_config, lookback)
+        train_df = data[(data.index >= window.train_start) & (data.index < window.train_end)]
+        valid_df = data[(data.index >= window.valid_start) & (data.index <= window.valid_end)]
+        if train_df.empty or valid_df.empty:
+            raise RuntimeError("训练/验证窗口为空，请检查时间跨度")
+
+        scaled_train, mean, std = _standardize(train_df, feature_cols)
+        scaled_valid = valid_df.copy()
+        for col in feature_cols:
+            scaled_valid[col] = (scaled_valid[col] - mean[col]) / (std[col] if std[col] else 1.0)
+
+        x_train = scaled_train[feature_cols].values.astype(np.float32)
+        y_train = scaled_train["label"].values.astype(np.float32)
+        x_valid = scaled_valid[feature_cols].values.astype(np.float32)
+        y_valid = scaled_valid["label"].values.astype(np.float32)
+
+        train_loader = DataLoader(
+            TensorDataset(torch.from_numpy(x_train), torch.from_numpy(y_train)),
+            batch_size=batch_size,
+            shuffle=True,
+        )
+        valid_loader = DataLoader(
+            TensorDataset(torch.from_numpy(x_valid), torch.from_numpy(y_valid)),
+            batch_size=batch_size,
+            shuffle=False,
+        )
+
+        model = TorchMLP(
+            input_dim=len(feature_cols),
+            hidden=torch_config.get("hidden", [64, 32]),
+            dropout=float(torch_config.get("dropout", 0.1)),
+        ).to(device)
+
+        def _epoch_progress(epoch: int, total: int) -> None:
+            _write_progress(
+                progress_path,
+                {
+                    "phase": "train",
+                    "progress": min(max(epoch / total, 0.0), 1.0) * 0.9,
+                    "epoch": epoch,
+                    "epoch_total": total,
+                },
+            )
+
+        metrics = _train_loop(
+            model,
+            train_loader,
+            valid_loader,
+            torch_config,
+            device,
+            progress_cb=_epoch_progress,
+        )
+        torch.save(model.state_dict(), output_dir / "torch_model.pt")
+
+        payload = LinearModelPayload(
+            model_type="torch_mlp",
+            features=feature_cols,
+            coef=[],
+            intercept=0.0,
+            mean={k: float(v) for k, v in mean.items()},
+            std={k: float(v) for k, v in std.items()},
+            label_horizon_days=horizon,
+            trained_at=datetime.utcnow().isoformat(),
+            train_window={
+                "train_start": window.train_start.date().isoformat(),
+                "train_end": window.train_end.date().isoformat(),
+                "valid_end": window.valid_end.date().isoformat(),
+                "test_end": window.valid_end.date().isoformat(),
+            },
+        )
+        save_linear_model(output_dir / "torch_payload.json", payload)
+        (output_dir / "torch_metrics.json").write_text(
+            json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+        _write_progress(progress_path, {"phase": "train_done", "progress": 0.9})
+
+        print(f"saved model: {output_dir / 'torch_model.pt'}")
+        print(f"saved payload: {output_dir / 'torch_payload.json'}")
+        return
+
+    scores_output = args.scores_output.strip()
+    if scores_output:
+        scores_path = Path(scores_output)
+    else:
+        scores_path = output_dir / "scores.csv"
+
+    score_rows: list[pd.DataFrame] = []
+    window_metrics: list[dict] = []
+    last_payload: LinearModelPayload | None = None
+    last_model_state: dict[str, torch.Tensor] | None = None
+
+    total_windows = len(windows)
+    for idx, window in enumerate(windows):
+        train_df = data[(data.index >= window.train_start) & (data.index < window.train_end)]
+        valid_df = data[(data.index >= window.valid_start) & (data.index <= window.valid_end)]
+        if train_df.empty or valid_df.empty:
+            continue
+
+        scaled_train, mean, std = _standardize(train_df, feature_cols)
+        scaled_valid = valid_df.copy()
+        for col in feature_cols:
+            scaled_valid[col] = (scaled_valid[col] - mean[col]) / (std[col] if std[col] else 1.0)
+
+        x_train = scaled_train[feature_cols].values.astype(np.float32)
+        y_train = scaled_train["label"].values.astype(np.float32)
+        x_valid = scaled_valid[feature_cols].values.astype(np.float32)
+        y_valid = scaled_valid["label"].values.astype(np.float32)
+
+        train_loader = DataLoader(
+            TensorDataset(torch.from_numpy(x_train), torch.from_numpy(y_train)),
+            batch_size=batch_size,
+            shuffle=True,
+        )
+        valid_loader = DataLoader(
+            TensorDataset(torch.from_numpy(x_valid), torch.from_numpy(y_valid)),
+            batch_size=batch_size,
+            shuffle=False,
+        )
+
+        model = TorchMLP(
+            input_dim=len(feature_cols),
+            hidden=torch_config.get("hidden", [64, 32]),
+            dropout=float(torch_config.get("dropout", 0.1)),
+        ).to(device)
+
+        def _window_progress(epoch: int, total: int) -> None:
+            progress = (idx + min(max(epoch / total, 0.0), 1.0)) / max(total_windows, 1)
+            _write_progress(
+                progress_path,
+                {
+                    "phase": "train",
+                    "progress": progress,
+                    "window": idx + 1,
+                    "window_total": total_windows,
+                    "epoch": epoch,
+                    "epoch_total": total,
+                },
+            )
+
+        metrics = _train_loop(
+            model,
+            train_loader,
+            valid_loader,
+            torch_config,
+            device,
+            progress_cb=_window_progress,
+        )
+        window_metrics.append(
+            {
+                "train_start": window.train_start.date().isoformat(),
+                "train_end": window.train_end.date().isoformat(),
+                "valid_start": window.valid_start.date().isoformat(),
+                "valid_end": window.valid_end.date().isoformat(),
+                "test_start": window.test_start.date().isoformat(),
+                "test_end": window.test_end.date().isoformat(),
+                "best_loss": metrics.get("best_loss"),
+                "epochs": len(metrics.get("history", [])),
+            }
+        )
+
+        _write_progress(
+            progress_path,
+            {
+                "phase": "score",
+                "progress": (idx + 0.95) / max(total_windows, 1),
+                "window": idx + 1,
+                "window_total": total_windows,
+            },
+        )
+
+        model.eval()
+        mean_vec = np.array([mean.get(name, 0.0) for name in feature_cols], dtype=np.float32)
+        std_vec = np.array([std.get(name, 1.0) or 1.0 for name in feature_cols], dtype=np.float32)
+
+        for symbol, features in features_map.items():
+            feature_frame = features[
+                (features.index > window.test_start) & (features.index <= window.test_end)
+            ]
+            if feature_frame.empty:
+                continue
+            feature_frame = feature_frame.reindex(columns=feature_cols).dropna()
+            if feature_frame.empty:
+                continue
+            matrix = feature_frame.to_numpy(dtype=np.float32, copy=True)
+            matrix = (matrix - mean_vec) / std_vec
+            scores = _predict_scores(model, matrix, device, batch_size)
+            if scores.size == 0:
+                continue
+            score_rows.append(
+                pd.DataFrame(
+                    {
+                        "date": feature_frame.index.date.astype(str),
+                        "symbol": symbol,
+                        "score": scores,
+                        "window": idx,
+                    }
+                )
+            )
+
+        _write_progress(
+            progress_path,
+            {
+                "phase": "window_done",
+                "progress": (idx + 1) / max(total_windows, 1),
+                "window": idx + 1,
+                "window_total": total_windows,
+            },
+        )
+
+        last_payload = LinearModelPayload(
+            model_type="torch_mlp",
+            features=feature_cols,
+            coef=[],
+            intercept=0.0,
+            mean={k: float(v) for k, v in mean.items()},
+            std={k: float(v) for k, v in std.items()},
+            label_horizon_days=horizon,
+            trained_at=datetime.utcnow().isoformat(),
+            train_window={
+                "train_start": window.train_start.date().isoformat(),
+                "train_end": window.train_end.date().isoformat(),
+                "valid_end": window.valid_end.date().isoformat(),
+                "test_end": window.test_end.date().isoformat(),
+            },
+        )
+        last_model_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+
+    if last_model_state is None or last_payload is None:
+        raise RuntimeError("训练窗口为空，请检查时间跨度")
+
+    torch.save(last_model_state, output_dir / "torch_model.pt")
+    save_linear_model(output_dir / "torch_payload.json", last_payload)
     (output_dir / "torch_metrics.json").write_text(
-        json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8"
+        json.dumps(
+            {"walk_forward": {"windows": window_metrics, "config": walk_config}},
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
     )
+
+    scores_path.parent.mkdir(parents=True, exist_ok=True)
+    if score_rows:
+        scores_df = pd.concat(score_rows, ignore_index=True)
+        scores_df = scores_df.sort_values(["date", "symbol", "window"])
+        scores_df = scores_df.drop_duplicates(subset=["date", "symbol"], keep="last")
+        scores_df = scores_df.sort_values(["date", "symbol"]).drop(columns=["window"])
+    else:
+        scores_df = pd.DataFrame(columns=["date", "symbol", "score"])
+    scores_df.to_csv(scores_path, index=False)
+
+    _write_progress(progress_path, {"phase": "done", "progress": 1.0})
 
     print(f"saved model: {output_dir / 'torch_model.pt'}")
     print(f"saved payload: {output_dir / 'torch_payload.json'}")
+    print(f"saved scores: {scores_path}")
 
 
 if __name__ == "__main__":

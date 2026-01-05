@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -30,15 +30,34 @@ def _load_base_config() -> dict[str, Any]:
     config_path = _project_root() / "ml" / "config.json"
     if config_path.exists():
         return json.loads(config_path.read_text(encoding="utf-8"))
-    return {
-        "output_dir": "ml/models",
-        "benchmark_symbol": "SPY",
-        "symbols": [],
-        "vendor_preference": ["Alpha", "Lean"],
-        "label_horizon_days": 20,
-        "walk_forward": {"train_years": 8, "valid_months": 12},
-        "torch": {"hidden": [64, 32], "dropout": 0.1, "lr": 0.001, "epochs": 50},
-    }
+        return {
+            "output_dir": "ml/models",
+            "benchmark_symbol": "SPY",
+            "symbols": [],
+            "vendor_preference": ["Alpha", "Lean"],
+            "label_horizon_days": 20,
+            "label_price": "open",
+            "label_start_offset": 1,
+            "pit_fundamentals": {
+                "enabled": True,
+                "dir": "",
+                "min_coverage": 0.05,
+                "coverage_action": "warn",
+                "missing_policy": "fill_zero",
+                "sample_on_snapshot": True,
+                "start": "",
+                "end": "",
+            },
+            "walk_forward": {"train_years": 8, "valid_months": 12},
+            "torch": {"hidden": [64, 32], "dropout": 0.1, "lr": 0.001, "epochs": 50},
+        }
+
+
+def _write_progress(path: Path, payload: dict[str, Any]) -> None:
+    data = dict(payload)
+    data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _collect_project_symbols(session, project_id: int) -> tuple[dict[str, Any], list[str]]:
@@ -135,6 +154,12 @@ def run_ml_train(job_id: int) -> None:
         output_dir = Path(settings.artifact_root) / f"ml_job_{job_id}"
         output_dir.mkdir(parents=True, exist_ok=True)
         log_path = output_dir / "ml_train.log"
+        progress_path = output_dir / "progress.json"
+
+        job.output_dir = str(output_dir)
+        job.log_path = str(log_path)
+        session.commit()
+        _write_progress(progress_path, {"phase": "queued", "progress": 0.0})
 
         config = dict(job.config or {})
         config["output_dir"] = str(output_dir / "output")
@@ -149,6 +174,18 @@ def run_ml_train(job_id: int) -> None:
         if not train_script.exists() or not predict_script.exists():
             raise RuntimeError("ml_scripts_missing")
 
+        scores_path = output_dir / "scores.csv"
+        walk_config = config.get("walk_forward") or {}
+        try:
+            test_months = int(walk_config.get("test_months") or 0)
+        except (TypeError, ValueError):
+            test_months = 0
+        try:
+            step_months = int(walk_config.get("step_months") or test_months)
+        except (TypeError, ValueError):
+            step_months = test_months
+        rolling_scores = test_months > 0 and step_months > 0
+
         cmd = [
             _resolve_ml_python(),
             str(train_script),
@@ -159,6 +196,9 @@ def run_ml_train(job_id: int) -> None:
             cmd += ["--data-root", settings.data_root]
         device = str(config.get("device") or "auto")
         cmd += ["--device", device]
+        cmd += ["--progress-path", str(progress_path)]
+        if rolling_scores:
+            cmd += ["--scores-output", str(scores_path)]
 
         with log_path.open("w", encoding="utf-8") as handle:
             handle.write(f"[train] running: {' '.join(cmd)}\n")
@@ -166,26 +206,30 @@ def run_ml_train(job_id: int) -> None:
             handle.write(f"[train] exit={proc.returncode}\n")
         if proc.returncode != 0:
             raise RuntimeError(f"train_failed:{proc.returncode}")
+        if rolling_scores:
+            if not scores_path.exists():
+                raise RuntimeError("score_failed:missing_scores")
+        else:
+            _write_progress(progress_path, {"phase": "score", "progress": 0.9})
+            score_cmd = [
+                _resolve_ml_python(),
+                str(predict_script),
+                "--config",
+                str(config_path),
+                "--output",
+                str(scores_path),
+            ]
+            if settings.data_root:
+                score_cmd += ["--data-root", settings.data_root]
+            score_cmd += ["--device", device]
 
-        scores_path = output_dir / "scores.csv"
-        score_cmd = [
-            _resolve_ml_python(),
-            str(predict_script),
-            "--config",
-            str(config_path),
-            "--output",
-            str(scores_path),
-        ]
-        if settings.data_root:
-            score_cmd += ["--data-root", settings.data_root]
-        score_cmd += ["--device", device]
-
-        with log_path.open("a", encoding="utf-8") as handle:
-            handle.write(f"[score] running: {' '.join(score_cmd)}\n")
-            proc = subprocess.run(score_cmd, stdout=handle, stderr=subprocess.STDOUT, check=False)
-            handle.write(f"[score] exit={proc.returncode}\n")
-        if proc.returncode != 0:
-            raise RuntimeError(f"score_failed:{proc.returncode}")
+            with log_path.open("a", encoding="utf-8") as handle:
+                handle.write(f"[score] running: {' '.join(score_cmd)}\n")
+                proc = subprocess.run(score_cmd, stdout=handle, stderr=subprocess.STDOUT, check=False)
+                handle.write(f"[score] exit={proc.returncode}\n")
+            if proc.returncode != 0:
+                raise RuntimeError(f"score_failed:{proc.returncode}")
+            _write_progress(progress_path, {"phase": "done", "progress": 1.0})
 
         metrics_path = Path(config["output_dir"]) / "torch_metrics.json"
         metrics: dict[str, Any] | None = None
@@ -198,6 +242,7 @@ def run_ml_train(job_id: int) -> None:
         activate_job(session, job)
         job.status = "success"
         job.ended_at = datetime.utcnow()
+        _write_progress(progress_path, {"phase": "done", "progress": 1.0})
 
         record_audit(
             session,
@@ -213,6 +258,12 @@ def run_ml_train(job_id: int) -> None:
             job.status = "failed"
             job.message = str(exc)
             job.ended_at = datetime.utcnow()
+            if job.output_dir:
+                progress_path = Path(job.output_dir) / "progress.json"
+                _write_progress(
+                    progress_path,
+                    {"phase": "failed", "progress": 1.0, "error": str(exc)},
+                )
             record_audit(
                 session,
                 action="ml.train.failed",

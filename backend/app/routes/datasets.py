@@ -9,26 +9,37 @@ import shutil
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlencode
 import zipfile
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
-from sqlalchemy import func
+from sqlalchemy import func, or_
 
 from app.db import SessionLocal, get_session
-from app.models import DataSyncJob, Dataset, UniverseMembership
+from app.models import BulkSyncJob, DataSyncJob, Dataset, UniverseMembership
 from app.core.config import settings
 from app.schemas import (
+    BulkSyncCreate,
+    BulkSyncOut,
+    BulkSyncPageOut,
     DataSyncCreate,
     DataSyncBatchRequest,
     DataSyncOut,
     DataSyncPageOut,
+    DataSyncQueueClearOut,
+    DataSyncQueueClearRequest,
+    DataSyncQueueRunOut,
+    DataSyncQueueRunRequest,
+    DataSyncSpeedOut,
     DatasetCreate,
     DatasetDeleteOut,
     DatasetDeleteRequest,
     DatasetFetchOut,
     DatasetFetchRequest,
+    DatasetListingFetchOut,
+    DatasetListingFetchRequest,
     DatasetOut,
     DatasetPageOut,
     DatasetQualityOut,
@@ -61,6 +72,13 @@ RETRY_IMMEDIATE_ATTEMPTS = 3
 RETRY_BASE_DELAY_SECONDS = 10
 RETRY_MAX_ATTEMPTS = 8
 RETRY_MAX_BACKOFF_SECONDS = 24 * 60 * 60
+MAX_BULK_ERRORS = 200
+
+SYNC_QUEUE_LOCK = threading.Lock()
+SYNC_QUEUE_RUNNING = False
+
+BULK_SYNC_LOCK = threading.Lock()
+BULK_SYNC_RUNNING: set[int] = set()
 
 
 def _coerce_pagination(page: int, page_size: int) -> tuple[int, int, int]:
@@ -81,12 +99,17 @@ def _compute_retry_delay(retry_count: int, min_delay: int | None = None) -> int:
     return int(min(delay, RETRY_MAX_BACKOFF_SECONDS))
 
 
+def _wait_alpha_rate_slot() -> None:
+    return
+
+
 def _schedule_retry(
     session,
     job: DataSyncJob,
     reason: str,
     min_delay: int | None = None,
     status: str = "queued",
+    spawn_thread: bool = True,
 ) -> bool:
     job.retry_count = (job.retry_count or 0) + 1
     if job.retry_count > RETRY_MAX_ATTEMPTS:
@@ -115,12 +138,406 @@ def _schedule_retry(
         detail={"dataset_id": job.dataset_id, "retry_in": delay, "reason": reason},
     )
 
-    def _runner():
-        time.sleep(delay)
-        run_data_sync(job.id)
+    if spawn_thread:
+        def _runner():
+            time.sleep(delay)
+            run_data_sync(job.id)
 
-    threading.Thread(target=_runner, daemon=True).start()
+        threading.Thread(target=_runner, daemon=True).start()
     return True
+
+
+def _count_pending_sync_jobs(session) -> int:
+    now = datetime.utcnow()
+    return (
+        session.query(DataSyncJob)
+        .filter(
+            DataSyncJob.status.in_(("queued", "rate_limited")),
+            or_(DataSyncJob.next_retry_at.is_(None), DataSyncJob.next_retry_at <= now),
+        )
+        .count()
+    )
+
+
+def _start_sync_queue_worker(max_jobs: int, min_delay_seconds: float) -> bool:
+    global SYNC_QUEUE_RUNNING
+    with SYNC_QUEUE_LOCK:
+        if SYNC_QUEUE_RUNNING:
+            return False
+        SYNC_QUEUE_RUNNING = True
+
+    def _worker():
+        global SYNC_QUEUE_RUNNING
+        processed = 0
+        try:
+            while True:
+                with get_session() as session:
+                    now = datetime.utcnow()
+                    job = (
+                        session.query(DataSyncJob)
+                        .filter(
+                            DataSyncJob.status.in_(("queued", "rate_limited")),
+                            or_(
+                                DataSyncJob.next_retry_at.is_(None),
+                                DataSyncJob.next_retry_at <= now,
+                            ),
+                        )
+                        .order_by(DataSyncJob.created_at.asc())
+                        .first()
+                    )
+                    if not job:
+                        break
+                    job_id = job.id
+
+                run_data_sync(job_id, spawn_retry_thread=False)
+                processed += 1
+                if max_jobs and processed >= max_jobs:
+                    break
+                if min_delay_seconds > 0:
+                    time.sleep(min_delay_seconds)
+        finally:
+            with SYNC_QUEUE_LOCK:
+                SYNC_QUEUE_RUNNING = False
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return True
+
+
+def _bulk_job_range(job: BulkSyncJob) -> tuple[datetime, datetime] | None:
+    if not job.enqueued_start_at:
+        return None
+    end = job.enqueued_end_at or datetime.utcnow()
+    return job.enqueued_start_at, end
+
+
+def _bulk_job_counts(session, job: BulkSyncJob) -> tuple[int | None, int | None, int | None]:
+    window = _bulk_job_range(job)
+    if not window:
+        return None, None, None
+    start, end = window
+    base = session.query(DataSyncJob).filter(
+        DataSyncJob.created_at >= start,
+        DataSyncJob.created_at <= end,
+    )
+    pending = base.filter(DataSyncJob.status.in_(("queued", "rate_limited"))).count()
+    running = base.filter(DataSyncJob.status == "running").count()
+    completed = base.filter(DataSyncJob.ended_at.isnot(None)).count()
+    return pending, running, completed
+
+
+def _bulk_append_error(errors: list[dict], phase: str, message: str) -> list[dict]:
+    if len(errors) >= MAX_BULK_ERRORS:
+        return errors
+    errors.append(
+        {
+            "ts": datetime.utcnow().isoformat(),
+            "phase": phase,
+            "message": message,
+        }
+    )
+    return errors
+
+
+def _bulk_check_control(session, job: BulkSyncJob, errors: list[dict]) -> bool:
+    session.refresh(job)
+    if job.cancel_requested:
+        job.status = "canceled"
+        job.phase = "canceled"
+        job.ended_at = datetime.utcnow()
+        job.cancel_requested = False
+        job.pause_requested = False
+        job.errors = errors
+        session.commit()
+        return True
+    if job.pause_requested:
+        job.status = "paused"
+        job.phase = job.phase or "paused"
+        job.pause_requested = False
+        job.errors = errors
+        session.commit()
+        return True
+    return False
+
+
+def _start_bulk_sync_worker(job_id: int) -> bool:
+    with BULK_SYNC_LOCK:
+        if job_id in BULK_SYNC_RUNNING:
+            return False
+        BULK_SYNC_RUNNING.add(job_id)
+
+    def _worker():
+        try:
+            _run_bulk_sync_job(job_id)
+        finally:
+            with BULK_SYNC_LOCK:
+                BULK_SYNC_RUNNING.discard(job_id)
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return True
+
+
+def _load_bulk_symbols(
+    status_filter: str,
+    asset_types: set[str],
+) -> list[dict[str, str]]:
+    rows = _load_listing_rows(_resolve_listing_paths(None))
+    symbols: list[dict[str, str]] = []
+    for row in rows:
+        symbol = _normalize_symbol(row.get("symbol", "")).upper()
+        if not symbol or symbol == "UNKNOWN":
+            continue
+        row_status = (row.get("status") or "").strip().lower()
+        if status_filter != "all" and row_status != status_filter:
+            continue
+        asset_type = (row.get("assetType") or "").strip().upper() or "UNKNOWN"
+        if asset_types and asset_type not in asset_types:
+            continue
+        symbols.append(
+            {
+                "symbol": symbol,
+                "assetType": asset_type,
+            }
+        )
+    symbols.sort(key=lambda item: item["symbol"])
+    return symbols
+
+
+def _run_bulk_sync_job(job_id: int) -> None:
+    session = SessionLocal()
+    try:
+        job = session.get(BulkSyncJob, job_id)
+        if not job:
+            return
+        if job.status in {"success", "failed", "canceled"}:
+            return
+        errors = list(job.errors or [])
+        params = job.params or {}
+        status_filter = (params.get("status") or "all").strip().lower()
+        batch_size = int(params.get("batch_size") or job.batch_size or 200)
+        only_missing = bool(params.get("only_missing", True))
+        auto_sync = bool(params.get("auto_sync", True))
+        refresh_listing = bool(params.get("refresh_listing", True))
+        min_delay_seconds = float(params.get("min_delay_seconds") or 0.9)
+
+        if not job.started_at:
+            job.started_at = datetime.utcnow()
+        job.status = "running"
+        session.commit()
+
+        if _bulk_check_control(session, job, errors):
+            return
+
+        if job.phase in {"queued", "listing_refresh"}:
+            job.phase = "listing_refresh"
+            job.message = "refresh_listing"
+            session.commit()
+            if refresh_listing:
+                try:
+                    summary = _refresh_alpha_listing()
+                except Exception as exc:
+                    errors = _bulk_append_error(errors, "listing_refresh", str(exc))
+                    job.errors = errors
+                    job.error = str(exc)
+                    session.commit()
+                    raise
+                job.message = (
+                    f"listing_ok; total={summary.get('total', 0)}"
+                    f"; active={summary.get('active', 0)}"
+                    f"; delisted={summary.get('delisted', 0)}"
+                )
+                job.errors = errors
+                session.commit()
+
+        if job.phase in {"listing_refresh", "enqueue"}:
+            job.phase = "enqueue"
+            job.batch_size = batch_size
+            if job.enqueued_start_at is None:
+                job.enqueued_start_at = datetime.utcnow()
+            session.commit()
+
+            asset_types = {"STOCK", "ETF"}
+            symbols = _load_bulk_symbols(status_filter, asset_types)
+            if not symbols:
+                errors = _bulk_append_error(errors, "enqueue", "listing_empty")
+                job.errors = errors
+                job.error = "listing_empty"
+                session.commit()
+                raise RuntimeError("listing_empty")
+            total_symbols = len(symbols)
+            job.total_symbols = total_symbols
+            session.commit()
+
+            offset = job.offset or 0
+            created = job.created_datasets or 0
+            reused = job.reused_datasets or 0
+            queued = job.queued_jobs or 0
+            if job.queue_started_at is not None:
+                _start_sync_queue_worker(0, min_delay_seconds)
+
+            while offset < total_symbols:
+                batch = symbols[offset : offset + batch_size]
+                if not batch:
+                    break
+                if _bulk_check_control(session, job, errors):
+                    return
+                for item in batch:
+                    symbol = item["symbol"]
+                    try:
+                        asset_type = item["assetType"]
+                        asset_class = "ETF" if asset_type == "ETF" else "Equity"
+                        source_path = f"alpha:{symbol.lower()}"
+                        dataset_name = f"Alpha_{symbol}_Daily"
+                        dataset = (
+                            session.query(Dataset)
+                            .filter(
+                                Dataset.source_path == source_path,
+                                Dataset.vendor == "Alpha",
+                                Dataset.frequency == "daily",
+                                Dataset.region == "US",
+                            )
+                            .first()
+                        )
+                        if not dataset:
+                            dataset = (
+                                session.query(Dataset)
+                                .filter(Dataset.name == dataset_name)
+                                .first()
+                            )
+
+                        if dataset and only_missing:
+                            reused += 1
+                            continue
+
+                        if not dataset:
+                            dataset = Dataset(
+                                name=dataset_name,
+                                vendor="Alpha",
+                                asset_class=asset_class,
+                                region="US",
+                                frequency="daily",
+                                source_path=source_path,
+                            )
+                            session.add(dataset)
+                            session.flush()
+                            created += 1
+                            record_audit(
+                                session,
+                                action="dataset.create",
+                                resource_type="dataset",
+                                resource_id=dataset.id,
+                                detail={"name": dataset.name, "source": "bulk_sync"},
+                            )
+                        else:
+                            updated = False
+                            if asset_class and dataset.asset_class != asset_class:
+                                dataset.asset_class = asset_class
+                                updated = True
+                            if not dataset.frequency:
+                                dataset.frequency = "daily"
+                                updated = True
+                            if not dataset.source_path and source_path:
+                                dataset.source_path = source_path
+                                updated = True
+                            if updated:
+                                dataset.updated_at = datetime.utcnow()
+                                record_audit(
+                                    session,
+                                    action="dataset.update",
+                                    resource_type="dataset",
+                                    resource_id=dataset.id,
+                                    detail={"source_path": source_path},
+                                )
+
+                        if auto_sync:
+                            stored_source = _resolve_market_source(dataset, source_path)
+                            date_column = (
+                                "timestamp" if _is_alpha_source(stored_source) else "date"
+                            )
+                            active = (
+                                session.query(DataSyncJob)
+                                .filter(
+                                    DataSyncJob.dataset_id == dataset.id,
+                                    DataSyncJob.source_path == stored_source,
+                                    DataSyncJob.date_column == date_column,
+                                    DataSyncJob.reset_history.is_(False),
+                                    DataSyncJob.status.in_(ACTIVE_SYNC_STATUSES),
+                                )
+                                .first()
+                            )
+                            if not active:
+                                sync_job = DataSyncJob(
+                                    dataset_id=dataset.id,
+                                    source_path=stored_source,
+                                    date_column=date_column,
+                                    reset_history=False,
+                                )
+                                session.add(sync_job)
+                                session.flush()
+                                queued += 1
+                                record_audit(
+                                    session,
+                                    action="data.sync.create",
+                                    resource_type="data_sync_job",
+                                    resource_id=sync_job.id,
+                                    detail={
+                                        "dataset_id": dataset.id,
+                                        "source_path": stored_source,
+                                    },
+                                )
+                    except Exception as exc:
+                        errors = _bulk_append_error(
+                            errors,
+                            "enqueue",
+                            f"{symbol}: {exc}",
+                        )
+                offset += len(batch)
+                job.offset = offset
+                job.processed_symbols = offset
+                job.created_datasets = created
+                job.reused_datasets = reused
+                job.queued_jobs = queued
+                job.errors = errors
+                session.commit()
+                if job.queue_started_at is None:
+                    job.queue_started_at = datetime.utcnow()
+                    session.commit()
+                _start_sync_queue_worker(0, min_delay_seconds)
+            job.enqueued_end_at = datetime.utcnow()
+            job.phase = "syncing"
+            session.commit()
+
+        if job.phase == "syncing":
+            _start_sync_queue_worker(0, min_delay_seconds)
+            while True:
+                if _bulk_check_control(session, job, errors):
+                    return
+                session.refresh(job)
+                if job.status in {"failed", "canceled"}:
+                    return
+                pending, running, _ = _bulk_job_counts(session, job)
+                if pending == 0 and running == 0:
+                    job.status = "success"
+                    job.phase = "done"
+                    job.queue_ended_at = datetime.utcnow()
+                    job.ended_at = datetime.utcnow()
+                    job.errors = errors
+                    session.commit()
+                    return
+                session.commit()
+                time.sleep(10)
+    except Exception as exc:
+        job = session.get(BulkSyncJob, job_id)
+        if job:
+            errors = list(job.errors or [])
+            errors = _bulk_append_error(errors, job.phase or "failed", str(exc))
+            job.status = "failed"
+            job.phase = job.phase or "failed"
+            job.error = str(exc)
+            job.errors = errors
+            job.ended_at = datetime.utcnow()
+            session.commit()
+    finally:
+        session.close()
 
 
 @router.get("", response_model=list[DatasetOut])
@@ -195,6 +612,36 @@ def list_sync_jobs_page(
         )
 
 
+@router.get("/sync-jobs/speed", response_model=DataSyncSpeedOut)
+def get_sync_speed(
+    window_seconds: int = Query(60, ge=10, le=600),
+):
+    now = datetime.utcnow()
+    window_start = now - timedelta(seconds=window_seconds)
+    with get_session() as session:
+        base = session.query(DataSyncJob).filter(
+            func.lower(DataSyncJob.source_path).like("alpha:%")
+        )
+        completed = (
+            base.filter(
+                DataSyncJob.ended_at.isnot(None),
+                DataSyncJob.ended_at >= window_start,
+            )
+            .count()
+        )
+        running = base.filter(DataSyncJob.status == "running").count()
+        pending = base.filter(DataSyncJob.status.in_(("queued", "rate_limited"))).count()
+
+    rate_per_min = completed * 60.0 / window_seconds
+    return DataSyncSpeedOut(
+        window_seconds=window_seconds,
+        completed=completed,
+        rate_per_min=rate_per_min,
+        running=running,
+        pending=pending,
+    )
+
+
 @router.get("/{dataset_id}/sync-jobs", response_model=list[DataSyncOut])
 def list_dataset_sync_jobs(dataset_id: int):
     with get_session() as session:
@@ -263,7 +710,8 @@ def create_sync_job(
         )
         session.commit()
 
-    background_tasks.add_task(run_data_sync, job.id)
+    if payload.auto_run:
+        background_tasks.add_task(run_data_sync, job.id)
     return job
 
 
@@ -343,6 +791,203 @@ def sync_all(background_tasks: BackgroundTasks, payload: DataSyncBatchRequest = 
             )
         session.commit()
     return jobs
+
+
+@router.post("/sync-queue/run", response_model=DataSyncQueueRunOut)
+def run_sync_queue(payload: DataSyncQueueRunRequest = DataSyncQueueRunRequest()):
+    max_jobs = max(int(payload.max_jobs or 0), 0)
+    min_delay_seconds = max(float(payload.min_delay_seconds or 0), 0.0)
+    started = _start_sync_queue_worker(max_jobs, min_delay_seconds)
+    with get_session() as session:
+        pending = _count_pending_sync_jobs(session)
+    return DataSyncQueueRunOut(
+        started=started,
+        running=SYNC_QUEUE_RUNNING,
+        pending=pending,
+        max_jobs=max_jobs,
+        min_delay_seconds=min_delay_seconds,
+    )
+
+
+@router.post("/sync-jobs/clear", response_model=DataSyncQueueClearOut)
+def clear_sync_queue(payload: DataSyncQueueClearRequest = DataSyncQueueClearRequest()):
+    allowed_statuses = {"queued", "rate_limited"}
+    statuses = [
+        (status or "").strip().lower()
+        for status in (payload.statuses or ["queued", "rate_limited"])
+        if (status or "").strip().lower() in allowed_statuses
+    ]
+    if not statuses:
+        raise HTTPException(status_code=400, detail="状态参数无效")
+    with get_session() as session:
+        query = session.query(DataSyncJob).filter(DataSyncJob.status.in_(statuses))
+        if payload.only_alpha:
+            query = query.filter(func.lower(DataSyncJob.source_path).like("alpha:%"))
+        deleted = query.delete(synchronize_session=False)
+        record_audit(
+            session,
+            action="data.sync.clear",
+            resource_type="data_sync_job",
+            resource_id=None,
+            detail={"statuses": statuses, "only_alpha": payload.only_alpha, "deleted": deleted},
+        )
+        session.commit()
+    return DataSyncQueueClearOut(
+        deleted=deleted,
+        statuses=statuses,
+        only_alpha=payload.only_alpha,
+    )
+
+
+def _bulk_job_to_out(session, job: BulkSyncJob) -> BulkSyncOut:
+    out = BulkSyncOut.model_validate(job, from_attributes=True)
+    pending, running, completed = _bulk_job_counts(session, job)
+    out.pending_sync_jobs = pending
+    out.running_sync_jobs = running
+    out.completed_sync_jobs = completed
+    return out
+
+
+def resume_bulk_sync_jobs() -> None:
+    with SessionLocal() as session:
+        jobs = (
+            session.query(BulkSyncJob)
+            .filter(BulkSyncJob.status.in_(("queued", "running")))
+            .order_by(BulkSyncJob.created_at.asc())
+            .all()
+        )
+    for job in jobs:
+        _start_bulk_sync_worker(job.id)
+
+
+@router.post("/actions/bulk-sync", response_model=BulkSyncOut)
+def create_bulk_sync_job(payload: BulkSyncCreate):
+    status_filter = (payload.status or "all").strip().lower()
+    if status_filter not in {"all", "active", "delisted"}:
+        raise HTTPException(status_code=400, detail="状态参数无效")
+    batch_size = max(int(payload.batch_size or 0), 1)
+    min_delay_seconds = max(float(payload.min_delay_seconds or 0), 0.0)
+    params = {
+        "status": status_filter,
+        "batch_size": batch_size,
+        "only_missing": bool(payload.only_missing),
+        "auto_sync": bool(payload.auto_sync),
+        "refresh_listing": bool(payload.refresh_listing),
+        "min_delay_seconds": min_delay_seconds,
+    }
+    with get_session() as session:
+        active = (
+            session.query(BulkSyncJob)
+            .filter(BulkSyncJob.status.in_(("queued", "running", "paused")))
+            .first()
+        )
+        if active:
+            raise HTTPException(status_code=409, detail="已有全量任务正在运行")
+        job = BulkSyncJob(
+            status="queued",
+            phase="listing_refresh",
+            params=params,
+            batch_size=batch_size,
+        )
+        session.add(job)
+        session.commit()
+        session.refresh(job)
+        out = _bulk_job_to_out(session, job)
+    _start_bulk_sync_worker(job.id)
+    return out
+
+
+@router.get("/bulk-sync-jobs/latest", response_model=BulkSyncOut)
+def get_latest_bulk_sync_job():
+    with get_session() as session:
+        job = session.query(BulkSyncJob).order_by(BulkSyncJob.created_at.desc()).first()
+        if not job:
+            raise HTTPException(status_code=404, detail="没有全量任务")
+        return _bulk_job_to_out(session, job)
+
+
+@router.get("/bulk-sync-jobs/page", response_model=BulkSyncPageOut)
+def list_bulk_sync_jobs(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=MAX_PAGE_SIZE),
+):
+    with get_session() as session:
+        total = session.query(BulkSyncJob).count()
+        safe_page, safe_page_size, offset = _coerce_pagination(page, page_size)
+        total_pages = max(1, math.ceil(total / safe_page_size)) if total else 1
+        if safe_page > total_pages:
+            safe_page = total_pages
+            offset = (safe_page - 1) * safe_page_size
+        jobs = (
+            session.query(BulkSyncJob)
+            .order_by(BulkSyncJob.created_at.desc())
+            .offset(offset)
+            .limit(safe_page_size)
+            .all()
+        )
+        items = [_bulk_job_to_out(session, job) for job in jobs]
+        return BulkSyncPageOut(
+            items=items,
+            total=total,
+            page=safe_page,
+            page_size=safe_page_size,
+        )
+
+
+@router.post("/bulk-sync-jobs/{job_id}/pause", response_model=BulkSyncOut)
+def pause_bulk_sync_job(job_id: int):
+    with get_session() as session:
+        job = session.get(BulkSyncJob, job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="全量任务不存在")
+        if job.status in {"success", "failed", "canceled"}:
+            raise HTTPException(status_code=400, detail="任务已结束")
+        if job.status == "paused":
+            return _bulk_job_to_out(session, job)
+        job.pause_requested = True
+        if job.status == "queued":
+            job.status = "paused"
+            job.pause_requested = False
+        job.updated_at = datetime.utcnow()
+        session.commit()
+        return _bulk_job_to_out(session, job)
+
+
+@router.post("/bulk-sync-jobs/{job_id}/resume", response_model=BulkSyncOut)
+def resume_bulk_sync_job(job_id: int):
+    with get_session() as session:
+        job = session.get(BulkSyncJob, job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="全量任务不存在")
+        if job.status in {"success", "failed", "canceled"}:
+            raise HTTPException(status_code=400, detail="任务已结束")
+        job.pause_requested = False
+        job.status = "queued"
+        job.updated_at = datetime.utcnow()
+        session.commit()
+        out = _bulk_job_to_out(session, job)
+    _start_bulk_sync_worker(job_id)
+    return out
+
+
+@router.post("/bulk-sync-jobs/{job_id}/cancel", response_model=BulkSyncOut)
+def cancel_bulk_sync_job(job_id: int):
+    with get_session() as session:
+        job = session.get(BulkSyncJob, job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="全量任务不存在")
+        if job.status in {"success", "failed", "canceled"}:
+            return _bulk_job_to_out(session, job)
+        job.cancel_requested = True
+        if job.status in {"queued", "paused"}:
+            job.status = "canceled"
+            job.phase = "canceled"
+            job.cancel_requested = False
+            job.pause_requested = False
+            job.ended_at = datetime.utcnow()
+        job.updated_at = datetime.utcnow()
+        session.commit()
+        return _bulk_job_to_out(session, job)
 
 
 def _parse_date(value: str | None) -> date | None:
@@ -517,6 +1162,116 @@ def _resolve_path(value: str) -> Path:
     if not path.is_absolute():
         path = data_root / path
     return path.resolve()
+
+
+def _load_listing_rows(paths: list[Path]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for path in paths:
+        if not path.exists():
+            continue
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            rows.extend([dict(row) for row in reader])
+    return rows
+
+
+def _resolve_listing_paths(source_path: str | None) -> list[Path]:
+    data_root = _get_data_root()
+    if source_path:
+        path = Path(source_path)
+        if not path.is_absolute():
+            path = data_root / path
+        return [path.resolve()]
+
+    preferred = data_root / "universe" / "alpha_symbol_life.csv"
+    if preferred.exists():
+        return [preferred]
+
+    active = data_root / "universe" / "alpha_listing_status_active_latest.csv"
+    delisted = data_root / "universe" / "alpha_listing_status_delisted_latest.csv"
+    paths = [path for path in (active, delisted) if path.exists()]
+    return paths or [preferred]
+
+
+def _fetch_alpha_listing_status(state: str, date_value: str | None = None) -> bytes:
+    api_key = (settings.alpha_vantage_api_key or "").strip()
+    if not api_key:
+        raise RuntimeError("ALPHA_KEY_MISSING")
+    params = {"function": "LISTING_STATUS", "apikey": api_key, "state": state}
+    if date_value:
+        params["date"] = date_value
+    url = f"https://www.alphavantage.co/query?{urlencode(params)}"
+    request = urllib.request.Request(url, headers={"User-Agent": "stocklean/1.0"})
+    with urllib.request.urlopen(request, timeout=60) as handle:
+        payload = handle.read()
+    if payload[:1] == b"{":
+        decoded = json.loads(payload.decode("utf-8", errors="ignore"))
+        raise RuntimeError(f"alpha error: {decoded}")
+    return payload
+
+
+def _merge_symbol_life_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    merged: dict[str, dict[str, str]] = {}
+    for row in rows:
+        symbol = _normalize_symbol(row.get("symbol", "")).upper()
+        if not symbol or symbol == "UNKNOWN":
+            continue
+        status = (row.get("status") or "").strip().lower()
+        delisted = (row.get("delistingDate") or "").strip()
+        existing = merged.get(symbol)
+        if not existing:
+            merged[symbol] = row
+            continue
+        existing_status = (existing.get("status") or "").strip().lower()
+        existing_delisted = (existing.get("delistingDate") or "").strip()
+        prefer = False
+        if existing_status != "delisted" and status == "delisted":
+            prefer = True
+        elif not existing_delisted and delisted:
+            prefer = True
+        if prefer:
+            merged[symbol] = row
+    return [merged[key] for key in sorted(merged)]
+
+
+def _write_symbol_life(rows: list[dict[str, str]], output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    headers = [
+        "symbol",
+        "name",
+        "exchange",
+        "assetType",
+        "ipoDate",
+        "delistingDate",
+        "status",
+    ]
+    with output_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=headers)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row.get(key, "") for key in headers})
+
+
+def _refresh_alpha_listing() -> dict[str, int]:
+    data_root = _get_data_root()
+    active_payload = _fetch_alpha_listing_status("active")
+    delisted_payload = _fetch_alpha_listing_status("delisted")
+    active_path = data_root / "universe" / "alpha_listing_status_active_latest.csv"
+    delisted_path = data_root / "universe" / "alpha_listing_status_delisted_latest.csv"
+    active_path.parent.mkdir(parents=True, exist_ok=True)
+    active_path.write_bytes(active_payload)
+    delisted_path.write_bytes(delisted_payload)
+    rows = _load_listing_rows([active_path, delisted_path])
+    merged = _merge_symbol_life_rows(rows)
+    symbol_life_path = data_root / "universe" / "alpha_symbol_life.csv"
+    _write_symbol_life(merged, symbol_life_path)
+    return {
+        "active": sum(1 for row in rows if (row.get("status") or "").strip().lower() == "active"),
+        "delisted": sum(
+            1 for row in rows if (row.get("status") or "").strip().lower() == "delisted"
+        ),
+        "total": len(merged),
+    }
 
 
 def _safe_delete_path(path: Path, allowed_roots: list[Path]) -> bool:
@@ -707,6 +1462,7 @@ def _fetch_alpha_csv(
     dataset_name: str,
     outputsize: str = "full",
 ) -> Path:
+    _wait_alpha_rate_slot()
     api_key = (settings.alpha_vantage_api_key or "").strip()
     if not api_key:
         raise RuntimeError("ALPHA_KEY_MISSING")
@@ -744,8 +1500,14 @@ def _fetch_alpha_csv(
         note = payload.get("Note") or payload.get("Information")
         error_msg = payload.get("Error Message") or payload.get("error")
         note_text = str(note or "").lower()
-        if "premium" in note_text:
-            raise RuntimeError("ALPHA_PREMIUM")
+        error_text = str(error_msg or "").lower()
+        premium_hint = any(
+            keyword in note_text or keyword in error_text
+            for keyword in ("premium endpoint", "premium only")
+        )
+        if premium_hint:
+            _alpha_rate_limited_until = datetime.utcnow() + ALPHA_RATE_LIMIT_WINDOW
+            raise RuntimeError("ALPHA_RATE_LIMIT")
         if note:
             _alpha_rate_limited_until = datetime.utcnow() + ALPHA_RATE_LIMIT_WINDOW
             raise RuntimeError("ALPHA_RATE_LIMIT")
@@ -1535,7 +2297,7 @@ def _scan_path(path: Path, date_column: str) -> tuple[int, datetime | None, date
     return total_rows, min_dt, max_dt, issues
 
 
-def run_data_sync(job_id: int) -> None:
+def run_data_sync(job_id: int, spawn_retry_thread: bool = True) -> None:
     session = SessionLocal()
     try:
         job = session.get(DataSyncJob, job_id)
@@ -1666,6 +2428,7 @@ def run_data_sync(job_id: int) -> None:
                                 reason="stooq_only; reason=STOOQ_RATE_LIMIT",
                                 min_delay=int(STOOQ_RATE_LIMIT_WINDOW.total_seconds()),
                                 status="rate_limited",
+                                spawn_thread=spawn_retry_thread,
                             )
                             _log_stooq_event(
                                 job.id,
@@ -1736,6 +2499,7 @@ def run_data_sync(job_id: int) -> None:
                                     max(STOOQ_RATE_LIMIT_WINDOW, YAHOO_RATE_LIMIT_WINDOW).total_seconds()
                                 ),
                                 status="rate_limited",
+                                spawn_thread=spawn_retry_thread,
                             )
                             return
                         elif yahoo_code == "YAHOO_NOT_FOUND":
@@ -1746,6 +2510,7 @@ def run_data_sync(job_id: int) -> None:
                                 session,
                                 job,
                                 reason=f"yahoo_fallback_failed: {yahoo_code}",
+                                spawn_thread=spawn_retry_thread,
                             )
                             return
                         job.ended_at = datetime.utcnow()
@@ -1764,6 +2529,7 @@ def run_data_sync(job_id: int) -> None:
                             session,
                             job,
                             reason=code,
+                            spawn_thread=spawn_retry_thread,
                         )
                         return
                     raise
@@ -1787,6 +2553,7 @@ def run_data_sync(job_id: int) -> None:
                         reason="YAHOO_RATE_LIMIT",
                         min_delay=int(YAHOO_RATE_LIMIT_WINDOW.total_seconds()),
                         status="rate_limited",
+                        spawn_thread=spawn_retry_thread,
                     )
                     return
                 elif code == "YAHOO_NOT_FOUND":
@@ -1797,6 +2564,7 @@ def run_data_sync(job_id: int) -> None:
                         session,
                         job,
                         reason=code,
+                        spawn_thread=spawn_retry_thread,
                     )
                     return
                 job.ended_at = datetime.utcnow()
@@ -1825,14 +2593,22 @@ def run_data_sync(job_id: int) -> None:
                         reason="ALPHA_RATE_LIMIT",
                         min_delay=int(ALPHA_RATE_LIMIT_WINDOW.total_seconds()),
                         status="rate_limited",
+                        spawn_thread=spawn_retry_thread,
                     )
                     return
                 elif code == "ALPHA_NOT_FOUND":
                     job.status = "not_found"
                     job.message = "Alpha Vantage 未覆盖该代码"
                 elif code == "ALPHA_PREMIUM":
-                    job.status = "failed"
-                    job.message = "Alpha Vantage 需要付费套餐"
+                    _schedule_retry(
+                        session,
+                        job,
+                        reason="ALPHA_RATE_LIMIT",
+                        min_delay=int(ALPHA_RATE_LIMIT_WINDOW.total_seconds()),
+                        status="rate_limited",
+                        spawn_thread=spawn_retry_thread,
+                    )
+                    return
                 elif code == "ALPHA_KEY_MISSING":
                     job.status = "failed"
                     job.message = "Alpha Vantage API Key 未配置"
@@ -1841,6 +2617,7 @@ def run_data_sync(job_id: int) -> None:
                         session,
                         job,
                         reason=code,
+                        spawn_thread=spawn_retry_thread,
                     )
                     return
                 job.ended_at = datetime.utcnow()
@@ -2148,6 +2925,158 @@ def fetch_dataset(payload: DatasetFetchRequest, background_tasks: BackgroundTask
         dataset=DatasetOut.model_validate(dataset, from_attributes=True),
         job=job_out,
         created=created,
+    )
+
+
+@router.post("/actions/fetch-listing", response_model=DatasetListingFetchOut)
+def fetch_listing_datasets(
+    payload: DatasetListingFetchRequest, background_tasks: BackgroundTasks
+):
+    vendor = (payload.vendor or "alpha").strip().lower()
+    if vendor != "alpha":
+        raise HTTPException(status_code=400, detail="当前仅支持 Alpha Vantage 数据源")
+    frequency = (payload.frequency or "daily").strip().lower()
+    if frequency != "daily":
+        raise HTTPException(status_code=400, detail="当前仅支持日线数据")
+
+    status_filter = (payload.status or "all").strip().lower()
+    if status_filter not in {"all", "active", "delisted"}:
+        raise HTTPException(status_code=400, detail="状态参数无效")
+
+    asset_types = payload.asset_types
+    if asset_types:
+        asset_type_filter = {item.strip().upper() for item in asset_types if item.strip()}
+    else:
+        asset_type_filter = {"STOCK", "ETF"}
+
+    paths = _resolve_listing_paths(payload.source_path)
+    rows = _load_listing_rows(paths)
+    if not rows:
+        raise HTTPException(status_code=404, detail="listing 文件不存在或为空")
+
+    symbol_map: dict[str, dict[str, str]] = {}
+    for row in rows:
+        symbol = _normalize_symbol(row.get("symbol", "")).upper()
+        if not symbol or symbol == "UNKNOWN":
+            continue
+        row_status = (row.get("status") or "").strip().lower()
+        if status_filter != "all" and row_status != status_filter:
+            continue
+        asset_type = (row.get("assetType") or "").strip().upper() or "UNKNOWN"
+        if asset_type_filter and asset_type not in asset_type_filter:
+            continue
+        if symbol not in symbol_map:
+            symbol_map[symbol] = {"symbol": symbol, "asset_type": asset_type}
+
+    items = sorted(symbol_map.values(), key=lambda item: item["symbol"])
+    total_symbols = len(items)
+    offset = max(payload.offset, 0)
+    limit = max(payload.limit, 0)
+    batch = items[offset:] if limit == 0 else items[offset : offset + limit]
+    selected_symbols = len(batch)
+    next_offset = offset + selected_symbols if offset + selected_symbols < total_symbols else None
+
+    vendor_label = _format_title(vendor)
+    frequency_label = "Daily"
+    region = (payload.region or "US").strip().upper()
+
+    created = 0
+    reused = 0
+    queued = 0
+
+    with get_session() as session:
+        for item in batch:
+            symbol = item["symbol"]
+            asset_type = item["asset_type"]
+            asset_class = "ETF" if asset_type == "ETF" else "Equity"
+            source_path = f"{vendor}:{symbol.lower()}"
+            dataset_name = f"{vendor_label}_{symbol}_{frequency_label}"
+            dataset = (
+                session.query(Dataset)
+                .filter(
+                    Dataset.source_path == source_path,
+                    Dataset.vendor == vendor_label,
+                    Dataset.frequency == frequency,
+                    Dataset.region == region,
+                )
+                .first()
+            )
+            if not dataset:
+                dataset = session.query(Dataset).filter(Dataset.name == dataset_name).first()
+
+            if dataset and payload.only_missing:
+                reused += 1
+                continue
+
+            if not dataset:
+                dataset = Dataset(
+                    name=dataset_name,
+                    vendor=vendor_label,
+                    asset_class=asset_class,
+                    region=region,
+                    frequency=frequency,
+                    source_path=source_path,
+                )
+                session.add(dataset)
+                session.commit()
+                session.refresh(dataset)
+                created += 1
+                record_audit(
+                    session,
+                    action="dataset.create",
+                    resource_type="dataset",
+                    resource_id=dataset.id,
+                    detail={"name": dataset.name, "source": "listing"},
+                )
+                session.commit()
+            else:
+                reused += 1
+                updated = False
+                if asset_class and dataset.asset_class != asset_class:
+                    dataset.asset_class = asset_class
+                    updated = True
+                if region and dataset.region != region:
+                    dataset.region = region
+                    updated = True
+                if not dataset.frequency and frequency:
+                    dataset.frequency = frequency
+                    updated = True
+                if not dataset.source_path and source_path:
+                    dataset.source_path = source_path
+                    updated = True
+                if updated:
+                    dataset.updated_at = datetime.utcnow()
+                    record_audit(
+                        session,
+                        action="dataset.update",
+                        resource_type="dataset",
+                        resource_id=dataset.id,
+                        detail={"source_path": source_path},
+                    )
+                    session.commit()
+
+            if payload.auto_sync:
+                job = create_sync_job(
+                    dataset.id,
+                    DataSyncCreate(
+                        source_path=source_path,
+                        date_column="date",
+                        reset_history=payload.reset_history,
+                        auto_run=payload.auto_run,
+                    ),
+                    background_tasks,
+                )
+                if job:
+                    queued += 1
+
+    return DatasetListingFetchOut(
+        total_symbols=total_symbols,
+        selected_symbols=selected_symbols,
+        created=created,
+        reused=reused,
+        queued=queued,
+        offset=offset,
+        next_offset=next_offset,
     )
 
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import math
+from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 
@@ -13,6 +15,27 @@ from app.services.ml_runner import activate_job, build_ml_config, run_ml_train
 router = APIRouter(prefix="/api/ml", tags=["ml"])
 
 MAX_PAGE_SIZE = 200
+
+
+def _read_progress(output_dir: str | None) -> dict | None:
+    if not output_dir:
+        return None
+    progress_path = Path(output_dir) / "progress.json"
+    if not progress_path.exists():
+        return None
+    try:
+        return json.loads(progress_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+
+
+def _with_progress(job: MLTrainJob) -> MLTrainOut:
+    out = MLTrainOut.model_validate(job, from_attributes=True)
+    progress = _read_progress(job.output_dir)
+    if progress:
+        out.progress = progress.get("progress")
+        out.progress_detail = progress
+    return out
 
 
 def _coerce_pagination(page: int, page_size: int, total: int) -> tuple[int, int, int]:
@@ -31,7 +54,8 @@ def list_train_jobs(project_id: int | None = Query(None)):
         query = session.query(MLTrainJob)
         if project_id:
             query = query.filter(MLTrainJob.project_id == project_id)
-        return query.order_by(MLTrainJob.created_at.desc()).all()
+        jobs = query.order_by(MLTrainJob.created_at.desc()).all()
+        return [_with_progress(job) for job in jobs]
 
 
 @router.get("/train-jobs/page", response_model=MLTrainPageOut)
@@ -53,7 +77,7 @@ def list_train_jobs_page(
             .all()
         )
         return MLTrainPageOut(
-            items=items,
+            items=[_with_progress(job) for job in items],
             total=total,
             page=safe_page,
             page_size=safe_page_size,
@@ -100,7 +124,7 @@ def get_train_job(job_id: int):
         job = session.get(MLTrainJob, job_id)
         if not job:
             raise HTTPException(status_code=404, detail="训练任务不存在")
-        return job
+        return _with_progress(job)
 
 
 @router.post("/train-jobs/{job_id}/activate", response_model=MLTrainOut)

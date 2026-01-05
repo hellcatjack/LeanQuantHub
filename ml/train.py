@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 
 from feature_engineering import FeatureConfig, compute_features, compute_label, required_lookback
+from pit_features import apply_pit_features, load_pit_fundamentals
 from model_io import LinearModelPayload, save_linear_model
 
 
@@ -194,6 +195,35 @@ def main() -> None:
         vol_windows=list(feature_windows.get("vol", [10, 20, 60])),
     )
     horizon = int(config.get("label_horizon_days", 20))
+    label_price = str(config.get("label_price", "open")).strip().lower()
+    if label_price not in {"open", "close"}:
+        label_price = "close"
+    label_start_offset = int(config.get("label_start_offset", 1))
+
+    pit_cfg = config.get("pit_fundamentals", {})
+    if not isinstance(pit_cfg, dict):
+        pit_cfg = {}
+    pit_enabled = bool(pit_cfg.get("enabled", False))
+    pit_sample_on_snapshot = bool(pit_cfg.get("sample_on_snapshot", True))
+    pit_missing_policy = str(pit_cfg.get("missing_policy", "fill_zero"))
+    pit_fields: list[str] = []
+    pit_map: dict[str, pd.DataFrame] = {}
+    if pit_enabled:
+        pit_dir = Path(pit_cfg.get("dir") or data_root / "factors" / "pit_weekly_fundamentals")
+        if not pit_dir.is_absolute():
+            pit_dir = data_root / pit_dir
+        pit_min_coverage = float(pit_cfg.get("min_coverage", 0.05))
+        pit_coverage_action = str(pit_cfg.get("coverage_action", "warn"))
+        pit_start = pit_cfg.get("start")
+        pit_end = pit_cfg.get("end")
+        pit_map, pit_fields, _ = load_pit_fundamentals(
+            pit_dir,
+            symbols,
+            start=pit_start,
+            end=pit_end,
+            min_coverage=pit_min_coverage,
+            coverage_action=pit_coverage_action,
+        )
 
     spy_path = _pick_dataset_file(benchmark_symbol, adjusted_dir, vendor_pref)
     if not spy_path:
@@ -207,7 +237,22 @@ def main() -> None:
             continue
         df = _load_series(symbol_path)
         features = compute_features(df, spy_df, feat_config)
-        label = compute_label(df, spy_df, horizon)
+        if pit_enabled:
+            pit_frame = pit_map.get(symbol)
+            features = apply_pit_features(
+                features,
+                pit_frame,
+                pit_fields,
+                pit_sample_on_snapshot,
+                pit_missing_policy,
+            )
+        label = compute_label(
+            df,
+            spy_df,
+            horizon,
+            start_offset=label_start_offset,
+            price_column=label_price,
+        )
         merged = features.join(label.rename("label")).dropna()
         if merged.empty:
             continue

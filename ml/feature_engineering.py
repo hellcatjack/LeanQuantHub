@@ -63,13 +63,26 @@ def compute_features(
     return features
 
 
-def compute_label(df: pd.DataFrame, spy_df: pd.DataFrame, horizon: int) -> pd.Series:
+def compute_label(
+    df: pd.DataFrame,
+    spy_df: pd.DataFrame,
+    horizon: int,
+    start_offset: int = 0,
+    price_column: str = "close",
+) -> pd.Series:
     df = df.sort_index()
     spy_df = spy_df.sort_index()
-    future = df["close"].shift(-horizon) / df["close"] - 1
-    spy_future = spy_df["close"].shift(-horizon) / spy_df["close"] - 1
-    spy_future = spy_future.reindex(df.index)
-    return future - spy_future
+    price_col = price_column if price_column in df.columns else "close"
+    spy_price_col = price_column if price_column in spy_df.columns else "close"
+    start_offset = max(int(start_offset), 0)
+    future = df[price_col].shift(-(start_offset + horizon))
+    start = df[price_col].shift(-start_offset)
+    rel = future / start - 1
+    spy_future = spy_df[spy_price_col].shift(-(start_offset + horizon))
+    spy_start = spy_df[spy_price_col].shift(-start_offset)
+    spy_rel = spy_future / spy_start - 1
+    spy_rel = spy_rel.reindex(df.index)
+    return rel - spy_rel
 
 
 def required_lookback(config: FeatureConfig, horizon: int) -> int:

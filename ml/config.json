@@ -538,6 +538,18 @@
                               "Lean"
                           ],
     "label_horizon_days":  20,
+    "label_price":  "open",
+    "label_start_offset":  1,
+    "pit_fundamentals":  {
+                             "enabled":  true,
+                             "dir":  "",
+                             "min_coverage":  0.05,
+                             "coverage_action":  "warn",
+                             "missing_policy":  "fill_zero",
+                             "sample_on_snapshot":  true,
+                             "start":  "",
+                             "end":  ""
+                         },
     "feature_windows":  {
                             "returns":  [
                                             5,

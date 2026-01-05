@@ -208,6 +208,8 @@ class MLTrainOut(BaseModel):
     log_path: str | None = None
     message: str | None = None
     is_active: bool = False
+    progress: float | None = None
+    progress_detail: dict[str, Any] | None = None
     created_at: datetime
     started_at: datetime | None = None
     ended_at: datetime | None = None
@@ -553,11 +555,37 @@ class DatasetFetchOut(BaseModel):
     created: bool
 
 
+class DatasetListingFetchRequest(BaseModel):
+    source_path: str | None = None
+    status: str | None = "all"
+    vendor: str | None = "alpha"
+    asset_types: list[str] | None = None
+    region: str | None = "US"
+    frequency: str | None = "daily"
+    only_missing: bool = True
+    auto_sync: bool = True
+    auto_run: bool = False
+    reset_history: bool = False
+    limit: int = 500
+    offset: int = 0
+
+
+class DatasetListingFetchOut(BaseModel):
+    total_symbols: int
+    selected_symbols: int
+    created: int
+    reused: int
+    queued: int
+    offset: int
+    next_offset: int | None = None
+
+
 class DataSyncCreate(BaseModel):
     source_path: str | None = None
     date_column: str = "date"
     stooq_only: bool = False
     reset_history: bool = False
+    auto_run: bool = True
 
 
 class DataSyncBatchRequest(BaseModel):
@@ -599,6 +627,154 @@ class DataSyncPageOut(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+class DataSyncQueueRunRequest(BaseModel):
+    max_jobs: int = 50
+    min_delay_seconds: float = 0.9
+
+
+class DataSyncQueueRunOut(BaseModel):
+    started: bool
+    running: bool
+    pending: int
+    max_jobs: int
+    min_delay_seconds: float
+
+
+class DataSyncQueueClearRequest(BaseModel):
+    statuses: list[str] | None = None
+    only_alpha: bool = False
+
+
+class DataSyncQueueClearOut(BaseModel):
+    deleted: int
+    statuses: list[str]
+    only_alpha: bool
+
+
+class DataSyncSpeedOut(BaseModel):
+    window_seconds: int
+    completed: int
+    rate_per_min: float
+    running: int
+    pending: int
+
+
+class BulkSyncCreate(BaseModel):
+    status: str = "all"
+    batch_size: int = 200
+    only_missing: bool = True
+    auto_sync: bool = True
+    refresh_listing: bool = True
+    min_delay_seconds: float = 0.1
+
+
+class BulkSyncOut(BaseModel):
+    id: int
+    status: str
+    phase: str
+    pause_requested: bool | None = None
+    cancel_requested: bool | None = None
+    total_symbols: int | None
+    processed_symbols: int | None
+    created_datasets: int | None
+    reused_datasets: int | None
+    queued_jobs: int | None
+    offset: int
+    batch_size: int
+    message: str | None
+    error: str | None
+    enqueued_start_at: datetime | None
+    enqueued_end_at: datetime | None
+    queue_started_at: datetime | None
+    queue_ended_at: datetime | None
+    started_at: datetime | None
+    ended_at: datetime | None
+    updated_at: datetime
+    errors: list[dict] | None = None
+    pending_sync_jobs: int | None = None
+    running_sync_jobs: int | None = None
+    completed_sync_jobs: int | None = None
+
+    class Config:
+        from_attributes = True
+
+
+class BulkSyncPageOut(BaseModel):
+    items: list[BulkSyncOut]
+    total: int
+    page: int
+    page_size: int
+
+
+class PitWeeklyJobCreate(BaseModel):
+    start: str | None = None
+    end: str | None = None
+    rebalance_mode: str = "week_open"
+    rebalance_day: str = "monday"
+    benchmark: str = "SPY"
+    market_timezone: str = "America/New_York"
+    market_session_open: str = "09:30"
+    market_session_close: str = "16:00"
+    asset_type: str = "Stock"
+    require_data: bool = False
+    vendor_preference: str = "Alpha,Lean,Stooq"
+    output_dir: str | None = None
+    symbol_life: str | None = None
+    data_root: str | None = None
+
+
+class PitWeeklyJobOut(BaseModel):
+    id: int
+    status: str
+    params: dict | None
+    output_dir: str | None
+    log_path: str | None
+    snapshot_count: int | None
+    last_snapshot_path: str | None
+    message: str | None
+    created_at: datetime
+    started_at: datetime | None
+    ended_at: datetime | None
+
+    class Config:
+        from_attributes = True
+
+
+class PitFundamentalJobCreate(BaseModel):
+    start: str | None = None
+    end: str | None = None
+    report_delay_days: int = 1
+    benchmark: str = "SPY"
+    vendor_preference: str = "Alpha,Lean,Stooq"
+    output_dir: str | None = None
+    pit_dir: str | None = None
+    fundamentals_dir: str | None = None
+    data_root: str | None = None
+    refresh_fundamentals: bool = False
+    refresh_days: int = 30
+    min_delay_seconds: float = 0.8
+    max_retries: int = 3
+    rate_limit_sleep: float = 60.0
+    rate_limit_retries: int = 3
+
+
+class PitFundamentalJobOut(BaseModel):
+    id: int
+    status: str
+    params: dict | None
+    output_dir: str | None
+    log_path: str | None
+    snapshot_count: int | None
+    last_snapshot_path: str | None
+    message: str | None
+    created_at: datetime
+    started_at: datetime | None
+    ended_at: datetime | None
+
+    class Config:
+        from_attributes = True
 
 
 class AuditLogOut(BaseModel):
