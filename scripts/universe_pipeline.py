@@ -1118,6 +1118,21 @@ def calc_metrics(series, risk_free: float) -> dict[str, float]:
     }
 
 
+def resolve_backtest_output_dir(data_root: Path, weights_cfg: dict[str, object]) -> Path:
+    output_override = str(weights_cfg.get("output_dir") or "").strip()
+    env_override = (
+        os.getenv("THEMATIC_BACKTEST_OUTPUT_DIR") or os.getenv("BACKTEST_OUTPUT_DIR") or ""
+    ).strip()
+    if env_override:
+        output_override = env_override
+    if output_override:
+        out = Path(output_override)
+        if not out.is_absolute():
+            out = data_root / out
+        return out
+    return data_root / "backtest" / "thematic"
+
+
 def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Path:
     import pandas as pd
 
@@ -1162,6 +1177,7 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
     halt_volume_threshold = max(float(weights_cfg.get("halt_volume_threshold") or 0.0), 0.0)
     record_universe = bool(weights_cfg.get("record_universe", True))
     universe_output_dir = str(weights_cfg.get("universe_output_dir") or "").strip()
+    out_dir = resolve_backtest_output_dir(data_root, weights_cfg)
     execution_cfg = weights_cfg.get("execution", {}) if isinstance(weights_cfg.get("execution"), dict) else {}
     max_holdings = int(execution_cfg.get("max_holdings") or weights_cfg.get("max_holdings") or 0)
     max_position_raw = execution_cfg.get("max_position_weight", weights_cfg.get("max_position_weight"))
@@ -1649,7 +1665,7 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
     universe_excluded: list[dict[str, str]] = []
     universe_dir = None
     if record_universe:
-        universe_dir = Path(universe_output_dir) if universe_output_dir else data_root / "backtest" / "thematic" / "universe"
+        universe_dir = Path(universe_output_dir) if universe_output_dir else out_dir / "universe"
         if not universe_dir.is_absolute():
             universe_dir = data_root / universe_dir
         ensure_dir(universe_dir)
@@ -1972,7 +1988,6 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
     benchmark_returns = bench_series.shift(-1) / bench_series - 1
     benchmark_equity = (1 + benchmark_returns.fillna(0.0)).cumprod()
 
-    out_dir = data_root / "backtest" / "thematic"
     ensure_dir(out_dir)
     equity_path = out_dir / "equity_curve.csv"
     equity_df = pd.DataFrame(

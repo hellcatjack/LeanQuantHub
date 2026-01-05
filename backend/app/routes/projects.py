@@ -4,6 +4,7 @@ import csv
 import difflib
 import hashlib
 import json
+import shutil
 import math
 import os
 import subprocess
@@ -818,7 +819,18 @@ def _run_thematic_backtest(
     theme_path, weights_path = _write_project_config_files(project_id, config)
     output_dir = Path(settings.artifact_root) / f"project_{project_id}" / "thematic_backtest"
     output_dir.mkdir(parents=True, exist_ok=True)
-    log_path = output_dir / f"backtest_{int(time.time())}.log"
+    run_id = int(time.time())
+    run_dir = output_dir / f"run_{run_id}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    config_dir = run_dir / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    theme_copy = config_dir / "theme_config.json"
+    weights_copy = config_dir / "weights_config.json"
+    shutil.copy2(theme_path, theme_copy)
+    shutil.copy2(weights_path, weights_copy)
+    log_path = run_dir / "backtest.log"
+    run_output_dir = run_dir / "output"
+    run_output_dir.mkdir(parents=True, exist_ok=True)
     with log_path.open("w", encoding="utf-8") as handle:
         subprocess.run(
             [sys.executable, str(script_path), "backtest"],
@@ -829,11 +841,12 @@ def _run_thematic_backtest(
             env={
                 **os.environ,
                 "DATA_ROOT": str(data_root),
-                "THEME_CONFIG_PATH": str(theme_path),
-                "WEIGHTS_CONFIG_PATH": str(weights_path),
+                "THEME_CONFIG_PATH": str(theme_copy),
+                "WEIGHTS_CONFIG_PATH": str(weights_copy),
+                "THEMATIC_BACKTEST_OUTPUT_DIR": str(run_output_dir),
             },
         )
-    summary_path = data_root / "backtest" / "thematic" / "summary.json"
+    summary_path = run_output_dir / "summary.json"
     if not summary_path.exists():
         error_message = None
         try:
@@ -850,9 +863,34 @@ def _run_thematic_backtest(
             "log": log_path.name,
         }
     try:
-        return json.loads(summary_path.read_text(encoding="utf-8"))
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return None
+
+    run_meta = {
+        "project_id": project_id,
+        "run_id": run_id,
+        "created_at": datetime.utcnow().isoformat(),
+        "output_dir": str(run_output_dir),
+        "log_path": str(log_path),
+        "theme_config": str(theme_copy),
+        "weights_config": str(weights_copy),
+    }
+    (run_dir / "run_meta.json").write_text(
+        json.dumps(run_meta, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    summary["artifact_dir"] = str(run_dir)
+    summary["output_dir"] = str(run_output_dir)
+    summary["log_path"] = str(log_path)
+    summary["config_paths"] = {"theme": str(theme_copy), "weights": str(weights_copy)}
+
+    summary_root = data_root / "backtest" / "thematic"
+    summary_root.mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.copy2(summary_path, summary_root / "summary.json")
+    except OSError:
+        pass
+    return summary
 
 
 def _run_thematic_backtest_task(project_id: int) -> None:
