@@ -33,6 +33,48 @@ def _parse_date(value: str | None) -> date | None:
     return datetime.strptime(text, "%Y-%m-%d").date()
 
 
+def _load_symbol_map(
+    path: Path,
+) -> dict[str, list[tuple[date | None, date | None, str]]]:
+    symbol_map: dict[str, list[tuple[date | None, date | None, str]]] = {}
+    if not path.exists():
+        return symbol_map
+    with path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            symbol = (row.get("symbol") or "").strip().upper()
+            canonical = (row.get("canonical") or "").strip().upper()
+            if not symbol or not canonical:
+                continue
+            start = _parse_date(row.get("start_date") or row.get("from_date") or "")
+            end = _parse_date(row.get("end_date") or row.get("to_date") or "")
+            symbol_map.setdefault(symbol, []).append((start, end, canonical))
+    for entries in symbol_map.values():
+        entries.sort(key=lambda item: item[0] or date.min)
+    return symbol_map
+
+
+def _resolve_symbol_alias(
+    symbol: str,
+    as_of: date | None,
+    symbol_map: dict[str, list[tuple[date | None, date | None, str]]],
+) -> str:
+    entries = symbol_map.get(symbol)
+    if not entries:
+        return symbol
+    if as_of:
+        match = None
+        for start, end, canonical in entries:
+            if start and as_of < start:
+                continue
+            if end and as_of > end:
+                continue
+            match = canonical
+        if match:
+            return match
+    return entries[-1][2]
+
+
 def _extract_symbol_from_filename(path: Path) -> str:
     stem = path.stem
     parts = stem.split("_", 2)
@@ -138,6 +180,7 @@ def _filter_symbols(
     life: dict[str, tuple[date | None, date | None]],
     snapshot_date: date,
     available_symbols: set[str] | None,
+    symbol_map: dict[str, list[tuple[date | None, date | None, str]]],
 ) -> list[str]:
     result: list[str] = []
     for symbol, (ipo, delist) in life.items():
@@ -145,8 +188,10 @@ def _filter_symbols(
             continue
         if delist and snapshot_date > delist:
             continue
-        if available_symbols is not None and symbol not in available_symbols:
-            continue
+        if available_symbols is not None:
+            mapped = _resolve_symbol_alias(symbol, snapshot_date, symbol_map)
+            if symbol not in available_symbols and mapped not in available_symbols:
+                continue
         result.append(symbol)
     return sorted(result)
 
@@ -186,6 +231,7 @@ def main() -> int:
     parser.add_argument("--asset-type", default="Stock")
     parser.add_argument("--require-data", action="store_true")
     parser.add_argument("--vendor-preference", default="Alpha,Lean,Stooq")
+    parser.add_argument("--symbol-map", default="")
     args = parser.parse_args()
 
     data_root = _resolve_data_root(args.data_root)
@@ -252,6 +298,12 @@ def main() -> int:
 
     life = _load_symbol_life(symbol_life_file, args.asset_type.strip() or None)
     available_symbols = _load_available_symbols(adjusted_dir) if args.require_data else None
+    symbol_map_path = str(args.symbol_map or "").strip()
+    if not symbol_map_path:
+        candidate = data_root / "universe" / "symbol_map.csv"
+        if candidate.exists():
+            symbol_map_path = str(candidate)
+    symbol_map = _load_symbol_map(Path(symbol_map_path)) if symbol_map_path else {}
 
     index_map = {day: idx for idx, day in enumerate(trading_days)}
     written = 0
@@ -260,7 +312,7 @@ def main() -> int:
         if idx is None or idx == 0:
             continue
         snapshot_date = trading_days[idx - 1]
-        symbols = _filter_symbols(life, snapshot_date, available_symbols)
+        symbols = _filter_symbols(life, snapshot_date, available_symbols, symbol_map)
         if not symbols:
             continue
         path = _write_snapshot(output_dir, snapshot_date, rebalance_date, symbols)
