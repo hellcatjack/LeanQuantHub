@@ -18,7 +18,6 @@ REPORT_FIELDS = {
         "grossProfit": "gross_profit",
         "operatingIncome": "operating_income",
         "netIncome": "net_income",
-        "eps": "eps",
     },
     "balance_sheet": {
         "totalAssets": "total_assets",
@@ -324,6 +323,8 @@ def main() -> int:
                     if key in {"fiscal_date", "reported_date"}:
                         continue
                     row[key] = value
+                if row.get("eps") in (None, "") and row.get("reported_eps") not in (None, ""):
+                    row["eps"] = row.get("reported_eps")
                 op_cf = report.get("operating_cashflow")
                 capex = report.get("capital_expenditures")
                 if op_cf is not None and capex is not None:
