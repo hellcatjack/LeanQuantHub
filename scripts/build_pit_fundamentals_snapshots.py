@@ -247,6 +247,7 @@ def main() -> int:
     parser.add_argument("--min-coverage", type=float, default=0.05)
     parser.add_argument("--coverage-action", default="warn")
     parser.add_argument("--only-with-data", action="store_true")
+    parser.add_argument("--exclude-symbols", default="")
     parser.add_argument("--benchmark", default="SPY")
     parser.add_argument("--vendor-preference", default="Alpha,Lean,Stooq")
     args = parser.parse_args()
@@ -274,6 +275,17 @@ def main() -> int:
     snapshots = _load_pit_snapshots(pit_dir, start, end)
     if not snapshots:
         raise RuntimeError("no pit snapshots found")
+    exclude_symbols: set[str] = set()
+    exclude_path = str(args.exclude_symbols or "").strip()
+    if exclude_path:
+        exclude_file = Path(exclude_path)
+        if not exclude_file.is_absolute():
+            exclude_file = data_root / exclude_file
+        if exclude_file.exists():
+            for raw in exclude_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+                symbol = raw.strip().upper()
+                if symbol and symbol != "SYMBOL":
+                    exclude_symbols.add(symbol)
 
     cache: dict[str, list[dict]] = {}
     total_symbols = 0
@@ -286,6 +298,8 @@ def main() -> int:
         rows: list[dict[str, object]] = []
         with_data = 0
         for symbol in symbols:
+            if exclude_symbols and symbol in exclude_symbols:
+                continue
             if symbol not in cache:
                 cache[symbol] = _load_symbol_reports(fundamentals_dir / symbol)
             reports = cache[symbol]
