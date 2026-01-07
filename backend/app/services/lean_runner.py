@@ -72,6 +72,31 @@ def _resolve_ml_python() -> str:
     return "python3"
 
 
+def _resolve_launcher_dll(launcher_path: str) -> str | None:
+    if settings.lean_launcher_dll:
+        candidate = Path(settings.lean_launcher_dll)
+        if candidate.exists():
+            return str(candidate)
+    if not launcher_path:
+        return None
+    candidate = Path(launcher_path)
+    if candidate.suffix.lower() == ".dll" and candidate.exists():
+        return str(candidate)
+    if candidate.suffix.lower() == ".csproj":
+        base = candidate.parent
+        direct = [
+            base / "bin" / "Debug" / "QuantConnect.Lean.Launcher.dll",
+            base / "bin" / "Release" / "QuantConnect.Lean.Launcher.dll",
+        ]
+        for dll in direct:
+            if dll.exists():
+                return str(dll)
+        for dll in base.glob("bin/*/QuantConnect.Lean.Launcher.dll"):
+            if dll.exists():
+                return str(dll)
+    return None
+
+
 def _read_score_symbols(score_path: str) -> set[str]:
     path = Path(score_path)
     if not path.exists():
@@ -406,11 +431,18 @@ def _map_perf_stats(perf: dict) -> dict:
 
 def _extract_portfolio_metrics(summary: dict) -> dict:
     metrics = summary.get("statistics") or {}
+    runtime_stats = summary.get("runtimeStatistics") or summary.get("runtime_statistics") or {}
     if metrics:
-        return metrics
+        merged = dict(metrics)
+        if isinstance(runtime_stats, dict):
+            merged.update(runtime_stats)
+        return merged
     total_perf = summary.get("totalPerformance") or summary.get("total_performance") or {}
     perf = total_perf.get("portfolioStatistics") or total_perf.get("portfolio_statistics") or {}
-    return _map_perf_stats(perf)
+    merged = _map_perf_stats(perf)
+    if isinstance(runtime_stats, dict):
+        merged.update(runtime_stats)
+    return merged
 
 
 def _extract_benchmark_metrics(summary: dict) -> dict:
@@ -666,7 +698,7 @@ def run_backtest(run_id: int) -> None:
                 config["python-venv"] = settings.lean_python_venv
         else:
             if not algo_path:
-                launcher_dir = Path(settings.lean_launcher_path).parent
+                launcher_dir = Path(settings.lean_launcher_path or settings.lean_launcher_dll).parent
                 algo_path = str(launcher_dir / "bin" / "Debug" / "QuantConnect.Algorithm.CSharp.dll")
             config["algorithm-location"] = algo_path
             if algo_type:
@@ -693,7 +725,8 @@ def run_backtest(run_id: int) -> None:
         config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
 
         launcher_path = settings.lean_launcher_path
-        if not launcher_path:
+        launcher_dll = _resolve_launcher_dll(launcher_path)
+        if not launcher_path and not launcher_dll:
             raise RuntimeError("Lean launcher path is not configured.")
         dotnet_path = settings.dotnet_path or "dotnet"
         env = os.environ.copy()
@@ -705,18 +738,23 @@ def run_backtest(run_id: int) -> None:
         if settings.lean_python_venv:
             env["PYTHONHOME"] = settings.lean_python_venv
 
+        launcher_dir = Path(launcher_dll).parent if launcher_dll else Path(launcher_path).parent
+        if launcher_dll:
+            command = [dotnet_path, launcher_dll, "--config", str(config_path)]
+        else:
+            command = [
+                dotnet_path,
+                "run",
+                "--project",
+                launcher_path,
+                "--",
+                "--config",
+                str(config_path),
+            ]
         with log_path.open("w", encoding="utf-8") as handle:
             proc = subprocess.run(
-                [
-                    dotnet_path,
-                    "run",
-                    "--project",
-                    launcher_path,
-                    "--",
-                    "--config",
-                    str(config_path),
-                ],
-                cwd=str(Path(launcher_path).parent),
+                command,
+                cwd=str(launcher_dir),
                 stdout=handle,
                 stderr=subprocess.STDOUT,
                 env=env,

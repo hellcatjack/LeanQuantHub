@@ -183,12 +183,19 @@ def _load_default_config(session=None) -> dict[str, Any]:
         item["weight"] = float(weights.get(key, 0.0)) if key else 0.0
     return {
         "template": "sp500_current",
-        "universe": {"mode": "sp500_current", "include_history": False},
+        "universe": {
+            "mode": "sp500_current",
+            "include_history": False,
+            "asset_types": ["STOCK"],
+            "pit_universe_only": False,
+        },
         "data": {"primary_vendor": "stooq", "fallback_vendor": "yahoo", "frequency": "daily"},
         "weights": weights,
         "benchmark": benchmark,
         "rebalance": rebalance,
         "risk_free_rate": risk_free_rate,
+        "backtest_start": "",
+        "backtest_end": "",
         "categories": categories,
         "themes": theme_items,
     }
@@ -297,12 +304,89 @@ def _build_weights_config(config: dict[str, Any]) -> dict[str, Any]:
             weights[key] = weight
     else:
         weights = {str(k): float(v) for k, v in (config.get("weights") or {}).items()}
-    return {
+    strategy = config.get("strategy") if isinstance(config.get("strategy"), dict) else {}
+    source_raw = str(
+        strategy.get("source")
+        or strategy.get("signal_mode")
+        or config.get("signal_mode")
+        or ""
+    ).strip().lower()
+    if source_raw in {"theme_weights", "theme", "weights"}:
+        signal_mode = "theme_weights"
+    elif source_raw in {"factor_scores", "ml_scores", "scores"}:
+        signal_mode = "ml_scores"
+    else:
+        signal_mode = "theme_weights"
+
+    score_csv_path = str(
+        strategy.get("score_csv_path") or config.get("score_csv_path") or ""
+    ).strip()
+    score_top_n = strategy.get("score_top_n")
+    score_weighting = str(strategy.get("score_weighting") or "").strip()
+    score_min = strategy.get("score_min")
+    score_max_weight = strategy.get("score_max_weight")
+    score_fallback = str(strategy.get("score_fallback") or "").strip()
+    execution_cfg = config.get("execution") if isinstance(config.get("execution"), dict) else None
+    asset_types = config.get("asset_types")
+    if not asset_types and isinstance(config.get("universe"), dict):
+        asset_types = config.get("universe", {}).get("asset_types")
+    pit_universe_only = config.get("pit_universe_only")
+    if pit_universe_only is None and isinstance(config.get("universe"), dict):
+        pit_universe_only = config.get("universe", {}).get("pit_universe_only")
+    backtest_cfg = config.get("backtest") if isinstance(config.get("backtest"), dict) else {}
+    backtest_start = (
+        config.get("backtest_start")
+        or backtest_cfg.get("start")
+        or backtest_cfg.get("start_date")
+    )
+    backtest_end = (
+        config.get("backtest_end")
+        or backtest_cfg.get("end")
+        or backtest_cfg.get("end_date")
+    )
+
+    payload = {
         "benchmark": config.get("benchmark") or "SPY",
         "rebalance": config.get("rebalance") or "M",
         "risk_free_rate": float(config.get("risk_free_rate") or 0.0),
         "category_weights": weights,
     }
+    payload["signal_mode"] = signal_mode
+    if signal_mode == "ml_scores":
+        if not score_csv_path:
+            if source_raw == "factor_scores":
+                score_csv_path = "ml/models/factor_scores.csv"
+            elif source_raw == "ml_scores":
+                score_csv_path = "ml/models/scores.csv"
+        if score_csv_path:
+            payload["score_csv_path"] = score_csv_path
+        if score_top_n not in (None, ""):
+            payload["score_top_n"] = int(score_top_n)
+        if score_weighting:
+            payload["score_weighting"] = score_weighting
+        if score_min not in (None, ""):
+            payload["score_min"] = score_min
+        if score_max_weight not in (None, ""):
+            payload["score_max_weight"] = score_max_weight
+        if score_fallback:
+            payload["score_fallback"] = score_fallback
+    if execution_cfg:
+        payload["execution"] = execution_cfg
+    if asset_types:
+        payload["asset_types"] = asset_types
+    if pit_universe_only is not None:
+        payload["pit_universe_only"] = bool(pit_universe_only)
+    if backtest_start:
+        payload["backtest_start"] = backtest_start
+    if backtest_end:
+        payload["backtest_end"] = backtest_end
+    backtest_plugins = config.get("backtest_plugins")
+    if isinstance(backtest_plugins, dict) and backtest_plugins:
+        payload["backtest_plugins"] = backtest_plugins
+    costs_cfg = config.get("costs")
+    if isinstance(costs_cfg, dict) and costs_cfg:
+        payload["costs"] = costs_cfg
+    return payload
 
 
 def _write_project_config_files(project_id: int, config: dict[str, Any]) -> tuple[Path, Path]:
@@ -883,11 +967,16 @@ def _run_thematic_backtest(
     summary["output_dir"] = str(run_output_dir)
     summary["log_path"] = str(log_path)
     summary["config_paths"] = {"theme": str(theme_copy), "weights": str(weights_copy)}
+    summary_path.write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
     summary_root = data_root / "backtest" / "thematic"
     summary_root.mkdir(parents=True, exist_ok=True)
     try:
-        shutil.copy2(summary_path, summary_root / "summary.json")
+        (summary_root / "summary.json").write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
     except OSError:
         pass
     return summary

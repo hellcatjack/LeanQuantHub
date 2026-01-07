@@ -3,16 +3,46 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import torch
 
+try:
+    import lightgbm as lgb
+except ImportError:  # pragma: no cover - optional dependency
+    lgb = None
+
 from feature_engineering import FeatureConfig, compute_features, required_lookback
 from pit_features import apply_pit_features, load_pit_fundamentals
 from model_io import load_linear_model
 from torch_model import TorchMLP
+
+
+class CancelledError(RuntimeError):
+    pass
+
+
+def _parse_train_start(config: dict) -> pd.Timestamp | None:
+    raw_year = config.get("train_start_year")
+    if raw_year is not None:
+        try:
+            year = int(raw_year)
+        except (TypeError, ValueError):
+            year = None
+        if year and 1900 <= year <= 2200:
+            return pd.Timestamp(year=year, month=1, day=1)
+    raw_date = str(config.get("train_start") or "").strip()
+    if raw_date:
+        try:
+            ts = pd.to_datetime(raw_date, errors="raise")
+        except (TypeError, ValueError):
+            return None
+        if ts is not pd.NaT:
+            return ts.normalize()
+    return None
 
 
 def _data_root() -> Path:
@@ -154,8 +184,13 @@ def _predict_scores(
         batch = batch.to(device)
         with torch.no_grad():
             output = model(batch).squeeze(-1).detach().cpu().numpy()
-        scores.append(output.astype(np.float32, copy=False))
+        scores.append(np.atleast_1d(output).astype(np.float32, copy=False))
     return np.concatenate(scores) if scores else np.array([], dtype=np.float32)
+
+
+def _check_cancel(cancel_path: Path | None) -> None:
+    if cancel_path and cancel_path.exists():
+        raise CancelledError("cancel_requested")
 
 
 def main() -> None:
@@ -164,9 +199,12 @@ def main() -> None:
     parser.add_argument("--data-root", default="")
     parser.add_argument("--output", default="ml/models/scores.csv")
     parser.add_argument("--device", default="auto")
+    parser.add_argument("--cancel-path", default="")
     args = parser.parse_args()
 
     config = json.loads(Path(args.config).read_text(encoding="utf-8"))
+    train_start = _parse_train_start(config)
+    cancel_path = Path(args.cancel_path) if args.cancel_path else None
     data_root = Path(args.data_root) if args.data_root else _data_root()
     adjusted_dir = data_root / "curated_adjusted"
     if not adjusted_dir.exists():
@@ -176,20 +214,32 @@ def main() -> None:
 
     model_dir = Path(config.get("output_dir") or "ml/models")
     payload_path = model_dir / "torch_payload.json"
-    model_path = model_dir / "torch_model.pt"
     payload = load_linear_model(payload_path)
+    model_type = str(payload.model_type or "torch_mlp").strip().lower()
     torch_config = config.get("torch", {})
-    model = TorchMLP(
-        input_dim=len(payload.features),
-        hidden=torch_config.get("hidden", [64, 32]),
-        dropout=float(torch_config.get("dropout", 0.1)),
-    )
-    state = torch.load(model_path, map_location="cpu")
-    model.load_state_dict(state)
-    model.eval()
 
-    device = torch.device("cuda" if (args.device == "auto" and torch.cuda.is_available()) else "cpu")
-    model.to(device)
+    if model_type == "lgbm_ranker":
+        if lgb is None:
+            raise RuntimeError("missing_lightgbm")
+        model_path = model_dir / "lgbm_model.txt"
+        if not model_path.exists():
+            raise RuntimeError(f"missing model file: {model_path}")
+        model = lgb.Booster(model_file=str(model_path))
+        device = None
+    else:
+        model_path = model_dir / "torch_model.pt"
+        model = TorchMLP(
+            input_dim=len(payload.features),
+            hidden=torch_config.get("hidden", [64, 32]),
+            dropout=float(torch_config.get("dropout", 0.1)),
+        )
+        state = torch.load(model_path, map_location="cpu")
+        model.load_state_dict(state)
+        model.eval()
+        device = torch.device(
+            "cuda" if (args.device == "auto" and torch.cuda.is_available()) else "cpu"
+        )
+        model.to(device)
 
     vendor_pref = config.get("vendor_preference", ["Alpha", "Stooq", "Lean"])
     benchmark_symbol = config.get("benchmark_symbol", "SPY")
@@ -245,6 +295,7 @@ def main() -> None:
     )
 
     for symbol in symbols:
+        _check_cancel(cancel_path)
         symbol_path = _pick_dataset_file(symbol, adjusted_dir, vendor_pref)
         if not symbol_path:
             continue
@@ -268,6 +319,10 @@ def main() -> None:
             )
         if "vol_z_20" in features.columns:
             features["vol_z_20"] = features["vol_z_20"].fillna(0.0)
+        if train_start is not None:
+            features = features[features.index >= train_start]
+            if features.empty:
+                continue
         features = features.dropna()
         if features.empty:
             continue
@@ -276,7 +331,10 @@ def main() -> None:
             continue
         matrix = feature_frame.to_numpy(dtype=np.float32, copy=True)
         matrix = (matrix - mean_vec) / std_vec
-        scores = _predict_scores(model, matrix, device, batch_size)
+        if model_type == "lgbm_ranker":
+            scores = model.predict(matrix)
+        else:
+            scores = _predict_scores(model, matrix, device, batch_size)
         if scores.size == 0:
             continue
         rows.append(
@@ -299,4 +357,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except CancelledError:
+        print("scoring canceled")
+        sys.exit(130)

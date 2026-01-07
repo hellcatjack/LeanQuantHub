@@ -169,9 +169,22 @@ def apply_pit_features(
         return features
     if sample_on_snapshot:
         features = features.loc[features.index.isin(pit_frame.index)]
-    if features.empty:
-        return features
-    merged = features.join(pit_frame, how="left")
+        if features.empty:
+            return features
+        merged = features.join(pit_frame, how="left")
+    else:
+        features = features.sort_index()
+        pit_frame = pit_frame.sort_index()
+        merged = pd.merge_asof(
+            features,
+            pit_frame,
+            left_index=True,
+            right_index=True,
+            direction="backward",
+            allow_exact_matches=True,
+        )
+    if merged.empty:
+        return merged
     if policy == "drop":
         if "pit_has_fundamentals" in merged.columns:
             merged = merged[merged["pit_has_fundamentals"].fillna(0) > 0]

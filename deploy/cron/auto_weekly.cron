@@ -1,0 +1,3 @@
+CRON_TZ=America/New_York
+# Run weekly automation every Monday 08:00 ET.
+0 8 * * 1 STOCKLEAN_ROOT=/app/stocklean STOCKLEAN_PROJECT_ID=8 /app/stocklean/deploy/cron/auto_weekly.sh >> /app/stocklean/artifacts/auto_weekly_cron.log 2>&1

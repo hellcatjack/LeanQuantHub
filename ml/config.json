@@ -546,7 +546,7 @@
                              "min_coverage":  0.05,
                              "coverage_action":  "warn",
                              "missing_policy":  "fill_zero",
-                             "sample_on_snapshot":  true,
+                             "sample_on_snapshot":  false,
                              "start":  "",
                              "end":  ""
                          },

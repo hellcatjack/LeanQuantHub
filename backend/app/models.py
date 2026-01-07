@@ -24,6 +24,9 @@ class Project(Base):
         back_populates="project", uselist=False
     )
     ml_train_jobs: Mapped[list["MLTrainJob"]] = relationship(back_populates="project")
+    factor_score_jobs: Mapped[list["FactorScoreJob"]] = relationship(
+        back_populates="project"
+    )
 
 
 class BacktestRun(Base):
@@ -74,6 +77,24 @@ class MLTrainJob(Base):
     ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     project: Mapped[Project] = relationship(back_populates="ml_train_jobs")
+
+
+class FactorScoreJob(Base):
+    __tablename__ = "factor_score_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="queued")
+    params: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    output_dir: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    log_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    scores_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    project: Mapped[Project] = relationship(back_populates="factor_score_jobs")
 
 
 class Dataset(Base):
@@ -359,6 +380,27 @@ class PitFundamentalJob(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
+
+class AutoWeeklyJob(Base):
+    __tablename__ = "auto_weekly_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="queued")
+    params: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    pit_weekly_job_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pit_weekly_log_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    pit_fundamental_job_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pit_fundamental_log_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    backtest_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    backtest_log_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    backtest_output_dir: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    backtest_artifact_dir: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    log_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"

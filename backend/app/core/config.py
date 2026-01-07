@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     db_name: str = "stocklean"
     artifact_root: str = str(Path("/app/stocklean/artifacts"))
     lean_launcher_path: str = ""
+    lean_launcher_dll: str = ""
     lean_config_template: str = ""
     lean_algorithm_path: str = ""
     lean_data_folder: str = ""

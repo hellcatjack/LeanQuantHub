@@ -95,17 +95,37 @@ interface ThemeConfigItem {
   snapshot?: { theme_id?: number; version_id?: number; version?: string } | null;
 }
 
+interface ProjectStrategyConfig {
+  source?: string | null;
+  score_csv_path?: string | null;
+  score_top_n?: number | null;
+  score_weighting?: string | null;
+  score_min?: number | null;
+  score_max_weight?: number | null;
+  score_fallback?: string | null;
+}
+
 interface ProjectConfig {
   template?: string;
-  universe?: { mode?: string; include_history?: boolean };
+  universe?: {
+    mode?: string;
+    include_history?: boolean;
+    asset_types?: string[];
+    pit_universe_only?: boolean;
+  };
   data?: { primary_vendor?: string; fallback_vendor?: string; frequency?: string };
   weights?: Record<string, number>;
   benchmark?: string;
   rebalance?: string;
   risk_free_rate?: number;
+  backtest_start?: string | null;
+  backtest_end?: string | null;
+  backtest_params?: Record<string, any>;
+  backtest_plugins?: Record<string, any>;
   categories?: { key: string; label: string }[];
   themes?: ThemeConfigItem[];
   symbol_types?: Record<string, string>;
+  strategy?: ProjectStrategyConfig;
 }
 
 interface ProjectConfigResponse {
@@ -145,6 +165,40 @@ interface BacktestRun {
   params?: Record<string, unknown> | null;
   metrics?: Record<string, unknown> | null;
   created_at: string;
+  ended_at?: string | null;
+}
+
+interface AutoWeeklyJob {
+  id: number;
+  project_id: number;
+  status: string;
+  params?: Record<string, unknown> | null;
+  pit_weekly_job_id?: number | null;
+  pit_weekly_log_path?: string | null;
+  pit_fundamental_job_id?: number | null;
+  pit_fundamental_log_path?: string | null;
+  backtest_status?: string | null;
+  backtest_log_path?: string | null;
+  backtest_output_dir?: string | null;
+  backtest_artifact_dir?: string | null;
+  log_path?: string | null;
+  message?: string | null;
+  created_at: string;
+  started_at?: string | null;
+  ended_at?: string | null;
+}
+
+interface FactorScoreJob {
+  id: number;
+  project_id: number;
+  status: string;
+  params?: Record<string, unknown> | null;
+  output_dir?: string | null;
+  log_path?: string | null;
+  scores_path?: string | null;
+  message?: string | null;
+  created_at: string;
+  started_at?: string | null;
   ended_at?: string | null;
 }
 
@@ -256,6 +310,9 @@ export default function ProjectsPage() {
   const [dataMessage, setDataMessage] = useState("");
   const [latestBacktest, setLatestBacktest] = useState<BacktestRun | null>(null);
   const [backtestMessage, setBacktestMessage] = useState("");
+  const [autoWeeklyJob, setAutoWeeklyJob] = useState<AutoWeeklyJob | null>(null);
+  const [autoWeeklyMessage, setAutoWeeklyMessage] = useState("");
+  const [autoWeeklyLoading, setAutoWeeklyLoading] = useState(false);
   const [algorithms, setAlgorithms] = useState<Algorithm[]>([]);
   const [algorithmVersions, setAlgorithmVersions] = useState<AlgorithmVersion[]>([]);
   const [binding, setBinding] = useState<ProjectAlgorithmBinding | null>(null);
@@ -269,18 +326,37 @@ export default function ProjectsPage() {
   const [mlJobs, setMlJobs] = useState<MLTrainJob[]>([]);
   const [mlMessage, setMlMessage] = useState("");
   const [mlLoading, setMlLoading] = useState(false);
+  const [mlActionLoadingId, setMlActionLoadingId] = useState<number | null>(null);
   const [mlDetailId, setMlDetailId] = useState<number | null>(null);
   const [mlForm, setMlForm] = useState({
     device: "auto",
     trainYears: "8",
+    trainStartYear: "",
     validMonths: "12",
+    testMonths: "12",
+    stepMonths: "6",
     labelHorizonDays: "20",
+    walkForwardEnabled: true,
+    modelType: "torch_mlp",
+    modelParams: "",
+  });
+  const [factorJobs, setFactorJobs] = useState<FactorScoreJob[]>([]);
+  const [factorLoadError, setFactorLoadError] = useState("");
+  const [factorActionMessage, setFactorActionMessage] = useState("");
+  const [factorActionLoading, setFactorActionLoading] = useState(false);
+  const [factorForm, setFactorForm] = useState({
+    start: "",
+    end: "",
+    config_path: "",
+    output_path: "",
+    overwrite_cache: false,
   });
   const [projectTab, setProjectTab] = useState<
     "overview" | "config" | "algorithm" | "data" | "backtest" | "versions" | "diff"
   >("overview");
   const [projectSearch, setProjectSearch] = useState("");
   const backtestRefreshTimers = useRef<number[]>([]);
+  const autoWeeklyRefreshTimers = useRef<number[]>([]);
 
   const symbolTypeOptions = [
     { value: "STOCK", label: t("symbols.types.stock") },
@@ -399,6 +475,18 @@ export default function ProjectsPage() {
     }
   };
 
+  const loadAutoWeeklyJob = async (projectId: number) => {
+    try {
+      const res = await api.get<AutoWeeklyJob>("/api/automation/weekly-jobs/latest", {
+        params: { project_id: projectId },
+      });
+      setAutoWeeklyJob(res.data);
+      setAutoWeeklyMessage("");
+    } catch (err) {
+      setAutoWeeklyJob(null);
+    }
+  };
+
   const scheduleBacktestRefresh = (projectId: number) => {
     backtestRefreshTimers.current.forEach((timer) => window.clearTimeout(timer));
     backtestRefreshTimers.current = [
@@ -407,6 +495,18 @@ export default function ProjectsPage() {
       }, 4000),
       window.setTimeout(() => {
         void loadLatestBacktest(projectId);
+      }, 12000),
+    ];
+  };
+
+  const scheduleAutoWeeklyRefresh = (projectId: number) => {
+    autoWeeklyRefreshTimers.current.forEach((timer) => window.clearTimeout(timer));
+    autoWeeklyRefreshTimers.current = [
+      window.setTimeout(() => {
+        void loadAutoWeeklyJob(projectId);
+      }, 4000),
+      window.setTimeout(() => {
+        void loadAutoWeeklyJob(projectId);
       }, 12000),
     ];
   };
@@ -475,14 +575,45 @@ export default function ProjectsPage() {
     }
   };
 
+  const loadFactorJobs = async (projectId: number) => {
+    try {
+      const res = await api.get<FactorScoreJob[]>("/api/factor-scores/jobs", {
+        params: { project_id: projectId },
+      });
+      setFactorJobs(res.data || []);
+      setFactorLoadError("");
+    } catch (err) {
+      setFactorJobs([]);
+      setFactorLoadError(t("projects.factorScores.error"));
+    }
+  };
+
   const createMlJob = async () => {
     if (!selectedProjectId) {
       return;
     }
     const toNumber = (value: string) => {
+      if (!value.trim()) {
+        return undefined;
+      }
       const num = Number(value);
       return Number.isFinite(num) ? num : undefined;
     };
+    let modelParams: Record<string, any> | undefined;
+    const rawParams = mlForm.modelParams?.trim();
+    if (rawParams) {
+      try {
+        const parsed = JSON.parse(rawParams);
+        if (!parsed || typeof parsed !== "object") {
+          throw new Error("invalid");
+        }
+        modelParams = parsed as Record<string, any>;
+      } catch (err) {
+        setMlMessage(t("projects.ml.modelParamsError"));
+        return;
+      }
+    }
+    const walkForwardEnabled = !!mlForm.walkForwardEnabled;
     setMlLoading(true);
     setMlMessage("");
     try {
@@ -490,8 +621,13 @@ export default function ProjectsPage() {
         project_id: selectedProjectId,
         device: mlForm.device,
         train_years: toNumber(mlForm.trainYears),
+        train_start_year: toNumber(mlForm.trainStartYear),
         valid_months: toNumber(mlForm.validMonths),
+        test_months: walkForwardEnabled ? toNumber(mlForm.testMonths) : 0,
+        step_months: walkForwardEnabled ? toNumber(mlForm.stepMonths) : 0,
         label_horizon_days: toNumber(mlForm.labelHorizonDays),
+        model_type: mlForm.modelType,
+        model_params: modelParams,
       });
       await loadMlJobs(selectedProjectId);
       setMlMessage(t("projects.ml.queued"));
@@ -499,6 +635,30 @@ export default function ProjectsPage() {
       setMlMessage(t("projects.ml.error"));
     } finally {
       setMlLoading(false);
+    }
+  };
+
+  const createFactorJob = async () => {
+    if (!selectedProjectId) {
+      return;
+    }
+    setFactorActionLoading(true);
+    setFactorActionMessage("");
+    try {
+      await api.post("/api/factor-scores/jobs", {
+        project_id: selectedProjectId,
+        start: factorForm.start || null,
+        end: factorForm.end || null,
+        config_path: factorForm.config_path || null,
+        output_path: factorForm.output_path || null,
+        overwrite_cache: factorForm.overwrite_cache,
+      });
+      await loadFactorJobs(selectedProjectId);
+      setFactorActionMessage(t("projects.factorScores.queued"));
+    } catch (err) {
+      setFactorActionMessage(t("projects.factorScores.error"));
+    } finally {
+      setFactorActionLoading(false);
     }
   };
 
@@ -513,6 +673,23 @@ export default function ProjectsPage() {
       setMlMessage(t("projects.ml.activated"));
     } catch (err) {
       setMlMessage(t("projects.ml.activateError"));
+    }
+  };
+
+  const cancelMlJob = async (jobId: number) => {
+    if (!selectedProjectId) {
+      return;
+    }
+    setMlActionLoadingId(jobId);
+    setMlMessage("");
+    try {
+      await api.post(`/api/ml/train-jobs/${jobId}/cancel`);
+      await loadMlJobs(selectedProjectId);
+      setMlMessage(t("projects.ml.cancelRequested"));
+    } catch (err) {
+      setMlMessage(t("projects.ml.cancelError"));
+    } finally {
+      setMlActionLoadingId(null);
     }
   };
 
@@ -535,6 +712,7 @@ export default function ProjectsPage() {
       loadThemeSummary(selectedProjectId);
       loadProjectBinding(selectedProjectId);
       loadMlJobs(selectedProjectId);
+      loadFactorJobs(selectedProjectId);
       setConfigMessage("");
       setDataMessage("");
       setBacktestMessage("");
@@ -569,7 +747,11 @@ export default function ProjectsPage() {
       setBinding(null);
       setMlJobs([]);
       setMlMessage("");
+      setMlActionLoadingId(null);
       setMlDetailId(null);
+      setFactorJobs([]);
+      setFactorLoadError("");
+      setFactorActionMessage("");
       setNewThemeSymbol("");
       setNewThemeSymbolType("STOCK");
       setThemeSymbolMessage("");
@@ -594,6 +776,22 @@ export default function ProjectsPage() {
   }, [selectedProjectId, mlJobs]);
 
   useEffect(() => {
+    if (!selectedProjectId) {
+      return;
+    }
+    const hasActiveJob = factorJobs.some(
+      (job) => job.status === "running" || job.status === "queued"
+    );
+    if (!hasActiveJob) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      loadFactorJobs(selectedProjectId);
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [selectedProjectId, factorJobs]);
+
+  useEffect(() => {
     const selectedId = Number(bindingForm.algorithmId);
     if (selectedId) {
       loadAlgorithmVersions(selectedId);
@@ -611,12 +809,14 @@ export default function ProjectsPage() {
   useEffect(() => {
     if (selectedProjectId && projectTab === "backtest") {
       loadLatestBacktest(selectedProjectId);
+      loadAutoWeeklyJob(selectedProjectId);
     }
   }, [projectTab, selectedProjectId]);
 
   useEffect(() => {
     return () => {
       backtestRefreshTimers.current.forEach((timer) => window.clearTimeout(timer));
+      autoWeeklyRefreshTimers.current.forEach((timer) => window.clearTimeout(timer));
     };
   }, []);
 
@@ -635,6 +835,39 @@ export default function ProjectsPage() {
 
   const updateVersionForm = (key: keyof typeof versionForm, value: string) => {
     setVersionForm((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const updateStrategyField = (key: keyof ProjectStrategyConfig, value: string | number | boolean) => {
+    setConfigDraft((prev) => {
+      if (!prev) {
+        return prev;
+      }
+      return {
+        ...prev,
+        strategy: {
+          ...(prev.strategy || {}),
+          [key]: value,
+        },
+      };
+    });
+  };
+
+  const handleStrategySourceChange = (value: string) => {
+    const normalized = value || "theme_weights";
+    setConfigDraft((prev) => {
+      if (!prev) {
+        return prev;
+      }
+      const next = { ...(prev.strategy || {}), source: normalized };
+      if (normalized === "factor_scores") {
+        next.score_csv_path = "ml/models/factor_scores.csv";
+      } else if (normalized === "ml_scores") {
+        next.score_csv_path = "ml/models/scores.csv";
+      } else {
+        next.score_csv_path = "";
+      }
+      return { ...prev, strategy: next };
+    });
   };
 
   const createVersion = async () => {
@@ -661,13 +894,51 @@ export default function ProjectsPage() {
   const updateConfigSection = (
     section: keyof ProjectConfig,
     key: string,
-    value: string | number | boolean
+    value: string | number | boolean | string[]
   ) => {
     setConfigDraft((prev) => {
       const next = { ...(prev || {}) };
       const sectionValue = { ...(next[section] as Record<string, any> | undefined) };
       sectionValue[key] = value;
       (next as Record<string, any>)[section] = sectionValue;
+      return next;
+    });
+  };
+
+  const updateBacktestPlugin = (key: string, value: any) => {
+    setConfigDraft((prev) => {
+      const next = { ...(prev || {}) } as ProjectConfig;
+      const plugins = { ...(next.backtest_plugins || {}) } as Record<string, any>;
+      plugins[key] = value;
+      next.backtest_plugins = plugins;
+      return next;
+    });
+  };
+
+  const updateBacktestPluginSection = (section: string, key: string, value: any) => {
+    setConfigDraft((prev) => {
+      const next = { ...(prev || {}) } as ProjectConfig;
+      const plugins = { ...(next.backtest_plugins || {}) } as Record<string, any>;
+      const sectionValue = { ...(plugins[section] || {}) };
+      sectionValue[key] = value;
+      plugins[section] = sectionValue;
+      next.backtest_plugins = plugins;
+      return next;
+    });
+  };
+
+  const toggleUniverseAssetType = (value: string) => {
+    setConfigDraft((prev) => {
+      const next = { ...(prev || {}) } as ProjectConfig;
+      const universe = { ...(next.universe || {}) };
+      const current = new Set<string>(universe.asset_types || []);
+      if (current.has(value)) {
+        current.delete(value);
+      } else {
+        current.add(value);
+      }
+      universe.asset_types = Array.from(current);
+      next.universe = universe;
       return next;
     });
   };
@@ -1074,6 +1345,26 @@ export default function ProjectsPage() {
     }
   };
 
+  const runAutoWeeklyJob = async () => {
+    if (!selectedProjectId) {
+      return;
+    }
+    setAutoWeeklyLoading(true);
+    setAutoWeeklyMessage("");
+    try {
+      const res = await api.post<AutoWeeklyJob>("/api/automation/weekly-jobs", {
+        project_id: selectedProjectId,
+      });
+      setAutoWeeklyJob(res.data || null);
+      setAutoWeeklyMessage(t("projects.automation.queued"));
+      scheduleAutoWeeklyRefresh(selectedProjectId);
+    } catch (err) {
+      setAutoWeeklyMessage(t("projects.automation.error"));
+    } finally {
+      setAutoWeeklyLoading(false);
+    }
+  };
+
   const saveAlgorithmBinding = async () => {
     if (!selectedProjectId) {
       return;
@@ -1125,6 +1416,8 @@ export default function ProjectsPage() {
     () => mlJobs.find((job) => job.id === mlDetailId) || mlActiveJob,
     [mlJobs, mlDetailId, mlActiveJob]
   );
+  const strategyDraft = configDraft?.strategy || {};
+  const strategySource = (strategyDraft.source || "theme_weights").toString();
   const filteredProjects = useMemo(() => {
     const keyword = projectSearch.trim().toLowerCase();
     if (!keyword) {
@@ -1157,6 +1450,18 @@ export default function ProjectsPage() {
     return label === key ? status || t("common.none") : label;
   };
 
+  const factorStatusLabel = (status?: string) => {
+    const key = `projects.factorScores.status.${status || "unknown"}`;
+    const label = t(key);
+    return label === key ? status || t("common.none") : label;
+  };
+
+  const automationStatusLabel = (status?: string) => {
+    const key = `projects.automation.status.${status || "unknown"}`;
+    const label = t(key);
+    return label === key ? status || t("common.none") : label;
+  };
+
   const mlProgressLabel = (job: MLTrainJob) => {
     const value = job.progress_detail?.progress ?? job.progress;
     if (value === null || value === undefined || Number.isNaN(value)) {
@@ -1166,6 +1471,103 @@ export default function ProjectsPage() {
     return `${pct.toFixed(0)}%`;
   };
 
+  const parseYear = (value: unknown) => {
+    if (typeof value === "number" && !Number.isNaN(value)) {
+      return value;
+    }
+    if (typeof value !== "string") {
+      return null;
+    }
+    const match = value.match(/(\d{4})/);
+    if (!match) {
+      return null;
+    }
+    const year = Number(match[1]);
+    return Number.isNaN(year) ? null : year;
+  };
+
+  const formatYearRange = (start: unknown, end: unknown) => {
+    const startYear = parseYear(start);
+    const endYear = parseYear(end);
+    if (startYear === null && endYear === null) {
+      return "-";
+    }
+    if (startYear !== null && endYear !== null) {
+      return `${startYear}-${endYear}`;
+    }
+    if (startYear !== null) {
+      return `${startYear}-`;
+    }
+    return `-${endYear}`;
+  };
+
+  const mlTrainRangeDetail = (job: MLTrainJob) => {
+    const metrics = (job.metrics || {}) as Record<string, any>;
+    const dataRanges = (metrics.data_ranges || metrics.dataRanges) as
+      | Record<string, any>
+      | undefined;
+    if (dataRanges && typeof dataRanges === "object") {
+      const train = formatYearRange(dataRanges.train?.start, dataRanges.train?.end);
+      const valid = formatYearRange(dataRanges.valid?.start, dataRanges.valid?.end);
+      const test = formatYearRange(dataRanges.test?.start, dataRanges.test?.end);
+      if (train !== "-" || valid !== "-" || test !== "-") {
+        return { train, valid, test };
+      }
+    }
+
+    const walk = (metrics.walk_forward || {}) as Record<string, any>;
+    const windows = Array.isArray(walk.windows) ? walk.windows : [];
+    const ranges = {
+      train: { min: null as number | null, max: null as number | null },
+      valid: { min: null as number | null, max: null as number | null },
+      test: { min: null as number | null, max: null as number | null },
+    };
+    const update = (range: { min: number | null; max: number | null }, start: unknown, end: unknown) => {
+      const startYear = parseYear(start);
+      const endYear = parseYear(end);
+      if (startYear !== null) {
+        range.min = range.min === null ? startYear : Math.min(range.min, startYear);
+      }
+      if (endYear !== null) {
+        range.max = range.max === null ? endYear : Math.max(range.max, endYear);
+      }
+    };
+    for (const window of windows) {
+      update(ranges.train, window.train_start || window.trainStart, window.train_end || window.trainEnd);
+      update(
+        ranges.valid,
+        window.valid_start || window.validStart || window.train_end || window.trainEnd,
+        window.valid_end || window.validEnd
+      );
+      update(
+        ranges.test,
+        window.test_start || window.testStart || window.valid_end || window.validEnd,
+        window.test_end || window.testEnd || window.valid_end || window.validEnd
+      );
+    }
+    const derived = {
+      train: formatYearRange(ranges.train.min, ranges.train.max),
+      valid: formatYearRange(ranges.valid.min, ranges.valid.max),
+      test: formatYearRange(ranges.test.min, ranges.test.max),
+    };
+    if (derived.train !== "-" || derived.valid !== "-" || derived.test !== "-") {
+      return derived;
+    }
+
+    const cfg = (job.config || {}) as Record<string, any>;
+    const startYearRaw = cfg.train_start_year;
+    const startYear =
+      typeof startYearRaw === "number" ? startYearRaw : Number(startYearRaw);
+    const trainYearsRaw = cfg.walk_forward?.train_years ?? cfg.train_years;
+    const trainYears =
+      typeof trainYearsRaw === "number" ? trainYearsRaw : Number(trainYearsRaw);
+    const trainRange =
+      !Number.isNaN(startYear) && startYear && !Number.isNaN(trainYears) && trainYears
+        ? `${startYear}-${startYear + trainYears - 1}`
+        : "-";
+    return { train: trainRange, valid: "-", test: "-" };
+  };
+
   const mlStatusClass = (status?: string) => {
     if (status === "success") {
       return "success";
@@ -1173,7 +1575,7 @@ export default function ProjectsPage() {
     if (status === "failed") {
       return "danger";
     }
-    if (status === "running" || status === "queued") {
+    if (status === "running" || status === "queued" || status === "cancel_requested") {
       return "warn";
     }
     return "";
@@ -1185,6 +1587,64 @@ export default function ProjectsPage() {
     }
     return value.toFixed(4);
   };
+
+  const formatBacktestParamValue = (value: unknown) => {
+    if (value === null || value === undefined || value === "") {
+      return "-";
+    }
+    if (typeof value === "boolean") {
+      return value ? t("common.boolean.true") : t("common.boolean.false");
+    }
+    if (typeof value === "string") {
+      const normalized = value.trim().toLowerCase();
+      if (normalized === "true" || normalized === "yes") {
+        return t("common.boolean.true");
+      }
+      if (normalized === "false" || normalized === "no") {
+        return t("common.boolean.false");
+      }
+      return value;
+    }
+    if (typeof value === "number") {
+      return String(value);
+    }
+    return String(value);
+  };
+
+  const backtestDefaultParams = useMemo(() => {
+    const defaults = configDraft?.backtest_params;
+    if (!defaults || typeof defaults !== "object") {
+      return [];
+    }
+    const entries = [
+      { key: "top_n", label: t("projects.backtest.defaults.topN") },
+      { key: "weighting", label: t("projects.backtest.defaults.weighting") },
+      { key: "max_weight", label: t("projects.backtest.defaults.maxWeight") },
+      { key: "max_exposure", label: t("projects.backtest.defaults.maxExposure") },
+      { key: "min_score", label: t("projects.backtest.defaults.minScore") },
+      { key: "market_filter", label: t("projects.backtest.defaults.marketFilter") },
+      { key: "market_ma_window", label: t("projects.backtest.defaults.marketMa") },
+      { key: "risk_off_mode", label: t("projects.backtest.defaults.riskOff") },
+      { key: "rebalance_frequency", label: t("projects.backtest.defaults.rebalanceFreq") },
+      { key: "rebalance_day", label: t("projects.backtest.defaults.rebalanceDay") },
+      { key: "rebalance_time_minutes", label: t("projects.backtest.defaults.rebalanceTime") },
+      { key: "score_delay_days", label: t("projects.backtest.defaults.scoreDelay") },
+      { key: "reload_scores", label: t("projects.backtest.defaults.reloadScores") },
+    ];
+    return entries
+      .map((entry) => ({
+        ...entry,
+        value: (defaults as Record<string, any>)[entry.key],
+      }))
+      .filter((entry) => entry.value !== undefined && entry.value !== "");
+  }, [configDraft, t]);
+
+  const backtestPlugins = (configDraft?.backtest_plugins || {}) as Record<string, any>;
+  const scoreSmoothing = (backtestPlugins.score_smoothing || {}) as Record<string, any>;
+  const scoreHysteresis = (backtestPlugins.score_hysteresis || {}) as Record<string, any>;
+  const weightSmoothing = (backtestPlugins.weight_smoothing || {}) as Record<string, any>;
+  const riskControl = (backtestPlugins.risk_control || {}) as Record<string, any>;
+  const pluginCosts = (backtestPlugins.costs || {}) as Record<string, any>;
 
   const renderWeightDonut = (value: number) => {
     const percent = Math.max(0, Math.min(1, value || 0));
@@ -1431,10 +1891,13 @@ export default function ProjectsPage() {
   const metricRows = [
     { key: "Compounding Annual Return", label: t("metrics.cagr") },
     { key: "Drawdown", label: t("metrics.drawdown") },
+    { key: "MaxDD_all", label: t("metrics.drawdownAll") },
+    { key: "MaxDD_52w", label: t("metrics.drawdown52w") },
     { key: "Sharpe Ratio", label: t("metrics.sharpe") },
     { key: "Net Profit", label: t("metrics.netProfit") },
     { key: "Total Fees", label: t("metrics.totalFees") },
     { key: "Portfolio Turnover", label: t("metrics.turnover") },
+    { key: "MaxTurnover_week", label: t("metrics.turnoverWeek") },
     { key: "Risk Status", label: t("metrics.riskStatus") },
   ];
   const backtestSummary = latestBacktest?.metrics as Record<string, any> | null;
@@ -1869,7 +2332,7 @@ export default function ProjectsPage() {
         )}
 
         {selectedProject && (projectTab === "config" || projectTab === "algorithm") && (
-          <div className="grid-2">
+          <div className={projectTab === "algorithm" ? "project-tab-stack" : "grid-2"}>
             {projectTab === "config" && (
               <div className="card">
             <div className="card-title">{t("projects.config.title")}</div>
@@ -1921,6 +2384,35 @@ export default function ProjectsPage() {
                       />
                       {t("projects.config.includeHistory")}
                     </label>
+                    <div className="form-row">
+                      <label className="form-label">{t("projects.config.assetTypes")}</label>
+                      <div className="checkbox-group">
+                        {symbolTypeOptions.map((option) => (
+                          <label className="checkbox-row" key={option.value}>
+                            <input
+                              type="checkbox"
+                              checked={
+                                configDraft.universe?.asset_types?.includes(option.value) || false
+                              }
+                              onChange={() => toggleUniverseAssetType(option.value)}
+                            />
+                            {option.label}
+                          </label>
+                        ))}
+                      </div>
+                      <div className="form-hint">{t("projects.config.assetTypesHint")}</div>
+                    </div>
+                    <label className="checkbox-row">
+                      <input
+                        type="checkbox"
+                        checked={configDraft.universe?.pit_universe_only ?? false}
+                        onChange={(e) =>
+                          updateConfigSection("universe", "pit_universe_only", e.target.checked)
+                        }
+                      />
+                      {t("projects.config.pitUniverseOnly")}
+                    </label>
+                    <div className="form-hint">{t("projects.config.pitUniverseOnlyHint")}</div>
                   </div>
                 )}
 
@@ -2666,6 +3158,35 @@ export default function ProjectsPage() {
                       </select>
                     </div>
                     <div className="form-row">
+                      <label className="form-label">{t("projects.config.backtestStart")}</label>
+                      <input
+                        className="form-input"
+                        type="date"
+                        value={configDraft.backtest_start || ""}
+                        onChange={(e) =>
+                          setConfigDraft((prev) => ({
+                            ...(prev || {}),
+                            backtest_start: e.target.value || "",
+                          }))
+                        }
+                      />
+                    </div>
+                    <div className="form-row">
+                      <label className="form-label">{t("projects.config.backtestEnd")}</label>
+                      <input
+                        className="form-input"
+                        type="date"
+                        value={configDraft.backtest_end || ""}
+                        onChange={(e) =>
+                          setConfigDraft((prev) => ({
+                            ...(prev || {}),
+                            backtest_end: e.target.value || "",
+                          }))
+                        }
+                      />
+                    </div>
+                    <div className="form-hint">{t("projects.config.backtestRangeHint")}</div>
+                    <div className="form-row">
                       <label className="form-label">{t("projects.config.riskFreeRate")}</label>
                       <input
                         className="form-input"
@@ -2778,6 +3299,260 @@ export default function ProjectsPage() {
             </div>
               {renderBenchmarkEditor()}
               <div className="card">
+                <div className="card-title">{t("projects.strategy.title")}</div>
+                <div className="card-meta">{t("projects.strategy.meta")}</div>
+                <div className="form-grid two-col">
+                  <div className="form-row">
+                    <label className="form-label">{t("projects.strategy.source")}</label>
+                    <select
+                      className="form-select"
+                      value={strategySource}
+                      onChange={(e) => handleStrategySourceChange(e.target.value)}
+                    >
+                      <option value="theme_weights">
+                        {t("projects.strategy.sourceTheme")}
+                      </option>
+                      <option value="factor_scores">
+                        {t("projects.strategy.sourceFactor")}
+                      </option>
+                      <option value="ml_scores">{t("projects.strategy.sourceMl")}</option>
+                    </select>
+                  </div>
+                  {strategySource !== "theme_weights" && (
+                    <>
+                      <div className="form-row">
+                        <label className="form-label">
+                          {t("projects.strategy.scorePath")}
+                        </label>
+                        <input
+                          value={strategyDraft.score_csv_path || ""}
+                          onChange={(e) =>
+                            updateStrategyField("score_csv_path", e.target.value)
+                          }
+                          placeholder={t("projects.strategy.scorePathHint")}
+                        />
+                      </div>
+                      <div className="form-row">
+                        <label className="form-label">
+                          {t("projects.strategy.scoreTopN")}
+                        </label>
+                        <input
+                          type="number"
+                          value={strategyDraft.score_top_n ?? ""}
+                          onChange={(e) => {
+                            const value = e.target.value;
+                            updateStrategyField(
+                              "score_top_n",
+                              value === "" ? "" : Number(value)
+                            );
+                          }}
+                        />
+                      </div>
+                      <div className="form-row">
+                        <label className="form-label">
+                          {t("projects.strategy.scoreWeighting")}
+                        </label>
+                        <select
+                          className="form-select"
+                          value={strategyDraft.score_weighting || "score"}
+                          onChange={(e) =>
+                            updateStrategyField("score_weighting", e.target.value)
+                          }
+                        >
+                          <option value="score">{t("projects.strategy.weightScore")}</option>
+                          <option value="equal">{t("projects.strategy.weightEqual")}</option>
+                        </select>
+                      </div>
+                      <div className="form-row">
+                        <label className="form-label">
+                          {t("projects.strategy.scoreMin")}
+                        </label>
+                        <input
+                          type="number"
+                          value={strategyDraft.score_min ?? ""}
+                          onChange={(e) => {
+                            const value = e.target.value;
+                            updateStrategyField(
+                              "score_min",
+                              value === "" ? "" : Number(value)
+                            );
+                          }}
+                        />
+                      </div>
+                      <div className="form-row">
+                        <label className="form-label">
+                          {t("projects.strategy.scoreMaxWeight")}
+                        </label>
+                        <input
+                          type="number"
+                          value={strategyDraft.score_max_weight ?? ""}
+                          onChange={(e) => {
+                            const value = e.target.value;
+                            updateStrategyField(
+                              "score_max_weight",
+                              value === "" ? "" : Number(value)
+                            );
+                          }}
+                        />
+                      </div>
+                      <div className="form-row">
+                        <label className="form-label">
+                          {t("projects.strategy.scoreFallback")}
+                        </label>
+                        <select
+                          className="form-select"
+                          value={strategyDraft.score_fallback || "theme_weights"}
+                          onChange={(e) =>
+                            updateStrategyField("score_fallback", e.target.value)
+                          }
+                        >
+                          <option value="theme_weights">
+                            {t("projects.strategy.fallbackTheme")}
+                          </option>
+                          <option value="universe">
+                            {t("projects.strategy.fallbackUniverse")}
+                          </option>
+                          <option value="skip">{t("projects.strategy.fallbackSkip")}</option>
+                        </select>
+                      </div>
+                    </>
+                  )}
+                  {strategySource === "theme_weights" && (
+                    <div className="form-hint">{t("projects.strategy.themeHint")}</div>
+                  )}
+                </div>
+                {configMessage && <div className="form-hint">{configMessage}</div>}
+                <button className="button-primary" onClick={saveProjectConfig}>
+                  {t("projects.strategy.save")}
+                </button>
+              </div>
+              <div className="card">
+                <div className="card-title">{t("projects.factorScores.title")}</div>
+                <div className="card-meta">{t("projects.factorScores.meta")}</div>
+                <div className="form-grid">
+                  <div className="form-row">
+                    <label className="form-label">
+                      {t("projects.factorScores.start")}
+                    </label>
+                    <input
+                      value={factorForm.start}
+                      onChange={(e) =>
+                        setFactorForm((prev) => ({ ...prev, start: e.target.value }))
+                      }
+                      placeholder={t("projects.factorScores.startHint")}
+                    />
+                  </div>
+                  <div className="form-row">
+                    <label className="form-label">
+                      {t("projects.factorScores.end")}
+                    </label>
+                    <input
+                      value={factorForm.end}
+                      onChange={(e) =>
+                        setFactorForm((prev) => ({ ...prev, end: e.target.value }))
+                      }
+                      placeholder={t("projects.factorScores.endHint")}
+                    />
+                  </div>
+                  <div className="form-row">
+                    <label className="form-label">
+                      {t("projects.factorScores.config")}
+                    </label>
+                    <input
+                      value={factorForm.config_path}
+                      onChange={(e) =>
+                        setFactorForm((prev) => ({ ...prev, config_path: e.target.value }))
+                      }
+                      placeholder={t("projects.factorScores.configHint")}
+                    />
+                  </div>
+                  <div className="form-row">
+                    <label className="form-label">
+                      {t("projects.factorScores.output")}
+                    </label>
+                    <input
+                      value={factorForm.output_path}
+                      onChange={(e) =>
+                        setFactorForm((prev) => ({ ...prev, output_path: e.target.value }))
+                      }
+                      placeholder={t("projects.factorScores.outputHint")}
+                    />
+                  </div>
+                  <label className="checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={factorForm.overwrite_cache}
+                      onChange={(e) =>
+                        setFactorForm((prev) => ({
+                          ...prev,
+                          overwrite_cache: e.target.checked,
+                        }))
+                      }
+                    />
+                    {t("projects.factorScores.overwrite")}
+                  </label>
+                </div>
+                {factorActionMessage && <div className="form-hint">{factorActionMessage}</div>}
+                {factorLoadError && <div className="form-error">{factorLoadError}</div>}
+                {factorJobs.length ? (
+                  <>
+                    <div className="meta-row">
+                      <span>{t("projects.factorScores.latest")}</span>
+                      <strong>
+                        {factorJobs[0].id} · {factorStatusLabel(factorJobs[0].status)}
+                      </strong>
+                    </div>
+                    {factorJobs[0].scores_path && (
+                      <div className="meta-row">
+                        <span>{t("projects.factorScores.scoresPath")}</span>
+                        <strong>{factorJobs[0].scores_path}</strong>
+                      </div>
+                    )}
+                    {factorJobs[0].log_path && (
+                      <div className="meta-row">
+                        <span>{t("projects.factorScores.logPath")}</span>
+                        <strong>{factorJobs[0].log_path}</strong>
+                      </div>
+                    )}
+                    <div className="table-scroll">
+                      <table className="table">
+                        <thead>
+                          <tr>
+                            <th>{t("projects.factorScores.table.id")}</th>
+                            <th>{t("projects.factorScores.table.status")}</th>
+                            <th>{t("projects.factorScores.table.createdAt")}</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {factorJobs.map((job) => (
+                            <tr key={job.id}>
+                              <td>#{job.id}</td>
+                              <td>
+                                <span className={`pill ${mlStatusClass(job.status)}`.trim()}>
+                                  {factorStatusLabel(job.status)}
+                                </span>
+                              </td>
+                              <td>{formatDateTime(job.created_at)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                ) : (
+                  <div className="empty-state">{t("projects.factorScores.empty")}</div>
+                )}
+                <button
+                  className="button-primary"
+                  onClick={createFactorJob}
+                  disabled={factorActionLoading}
+                >
+                  {factorActionLoading
+                    ? t("common.actions.loading")
+                    : t("projects.factorScores.action")}
+                </button>
+              </div>
+              <div className="card">
                 <div className="card-title">{t("projects.ml.title")}</div>
                 <div className="card-meta">{t("projects.ml.meta")}</div>
                 <div className="meta-list" style={{ marginBottom: "12px" }}>
@@ -2814,6 +3589,20 @@ export default function ProjectsPage() {
                     </select>
                   </div>
                   <div className="form-row">
+                    <label className="form-label">{t("projects.ml.modelType")}</label>
+                    <select
+                      className="form-select"
+                      value={mlForm.modelType}
+                      onChange={(e) =>
+                        setMlForm((prev) => ({ ...prev, modelType: e.target.value }))
+                      }
+                    >
+                      <option value="torch_mlp">{t("projects.ml.modelTypeTorch")}</option>
+                      <option value="lgbm_ranker">{t("projects.ml.modelTypeLgbm")}</option>
+                    </select>
+                    <div className="form-hint">{t("projects.ml.modelTypeHint")}</div>
+                  </div>
+                  <div className="form-row">
                     <label className="form-label">{t("projects.ml.trainYears")}</label>
                     <input
                       type="number"
@@ -2825,6 +3614,24 @@ export default function ProjectsPage() {
                     />
                   </div>
                   <div className="form-row">
+                    <label className="form-label">{t("projects.ml.trainStartYear")}</label>
+                    <input
+                      type="number"
+                      min={2000}
+                      max={2100}
+                      className="form-input"
+                      value={mlForm.trainStartYear}
+                      onChange={(e) =>
+                        setMlForm((prev) => ({
+                          ...prev,
+                          trainStartYear: e.target.value,
+                        }))
+                      }
+                      placeholder={t("projects.ml.trainStartYearPlaceholder")}
+                    />
+                    <div className="form-hint">{t("projects.ml.trainStartYearHint")}</div>
+                  </div>
+                  <div className="form-row">
                     <label className="form-label">{t("projects.ml.validMonths")}</label>
                     <input
                       type="number"
@@ -2833,6 +3640,47 @@ export default function ProjectsPage() {
                       onChange={(e) =>
                         setMlForm((prev) => ({ ...prev, validMonths: e.target.value }))
                       }
+                    />
+                  </div>
+                  <div className="form-row">
+                    <label className="form-label">{t("projects.ml.walkForward")}</label>
+                    <label className="switch">
+                      <input
+                        type="checkbox"
+                        checked={mlForm.walkForwardEnabled}
+                        onChange={(e) =>
+                          setMlForm((prev) => ({
+                            ...prev,
+                            walkForwardEnabled: e.target.checked,
+                          }))
+                        }
+                      />
+                      <span className="slider" />
+                    </label>
+                    <div className="form-hint">{t("projects.ml.walkForwardHint")}</div>
+                  </div>
+                  <div className="form-row">
+                    <label className="form-label">{t("projects.ml.testMonths")}</label>
+                    <input
+                      type="number"
+                      className="form-input"
+                      value={mlForm.testMonths}
+                      onChange={(e) =>
+                        setMlForm((prev) => ({ ...prev, testMonths: e.target.value }))
+                      }
+                      disabled={!mlForm.walkForwardEnabled}
+                    />
+                  </div>
+                  <div className="form-row">
+                    <label className="form-label">{t("projects.ml.stepMonths")}</label>
+                    <input
+                      type="number"
+                      className="form-input"
+                      value={mlForm.stepMonths}
+                      onChange={(e) =>
+                        setMlForm((prev) => ({ ...prev, stepMonths: e.target.value }))
+                      }
+                      disabled={!mlForm.walkForwardEnabled}
                     />
                   </div>
                   <div className="form-row">
@@ -2849,6 +3697,19 @@ export default function ProjectsPage() {
                       }
                     />
                   </div>
+                  <div className="form-row" style={{ gridColumn: "1 / -1" }}>
+                    <label className="form-label">{t("projects.ml.modelParams")}</label>
+                    <textarea
+                      className="form-input"
+                      rows={3}
+                      value={mlForm.modelParams}
+                      onChange={(e) =>
+                        setMlForm((prev) => ({ ...prev, modelParams: e.target.value }))
+                      }
+                      placeholder={t("projects.ml.modelParamsPlaceholder")}
+                    />
+                    <div className="form-hint">{t("projects.ml.modelParamsHint")}</div>
+                  </div>
                   {mlMessage && <div className="form-hint">{mlMessage}</div>}
                   <button className="button-primary" onClick={createMlJob} disabled={mlLoading}>
                     {mlLoading ? t("common.actions.loading") : t("projects.ml.train")}
@@ -2857,12 +3718,14 @@ export default function ProjectsPage() {
                 <div className="section-divider" />
                 {mlJobs.length ? (
                   <div className="table-scroll">
-                    <table className="table">
+                    <table className="table ml-train-table">
                       <thead>
                         <tr>
                           <th>{t("projects.ml.table.status")}</th>
                           <th>{t("projects.ml.table.progress")}</th>
                           <th>{t("projects.ml.table.window")}</th>
+                          <th>{t("projects.ml.table.range")}</th>
+                          <th>{t("projects.ml.table.model")}</th>
                           <th>{t("projects.ml.table.horizon")}</th>
                           <th>{t("projects.ml.table.symbols")}</th>
                           <th>{t("projects.ml.table.device")}</th>
@@ -2874,46 +3737,80 @@ export default function ProjectsPage() {
                         {mlJobs.map((job) => {
                           const cfg = job.config || {};
                           const walk = (cfg.walk_forward || {}) as Record<string, any>;
+                          const modelType = cfg.model_type || cfg.model?.type || "torch_mlp";
                           const symbolCount =
                             cfg.meta?.symbol_count ?? (cfg.symbols?.length ?? 0);
+                          const ranges = mlTrainRangeDetail(job);
+                          const trainLabel = t("projects.ml.table.trainRangeShort");
+                          const validLabel = t("projects.ml.table.validRangeShort");
+                          const testLabel = t("projects.ml.table.testRangeShort");
                           return (
                             <tr key={job.id}>
                               <td>
-                                <span className={`pill ${mlStatusClass(job.status)}`.trim()}>
-                                  {mlStatusLabel(job.status)}
-                                </span>
-                                {job.is_active && (
-                                  <span className="badge" style={{ marginLeft: 8 }}>
-                                    {t("projects.ml.active")}
+                                <div className="ml-status-cell">
+                                  <span className={`pill ${mlStatusClass(job.status)}`.trim()}>
+                                    {mlStatusLabel(job.status)}
                                   </span>
-                                )}
+                                  {job.is_active && (
+                                    <span className="badge">{t("projects.ml.active")}</span>
+                                  )}
+                                </div>
                               </td>
                               <td>{mlProgressLabel(job)}</td>
                               <td>
                                 {walk.train_years ? `${walk.train_years}Y` : "-"} /{" "}
-                                {walk.valid_months ? `${walk.valid_months}M` : "-"}
+                                {walk.valid_months ? `${walk.valid_months}M` : "-"} /{" "}
+                                {walk.test_months ? `${walk.test_months}M` : "-"}
                               </td>
+                              <td className="ml-range-cell">
+                                <div className="ml-range-inline">
+                                  <span title={`${t("projects.ml.table.trainRange")}: ${ranges.train}`}>
+                                    {trainLabel} {ranges.train}
+                                  </span>
+                                  <span title={`${t("projects.ml.table.validRange")}: ${ranges.valid}`}>
+                                    {validLabel} {ranges.valid}
+                                  </span>
+                                  <span title={`${t("projects.ml.table.testRange")}: ${ranges.test}`}>
+                                    {testLabel} {ranges.test}
+                                  </span>
+                                </div>
+                              </td>
+                              <td>{String(modelType)}</td>
                               <td>{cfg.label_horizon_days ?? "-"}</td>
                               <td>{symbolCount || "-"}</td>
                               <td>{cfg.device || "auto"}</td>
                               <td>{formatDateTime(job.created_at)}</td>
-                              <td className="table-actions">
-                                <button
-                                  className="link-button"
-                                  type="button"
-                                  onClick={() => setMlDetailId(job.id)}
-                                >
-                                  {t("projects.ml.detail")}
-                                </button>
-                                {job.status === "success" && !job.is_active && (
+                              <td className="ml-actions-cell">
+                                <div className="table-actions">
                                   <button
                                     className="link-button"
                                     type="button"
-                                    onClick={() => activateMlJob(job.id)}
+                                    onClick={() => setMlDetailId(job.id)}
                                   >
-                                    {t("projects.ml.activate")}
+                                    {t("projects.ml.detail")}
                                   </button>
-                                )}
+                                  {(job.status === "running" || job.status === "queued") && (
+                                    <button
+                                      className="link-button"
+                                      type="button"
+                                      onClick={() => cancelMlJob(job.id)}
+                                      disabled={mlActionLoadingId === job.id}
+                                    >
+                                      {mlActionLoadingId === job.id
+                                        ? t("projects.ml.canceling")
+                                        : t("projects.ml.cancel")}
+                                    </button>
+                                  )}
+                                  {job.status === "success" && !job.is_active && (
+                                    <button
+                                      className="link-button"
+                                      type="button"
+                                      onClick={() => activateMlJob(job.id)}
+                                    >
+                                      {t("projects.ml.activate")}
+                                    </button>
+                                  )}
+                                </div>
                               </td>
                             </tr>
                           );
@@ -2935,6 +3832,16 @@ export default function ProjectsPage() {
                     <div className="meta-row">
                       <span>{t("projects.ml.detailStatus")}</span>
                       <strong>{mlStatusLabel(mlDetailJob.status)}</strong>
+                    </div>
+                    <div className="meta-row">
+                      <span>{t("projects.ml.detailModel")}</span>
+                      <strong>
+                        {String(
+                          mlDetailJob.config?.model_type ||
+                            mlDetailJob.config?.model?.type ||
+                            "torch_mlp"
+                        )}
+                      </strong>
                     </div>
                     <div className="meta-row">
                       <span>{t("projects.ml.detailProgress")}</span>
@@ -3000,6 +3907,31 @@ export default function ProjectsPage() {
               <div className="empty-state">{t("common.noneText")}</div>
             ) : (
               <div className="meta-list">
+                {(() => {
+                  const backtestSummary = dataStatus.backtest?.summary as
+                    | Record<string, any>
+                    | null
+                    | undefined;
+                  if (!backtestSummary) {
+                    return null;
+                  }
+                  return (
+                    <>
+                      <div className="meta-row">
+                        <span>{t("projects.dataStatus.backtestLog")}</span>
+                        <strong>{backtestSummary.log_path || t("common.none")}</strong>
+                      </div>
+                      <div className="meta-row">
+                        <span>{t("projects.dataStatus.backtestOutput")}</span>
+                        <strong>{backtestSummary.output_dir || t("common.none")}</strong>
+                      </div>
+                      <div className="meta-row">
+                        <span>{t("projects.dataStatus.backtestArtifact")}</span>
+                        <strong>{backtestSummary.artifact_dir || t("common.none")}</strong>
+                      </div>
+                    </>
+                  );
+                })()}
                 <div className="meta-row">
                   <span>{t("projects.dataStatus.membership")}</span>
                   <strong>{dataStatus.membership.symbols}</strong>
@@ -3048,6 +3980,397 @@ export default function ProjectsPage() {
 
             {projectTab === "backtest" && (
               <>
+              <div className="card">
+            <div className="card-title">{t("projects.automation.title")}</div>
+            <div className="card-meta">{t("projects.automation.meta")}</div>
+            {autoWeeklyJob ? (
+              <div className="meta-list">
+                <div className="meta-row">
+                  <span>{t("projects.automation.statusLabel")}</span>
+                  <strong>
+                    <span className={`pill ${mlStatusClass(autoWeeklyJob.status)}`.trim()}>
+                      {automationStatusLabel(autoWeeklyJob.status)}
+                    </span>
+                  </strong>
+                </div>
+                <div className="meta-row">
+                  <span>{t("projects.automation.pitWeekly")}</span>
+                  <strong>{autoWeeklyJob.pit_weekly_job_id ?? t("common.none")}</strong>
+                </div>
+                {autoWeeklyJob.pit_weekly_log_path && (
+                  <div className="meta-row">
+                    <span>{t("projects.automation.pitWeeklyLog")}</span>
+                    <strong>{autoWeeklyJob.pit_weekly_log_path}</strong>
+                  </div>
+                )}
+                <div className="meta-row">
+                  <span>{t("projects.automation.pitFund")}</span>
+                  <strong>{autoWeeklyJob.pit_fundamental_job_id ?? t("common.none")}</strong>
+                </div>
+                {autoWeeklyJob.pit_fundamental_log_path && (
+                  <div className="meta-row">
+                    <span>{t("projects.automation.pitFundLog")}</span>
+                    <strong>{autoWeeklyJob.pit_fundamental_log_path}</strong>
+                  </div>
+                )}
+                <div className="meta-row">
+                  <span>{t("projects.automation.backtest")}</span>
+                  <strong>{automationStatusLabel(autoWeeklyJob.backtest_status || "")}</strong>
+                </div>
+                {autoWeeklyJob.backtest_log_path && (
+                  <div className="meta-row">
+                    <span>{t("projects.automation.backtestLog")}</span>
+                    <strong>{autoWeeklyJob.backtest_log_path}</strong>
+                  </div>
+                )}
+                {autoWeeklyJob.backtest_output_dir && (
+                  <div className="meta-row">
+                    <span>{t("projects.automation.backtestOutput")}</span>
+                    <strong>{autoWeeklyJob.backtest_output_dir}</strong>
+                  </div>
+                )}
+                {autoWeeklyJob.backtest_artifact_dir && (
+                  <div className="meta-row">
+                    <span>{t("projects.automation.backtestArtifact")}</span>
+                    <strong>{autoWeeklyJob.backtest_artifact_dir}</strong>
+                  </div>
+                )}
+                {autoWeeklyJob.log_path && (
+                  <div className="meta-row">
+                    <span>{t("projects.automation.log")}</span>
+                    <strong>{autoWeeklyJob.log_path}</strong>
+                  </div>
+                )}
+                <div className="meta-row">
+                  <span>{t("common.labels.updatedAt")}</span>
+                  <strong>
+                    {formatDateTime(
+                      autoWeeklyJob.ended_at ||
+                        autoWeeklyJob.started_at ||
+                        autoWeeklyJob.created_at
+                    )}
+                  </strong>
+                </div>
+                {autoWeeklyJob.message && (
+                  <div className="form-hint">{autoWeeklyJob.message}</div>
+                )}
+              </div>
+            ) : (
+              <div className="empty-state">{t("projects.automation.empty")}</div>
+            )}
+            {autoWeeklyMessage && <div className="form-hint">{autoWeeklyMessage}</div>}
+            <button
+              className="button-secondary"
+              onClick={runAutoWeeklyJob}
+              disabled={autoWeeklyLoading}
+            >
+              {autoWeeklyLoading
+                ? t("projects.automation.running")
+                : t("projects.automation.action")}
+            </button>
+            </div>
+              <div className="card">
+            <div className="card-title">{t("projects.config.backtestRangeTitle")}</div>
+            <div className="card-meta">{t("projects.config.backtestRangeMeta")}</div>
+            <div className="form-row">
+              <label className="form-label">{t("projects.config.backtestStart")}</label>
+              <input
+                className="form-input"
+                type="date"
+                value={configDraft?.backtest_start || ""}
+                onChange={(e) =>
+                  setConfigDraft((prev) => ({
+                    ...(prev || {}),
+                    backtest_start: e.target.value || "",
+                  }))
+                }
+              />
+            </div>
+            <div className="form-row">
+              <label className="form-label">{t("projects.config.backtestEnd")}</label>
+              <input
+                className="form-input"
+                type="date"
+                value={configDraft?.backtest_end || ""}
+                onChange={(e) =>
+                  setConfigDraft((prev) => ({
+                    ...(prev || {}),
+                    backtest_end: e.target.value || "",
+                  }))
+                }
+              />
+            </div>
+            <div className="form-hint">{t("projects.config.backtestRangeHint")}</div>
+            <button className="button-secondary" onClick={saveProjectConfig}>
+              {t("projects.config.save")}
+            </button>
+            </div>
+            <div className="card">
+            <div className="card-title">{t("projects.backtest.defaults.title")}</div>
+            <div className="card-meta">{t("projects.backtest.defaults.meta")}</div>
+            {backtestDefaultParams.length ? (
+              <div className="meta-list">
+                {backtestDefaultParams.map((item) => (
+                  <div className="meta-row" key={item.key}>
+                    <span>{item.label}</span>
+                    <strong>{formatBacktestParamValue(item.value)}</strong>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="empty-state">{t("projects.backtest.defaults.empty")}</div>
+            )}
+            </div>
+              <div className="card">
+            <div className="card-title">{t("projects.backtest.plugins.title")}</div>
+            <div className="card-meta">{t("projects.backtest.plugins.meta")}</div>
+            <div className="form-grid">
+              <div className="form-row">
+                <label className="form-label">{t("projects.backtest.plugins.scoreDelay")}</label>
+                <input
+                  type="number"
+                  className="form-input"
+                  value={backtestPlugins.score_delay_days ?? ""}
+                  onChange={(e) =>
+                    updateBacktestPlugin(
+                      "score_delay_days",
+                      e.target.value ? Number(e.target.value) : ""
+                    )
+                  }
+                />
+                <div className="form-hint">{t("projects.backtest.plugins.scoreDelayHint")}</div>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("projects.backtest.plugins.scoreSmoothing")}</label>
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    checked={!!scoreSmoothing.enabled}
+                    onChange={(e) =>
+                      updateBacktestPluginSection("score_smoothing", "enabled", e.target.checked)
+                    }
+                  />
+                  <span className="slider" />
+                </label>
+                <div className="form-hint">{t("projects.backtest.plugins.scoreSmoothingHint")}</div>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("projects.backtest.plugins.scoreSmoothMethod")}</label>
+                <select
+                  className="form-select"
+                  value={scoreSmoothing.method || "ema"}
+                  onChange={(e) =>
+                    updateBacktestPluginSection("score_smoothing", "method", e.target.value)
+                  }
+                >
+                  <option value="ema">{t("projects.backtest.plugins.scoreSmoothEma")}</option>
+                  <option value="none">{t("projects.backtest.plugins.scoreSmoothNone")}</option>
+                </select>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("projects.backtest.plugins.scoreSmoothAlpha")}</label>
+                <input
+                  type="number"
+                  step="0.05"
+                  className="form-input"
+                  value={scoreSmoothing.alpha ?? ""}
+                  onChange={(e) =>
+                    updateBacktestPluginSection(
+                      "score_smoothing",
+                      "alpha",
+                      e.target.value ? Number(e.target.value) : ""
+                    )
+                  }
+                />
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("projects.backtest.plugins.scoreCarry")}</label>
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    checked={scoreSmoothing.carry_missing ?? true}
+                    onChange={(e) =>
+                      updateBacktestPluginSection(
+                        "score_smoothing",
+                        "carry_missing",
+                        e.target.checked
+                      )
+                    }
+                  />
+                  <span className="slider" />
+                </label>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("projects.backtest.plugins.scoreHysteresis")}</label>
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    checked={!!scoreHysteresis.enabled}
+                    onChange={(e) =>
+                      updateBacktestPluginSection("score_hysteresis", "enabled", e.target.checked)
+                    }
+                  />
+                  <span className="slider" />
+                </label>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("projects.backtest.plugins.scoreRetain")}</label>
+                <input
+                  type="number"
+                  className="form-input"
+                  value={scoreHysteresis.retain_top_n ?? ""}
+                  onChange={(e) =>
+                    updateBacktestPluginSection(
+                      "score_hysteresis",
+                      "retain_top_n",
+                      e.target.value ? Number(e.target.value) : ""
+                    )
+                  }
+                />
+                <div className="form-hint">{t("projects.backtest.plugins.scoreRetainHint")}</div>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("projects.backtest.plugins.weightSmoothing")}</label>
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    checked={!!weightSmoothing.enabled}
+                    onChange={(e) =>
+                      updateBacktestPluginSection("weight_smoothing", "enabled", e.target.checked)
+                    }
+                  />
+                  <span className="slider" />
+                </label>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("projects.backtest.plugins.weightAlpha")}</label>
+                <input
+                  type="number"
+                  step="0.05"
+                  className="form-input"
+                  value={weightSmoothing.alpha ?? ""}
+                  onChange={(e) =>
+                    updateBacktestPluginSection(
+                      "weight_smoothing",
+                      "alpha",
+                      e.target.value ? Number(e.target.value) : ""
+                    )
+                  }
+                />
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("projects.backtest.plugins.riskControl")}</label>
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    checked={!!riskControl.enabled}
+                    onChange={(e) => {
+                      updateBacktestPluginSection("risk_control", "enabled", e.target.checked);
+                      updateBacktestPluginSection(
+                        "risk_control",
+                        "market_filter",
+                        e.target.checked
+                      );
+                    }}
+                  />
+                  <span className="slider" />
+                </label>
+                <div className="form-hint">{t("projects.backtest.plugins.riskControlHint")}</div>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("projects.backtest.plugins.marketMa")}</label>
+                <input
+                  type="number"
+                  className="form-input"
+                  value={riskControl.market_ma_window ?? ""}
+                  onChange={(e) =>
+                    updateBacktestPluginSection(
+                      "risk_control",
+                      "market_ma_window",
+                      e.target.value ? Number(e.target.value) : ""
+                    )
+                  }
+                />
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("projects.backtest.plugins.riskOffMode")}</label>
+                <select
+                  className="form-select"
+                  value={riskControl.risk_off_mode || "cash"}
+                  onChange={(e) =>
+                    updateBacktestPluginSection("risk_control", "risk_off_mode", e.target.value)
+                  }
+                >
+                  <option value="cash">{t("projects.backtest.plugins.riskOffCash")}</option>
+                  <option value="benchmark">{t("projects.backtest.plugins.riskOffBenchmark")}</option>
+                </select>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("projects.backtest.plugins.maxExposure")}</label>
+                <input
+                  type="number"
+                  step="0.05"
+                  className="form-input"
+                  value={riskControl.max_exposure ?? ""}
+                  onChange={(e) =>
+                    updateBacktestPluginSection(
+                      "risk_control",
+                      "max_exposure",
+                      e.target.value ? Number(e.target.value) : ""
+                    )
+                  }
+                />
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("projects.backtest.plugins.feeBps")}</label>
+                <input
+                  type="number"
+                  className="form-input"
+                  value={pluginCosts.fee_bps ?? ""}
+                  onChange={(e) =>
+                    updateBacktestPluginSection(
+                      "costs",
+                      "fee_bps",
+                      e.target.value ? Number(e.target.value) : ""
+                    )
+                  }
+                />
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("projects.backtest.plugins.slippageBps")}</label>
+                <input
+                  type="number"
+                  className="form-input"
+                  value={pluginCosts.slippage_bps ?? ""}
+                  onChange={(e) =>
+                    updateBacktestPluginSection(
+                      "costs",
+                      "slippage_bps",
+                      e.target.value ? Number(e.target.value) : ""
+                    )
+                  }
+                />
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("projects.backtest.plugins.impactBps")}</label>
+                <input
+                  type="number"
+                  className="form-input"
+                  value={pluginCosts.impact_bps ?? ""}
+                  onChange={(e) =>
+                    updateBacktestPluginSection(
+                      "costs",
+                      "impact_bps",
+                      e.target.value ? Number(e.target.value) : ""
+                    )
+                  }
+                />
+              </div>
+            </div>
+            <button className="button-secondary" onClick={saveProjectConfig}>
+              {t("projects.config.save")}
+            </button>
+            </div>
               <div className="card">
             <div className="card-title">{t("projects.backtest.title")}</div>
             <div className="card-meta">{t("projects.backtest.meta")}</div>

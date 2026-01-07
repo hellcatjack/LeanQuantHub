@@ -194,6 +194,18 @@ def _build_fundamental_command(params: dict[str, Any], output_dir: str | None) -
     if vendor_preference:
         cmd.extend(["--vendor-preference", vendor_preference])
 
+    exclude_symbols_path = str(params.get("exclude_symbols_path") or "").strip()
+    if not exclude_symbols_path and data_root:
+        long_term_exclude = Path(data_root) / "universe" / "fundamentals_exclude.csv"
+        if long_term_exclude.exists():
+            exclude_symbols_path = str(long_term_exclude)
+        else:
+            default_exclude = Path(data_root) / "universe" / "fundamentals_missing.csv"
+            if default_exclude.exists():
+                exclude_symbols_path = str(default_exclude)
+    if exclude_symbols_path:
+        cmd.extend(["--exclude-symbols", exclude_symbols_path])
+
     return cmd
 
 

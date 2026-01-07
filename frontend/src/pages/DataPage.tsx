@@ -1634,6 +1634,24 @@ export default function DataPage() {
               </div>
             </div>
             <div className="card">
+              <div className="card-title">{t("data.lifecycle.title")}</div>
+              <div className="card-meta">{t("data.lifecycle.meta")}</div>
+              <div style={{ marginTop: "12px", display: "grid", gap: "6px" }}>
+                <div className="form-hint">
+                  {t("data.lifecycle.source")}{" "}
+                  <code>data_root/universe/alpha_symbol_life.csv</code>
+                </div>
+                <div className="form-hint">
+                  {t("data.lifecycle.override")}{" "}
+                  <code>data_root/universe/symbol_life_override.csv</code>
+                </div>
+                <div className="form-hint">{t("data.lifecycle.priority")}</div>
+                <div className="form-hint">
+                  {t("data.lifecycle.config")} <code>symbol_life_override_path</code>
+                </div>
+              </div>
+            </div>
+            <div className="card">
             <div className="card-title">{t("data.register.title")}</div>
             <div className="card-meta">{t("data.register.meta")}</div>
             <div style={{ marginTop: "12px", display: "grid", gap: "8px" }}>

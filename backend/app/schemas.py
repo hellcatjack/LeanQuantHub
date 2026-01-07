@@ -192,7 +192,12 @@ class MLTrainCreate(BaseModel):
     device: str = "auto"
     train_years: int | None = None
     valid_months: int | None = None
+    test_months: int | None = None
+    step_months: int | None = None
     label_horizon_days: int | None = None
+    train_start_year: int | None = None
+    model_type: str | None = None
+    model_params: dict[str, Any] | None = None
 
 
 class MLTrainOut(BaseModel):
@@ -768,6 +773,75 @@ class PitFundamentalJobOut(BaseModel):
     log_path: str | None
     snapshot_count: int | None
     last_snapshot_path: str | None
+    message: str | None
+    created_at: datetime
+    started_at: datetime | None
+    ended_at: datetime | None
+
+    class Config:
+        from_attributes = True
+
+
+class FactorScoreJobCreate(BaseModel):
+    project_id: int
+    start: str | None = None
+    end: str | None = None
+    config_path: str | None = None
+    output_path: str | None = None
+    cache_dir: str | None = None
+    overwrite_cache: bool = False
+    data_root: str | None = None
+    pit_weekly_dir: str | None = None
+    pit_fundamentals_dir: str | None = None
+    adjusted_dir: str | None = None
+    exclude_symbols: str | None = None
+
+
+class FactorScoreJobOut(BaseModel):
+    id: int
+    project_id: int
+    status: str
+    params: dict | None
+    output_dir: str | None
+    log_path: str | None
+    scores_path: str | None
+    message: str | None
+    created_at: datetime
+    started_at: datetime | None
+    ended_at: datetime | None
+
+    class Config:
+        from_attributes = True
+
+
+class AutoWeeklyJobCreate(BaseModel):
+    project_id: int
+    run_pit_weekly: bool = True
+    run_pit_fundamentals: bool = True
+    run_backtest: bool = True
+    refresh_fundamentals: bool = False
+    pit_start: str | None = None
+    pit_end: str | None = None
+    pit_require_data: bool = False
+    pit_vendor_preference: str | None = None
+    fundamental_start: str | None = None
+    fundamental_end: str | None = None
+
+
+class AutoWeeklyJobOut(BaseModel):
+    id: int
+    project_id: int
+    status: str
+    params: dict | None
+    pit_weekly_job_id: int | None
+    pit_weekly_log_path: str | None
+    pit_fundamental_job_id: int | None
+    pit_fundamental_log_path: str | None
+    backtest_status: str | None
+    backtest_log_path: str | None
+    backtest_output_dir: str | None
+    backtest_artifact_dir: str | None
+    log_path: str | None
     message: str | None
     created_at: datetime
     started_at: datetime | None

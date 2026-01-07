@@ -1,0 +1,13 @@
+{
+  "momentum_windows": [63, 126, 252],
+  "vol_window": 60,
+  "liquidity_window": 20,
+  "winsor_z": 3.0,
+  "weights": {
+    "momentum": 0.2,
+    "quality": 0.2,
+    "value": 0.2,
+    "low_vol": 0.2,
+    "liquidity": 0.2
+  }
+}

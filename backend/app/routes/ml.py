@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
@@ -10,7 +11,12 @@ from app.db import get_session
 from app.models import MLTrainJob, Project
 from app.schemas import MLTrainCreate, MLTrainOut, MLTrainPageOut
 from app.services.audit_log import record_audit
-from app.services.ml_runner import activate_job, build_ml_config, run_ml_train
+from app.services.ml_runner import (
+    activate_job,
+    build_ml_config,
+    run_ml_train,
+    _attach_data_ranges,
+)
 
 router = APIRouter(prefix="/api/ml", tags=["ml"])
 
@@ -35,7 +41,16 @@ def _with_progress(job: MLTrainJob) -> MLTrainOut:
     if progress:
         out.progress = progress.get("progress")
         out.progress_detail = progress
+    out.metrics = _attach_data_ranges(out.metrics, out.output_dir)
     return out
+
+
+def _touch_cancel_flag(output_dir: str | None) -> None:
+    if not output_dir:
+        return
+    cancel_path = Path(output_dir) / "cancel.flag"
+    cancel_path.parent.mkdir(parents=True, exist_ok=True)
+    cancel_path.write_text("cancel", encoding="utf-8")
 
 
 def _coerce_pagination(page: int, page_size: int, total: int) -> tuple[int, int, int]:
@@ -90,7 +105,12 @@ def create_train_job(payload: MLTrainCreate, background_tasks: BackgroundTasks):
         "device": payload.device,
         "train_years": payload.train_years,
         "valid_months": payload.valid_months,
+        "test_months": payload.test_months,
+        "step_months": payload.step_months,
         "label_horizon_days": payload.label_horizon_days,
+        "train_start_year": payload.train_start_year,
+        "model_type": payload.model_type,
+        "model_params": payload.model_params,
     }
     with get_session() as session:
         project = session.get(Project, payload.project_id)
@@ -146,3 +166,32 @@ def activate_train_job(job_id: int):
         session.commit()
         session.refresh(job)
         return job
+
+
+@router.post("/train-jobs/{job_id}/cancel", response_model=MLTrainOut)
+def cancel_train_job(job_id: int):
+    with get_session() as session:
+        job = session.get(MLTrainJob, job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="训练任务不存在")
+        if job.status in {"success", "failed", "canceled"}:
+            return _with_progress(job)
+        if job.status == "queued":
+            job.status = "canceled"
+            job.message = "用户取消"
+            job.ended_at = datetime.utcnow()
+        else:
+            if job.status != "cancel_requested":
+                job.status = "cancel_requested"
+                job.message = "取消中"
+            _touch_cancel_flag(job.output_dir)
+        record_audit(
+            session,
+            action="ml.train.cancel",
+            resource_type="ml_train_job",
+            resource_id=job.id,
+            detail={"project_id": job.project_id, "status": job.status},
+        )
+        session.commit()
+        session.refresh(job)
+        return _with_progress(job)

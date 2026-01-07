@@ -44,6 +44,11 @@ def main() -> None:
         default="US",
         help="地区（默认 US）",
     )
+    parser.add_argument(
+        "--reset-history",
+        action="store_true",
+        help="清空历史后重新抓取",
+    )
     args = parser.parse_args()
 
     project_root = Path(__file__).resolve().parents[1]
@@ -79,8 +84,9 @@ def main() -> None:
 
     vendor_label = "Alpha"
     frequency = "daily"
-    region = args.region.strip().upper() or "US"
+    default_region = args.region.strip().upper() or "US"
     date_column = "timestamp"
+    reset_history = bool(args.reset_history)
 
     created = 0
     updated = 0
@@ -96,6 +102,7 @@ def main() -> None:
             symbol = (row.get("symbol") or "").strip().upper()
             if not symbol:
                 continue
+            region = (row.get("region") or "").strip().upper() or default_region
             asset_type = (row.get("asset_type") or "").strip().upper()
             asset_class = "ETF" if asset_type == "ETF" else "Equity"
             source_path = f"alpha:{symbol.lower()}"
@@ -171,7 +178,7 @@ def main() -> None:
                     DataSyncJob.dataset_id == dataset.id,
                     DataSyncJob.source_path == stored_source,
                     DataSyncJob.date_column == date_column,
-                    DataSyncJob.reset_history.is_(False),
+                    DataSyncJob.reset_history == reset_history,
                     DataSyncJob.status.in_(ACTIVE_SYNC_STATUSES),
                 )
                 .order_by(DataSyncJob.created_at.desc())
@@ -185,7 +192,7 @@ def main() -> None:
                 dataset_id=dataset.id,
                 source_path=stored_source,
                 date_column=date_column,
-                reset_history=False,
+                reset_history=reset_history,
             )
             session.add(job)
             session.commit()

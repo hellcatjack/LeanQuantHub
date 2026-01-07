@@ -386,6 +386,26 @@ def create_backtest(payload: BacktestCreate, background_tasks: BackgroundTasks):
                 )
         if not str(algo_params.get("theme_tilt") or "").strip():
             algo_params["theme_tilt"] = "0.5"
+        backtest_cfg = (
+            config.get("backtest") if isinstance(config.get("backtest"), dict) else {}
+        )
+        backtest_start = (
+            config.get("backtest_start")
+            or backtest_cfg.get("start")
+            or backtest_cfg.get("start_date")
+        )
+        backtest_end = (
+            config.get("backtest_end") or backtest_cfg.get("end") or backtest_cfg.get("end_date")
+        )
+        if backtest_start and not str(algo_params.get("backtest_start") or "").strip():
+            algo_params["backtest_start"] = str(backtest_start)
+        if backtest_end and not str(algo_params.get("backtest_end") or "").strip():
+            algo_params["backtest_end"] = str(backtest_end)
+        backtest_params = config.get("backtest_params")
+        if isinstance(backtest_params, dict):
+            for key, value in backtest_params.items():
+                if key not in algo_params or str(algo_params.get(key) or "").strip() == "":
+                    algo_params[key] = value
         binding = (
             session.query(ProjectAlgorithmBinding)
             .filter(ProjectAlgorithmBinding.project_id == payload.project_id)

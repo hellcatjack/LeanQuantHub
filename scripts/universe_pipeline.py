@@ -10,7 +10,7 @@ import time
 import urllib.parse
 import urllib.request
 from bisect import bisect_right
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Iterable
 
@@ -408,6 +408,26 @@ def normalize_symbol_list(value) -> list[str]:
         if symbol:
             result.append(symbol)
     return result
+
+
+def normalize_asset_type(value: object) -> str:
+    if value is None:
+        return "UNKNOWN"
+    text = str(value).strip().upper()
+    if not text:
+        return "UNKNOWN"
+    mapping = {
+        "EQUITY": "STOCK",
+        "STOCK": "STOCK",
+        "COMMON STOCK": "STOCK",
+        "ETF": "ETF",
+        "ETN": "ETN",
+        "ADR": "ADR",
+        "REIT": "REIT",
+        "FUND": "FUND",
+        "INDEX": "INDEX",
+    }
+    return mapping.get(text, text)
 
 
 def coerce_priority(value: object, default: int = 0) -> int:
@@ -1074,6 +1094,46 @@ def load_symbol_life(path: Path) -> dict[str, tuple[date | None, date | None]]:
     return life
 
 
+def load_symbol_asset_types(
+    path: Path,
+    symbol_map: dict[str, list[tuple[date | None, date | None, str]]] | None = None,
+) -> dict[str, str]:
+    types: dict[str, str] = {}
+    if not path.exists():
+        return types
+    with path.open("r", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            symbol = (row.get("symbol") or "").strip().upper()
+            if not symbol:
+                continue
+            asset_type = normalize_asset_type(row.get("assetType") or row.get("asset_type") or "")
+            if not asset_type or asset_type == "UNKNOWN":
+                continue
+            if symbol_map:
+                symbol = resolve_symbol_alias(symbol, None, symbol_map)
+            types[symbol] = asset_type
+    return types
+
+
+def load_symbol_life_overrides(path: Path) -> dict[str, tuple[date | None, date | None]]:
+    overrides: dict[str, tuple[date | None, date | None]] = {}
+    if not path.exists():
+        return overrides
+    with path.open("r", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            symbol = (row.get("symbol") or "").strip().upper()
+            if not symbol:
+                continue
+            ipo = parse_date(row.get("ipoDate") or row.get("ipo_date") or row.get("ipo") or "")
+            delist = parse_date(
+                row.get("delistingDate") or row.get("delisting_date") or row.get("delist") or ""
+            )
+            overrides[symbol] = (ipo, delist)
+    return overrides
+
+
 def load_membership_ranges(rows: list[dict[str, str]]) -> dict[str, list[tuple[date | None, date | None]]]:
     ranges: dict[str, list[tuple[date | None, date | None]]] = {}
     for row in rows:
@@ -1204,6 +1264,94 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
     else:
         max_shift_days = max(int(max_shift_raw), 0)
 
+    def _parse_asset_types(value: object) -> set[str]:
+        if value is None:
+            return set()
+        if isinstance(value, str):
+            items = [item.strip() for item in value.split(",")]
+        elif isinstance(value, (list, tuple, set)):
+            items = list(value)
+        else:
+            items = [value]
+        normalized = {normalize_asset_type(item) for item in items if str(item).strip()}
+        return {item for item in normalized if item and item != "UNKNOWN"}
+
+    allowed_asset_types = _parse_asset_types(weights_cfg.get("asset_types"))
+    pit_universe_only = bool(
+        weights_cfg.get("pit_universe_only")
+        or weights_cfg.get("pit_only_universe")
+        or weights_cfg.get("pit_universe")
+    )
+    backtest_start = parse_date(str(weights_cfg.get("backtest_start") or weights_cfg.get("start") or ""))
+    backtest_end = parse_date(str(weights_cfg.get("backtest_end") or weights_cfg.get("end") or ""))
+
+    plugins = weights_cfg.get("backtest_plugins")
+    if not isinstance(plugins, dict):
+        plugins = {}
+
+    def _coerce_int(value: object, default: int) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _coerce_float(value: object, default: float) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    score_delay_days = max(
+        _coerce_int(
+            plugins.get("score_delay_days", weights_cfg.get("score_delay_days", 0)), 0
+        ),
+        0,
+    )
+    score_smoothing_cfg = plugins.get("score_smoothing") if isinstance(plugins.get("score_smoothing"), dict) else {}
+    score_smoothing_enabled = bool(score_smoothing_cfg.get("enabled", False))
+    score_smoothing_method = str(score_smoothing_cfg.get("method") or "").strip().lower()
+    if score_smoothing_enabled and not score_smoothing_method:
+        score_smoothing_method = "ema"
+    score_smoothing_alpha = _coerce_float(score_smoothing_cfg.get("alpha"), 0.0)
+    if score_smoothing_alpha < 0:
+        score_smoothing_alpha = 0.0
+    if score_smoothing_alpha > 1:
+        score_smoothing_alpha = 1.0
+    score_smoothing_carry = bool(score_smoothing_cfg.get("carry_missing", True))
+
+    score_hysteresis_cfg = (
+        plugins.get("score_hysteresis") if isinstance(plugins.get("score_hysteresis"), dict) else {}
+    )
+    score_hysteresis_enabled = bool(score_hysteresis_cfg.get("enabled", False))
+    score_retain_top_n = (
+        _coerce_int(score_hysteresis_cfg.get("retain_top_n", 0), 0)
+        if score_hysteresis_enabled
+        else 0
+    )
+
+    weight_smoothing_cfg = (
+        plugins.get("weight_smoothing") if isinstance(plugins.get("weight_smoothing"), dict) else {}
+    )
+    weight_smoothing_alpha = _coerce_float(weight_smoothing_cfg.get("alpha"), 0.0)
+    if weight_smoothing_alpha < 0:
+        weight_smoothing_alpha = 0.0
+    if weight_smoothing_alpha > 1:
+        weight_smoothing_alpha = 1.0
+    weight_smoothing_enabled = bool(weight_smoothing_cfg.get("enabled", False))
+
+    risk_cfg = plugins.get("risk_control") if isinstance(plugins.get("risk_control"), dict) else {}
+    risk_enabled = bool(risk_cfg.get("enabled", False)) if risk_cfg else bool(weights_cfg.get("market_filter", False))
+    market_filter = bool(risk_cfg.get("market_filter", risk_enabled))
+    market_ma_window = _coerce_int(
+        risk_cfg.get("market_ma_window", weights_cfg.get("market_ma_window", 200)), 200
+    )
+    risk_off_mode = str(risk_cfg.get("risk_off_mode") or weights_cfg.get("risk_off_mode") or "cash").strip().lower()
+    max_exposure = _coerce_float(risk_cfg.get("max_exposure", weights_cfg.get("max_exposure", 1.0)), 1.0)
+    if max_exposure <= 0:
+        max_exposure = 0.0
+    if max_exposure > 1:
+        max_exposure = 1.0
+
     universe = read_csv(universe_path)
     symbol_map_path = str(weights_cfg.get("symbol_map_path") or "").strip()
     symbol_map_file = (
@@ -1227,13 +1375,58 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
     symbol_life = load_symbol_life(life_path) if life_path.exists() else {}
     if symbol_map:
         symbol_life = merge_symbol_life(symbol_life, symbol_map)
+    override_path_raw = str(weights_cfg.get("symbol_life_override_path") or "").strip()
+    if override_path_raw:
+        override_path = Path(override_path_raw).expanduser().resolve()
+    else:
+        override_path = data_root / "universe" / "symbol_life_override.csv"
+    symbol_life_overrides = (
+        load_symbol_life_overrides(override_path) if override_path.exists() else {}
+    )
+    if symbol_life_overrides:
+        if symbol_map:
+            remapped: dict[str, tuple[date | None, date | None]] = {}
+            for symbol, values in symbol_life_overrides.items():
+                mapped = resolve_symbol_alias(symbol, None, symbol_map)
+                remapped[mapped] = values
+            symbol_life_overrides = remapped
+        for symbol, values in symbol_life_overrides.items():
+            symbol_life[symbol] = values
+    asset_type_path_raw = str(weights_cfg.get("asset_type_path") or "").strip()
+    asset_type_path = (
+        Path(asset_type_path_raw).expanduser().resolve()
+        if asset_type_path_raw
+        else life_path
+    )
+    asset_type_map = (
+        load_symbol_asset_types(asset_type_path, symbol_map)
+        if asset_type_path.exists()
+        else {}
+    )
+    exclude_symbols_path = str(weights_cfg.get("exclude_symbols_path") or "").strip()
+    if exclude_symbols_path:
+        exclude_path = Path(exclude_symbols_path).expanduser().resolve()
+    else:
+        exclude_path = data_root / "universe" / "exclude_symbols.csv"
+    exclude_symbols = set()
+    if exclude_path.exists():
+        for row in read_csv(exclude_path):
+            symbol = (row.get("symbol") or "").strip().upper()
+            if symbol:
+                exclude_symbols.add(symbol)
     category_by_symbol: dict[str, str] = {}
+    asset_type_by_symbol: dict[str, str] = dict(asset_type_map)
     for row in universe:
         raw_symbol = row.get("symbol", "").strip().upper()
         if not raw_symbol:
             continue
         mapped = resolve_symbol_alias(raw_symbol, None, symbol_map)
         category_by_symbol[mapped] = row.get("category", "")
+        if mapped not in asset_type_by_symbol:
+            asset_type = asset_type_map.get(mapped) or asset_type_map.get(raw_symbol)
+            if not asset_type:
+                asset_type = normalize_asset_type(row.get("asset_class") or "")
+            asset_type_by_symbol[mapped] = asset_type or "UNKNOWN"
     stooq_dir = data_root / "prices" / "stooq"
     yahoo_dir = data_root / "prices" / "yahoo"
     curated_dir = data_root / "curated"
@@ -1260,14 +1453,25 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
     curated_adjusted_map = build_symbol_map(curated_adjusted_dir)
     normalized_map = build_symbol_map(normalized_dir)
 
+    def _expand_symbol_variants(value: str) -> list[str]:
+        variants = [value]
+        if "." in value:
+            variants.append(value.replace(".", "_"))
+            variants.append(value.replace(".", "-"))
+        if "-" in value:
+            variants.append(value.replace("-", "_"))
+        return [item for item in variants if item]
+
     def resolve_symbol_path(symbol: str, mapped_symbol: str) -> tuple[Path | None, str, str]:
-        candidates = []
+        candidates: list[str] = []
         if mapped_symbol:
-            candidates.append(mapped_symbol)
+            candidates.extend(_expand_symbol_variants(mapped_symbol))
         if symbol and symbol != mapped_symbol:
-            candidates.append(symbol)
-        candidates.extend(sorted(alias_map.get(mapped_symbol, set())))
-        candidates.extend(sorted(alias_map.get(symbol, set())))
+            candidates.extend(_expand_symbol_variants(symbol))
+        for alias in sorted(alias_map.get(mapped_symbol, set())):
+            candidates.extend(_expand_symbol_variants(alias))
+        for alias in sorted(alias_map.get(symbol, set())):
+            candidates.extend(_expand_symbol_variants(alias))
         seen = set()
         for candidate in candidates:
             if not candidate or candidate in seen:
@@ -1307,6 +1511,11 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
             continue
         mapped_symbol = resolve_symbol_alias(raw_symbol, None, symbol_map)
         if mapped_symbol in seen_symbols:
+            continue
+        if mapped_symbol in exclude_symbols:
+            continue
+        asset_type = asset_type_by_symbol.get(mapped_symbol, "UNKNOWN")
+        if allowed_asset_types and asset_type not in allowed_asset_types:
             continue
         path, mode, resolved_symbol = resolve_symbol_path(raw_symbol, mapped_symbol)
         if not path or not path.exists():
@@ -1350,6 +1559,7 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
 
     prices = pd.concat(frames, axis=1).sort_index()
     prices = prices.dropna(how="all")
+    price_symbol_set = set(prices.columns)
     if open_frames:
         open_prices = pd.concat(open_frames, axis=1).sort_index()
         open_prices = open_prices.reindex(prices.index)
@@ -1374,12 +1584,40 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
     if trade_price_mode not in {"open", "close"}:
         raise SystemExit("trade_price must be open or close")
     trade_prices = open_prices if trade_price_mode == "open" else prices
+
+    benchmark_symbol = resolve_symbol_alias(benchmark.upper(), None, symbol_map)
+    benchmark_series = prices.get(benchmark_symbol)
+    if benchmark_series is None or benchmark_series.dropna().empty:
+        benchmark_path, _, _ = resolve_symbol_path(benchmark.upper(), benchmark_symbol)
+        if benchmark_path and benchmark_path.exists():
+            bench_df = pd.read_csv(benchmark_path)
+            bench_column_map = {col.lower(): col for col in bench_df.columns}
+            bench_date_col = bench_column_map.get("date")
+            bench_price_col = bench_column_map.get("close")
+            if bench_date_col and bench_price_col:
+                bench_df = bench_df[[bench_date_col, bench_price_col]].rename(
+                    columns={bench_date_col: "date", bench_price_col: benchmark_symbol}
+                )
+                bench_df["date"] = pd.to_datetime(bench_df["date"], utc=True).dt.tz_convert(None)
+                benchmark_series = bench_df.set_index("date")[benchmark_symbol].sort_index()
+    if benchmark_series is None or benchmark_series.dropna().empty:
+        benchmark_series = trade_prices.get(benchmark_symbol)
+    if benchmark_series is not None:
+        benchmark_series = benchmark_series.reindex(prices.index).ffill()
+    benchmark_sma = (
+        benchmark_series.rolling(market_ma_window).mean()
+        if market_filter and benchmark_series is not None
+        else None
+    )
     returns = trade_prices.shift(-1) / trade_prices - 1
     returns = returns.fillna(0.0)
     min_history_days = int(weights_cfg.get("min_history_days") or 0)
     min_price = float(weights_cfg.get("min_price") or 0.0)
     valid_counts = prices.notna().cumsum()
     cost_cfg = weights_cfg.get("costs", {}) if isinstance(weights_cfg.get("costs"), dict) else {}
+    plugin_costs = plugins.get("costs") if isinstance(plugins.get("costs"), dict) else {}
+    if plugin_costs:
+        cost_cfg = {**cost_cfg, **plugin_costs}
     fee_bps = float(cost_cfg.get("fee_bps", weights_cfg.get("fee_bps", 0.0)) or 0.0)
     slippage_bps = float(
         cost_cfg.get("slippage_bps", weights_cfg.get("slippage_bps", 0.0)) or 0.0
@@ -1623,6 +1861,7 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
     score_dates: list[date] = []
     if signal_mode == "ml_scores":
         scores_by_date, score_dates = _load_scores(score_path)
+    has_scores = bool(scores_by_date)
 
     pit_map, pit_snapshot_map = load_pit_weekly_snapshots() if use_pit else ({}, {})
     if pit_map:
@@ -1657,6 +1896,20 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
         )
         if not pit_used and pit_map is None:
             pit_map = {}
+    if backtest_start or backtest_end:
+        rebalance_dates = [
+            rebalance
+            for rebalance in rebalance_dates
+            if (not backtest_start or rebalance >= backtest_start)
+            and (not backtest_end or rebalance <= backtest_end)
+        ]
+        if pit_map is not None:
+            pit_map = {rebalance: pit_map.get(rebalance, set()) for rebalance in rebalance_dates}
+        if pit_snapshot_map is not None:
+            pit_snapshot_map = {
+                rebalance: pit_snapshot_map.get(rebalance, rebalance)
+                for rebalance in rebalance_dates
+            }
     weights = pd.DataFrame(0.0, index=prices.index, columns=prices.columns)
     signal_rows: list[dict[str, str]] = []
     weight_rows: list[dict[str, str]] = []
@@ -1672,10 +1925,12 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
 
     filter_counts: dict[str, int] = {}
     prev_weights_row = pd.Series(0.0, index=prices.columns)
+    smoothed_scores: dict[str, float] = {}
     max_holdings_trimmed = 0
     turnover_limited = 0
     turnover_scale_sum = 0.0
     cash_weight_sum = 0.0
+    risk_off_count = 0
 
     for idx, rebalance in enumerate(rebalance_dates):
         snapshot_date = pit_snapshot_map.get(rebalance, rebalance)
@@ -1700,9 +1955,35 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
             avg_dollar = (window_volumes * window_prices).mean()
             snapshot_volumes = volumes.iloc[snapshot_pos]
         active_symbols = []
-        for symbol in prices.columns:
+        if pit_used and pit_universe_only:
+            symbol_pool = pit_map.get(rebalance, set())
+            if symbol_pool:
+                symbol_pool = symbol_pool.intersection(price_symbol_set)
+        else:
+            symbol_pool = prices.columns
+        for symbol in symbol_pool:
             reasons: list[str] = []
-            if pit_used and symbol not in pit_map.get(rebalance, set()):
+            asset_type = asset_type_by_symbol.get(symbol, "UNKNOWN")
+            if allowed_asset_types and asset_type not in allowed_asset_types:
+                reasons.append("asset_type")
+                filter_counts["asset_type"] = filter_counts.get("asset_type", 0) + 1
+                if record_universe:
+                    snapshot_price = snapshot_prices.get(symbol)
+                    universe_excluded.append(
+                        {
+                            "symbol": symbol,
+                            "snapshot_date": snapshot_date.isoformat(),
+                            "rebalance_date": rebalance.isoformat(),
+                            "reason": "asset_type",
+                            "snapshot_price": f"{snapshot_price:.6f}"
+                            if snapshot_price is not None and not math.isnan(snapshot_price)
+                            else "",
+                        }
+                    )
+                continue
+            if symbol in exclude_symbols:
+                reasons.append("excluded")
+            if pit_used and not pit_universe_only and symbol not in pit_map.get(rebalance, set()):
                 reasons.append("not_in_pit")
             life = symbol_life.get(symbol)
             if life:
@@ -1790,31 +2071,90 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
         score_date = None
         selected_symbols: list[str] = []
         selected_scores: dict[str, float] = {}
+        risk_off = False
+        if market_filter and benchmark_sma is not None and benchmark_series is not None:
+            try:
+                bench_price = float(benchmark_series.iloc[snapshot_pos])
+                bench_sma = float(benchmark_sma.iloc[snapshot_pos])
+            except (ValueError, TypeError):
+                bench_price = float("nan")
+                bench_sma = float("nan")
+            if not math.isnan(bench_price) and not math.isnan(bench_sma):
+                if bench_price < bench_sma:
+                    risk_off = True
 
-        if signal_mode == "ml_scores" and scores_by_date:
-            score_date = _closest_score_date(score_dates, snapshot_date)
-            if score_date:
-                scores_for_date = scores_by_date.get(score_date, {})
-                ranked = [
-                    (symbol, scores_for_date[symbol])
-                    for symbol in active_symbols
-                    if symbol in scores_for_date
-                ]
-                ranked.sort(key=lambda item: item[1], reverse=True)
-                for symbol, score in ranked:
-                    if score_min is not None and score < score_min:
-                        continue
-                    selected_symbols.append(symbol)
-                    selected_scores[symbol] = score
-                    if score_top_n > 0 and len(selected_symbols) >= score_top_n:
-                        break
-            if not selected_symbols:
+        if risk_off:
+            risk_off_count += 1
+            signal_mode_used = "risk_off"
+            if risk_off_mode == "benchmark" and benchmark_symbol in prices.columns:
+                weights_for_symbols = {benchmark_symbol: 1.0}
+            else:
+                weights_for_symbols = {}
+
+        if not risk_off and signal_mode == "ml_scores":
+            if not has_scores:
                 if score_fallback == "theme_weights":
                     signal_mode_used = "theme_weights"
                 elif score_fallback == "universe":
                     selected_symbols = list(active_symbols)
                 else:
                     continue
+            else:
+                score_target = snapshot_date - timedelta(days=score_delay_days) if score_delay_days else snapshot_date
+                score_date = _closest_score_date(score_dates, score_target)
+                if score_date:
+                    scores_for_date = scores_by_date.get(score_date, {})
+                    scores_used = scores_for_date
+                    if (
+                        score_smoothing_enabled
+                        and score_smoothing_method == "ema"
+                        and score_smoothing_alpha > 0
+                    ):
+                        for symbol, score in scores_for_date.items():
+                            prev = smoothed_scores.get(symbol, score)
+                            smoothed_scores[symbol] = (
+                                score_smoothing_alpha * score
+                                + (1.0 - score_smoothing_alpha) * prev
+                            )
+                        if score_smoothing_carry:
+                            scores_used = smoothed_scores
+                        else:
+                            scores_used = {
+                                symbol: smoothed_scores[symbol] for symbol in scores_for_date
+                            }
+                    ranked = [
+                        (symbol, scores_used[symbol])
+                        for symbol in active_symbols
+                        if symbol in scores_used
+                    ]
+                    ranked.sort(key=lambda item: item[1], reverse=True)
+                    prev_selected = set(prev_weights_row[prev_weights_row > 0].index)
+                    retain_limit = (
+                        score_retain_top_n if score_top_n > 0 and score_retain_top_n > score_top_n else 0
+                    )
+                    if retain_limit and prev_selected:
+                        for symbol, score in ranked[:retain_limit]:
+                            if score_min is not None and score < score_min:
+                                continue
+                            if symbol in prev_selected:
+                                selected_symbols.append(symbol)
+                                selected_scores[symbol] = score
+                    for symbol, score in ranked:
+                        if score_min is not None and score < score_min:
+                            continue
+                        if symbol in selected_symbols:
+                            continue
+                        selected_symbols.append(symbol)
+                        selected_scores[symbol] = score
+                        if score_top_n > 0 and len(selected_symbols) >= score_top_n:
+                            break
+                if not selected_symbols:
+                    if score_fallback == "theme_weights":
+                        signal_mode_used = "theme_weights"
+                    elif score_fallback == "universe":
+                        selected_symbols = list(active_symbols)
+                    else:
+                        continue
             if signal_mode_used == "ml_scores":
                 if not selected_symbols:
                     continue
@@ -1843,7 +2183,7 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
                         weights_for_symbols, float(score_max_weight)
                     )
 
-        if signal_mode_used != "ml_scores":
+        if not risk_off and signal_mode_used != "ml_scores":
             symbols_by_category: dict[str, list[str]] = {}
             for symbol in active_symbols:
                 category = category_by_symbol.get(symbol) or "SP500_FORMER"
@@ -1867,6 +2207,18 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
                 for symbol in symbols:
                     weights_for_symbols[symbol] = share
 
+        if not weights_for_symbols and risk_off:
+            weight_series = pd.Series(0.0, index=prices.columns)
+            start_idx = prices.index.get_loc(pd.Timestamp(rebalance))
+            end_idx = (
+                prices.index.get_loc(pd.Timestamp(rebalance_dates[idx + 1]))
+                if idx + 1 < len(rebalance_dates)
+                else len(prices.index)
+            )
+            weights.iloc[start_idx:end_idx] = weight_series
+            prev_weights_row = weight_series
+            cash_weight_sum += 1.0
+            continue
         if not weights_for_symbols:
             continue
 
@@ -1887,6 +2239,10 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
         weights_for_symbols = {
             symbol: weight / total_weight for symbol, weight in weights_for_symbols.items()
         }
+        if max_exposure < 1.0:
+            weights_for_symbols = {
+                symbol: weight * max_exposure for symbol, weight in weights_for_symbols.items()
+            }
 
         weight_row = {symbol: 0.0 for symbol in prices.columns}
         for symbol, weight in weights_for_symbols.items():
@@ -1909,6 +2265,11 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
                 }
             )
         weight_series = pd.Series(weight_row)
+        if not risk_off and weight_smoothing_enabled and 0 < weight_smoothing_alpha < 1:
+            weight_series = prev_weights_row * (1.0 - weight_smoothing_alpha) + weight_series * weight_smoothing_alpha
+            total_weight = float(weight_series.sum())
+            if total_weight > 0:
+                weight_series = weight_series / total_weight
         if turnover_limit and turnover_limit > 0:
             weight_series, planned_turnover, scale = _apply_turnover_limit(
                 weight_series, prev_weights_row, turnover_limit
@@ -1988,13 +2349,25 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
     benchmark_returns = bench_series.shift(-1) / bench_series - 1
     benchmark_equity = (1 + benchmark_returns.fillna(0.0)).cumprod()
 
+    equity_window = pd.DataFrame(
+        {"portfolio": portfolio_equity, "benchmark": benchmark_equity}
+    )
+    if backtest_start:
+        equity_window = equity_window.loc[equity_window.index >= pd.Timestamp(backtest_start)]
+    if backtest_end:
+        equity_window = equity_window.loc[equity_window.index <= pd.Timestamp(backtest_end)]
+    if equity_window.empty:
+        equity_window = pd.DataFrame(
+            {"portfolio": portfolio_equity, "benchmark": benchmark_equity}
+        )
+
     ensure_dir(out_dir)
     equity_path = out_dir / "equity_curve.csv"
     equity_df = pd.DataFrame(
         {
-            "date": portfolio_equity.index,
-            "portfolio": portfolio_equity.values,
-            "benchmark": benchmark_equity.values,
+            "date": equity_window.index,
+            "portfolio": equity_window["portfolio"].values,
+            "benchmark": equity_window["benchmark"].values,
         }
     )
     equity_df.to_csv(equity_path, index=False, encoding="utf-8")
@@ -2006,10 +2379,10 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
         price_mode = "mixed"
     rebalance_label = "weekly" if pit_used or rebalance_cfg == "W" else "monthly"
     summary = {
-        "portfolio": calc_metrics(portfolio_equity, risk_free),
-        "benchmark": calc_metrics(benchmark_equity, risk_free),
-        "start": str(portfolio_equity.index[0].date()),
-        "end": str(portfolio_equity.index[-1].date()),
+        "portfolio": calc_metrics(equity_window["portfolio"], risk_free),
+        "benchmark": calc_metrics(equity_window["benchmark"], risk_free),
+        "start": str(equity_window.index[0].date()),
+        "end": str(equity_window.index[-1].date()),
         "benchmark_symbol": benchmark_symbol,
         "price_mode": price_mode,
         "benchmark_mode": benchmark_mode if benchmark_mode else price_mode,
@@ -2022,9 +2395,23 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
         "score_min": score_min if score_min is not None else "",
         "score_max_weight": score_max_weight if score_max_weight is not None else "",
         "score_fallback": score_fallback,
+        "score_delay_days": score_delay_days,
+        "score_smoothing": score_smoothing_method if score_smoothing_enabled else "",
+        "score_smoothing_alpha": score_smoothing_alpha if score_smoothing_enabled else "",
+        "score_smoothing_carry": score_smoothing_carry if score_smoothing_enabled else "",
+        "score_retain_top_n": score_retain_top_n if score_retain_top_n else "",
+        "weight_smoothing_alpha": weight_smoothing_alpha if weight_smoothing_enabled else "",
+        "backtest_start": backtest_start.isoformat() if backtest_start else "",
+        "backtest_end": backtest_end.isoformat() if backtest_end else "",
+        "asset_type_filter": sorted(allowed_asset_types) if allowed_asset_types else "",
+        "pit_universe_only": pit_universe_only,
         "price_source_policy": price_source_policy,
         "price_source_counts": price_source_counts,
         "missing_adjusted_count": len(missing_adjusted),
+        "exclude_symbols_path": str(exclude_path) if exclude_symbols else "",
+        "exclude_symbols_count": len(exclude_symbols),
+        "symbol_life_override_path": str(override_path) if symbol_life_overrides else "",
+        "symbol_life_override_count": len(symbol_life_overrides),
         "rebalance": rebalance_label,
         "rebalance_mode": rebalance_mode,
         "pit_weekly": pit_used,
@@ -2035,6 +2422,11 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
         "liquidity_window_days": liquidity_window_days,
         "halt_volume_threshold": halt_volume_threshold,
         "record_universe": record_universe,
+        "market_filter": market_filter,
+        "market_ma_window": market_ma_window,
+        "risk_off_mode": risk_off_mode,
+        "max_exposure": max_exposure,
+        "risk_off_count": risk_off_count,
         "fee_bps": fee_bps,
         "slippage_bps": slippage_bps,
         "impact_bps": impact_bps,

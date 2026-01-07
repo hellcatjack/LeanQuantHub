@@ -8,9 +8,11 @@ from app.db import engine
 from app.models import Base
 from app.routes import (
     algorithms,
+    automation,
     audit_logs,
     backtests,
     datasets,
+    factor_scores,
     ml,
     pit,
     projects,
@@ -51,7 +53,9 @@ app.include_router(backtests.router)
 app.include_router(reports.router)
 app.include_router(datasets.router)
 app.include_router(audit_logs.router)
+app.include_router(automation.router)
 app.include_router(system_themes.router)
 app.include_router(universe.router)
 app.include_router(ml.router)
 app.include_router(pit.router)
+app.include_router(factor_scores.router)

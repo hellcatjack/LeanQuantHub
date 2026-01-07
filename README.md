@@ -60,6 +60,14 @@ systemctl --user restart stocklean-backend stocklean-frontend
 - `PYTHON_DLL`：Python 3.11 的 `libpython` 路径
 - `DOTNET_PATH` / `DOTNET_ROOT`
 
+## 数据与生命周期覆盖说明
+回测使用 `data_root/universe/alpha_symbol_life.csv` 作为股票生命周期来源（IPO/退市日期）。  
+当 Alpha 的 `delistingDate` 与价格历史冲突时，可以使用覆盖文件修正：
+- 覆盖文件默认路径：`data_root/universe/symbol_life_override.csv`
+- 覆盖文件格式：`symbol,ipoDate,delistingDate,source,note`
+- 覆盖优先级：`symbol_life_override.csv` **高于** `alpha_symbol_life.csv`
+- 可通过权重配置 `symbol_life_override_path` 指定自定义路径
+
 ## ML 评分（双 venv）
 - Lean 使用 Python 3.11（兼容 Python.NET）
 - ML 推理使用独立 Python（推荐 3.12），在 `.env` 中配置：

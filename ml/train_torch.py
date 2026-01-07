@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,6 +14,11 @@ import pandas as pd
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
+
+try:
+    import lightgbm as lgb
+except ImportError:  # pragma: no cover - optional dependency
+    lgb = None
 
 from feature_engineering import FeatureConfig, compute_features, compute_label, required_lookback
 from pit_features import apply_pit_features, load_pit_fundamentals
@@ -38,8 +44,32 @@ class WalkForwardWindow:
     test_end: pd.Timestamp
 
 
+class CancelledError(RuntimeError):
+    pass
+
+
 def _parse_config(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _parse_train_start(config: dict) -> pd.Timestamp | None:
+    raw_year = config.get("train_start_year")
+    if raw_year is not None:
+        try:
+            year = int(raw_year)
+        except (TypeError, ValueError):
+            year = None
+        if year and 1900 <= year <= 2200:
+            return pd.Timestamp(year=year, month=1, day=1)
+    raw_date = str(config.get("train_start") or "").strip()
+    if raw_date:
+        try:
+            ts = pd.to_datetime(raw_date, errors="raise")
+        except (TypeError, ValueError):
+            return None
+        if ts is not pd.NaT:
+            return ts.normalize()
+    return None
 
 
 def _data_root_from_config(config: dict) -> Path:
@@ -250,6 +280,100 @@ def _standardize(
     return scaled, mean, std
 
 
+def _resolve_model_type(config: dict) -> str:
+    raw = config.get("model_type") or (config.get("model") or {}).get("type") or "torch_mlp"
+    value = str(raw).strip().lower()
+    if value in {"lgbm_rank", "lgbm_ranker", "lightgbm_rank", "rank_lgbm"}:
+        return "lgbm_ranker"
+    return "torch_mlp"
+
+
+def _build_rank_groups(frame: pd.DataFrame) -> list[int]:
+    if frame.empty:
+        return []
+    ordered = frame.sort_index()
+    return ordered.groupby(ordered.index.date).size().tolist()
+
+
+def _lgbm_params(config: dict) -> dict:
+    params: dict[str, object] = {
+        "objective": "lambdarank",
+        "metric": "ndcg",
+        "learning_rate": 0.05,
+        "num_leaves": 31,
+        "n_estimators": 200,
+        "min_data_in_leaf": 50,
+        "subsample": 0.8,
+        "colsample_bytree": 0.8,
+        "random_state": 42,
+    }
+    raw = config.get("model_params")
+    if isinstance(raw, dict):
+        params.update({k: v for k, v in raw.items() if k != "rank_label_bins"})
+    device = str(config.get("device") or "").strip().lower()
+    if device in {"cuda", "gpu"} and "device_type" not in params:
+        params["device_type"] = "gpu"
+    if device in {"cpu"} and "device_type" not in params:
+        params["device_type"] = "cpu"
+    if "gpu_platform_id" not in params and config.get("gpu_platform_id") is not None:
+        params["gpu_platform_id"] = int(config.get("gpu_platform_id"))
+    if "gpu_device_id" not in params and config.get("gpu_device_id") is not None:
+        params["gpu_device_id"] = int(config.get("gpu_device_id"))
+    return params
+
+
+def _rank_labels(frame: pd.DataFrame, bins: int) -> np.ndarray:
+    if frame.empty:
+        return np.array([], dtype=np.int32)
+    bins = max(int(bins), 2)
+    labels = np.zeros(len(frame), dtype=np.int32)
+    values = frame["label"].to_numpy()
+    groups = frame.groupby(frame.index.date).indices
+    for idx_list in groups.values():
+        if len(idx_list) == 0:
+            continue
+        if len(idx_list) == 1:
+            labels[idx_list[0]] = 0
+            continue
+        group_vals = values[idx_list]
+        ranks = group_vals.argsort().argsort()
+        pct = ranks / max(len(group_vals) - 1, 1)
+        bucket = np.floor(pct * bins).astype(int)
+        bucket = np.clip(bucket, 0, bins - 1)
+        labels[idx_list] = bucket
+    return labels
+
+
+def _train_lgbm_ranker(
+    config: dict,
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    train_groups: list[int],
+    x_valid: np.ndarray,
+    y_valid: np.ndarray,
+    valid_groups: list[int],
+    eval_at: int,
+) -> "lgb.LGBMRanker":
+    if lgb is None:
+        raise RuntimeError("missing_lightgbm")
+    params = _lgbm_params(config)
+    early_rounds = params.pop("early_stopping_rounds", None)
+    model = lgb.LGBMRanker(**params)
+    callbacks = []
+    if early_rounds:
+        callbacks.append(lgb.early_stopping(int(early_rounds), verbose=False))
+    model.fit(
+        x_train,
+        y_train,
+        group=train_groups,
+        eval_set=[(x_valid, y_valid)],
+        eval_group=[valid_groups],
+        eval_at=[max(int(eval_at), 1)],
+        callbacks=callbacks or None,
+    )
+    return model
+
+
 def _predict_scores(
     model: nn.Module, features: np.ndarray, device: torch.device, batch_size: int
 ) -> np.ndarray:
@@ -262,7 +386,7 @@ def _predict_scores(
         batch = batch.to(device)
         with torch.no_grad():
             output = model(batch).squeeze(-1).detach().cpu().numpy()
-        scores.append(output.astype(np.float32, copy=False))
+        scores.append(np.atleast_1d(output).astype(np.float32, copy=False))
     return np.concatenate(scores) if scores else np.array([], dtype=np.float32)
 
 
@@ -275,6 +399,19 @@ def _write_progress(path: Path | None, payload: dict) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _check_cancel(
+    cancel_path: Path | None, progress_path: Path | None, payload: dict | None = None
+) -> None:
+    if not cancel_path or not cancel_path.exists():
+        return
+    if progress_path:
+        data = {"phase": "canceled"}
+        if payload:
+            data.update(payload)
+        _write_progress(progress_path, data)
+    raise CancelledError("cancel_requested")
+
+
 def _train_loop(
     model: nn.Module,
     train_loader: DataLoader,
@@ -282,6 +419,7 @@ def _train_loop(
     config: dict,
     device: torch.device,
     progress_cb: Callable[[int, int], None] | None = None,
+    cancel_cb: Callable[[], None] | None = None,
 ) -> dict:
     lr = float(config.get("lr", 1e-3))
     weight_decay = float(config.get("weight_decay", 1e-4))
@@ -297,6 +435,8 @@ def _train_loop(
     history = []
 
     for epoch in range(1, epochs + 1):
+        if cancel_cb:
+            cancel_cb()
         model.train()
         for batch_x, batch_y in train_loader:
             batch_x = batch_x.to(device)
@@ -342,12 +482,15 @@ def main() -> None:
     parser.add_argument("--device", default="auto")
     parser.add_argument("--scores-output", default="")
     parser.add_argument("--progress-path", default="")
+    parser.add_argument("--cancel-path", default="")
     args = parser.parse_args()
 
     config_path = Path(args.config)
     config = _parse_config(config_path)
     progress_path = Path(args.progress_path) if args.progress_path else None
+    cancel_path = Path(args.cancel_path) if args.cancel_path else None
     _write_progress(progress_path, {"phase": "prepare", "progress": 0.0})
+    _check_cancel(cancel_path, progress_path, {"progress": 0.0})
     data_root = Path(args.data_root) if args.data_root else _data_root_from_config(config)
     adjusted_dir = data_root / "curated_adjusted"
     if not adjusted_dir.exists():
@@ -372,6 +515,7 @@ def main() -> None:
     if label_price not in {"open", "close"}:
         label_price = "close"
     label_start_offset = int(config.get("label_start_offset", 1))
+    train_start = _parse_train_start(config)
 
     pit_cfg = config.get("pit_fundamentals", {})
     if not isinstance(pit_cfg, dict):
@@ -418,6 +562,7 @@ def main() -> None:
     dataset = []
     features_map: dict[str, pd.DataFrame] = {}
     for symbol in symbols:
+        _check_cancel(cancel_path, progress_path)
         symbol_path = _pick_dataset_file(symbol, adjusted_dir, vendor_pref)
         if not symbol_path:
             continue
@@ -437,6 +582,10 @@ def main() -> None:
                 pit_sample_on_snapshot,
                 pit_missing_policy,
             )
+        if train_start is not None:
+            features = features[features.index >= train_start]
+            if features.empty:
+                continue
         score_features = features.copy()
         if "vol_z_20" in score_features.columns:
             score_features["vol_z_20"] = score_features["vol_z_20"].fillna(0.0)
@@ -482,11 +631,217 @@ def main() -> None:
             },
         )
 
+    output_dir = Path(config.get("output_dir", "ml/models"))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    model_type = _resolve_model_type(config)
+
+    if model_type == "lgbm_ranker":
+        scores_output = args.scores_output.strip()
+        scores_path = Path(scores_output) if scores_output else output_dir / "scores.csv"
+        eval_at = int(config.get("rank_eval_at") or config.get("score_top_n") or 50)
+        rank_bins = int(
+            config.get("rank_label_bins")
+            or (config.get("model_params") or {}).get("rank_label_bins")
+            or 5
+        )
+
+        if not windows:
+            window = _build_window(data.index, walk_config, lookback)
+            train_df = data[(data.index >= window.train_start) & (data.index < window.train_end)]
+            valid_df = data[(data.index >= window.valid_start) & (data.index <= window.valid_end)]
+            if train_df.empty or valid_df.empty:
+                raise RuntimeError("训练/验证窗口为空，请检查时间跨度")
+
+            scaled_train, mean, std = _standardize(train_df, feature_cols)
+            scaled_valid = valid_df.copy()
+            for col in feature_cols:
+                scaled_valid[col] = (scaled_valid[col] - mean[col]) / (std[col] if std[col] else 1.0)
+
+            x_train = scaled_train[feature_cols].values.astype(np.float32)
+            y_train = _rank_labels(scaled_train, rank_bins)
+            x_valid = scaled_valid[feature_cols].values.astype(np.float32)
+            y_valid = _rank_labels(scaled_valid, rank_bins)
+
+            train_groups = _build_rank_groups(train_df)
+            valid_groups = _build_rank_groups(valid_df)
+
+            model = _train_lgbm_ranker(
+                config, x_train, y_train, train_groups, x_valid, y_valid, valid_groups, eval_at
+            )
+            model.booster_.save_model(str(output_dir / "lgbm_model.txt"))
+
+            payload = LinearModelPayload(
+                model_type="lgbm_ranker",
+                features=feature_cols,
+                coef=[],
+                intercept=0.0,
+                mean={k: float(v) for k, v in mean.items()},
+                std={k: float(v) for k, v in std.items()},
+                label_horizon_days=horizon,
+                trained_at=datetime.utcnow().isoformat(),
+                train_window={
+                    "train_start": window.train_start.date().isoformat(),
+                    "train_end": window.train_end.date().isoformat(),
+                    "valid_end": window.valid_end.date().isoformat(),
+                    "test_end": window.valid_end.date().isoformat(),
+                },
+            )
+            save_linear_model(output_dir / "torch_payload.json", payload)
+            metrics = {
+                "model_type": "lgbm_ranker",
+                "best_iteration": getattr(model, "best_iteration_", None),
+                "best_score": getattr(model, "best_score_", None),
+            }
+            (output_dir / "torch_metrics.json").write_text(
+                json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+
+            _write_progress(progress_path, {"phase": "train_done", "progress": 0.9})
+            return
+
+        score_rows: list[pd.DataFrame] = []
+        window_metrics: list[dict] = []
+        last_payload: LinearModelPayload | None = None
+        last_model: "lgb.LGBMRanker | None" = None
+
+        total_windows = len(windows)
+        for idx, window in enumerate(windows):
+            _check_cancel(cancel_path, progress_path)
+            train_df = data[(data.index >= window.train_start) & (data.index < window.train_end)]
+            valid_df = data[(data.index >= window.valid_start) & (data.index <= window.valid_end)]
+            if train_df.empty or valid_df.empty:
+                continue
+
+            scaled_train, mean, std = _standardize(train_df, feature_cols)
+            scaled_valid = valid_df.copy()
+            for col in feature_cols:
+                scaled_valid[col] = (scaled_valid[col] - mean[col]) / (std[col] if std[col] else 1.0)
+
+            x_train = scaled_train[feature_cols].values.astype(np.float32)
+            y_train = _rank_labels(scaled_train, rank_bins)
+            x_valid = scaled_valid[feature_cols].values.astype(np.float32)
+            y_valid = _rank_labels(scaled_valid, rank_bins)
+
+            train_groups = _build_rank_groups(train_df)
+            valid_groups = _build_rank_groups(valid_df)
+
+            model = _train_lgbm_ranker(
+                config, x_train, y_train, train_groups, x_valid, y_valid, valid_groups, eval_at
+            )
+            window_metrics.append(
+                {
+                    "train_start": window.train_start.date().isoformat(),
+                    "train_end": window.train_end.date().isoformat(),
+                    "valid_start": window.valid_start.date().isoformat(),
+                    "valid_end": window.valid_end.date().isoformat(),
+                    "test_start": window.test_start.date().isoformat(),
+                    "test_end": window.test_end.date().isoformat(),
+                    "best_iteration": getattr(model, "best_iteration_", None),
+                    "best_score": getattr(model, "best_score_", None),
+                }
+            )
+
+            _write_progress(
+                progress_path,
+                {
+                    "phase": "score",
+                    "progress": (idx + 0.95) / max(total_windows, 1),
+                    "window": idx + 1,
+                    "window_total": total_windows,
+                },
+            )
+
+            mean_vec = np.array([mean.get(name, 0.0) for name in feature_cols], dtype=np.float32)
+            std_vec = np.array(
+                [std.get(name, 1.0) or 1.0 for name in feature_cols], dtype=np.float32
+            )
+            for symbol, features in features_map.items():
+                _check_cancel(cancel_path, progress_path)
+                feature_frame = features[
+                    (features.index > window.test_start) & (features.index <= window.test_end)
+                ]
+                if feature_frame.empty:
+                    continue
+                feature_frame = feature_frame.reindex(columns=feature_cols).dropna()
+                if feature_frame.empty:
+                    continue
+                matrix = feature_frame.to_numpy(dtype=np.float32, copy=True)
+                matrix = (matrix - mean_vec) / std_vec
+                scores = model.predict(matrix)
+                if scores is None or len(scores) == 0:
+                    continue
+                score_rows.append(
+                    pd.DataFrame(
+                        {
+                            "date": feature_frame.index.date.astype(str),
+                            "symbol": symbol,
+                            "score": scores,
+                            "window": idx,
+                        }
+                    )
+                )
+
+            _write_progress(
+                progress_path,
+                {
+                    "phase": "window_done",
+                    "progress": (idx + 1) / max(total_windows, 1),
+                    "window": idx + 1,
+                    "window_total": total_windows,
+                },
+            )
+
+            last_payload = LinearModelPayload(
+                model_type="lgbm_ranker",
+                features=feature_cols,
+                coef=[],
+                intercept=0.0,
+                mean={k: float(v) for k, v in mean.items()},
+                std={k: float(v) for k, v in std.items()},
+                label_horizon_days=horizon,
+                trained_at=datetime.utcnow().isoformat(),
+                train_window={
+                    "train_start": window.train_start.date().isoformat(),
+                    "train_end": window.train_end.date().isoformat(),
+                    "valid_end": window.valid_end.date().isoformat(),
+                    "test_end": window.test_end.date().isoformat(),
+                },
+            )
+            last_model = model
+
+        if last_model is None or last_payload is None:
+            raise RuntimeError("训练窗口为空，请检查时间跨度")
+
+        last_model.booster_.save_model(str(output_dir / "lgbm_model.txt"))
+        save_linear_model(output_dir / "torch_payload.json", last_payload)
+        (output_dir / "torch_metrics.json").write_text(
+            json.dumps(
+                {"walk_forward": {"windows": window_metrics, "config": walk_config}},
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        scores_path.parent.mkdir(parents=True, exist_ok=True)
+        if score_rows:
+            scores_df = pd.concat(score_rows, ignore_index=True)
+            scores_df = scores_df.sort_values(["date", "symbol", "window"])
+            scores_df = scores_df.drop_duplicates(subset=["date", "symbol"], keep="last")
+            scores_df = scores_df.sort_values(["date", "symbol"]).drop(columns=["window"])
+        else:
+            scores_df = pd.DataFrame(columns=["date", "symbol", "score"])
+        scores_df.to_csv(scores_path, index=False)
+
+        _write_progress(progress_path, {"phase": "done", "progress": 1.0})
+        print(f"saved model: {output_dir / 'lgbm_model.txt'}")
+        print(f"saved payload: {output_dir / 'torch_payload.json'}")
+        print(f"saved scores: {scores_path}")
+        return
+
     batch_size = int(config.get("torch", {}).get("batch_size", 512))
     device = torch.device("cuda" if (args.device == "auto" and torch.cuda.is_available()) else "cpu")
     torch_config = config.get("torch", {})
-    output_dir = Path(config.get("output_dir", "ml/models"))
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     if not windows:
         window = _build_window(data.index, walk_config, lookback)
@@ -540,6 +895,7 @@ def main() -> None:
             torch_config,
             device,
             progress_cb=_epoch_progress,
+            cancel_cb=lambda: _check_cancel(cancel_path, progress_path),
         )
         torch.save(model.state_dict(), output_dir / "torch_model.pt")
 
@@ -583,6 +939,7 @@ def main() -> None:
 
     total_windows = len(windows)
     for idx, window in enumerate(windows):
+        _check_cancel(cancel_path, progress_path)
         train_df = data[(data.index >= window.train_start) & (data.index < window.train_end)]
         valid_df = data[(data.index >= window.valid_start) & (data.index <= window.valid_end)]
         if train_df.empty or valid_df.empty:
@@ -636,6 +993,7 @@ def main() -> None:
             torch_config,
             device,
             progress_cb=_window_progress,
+            cancel_cb=lambda: _check_cancel(cancel_path, progress_path),
         )
         window_metrics.append(
             {
@@ -665,6 +1023,7 @@ def main() -> None:
         std_vec = np.array([std.get(name, 1.0) or 1.0 for name in feature_cols], dtype=np.float32)
 
         for symbol, features in features_map.items():
+            _check_cancel(cancel_path, progress_path)
             feature_frame = features[
                 (features.index > window.test_start) & (features.index <= window.test_end)
             ]
@@ -749,4 +1108,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except CancelledError:
+        print("training canceled")
+        sys.exit(130)
