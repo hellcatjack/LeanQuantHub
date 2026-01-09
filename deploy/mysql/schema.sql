@@ -11,9 +11,26 @@ CREATE TABLE IF NOT EXISTS projects (
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS ml_pipeline_runs (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  project_id INT NOT NULL,
+  name VARCHAR(120) NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'created',
+  params JSON NULL,
+  notes TEXT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  started_at DATETIME NULL,
+  ended_at DATETIME NULL,
+  CONSTRAINT fk_ml_pipeline_runs_project FOREIGN KEY (project_id)
+    REFERENCES projects(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE INDEX idx_ml_pipeline_runs_project ON ml_pipeline_runs(project_id);
+
 CREATE TABLE IF NOT EXISTS backtest_runs (
   id INT AUTO_INCREMENT PRIMARY KEY,
   project_id INT NOT NULL,
+  pipeline_id INT NULL,
   status VARCHAR(32) NOT NULL DEFAULT 'queued',
   params JSON NULL,
   metrics JSON NULL,
@@ -21,10 +38,13 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
   ended_at DATETIME NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT fk_backtest_runs_project FOREIGN KEY (project_id)
-    REFERENCES projects(id) ON DELETE CASCADE
+    REFERENCES projects(id) ON DELETE CASCADE,
+  CONSTRAINT fk_backtest_runs_pipeline FOREIGN KEY (pipeline_id)
+    REFERENCES ml_pipeline_runs(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE INDEX idx_backtest_runs_project ON backtest_runs(project_id);
+CREATE INDEX idx_backtest_runs_pipeline ON backtest_runs(pipeline_id);
 
 CREATE TABLE IF NOT EXISTS reports (
   id INT AUTO_INCREMENT PRIMARY KEY,
@@ -41,6 +61,7 @@ CREATE INDEX idx_reports_run ON reports(run_id);
 CREATE TABLE IF NOT EXISTS ml_train_jobs (
   id INT AUTO_INCREMENT PRIMARY KEY,
   project_id INT NOT NULL,
+  pipeline_id INT NULL,
   status VARCHAR(32) NOT NULL DEFAULT 'queued',
   config JSON NULL,
   metrics JSON NULL,
@@ -55,10 +76,13 @@ CREATE TABLE IF NOT EXISTS ml_train_jobs (
   started_at DATETIME NULL,
   ended_at DATETIME NULL,
   CONSTRAINT fk_ml_train_jobs_project FOREIGN KEY (project_id)
-    REFERENCES projects(id) ON DELETE CASCADE
+    REFERENCES projects(id) ON DELETE CASCADE,
+  CONSTRAINT fk_ml_train_jobs_pipeline FOREIGN KEY (pipeline_id)
+    REFERENCES ml_pipeline_runs(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE INDEX idx_ml_train_jobs_project ON ml_train_jobs(project_id);
+CREATE INDEX idx_ml_train_jobs_pipeline ON ml_train_jobs(pipeline_id);
 
 CREATE TABLE IF NOT EXISTS factor_score_jobs (
   id INT AUTO_INCREMENT PRIMARY KEY,

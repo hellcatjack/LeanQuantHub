@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import BacktestChartPanel from "./BacktestChartPanel";
+import BacktestPerformanceChart from "./BacktestPerformanceChart";
 import { useI18n } from "../i18n";
 
 interface ReportItem {
@@ -8,9 +9,9 @@ interface ReportItem {
   report_type: string;
 }
 
-type ChartPoint = { x: number; y: number };
+type ChartPoint = { time: number; value: number };
 
-const apiBase = import.meta.env.VITE_API_BASE_URL || "";
+const apiBase = import.meta.env.VITE_API_BASE_URL || "http://localhost:8021";
 
 const extractSeries = (data: any, chartName: string, seriesName: string): ChartPoint[] => {
   const charts = data?.charts || {};
@@ -22,80 +23,29 @@ const extractSeries = (data: any, chartName: string, seriesName: string): ChartP
       if (!Array.isArray(entry) || entry.length < 2) {
         return null;
       }
-      const x = Number(entry[0]);
-      const y = Number(entry[1]);
-      if (!Number.isFinite(y)) {
+      const time = Number(entry[0]);
+      const value = Number(entry[1]);
+      if (!Number.isFinite(value)) {
         return null;
       }
-      return { x: Number.isFinite(x) ? x : index, y };
+      return { time: Number.isFinite(time) ? time : index, value };
     })
     .filter(Boolean) as ChartPoint[];
 };
 
-const LineChart = ({
-  title,
-  points,
-  stroke = "#0f62fe",
-  summary,
-  emptyText,
-}: {
-  title: string;
-  points: ChartPoint[];
-  stroke?: string;
-  summary: string;
-  emptyText: string;
-}) => {
-  if (!points.length) {
-    return (
-      <div className="card">
-        <div className="card-title">{title}</div>
-        <div className="card-meta">{emptyText}</div>
-      </div>
-    );
+const isFlatSeries = (points: ChartPoint[]) => {
+  if (points.length < 2) {
+    return true;
   }
-
-  const width = 640;
-  const height = 220;
-  const padding = 28;
-  const xs = points.map((p) => p.x);
-  const ys = points.map((p) => p.y);
-  const minX = Math.min(...xs);
-  const maxX = Math.max(...xs);
-  const minY = Math.min(...ys);
-  const maxY = Math.max(...ys);
-  const spanX = maxX - minX || 1;
-  const spanY = maxY - minY || 1;
-  const scaleX = (value: number) =>
-    padding + ((value - minX) / spanX) * (width - padding * 2);
-  const scaleY = (value: number) =>
-    height - padding - ((value - minY) / spanY) * (height - padding * 2);
-
-  const path = points
-    .map((point, idx) => {
-      const x = scaleX(point.x);
-      const y = scaleY(point.y);
-      return `${idx === 0 ? "M" : "L"}${x.toFixed(2)} ${y.toFixed(2)}`;
-    })
-    .join(" ");
-
-  return (
-    <div className="card">
-      <div className="card-title">{title}</div>
-      <div className="card-meta">{summary}</div>
-      <svg viewBox={`0 0 ${width} ${height}`} width="100%" height={height}>
-        <rect x="0" y="0" width={width} height={height} fill="#ffffff" />
-        <line
-          x1={padding}
-          y1={height - padding}
-          x2={width - padding}
-          y2={height - padding}
-          stroke="#e3e6ee"
-        />
-        <line x1={padding} y1={padding} x2={padding} y2={height - padding} stroke="#e3e6ee" />
-        <path d={path} fill="none" stroke={stroke} strokeWidth={2} />
-      </svg>
-    </div>
-  );
+  const values = points.map((item) => item.value).filter((value) => Number.isFinite(value));
+  if (values.length < 2) {
+    return true;
+  }
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min;
+  const base = Math.abs(max) || 1;
+  return span / base < 1e-6;
 };
 
 interface BacktestInlinePreviewProps {
@@ -112,6 +62,10 @@ export default function BacktestInlinePreview({
   const { t } = useI18n();
   const [equityPoints, setEquityPoints] = useState<ChartPoint[]>([]);
   const [drawdownPoints, setDrawdownPoints] = useState<ChartPoint[]>([]);
+  const [benchmarkPoints, setBenchmarkPoints] = useState<ChartPoint[]>([]);
+  const [longExposurePoints, setLongExposurePoints] = useState<ChartPoint[]>([]);
+  const [shortExposurePoints, setShortExposurePoints] = useState<ChartPoint[]>([]);
+  const [defensiveExposurePoints, setDefensiveExposurePoints] = useState<ChartPoint[]>([]);
   const [reportHtmlId, setReportHtmlId] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [errorKey, setErrorKey] = useState("");
@@ -121,6 +75,10 @@ export default function BacktestInlinePreview({
       if (!runId) {
         setEquityPoints([]);
         setDrawdownPoints([]);
+        setBenchmarkPoints([]);
+        setLongExposurePoints([]);
+        setShortExposurePoints([]);
+        setDefensiveExposurePoints([]);
         setReportHtmlId(null);
         setErrorKey("");
         return;
@@ -137,16 +95,85 @@ export default function BacktestInlinePreview({
         if (!resultReport) {
           setEquityPoints([]);
           setDrawdownPoints([]);
+          setBenchmarkPoints([]);
+          setLongExposurePoints([]);
+          setShortExposurePoints([]);
+          setDefensiveExposurePoints([]);
           setErrorKey("reports.charts.errorNotFound");
           return;
         }
         const fileRes = await fetch(`${apiBase}/api/reports/${resultReport.id}/file`);
         const payload = await fileRes.json();
-        setEquityPoints(extractSeries(payload, "Strategy Equity", "Equity"));
-        setDrawdownPoints(extractSeries(payload, "Drawdown", "Equity Drawdown"));
+        const nextEquity = extractSeries(payload, "Strategy Equity", "Equity");
+        const nextDrawdown = extractSeries(payload, "Drawdown", "Equity Drawdown");
+        const reportBenchmark = extractSeries(payload, "Benchmark", "Benchmark");
+        const nextLong = extractSeries(payload, "Exposure", "Equity - Long Ratio");
+        const nextShort = extractSeries(payload, "Exposure", "Equity - Short Ratio");
+        const nextDefensive = extractSeries(payload, "Exposure Extra", "Defensive Ratio");
+        setEquityPoints(nextEquity);
+        setDrawdownPoints(nextDrawdown);
+        setLongExposurePoints(nextLong);
+        setShortExposurePoints(nextShort);
+        setDefensiveExposurePoints(nextDefensive);
+
+        let resolvedBenchmark = reportBenchmark;
+        if (isFlatSeries(reportBenchmark)) {
+          try {
+            const runRes = await api.get(`/api/backtests/${runId}`);
+            const runParams = (runRes.data as any)?.params || {};
+            const algoParams = runParams.algorithm_parameters || {};
+            const benchmarkSymbol =
+              runParams.benchmark || algoParams.benchmark || "SPY";
+            const start =
+              algoParams.backtest_start ||
+              algoParams.start_date ||
+              algoParams.start ||
+              undefined;
+            const end =
+              algoParams.backtest_end ||
+              algoParams.end_date ||
+              algoParams.end ||
+              undefined;
+            const chartRes = await api.get(`/api/backtests/${runId}/chart`, {
+              params: { symbol: String(benchmarkSymbol).toUpperCase() },
+            });
+            const dataset = (chartRes.data as any)?.dataset;
+            if (dataset?.id) {
+              const seriesRes = await api.get(`/api/datasets/${dataset.id}/series`, {
+                params: { mode: "adjusted", start, end },
+              });
+              const adjusted = (seriesRes.data as any)?.adjusted || [];
+              const candles = (seriesRes.data as any)?.candles || [];
+              const pointsFromAdjusted = adjusted
+                .map((item: any) => ({
+                  time: Number(item.time),
+                  value: Number(item.value),
+                }))
+                .filter((item: ChartPoint) => Number.isFinite(item.value));
+              if (pointsFromAdjusted.length) {
+                resolvedBenchmark = pointsFromAdjusted;
+              } else if (candles.length) {
+                const pointsFromCandles = candles
+                  .map((item: any) => ({
+                    time: Number(item.time),
+                    value: Number(item.close),
+                  }))
+                  .filter((item: ChartPoint) => Number.isFinite(item.value));
+                resolvedBenchmark = pointsFromCandles;
+              }
+            }
+          } catch {
+            // fall back to report benchmark
+          }
+        }
+        setBenchmarkPoints(resolvedBenchmark);
       } catch (err) {
         setEquityPoints([]);
         setDrawdownPoints([]);
+        setBenchmarkPoints([]);
+        setLongExposurePoints([]);
+        setShortExposurePoints([]);
+        setDefensiveExposurePoints([]);
         setErrorKey("reports.charts.errorLoad");
       } finally {
         setLoading(false);
@@ -154,19 +181,6 @@ export default function BacktestInlinePreview({
     };
     void load();
   }, [runId]);
-
-  const formatChartSummary = (points: ChartPoint[]) => {
-    if (!points.length) {
-      return "";
-    }
-    const startValue = points[0].y.toFixed(2);
-    const endValue = points[points.length - 1].y.toFixed(2);
-    return t("charts.pointsSummary", {
-      count: points.length,
-      start: startValue,
-      end: endValue,
-    });
-  };
 
   if (!runId) {
     return (
@@ -214,21 +228,16 @@ export default function BacktestInlinePreview({
         {errorKey && <span className="form-hint danger">{t(errorKey)}</span>}
       </div>
       {activeTab === "charts" ? (
-        <div className="grid-2">
-          <LineChart
-            title={t("charts.equityCurve")}
-            points={equityPoints}
-            summary={formatChartSummary(equityPoints)}
-            emptyText={t("charts.noData")}
-          />
-          <LineChart
-            title={t("charts.drawdownCurve")}
-            points={drawdownPoints}
-            summary={formatChartSummary(drawdownPoints)}
-            emptyText={t("charts.noData")}
-            stroke="#d64545"
-          />
-        </div>
+        <BacktestPerformanceChart
+          equityPoints={equityPoints}
+          drawdownPoints={drawdownPoints}
+          benchmarkPoints={benchmarkPoints}
+          longExposurePoints={longExposurePoints}
+          shortExposurePoints={shortExposurePoints}
+          defensiveExposurePoints={defensiveExposurePoints}
+          loading={loading}
+          errorKey={errorKey}
+        />
       ) : (
         <BacktestChartPanel runId={runId} />
       )}

@@ -13,6 +13,8 @@ from app.models import (
     AlgorithmVersion,
     BacktestRun,
     Dataset,
+    MLPipelineRun,
+    MLTrainJob,
     Project,
     ProjectAlgorithmBinding,
     Report,
@@ -55,6 +57,31 @@ def _coerce_pagination(page: int, page_size: int, total: int) -> tuple[int, int,
         safe_page = total_pages
     offset = (safe_page - 1) * safe_page_size
     return safe_page, safe_page_size, offset
+
+
+def _merge_params(base: dict, override: dict) -> dict:
+    if not base:
+        return dict(override)
+    result = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _merge_params(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def _extract_pipeline_backtest_params(pipeline: MLPipelineRun) -> dict:
+    params = pipeline.params if isinstance(pipeline.params, dict) else {}
+    backtest_params = params.get("backtest")
+    if isinstance(backtest_params, dict):
+        return dict(backtest_params)
+    fallback_keys = ("algorithm_parameters", "benchmark", "costs", "risk", "data_folder", "score_csv_path")
+    fallback: dict[str, object] = {}
+    for key in fallback_keys:
+        if key in params:
+            fallback[key] = params[key]
+    return fallback
 
 
 def _build_theme_weight_index(config: dict) -> dict[str, float]:
@@ -317,7 +344,7 @@ def _resolve_dataset_for_symbol(session, symbol: str) -> Dataset | None:
 @router.get("", response_model=list[BacktestOut])
 def list_backtests():
     with get_session() as session:
-        return session.query(BacktestRun).order_by(BacktestRun.created_at.desc()).all()
+        return session.query(BacktestRun).order_by(BacktestRun.id.desc()).all()
 
 
 @router.get("/page", response_model=BacktestPageOut)
@@ -330,7 +357,7 @@ def list_backtests_page(
         safe_page, safe_page_size, offset = _coerce_pagination(page, page_size, total)
         runs = (
             session.query(BacktestRun)
-            .order_by(BacktestRun.created_at.desc())
+            .order_by(BacktestRun.id.desc())
             .offset(offset)
             .limit(safe_page_size)
             .all()
@@ -365,13 +392,31 @@ def create_backtest(payload: BacktestCreate, background_tasks: BackgroundTasks):
         project = session.get(Project, payload.project_id)
         if not project:
             raise HTTPException(status_code=404, detail="项目不存在")
+        pipeline_id = payload.pipeline_id
+        pipeline = None
+        if pipeline_id is not None:
+            pipeline = session.get(MLPipelineRun, pipeline_id)
+            if not pipeline or pipeline.project_id != payload.project_id:
+                raise HTTPException(status_code=404, detail="Pipeline 不存在")
         params = payload.params.copy() if isinstance(payload.params, dict) else {}
+        if pipeline is not None:
+            pipeline_params = _extract_pipeline_backtest_params(pipeline)
+            if pipeline_params:
+                params = _merge_params(pipeline_params, params)
         config = _resolve_project_config(session, payload.project_id)
         if not params.get("benchmark"):
             params["benchmark"] = config.get("benchmark") or "SPY"
         algo_params = params.get("algorithm_parameters")
         if not isinstance(algo_params, dict):
             algo_params = {}
+        train_job_id = params.get("pipeline_train_job_id")
+        if train_job_id:
+            train_job = session.get(MLTrainJob, int(train_job_id))
+            if train_job and train_job.project_id == payload.project_id:
+                if train_job.output_dir:
+                    candidate = Path(train_job.output_dir) / "scores.csv"
+                    if candidate.exists():
+                        algo_params["score_csv_path"] = str(candidate)
         if not str(algo_params.get("symbols") or "").strip():
             theme_symbols = _collect_project_symbols(config)
             if theme_symbols:
@@ -438,7 +483,9 @@ def create_backtest(payload: BacktestCreate, background_tasks: BackgroundTasks):
                 params["algorithm_type_name"] = algo_version.type_name
         if algo_params:
             params["algorithm_parameters"] = algo_params
-        run = BacktestRun(project_id=payload.project_id, params=params)
+        run = BacktestRun(
+            project_id=payload.project_id, params=params, pipeline_id=pipeline_id
+        )
         session.add(run)
         session.commit()
         session.refresh(run)

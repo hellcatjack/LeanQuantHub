@@ -16,12 +16,13 @@ LeanQuantHub 是一套本地化多用户量化平台：前端参考 QuantConnect
 
 ### 后端
 ```bash
-cd backend
-cp .env.example .env
+cd /app/stocklean
+cp backend/.env.example backend/.env
 # 填写 DB_* / LEAN_* / ML_* 等环境变量
-python -m venv .venv
-.venv/bin/pip install -r requirements.txt
-.venv/bin/uvicorn app.main:app --reload --host 0.0.0.0 --port 8021
+python3.11 -m venv .venv
+.venv/bin/pip install -r backend/requirements.txt -r ml/requirements.txt
+cd backend
+../.venv/bin/uvicorn app.main:app --reload --host 0.0.0.0 --port 8021
 ```
 
 ### 前端
@@ -56,8 +57,8 @@ systemctl --user restart stocklean-backend stocklean-frontend
 - `LEAN_CONFIG_TEMPLATE`：Lean 配置模板 JSON
 - `LEAN_ALGORITHM_PATH`：算法脚本路径
 - `LEAN_DATA_FOLDER`：Lean 数据目录
-- `LEAN_PYTHON_VENV`：**Lean 专用 Python 3.11 venv**
-- `PYTHON_DLL`：Python 3.11 的 `libpython` 路径
+- `LEAN_PYTHON_VENV`：**统一 Python 3.11 venv（推荐 `/app/stocklean/.venv`）**
+- `PYTHON_DLL`：Python 3.11 的 `libpython` 路径（推荐 `/app/stocklean/.venv/lib/libpython3.11.so`）
 - `DOTNET_PATH` / `DOTNET_ROOT`
 
 ## 数据与生命周期覆盖说明
@@ -68,9 +69,9 @@ systemctl --user restart stocklean-backend stocklean-frontend
 - 覆盖优先级：`symbol_life_override.csv` **高于** `alpha_symbol_life.csv`
 - 可通过权重配置 `symbol_life_override_path` 指定自定义路径
 
-## ML 评分（双 venv）
-- Lean 使用 Python 3.11（兼容 Python.NET）
-- ML 推理使用独立 Python（推荐 3.12），在 `.env` 中配置：
+## ML 评分（统一 venv）
+- Lean 与 ML 统一使用 Python 3.11（兼容 Python.NET）
+- 在 `.env` 中配置：
   - `ML_PYTHON_PATH=/app/stocklean/.venv/bin/python`
 
 ## 安全与提交

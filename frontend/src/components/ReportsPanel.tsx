@@ -25,7 +25,7 @@ interface CompareItem {
 
 type ChartPoint = { x: number; y: number };
 
-const apiBase = import.meta.env.VITE_API_BASE_URL || "";
+const apiBase = import.meta.env.VITE_API_BASE_URL || "http://localhost:8021";
 
 const extractSeries = (data: any, chartName: string, seriesName: string): ChartPoint[] => {
   const charts = data?.charts || {};
@@ -139,6 +139,8 @@ export default function ReportsPanel() {
       { key: "Net Profit", label: t("metrics.netProfit") },
       { key: "Total Fees", label: t("metrics.totalFees") },
       { key: "Portfolio Turnover", label: t("metrics.turnover") },
+      { key: "Turnover_week", label: t("metrics.turnoverWeekAvg") },
+      { key: "Turnover_sanity_ratio", label: t("metrics.turnoverSanityRatio") },
       { key: "Risk Status", label: t("metrics.riskStatus") },
     ],
     [t]

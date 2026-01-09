@@ -591,6 +591,7 @@
                          "train_years":  8,
                          "valid_months":  12,
                          "test_months":  12,
-                         "step_months":  6
+                         "step_months":  12,
+                         "allow_overlap":  false
                      }
 }

@@ -25,7 +25,7 @@ interface BacktestProgress {
   as_of?: string | null;
 }
 
-const apiBase = import.meta.env.VITE_API_BASE_URL || "";
+const apiBase = import.meta.env.VITE_API_BASE_URL || "http://localhost:8021";
 
 export default function BacktestsPage() {
   const { t, formatDateTime } = useI18n();
@@ -50,6 +50,8 @@ export default function BacktestsPage() {
       { key: "Net Profit", label: t("metrics.netProfit") },
       { key: "Total Fees", label: t("metrics.totalFees") },
       { key: "Portfolio Turnover", label: t("metrics.turnover") },
+      { key: "Turnover_week", label: t("metrics.turnoverWeekAvg") },
+      { key: "Turnover_sanity_ratio", label: t("metrics.turnoverSanityRatio") },
       { key: "Risk Status", label: t("metrics.riskStatus") },
     ],
     [t]
@@ -88,9 +90,10 @@ export default function BacktestsPage() {
     const res = await api.get<Paginated<Backtest>>("/api/backtests/page", {
       params: { page: nextPage, page_size: nextSize },
     });
-    setRuns(res.data.items);
+    const items = [...res.data.items].sort((a, b) => b.id - a.id);
+    setRuns(items);
     setRunTotal(res.data.total);
-    await loadProgress(res.data.items);
+    await loadProgress(items);
   };
 
   useEffect(() => {

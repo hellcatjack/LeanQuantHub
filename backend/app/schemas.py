@@ -164,11 +164,13 @@ class BacktestCreate(BaseModel):
     project_id: int
     algorithm_version_id: int | None = None
     params: dict[str, Any] | None = None
+    pipeline_id: int | None = None
 
 
 class BacktestOut(BaseModel):
     id: int
     project_id: int
+    pipeline_id: int | None = None
     status: str
     params: dict[str, Any] | None
     metrics: dict[str, Any] | None
@@ -198,11 +200,13 @@ class MLTrainCreate(BaseModel):
     train_start_year: int | None = None
     model_type: str | None = None
     model_params: dict[str, Any] | None = None
+    pipeline_id: int | None = None
 
 
 class MLTrainOut(BaseModel):
     id: int
     project_id: int
+    pipeline_id: int | None = None
     status: str
     config: dict[str, Any] | None = None
     metrics: dict[str, Any] | None = None
@@ -228,6 +232,57 @@ class MLTrainPageOut(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+class MLPipelineCreate(BaseModel):
+    project_id: int
+    name: str | None = None
+    params: dict[str, Any] | None = None
+    notes: str | None = None
+
+
+class MLPipelineUpdate(BaseModel):
+    name: str | None = None
+    params: dict[str, Any] | None = None
+    notes: str | None = None
+    status: str | None = None
+
+
+class MLPipelineOut(BaseModel):
+    id: int
+    project_id: int
+    name: str | None = None
+    status: str
+    params: dict[str, Any] | None = None
+    notes: str | None = None
+    created_at: datetime
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+
+    class Config:
+        from_attributes = True
+
+
+class MLPipelineListItem(MLPipelineOut):
+    train_job_count: int = 0
+    backtest_count: int = 0
+    best_train_score: float | None = None
+    best_backtest_score: float | None = None
+    combined_score: float | None = None
+    best_train_job_id: int | None = None
+    best_backtest_run_id: int | None = None
+
+
+class PipelineBacktestOut(BacktestOut):
+    score: float | None = None
+    score_detail: dict[str, Any] | None = None
+
+
+class MLPipelineDetailOut(MLPipelineOut):
+    train_jobs: list[MLTrainOut] = []
+    backtests: list[PipelineBacktestOut] = []
+    train_score_summary: dict[str, Any] | None = None
+    backtest_score_summary: dict[str, Any] | None = None
 
 
 class BacktestListOut(BacktestOut):

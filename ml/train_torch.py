@@ -11,9 +11,15 @@ from typing import Callable, Iterable
 
 import numpy as np
 import pandas as pd
-import torch
-from torch import nn
-from torch.utils.data import DataLoader, TensorDataset
+try:
+    import torch
+    from torch import nn
+    from torch.utils.data import DataLoader, TensorDataset
+except ImportError:  # pragma: no cover - optional dependency
+    torch = None
+    nn = None
+    DataLoader = None
+    TensorDataset = None
 
 try:
     import lightgbm as lgb
@@ -23,7 +29,10 @@ except ImportError:  # pragma: no cover - optional dependency
 from feature_engineering import FeatureConfig, compute_features, compute_label, required_lookback
 from pit_features import apply_pit_features, load_pit_fundamentals
 from model_io import LinearModelPayload, save_linear_model
-from torch_model import TorchMLP
+try:
+    from torch_model import TorchMLP
+except ImportError:  # pragma: no cover - optional dependency
+    TorchMLP = None
 
 
 @dataclass
@@ -46,6 +55,17 @@ class WalkForwardWindow:
 
 class CancelledError(RuntimeError):
     pass
+
+
+def _require_torch() -> None:
+    if (
+        torch is None
+        or nn is None
+        or DataLoader is None
+        or TensorDataset is None
+        or TorchMLP is None
+    ):
+        raise RuntimeError("torch_missing:请安装torch或切换到lgbm模型")
 
 
 def _parse_config(path: Path) -> dict:
@@ -228,6 +248,10 @@ def _build_walk_forward_windows(
     valid_months = _coerce_int(config.get("valid_months"), 12)
     test_months = _coerce_int(config.get("test_months"), 0)
     step_months = _coerce_int(config.get("step_months"), test_months)
+    allow_overlap = bool(config.get("allow_overlap", False))
+
+    if not allow_overlap and test_months > 0 and step_months < test_months:
+        step_months = test_months
 
     if test_months <= 0 or step_months <= 0:
         return []
@@ -322,6 +346,162 @@ def _lgbm_params(config: dict) -> dict:
     return params
 
 
+def _extract_lgbm_curve(
+    model: "lgb.LGBMRanker",
+) -> tuple[str | None, list[float], list[float]]:
+    evals = getattr(model, "evals_result_", None) or {}
+    if not isinstance(evals, dict) or not evals:
+        return None, [], []
+
+    def _pick_metric(series: dict) -> str:
+        for key in ("ndcg@50", "ndcg@10", "ndcg@100"):
+            if key in series:
+                return key
+        return next(iter(series.keys()))
+
+    metric_name = None
+    for key in ("valid", "valid_0", "train", "training"):
+        series = evals.get(key)
+        if isinstance(series, dict) and series:
+            metric_name = _pick_metric(series)
+            break
+    if not metric_name:
+        return None, [], []
+
+    def _series(keys: tuple[str, ...]) -> list[float]:
+        for key in keys:
+            series = evals.get(key)
+            if not isinstance(series, dict):
+                continue
+            values = series.get(metric_name)
+            if values is None and series:
+                values = next(iter(series.values()))
+            if values:
+                return [float(item) for item in values]
+        return []
+
+    train_curve = _series(("train", "training"))
+    valid_curve = _series(("valid", "valid_0"))
+    return metric_name, train_curve, valid_curve
+
+
+def _aggregate_curves(curves: list[list[float]]) -> list[float]:
+    curves = [curve for curve in curves if curve]
+    if not curves:
+        return []
+    min_len = min(len(curve) for curve in curves)
+    if min_len <= 0:
+        return []
+    return [float(np.mean([curve[i] for curve in curves])) for i in range(min_len)]
+
+
+def _build_curve_payload(
+    metric: str | None, train_curve: list[float], valid_curve: list[float]
+) -> dict | None:
+    if not train_curve and not valid_curve:
+        return None
+    if train_curve and valid_curve:
+        length = min(len(train_curve), len(valid_curve))
+        train_curve = train_curve[:length]
+        valid_curve = valid_curve[:length]
+    else:
+        length = len(train_curve) or len(valid_curve)
+    if length <= 0:
+        return None
+    return {
+        "metric": metric or "",
+        "iterations": list(range(1, length + 1)),
+        "train": train_curve,
+        "valid": valid_curve,
+    }
+
+
+def _build_loss_curve(history: list[dict]) -> dict | None:
+    if not history:
+        return None
+    values = []
+    iterations = []
+    for idx, item in enumerate(history, start=1):
+        raw = item.get("valid_loss")
+        if raw is None:
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        values.append(value)
+        iterations.append(int(item.get("epoch") or idx))
+    if not values:
+        return None
+    return {"metric": "valid_loss", "iterations": iterations, "train": [], "valid": values}
+
+
+def _resolve_eval_at_list(config: dict, base_eval: int) -> list[int]:
+    values: list[int] = []
+    raw_list = config.get("rank_eval_at_list") or config.get("rank_eval_ats")
+    if isinstance(raw_list, (list, tuple)):
+        for item in raw_list:
+            try:
+                number = int(item)
+            except (TypeError, ValueError):
+                continue
+            if number > 0:
+                values.append(number)
+    if base_eval:
+        values.append(int(base_eval))
+    values.extend([10, 50, 100])
+    deduped = sorted({value for value in values if value > 0})
+    return deduped or [max(int(base_eval or 1), 1)]
+
+
+def _extract_ndcg_scores(model: "lgb.LGBMRanker") -> dict[str, float]:
+    best = getattr(model, "best_score_", None) or {}
+    if not isinstance(best, dict):
+        return {}
+    valid = best.get("valid") or best.get("valid_0") or {}
+    if not isinstance(valid, dict):
+        return {}
+    result: dict[str, float] = {}
+    for k in (10, 50, 100):
+        key = f"ndcg@{k}"
+        if key in valid:
+            try:
+                result[f"ndcg_at_{k}"] = float(valid[key])
+            except (TypeError, ValueError):
+                continue
+    return result
+
+
+def _safe_corr(x: np.ndarray, y: np.ndarray) -> float | None:
+    if x.size < 2 or y.size < 2:
+        return None
+    mask = np.isfinite(x) & np.isfinite(y)
+    x = x[mask]
+    y = y[mask]
+    if x.size < 2 or y.size < 2:
+        return None
+    if np.std(x) == 0 or np.std(y) == 0:
+        return None
+    return float(np.corrcoef(x, y)[0, 1])
+
+
+def _rank_values(values: np.ndarray) -> np.ndarray:
+    return pd.Series(values).rank(method="average").to_numpy(dtype=np.float32)
+
+
+def _compute_ic_scores(pred: np.ndarray, actual: np.ndarray) -> tuple[float | None, float | None]:
+    if pred.size == 0 or actual.size == 0:
+        return None, None
+    mask = np.isfinite(pred) & np.isfinite(actual)
+    pred = pred[mask]
+    actual = actual[mask]
+    if pred.size < 2 or actual.size < 2:
+        return None, None
+    ic = _safe_corr(pred, actual)
+    rank_ic = _safe_corr(_rank_values(pred), _rank_values(actual))
+    return ic, rank_ic
+
+
 def _rank_labels(frame: pd.DataFrame, bins: int) -> np.ndarray:
     if frame.empty:
         return np.array([], dtype=np.int32)
@@ -352,7 +532,7 @@ def _train_lgbm_ranker(
     x_valid: np.ndarray,
     y_valid: np.ndarray,
     valid_groups: list[int],
-    eval_at: int,
+    eval_at: list[int],
 ) -> "lgb.LGBMRanker":
     if lgb is None:
         raise RuntimeError("missing_lightgbm")
@@ -366,9 +546,10 @@ def _train_lgbm_ranker(
         x_train,
         y_train,
         group=train_groups,
-        eval_set=[(x_valid, y_valid)],
-        eval_group=[valid_groups],
-        eval_at=[max(int(eval_at), 1)],
+        eval_set=[(x_train, y_train), (x_valid, y_valid)],
+        eval_group=[train_groups, valid_groups],
+        eval_names=["train", "valid"],
+        eval_at=[int(item) for item in eval_at if int(item) > 0] or [1],
         callbacks=callbacks or None,
     )
     return model
@@ -639,6 +820,7 @@ def main() -> None:
         scores_output = args.scores_output.strip()
         scores_path = Path(scores_output) if scores_output else output_dir / "scores.csv"
         eval_at = int(config.get("rank_eval_at") or config.get("score_top_n") or 50)
+        eval_at_list = _resolve_eval_at_list(config, eval_at)
         rank_bins = int(
             config.get("rank_label_bins")
             or (config.get("model_params") or {}).get("rank_label_bins")
@@ -666,9 +848,20 @@ def main() -> None:
             valid_groups = _build_rank_groups(valid_df)
 
             model = _train_lgbm_ranker(
-                config, x_train, y_train, train_groups, x_valid, y_valid, valid_groups, eval_at
+                config,
+                x_train,
+                y_train,
+                train_groups,
+                x_valid,
+                y_valid,
+                valid_groups,
+                eval_at_list,
             )
             model.booster_.save_model(str(output_dir / "lgbm_model.txt"))
+            metric_name, train_curve, valid_curve = _extract_lgbm_curve(model)
+            ndcg_scores = _extract_ndcg_scores(model)
+            preds = model.predict(x_valid)
+            ic, rank_ic = _compute_ic_scores(preds, valid_df["label"].values.astype(np.float32))
 
             payload = LinearModelPayload(
                 model_type="lgbm_ranker",
@@ -691,7 +884,13 @@ def main() -> None:
                 "model_type": "lgbm_ranker",
                 "best_iteration": getattr(model, "best_iteration_", None),
                 "best_score": getattr(model, "best_score_", None),
+                **ndcg_scores,
+                "ic": ic,
+                "rank_ic": rank_ic,
             }
+            curve_payload = _build_curve_payload(metric_name, train_curve, valid_curve)
+            if curve_payload:
+                metrics["curve"] = curve_payload
             (output_dir / "torch_metrics.json").write_text(
                 json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8"
             )
@@ -703,6 +902,9 @@ def main() -> None:
         window_metrics: list[dict] = []
         last_payload: LinearModelPayload | None = None
         last_model: "lgb.LGBMRanker | None" = None
+        curve_metric: str | None = None
+        train_curves: list[list[float]] = []
+        valid_curves: list[list[float]] = []
 
         total_windows = len(windows)
         for idx, window in enumerate(windows):
@@ -726,8 +928,25 @@ def main() -> None:
             valid_groups = _build_rank_groups(valid_df)
 
             model = _train_lgbm_ranker(
-                config, x_train, y_train, train_groups, x_valid, y_valid, valid_groups, eval_at
+                config,
+                x_train,
+                y_train,
+                train_groups,
+                x_valid,
+                y_valid,
+                valid_groups,
+                eval_at_list,
             )
+            metric_name, train_curve, valid_curve = _extract_lgbm_curve(model)
+            ndcg_scores = _extract_ndcg_scores(model)
+            preds = model.predict(x_valid)
+            ic, rank_ic = _compute_ic_scores(preds, valid_df["label"].values.astype(np.float32))
+            if metric_name and not curve_metric:
+                curve_metric = metric_name
+            if train_curve:
+                train_curves.append(train_curve)
+            if valid_curve:
+                valid_curves.append(valid_curve)
             window_metrics.append(
                 {
                     "train_start": window.train_start.date().isoformat(),
@@ -738,6 +957,9 @@ def main() -> None:
                     "test_end": window.test_end.date().isoformat(),
                     "best_iteration": getattr(model, "best_iteration_", None),
                     "best_score": getattr(model, "best_score_", None),
+                    **ndcg_scores,
+                    "ic": ic,
+                    "rank_ic": rank_ic,
                 }
             )
 
@@ -814,9 +1036,18 @@ def main() -> None:
 
         last_model.booster_.save_model(str(output_dir / "lgbm_model.txt"))
         save_linear_model(output_dir / "torch_payload.json", last_payload)
+        curve_payload = _build_curve_payload(
+            curve_metric,
+            _aggregate_curves(train_curves),
+            _aggregate_curves(valid_curves),
+        )
         (output_dir / "torch_metrics.json").write_text(
             json.dumps(
-                {"walk_forward": {"windows": window_metrics, "config": walk_config}},
+                {
+                    "model_type": "lgbm_ranker",
+                    "curve": curve_payload,
+                    "walk_forward": {"windows": window_metrics, "config": walk_config},
+                },
                 ensure_ascii=False,
                 indent=2,
             ),
@@ -827,7 +1058,7 @@ def main() -> None:
         if score_rows:
             scores_df = pd.concat(score_rows, ignore_index=True)
             scores_df = scores_df.sort_values(["date", "symbol", "window"])
-            scores_df = scores_df.drop_duplicates(subset=["date", "symbol"], keep="last")
+            scores_df = scores_df.drop_duplicates(subset=["date", "symbol"], keep="first")
             scores_df = scores_df.sort_values(["date", "symbol"]).drop(columns=["window"])
         else:
             scores_df = pd.DataFrame(columns=["date", "symbol", "score"])
@@ -839,6 +1070,7 @@ def main() -> None:
         print(f"saved scores: {scores_path}")
         return
 
+    _require_torch()
     batch_size = int(config.get("torch", {}).get("batch_size", 512))
     device = torch.device("cuda" if (args.device == "auto" and torch.cuda.is_available()) else "cpu")
     torch_config = config.get("torch", {})
@@ -897,6 +1129,9 @@ def main() -> None:
             progress_cb=_epoch_progress,
             cancel_cb=lambda: _check_cancel(cancel_path, progress_path),
         )
+        curve_payload = _build_loss_curve(metrics.get("history", []))
+        if curve_payload:
+            metrics["curve"] = curve_payload
         torch.save(model.state_dict(), output_dir / "torch_model.pt")
 
         payload = LinearModelPayload(
@@ -936,6 +1171,7 @@ def main() -> None:
     window_metrics: list[dict] = []
     last_payload: LinearModelPayload | None = None
     last_model_state: dict[str, torch.Tensor] | None = None
+    loss_curves: list[list[float]] = []
 
     total_windows = len(windows)
     for idx, window in enumerate(windows):
@@ -995,6 +1231,9 @@ def main() -> None:
             progress_cb=_window_progress,
             cancel_cb=lambda: _check_cancel(cancel_path, progress_path),
         )
+        curve_payload = _build_loss_curve(metrics.get("history", []))
+        if curve_payload and curve_payload.get("valid"):
+            loss_curves.append(list(curve_payload.get("valid") or []))
         window_metrics.append(
             {
                 "train_start": window.train_start.date().isoformat(),
@@ -1081,9 +1320,16 @@ def main() -> None:
 
     torch.save(last_model_state, output_dir / "torch_model.pt")
     save_linear_model(output_dir / "torch_payload.json", last_payload)
+    curve_payload = _build_curve_payload(
+        "valid_loss", [], _aggregate_curves(loss_curves)
+    )
     (output_dir / "torch_metrics.json").write_text(
         json.dumps(
-            {"walk_forward": {"windows": window_metrics, "config": walk_config}},
+            {
+                "model_type": "torch_mlp",
+                "curve": curve_payload,
+                "walk_forward": {"windows": window_metrics, "config": walk_config},
+            },
             ensure_ascii=False,
             indent=2,
         ),
@@ -1094,7 +1340,7 @@ def main() -> None:
     if score_rows:
         scores_df = pd.concat(score_rows, ignore_index=True)
         scores_df = scores_df.sort_values(["date", "symbol", "window"])
-        scores_df = scores_df.drop_duplicates(subset=["date", "symbol"], keep="last")
+        scores_df = scores_df.drop_duplicates(subset=["date", "symbol"], keep="first")
         scores_df = scores_df.sort_values(["date", "symbol"]).drop(columns=["window"])
     else:
         scores_df = pd.DataFrame(columns=["date", "symbol", "score"])

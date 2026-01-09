@@ -10,8 +10,22 @@ from typing import Any
 
 from app.core.config import settings
 from app.db import SessionLocal
-from app.models import MLTrainJob
+from app.models import (
+    AlgorithmVersion,
+    BacktestRun,
+    MLPipelineRun,
+    MLTrainJob,
+    ProjectAlgorithmBinding,
+)
+from app.routes.backtests import (
+    _collect_project_symbols as _collect_project_symbols_from_config,
+    _collect_project_theme_map,
+    _extract_pipeline_backtest_params,
+)
+from app.routes.projects import _resolve_project_config
 from app.services.audit_log import record_audit
+from app.services.lean_runner import run_backtest
+from app.services.ml_quality import attach_train_quality
 
 CANCEL_EXIT_CODE = 130
 
@@ -93,6 +107,138 @@ def _read_progress(path: Path) -> dict[str, Any] | None:
         return json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return None
+
+
+def _pipeline_auto_backtest_enabled(pipeline: MLPipelineRun) -> bool:
+    params = pipeline.params if isinstance(pipeline.params, dict) else {}
+    raw_flag = params.get("auto_backtest")
+    if raw_flag is None:
+        raw_flag = params.get("auto_backtest_on_train") or params.get("auto_run_backtest")
+    if isinstance(raw_flag, str):
+        return raw_flag.strip().lower() in ("1", "true", "yes", "y")
+    return bool(raw_flag)
+
+
+def _build_pipeline_backtest_params(
+    session,
+    project_id: int,
+    pipeline: MLPipelineRun,
+    score_path: Path | None,
+) -> dict[str, Any]:
+    params = _extract_pipeline_backtest_params(pipeline) or {}
+    if not isinstance(params, dict):
+        params = {}
+    config = _resolve_project_config(session, project_id)
+    if not params.get("benchmark"):
+        params["benchmark"] = config.get("benchmark") or "SPY"
+    algo_params = params.get("algorithm_parameters")
+    if not isinstance(algo_params, dict):
+        algo_params = {}
+    if score_path and not str(algo_params.get("score_csv_path") or "").strip():
+        algo_params["score_csv_path"] = str(score_path)
+    if not str(algo_params.get("symbols") or "").strip():
+        theme_symbols = _collect_project_symbols_from_config(config)
+        if theme_symbols:
+            algo_params["symbols"] = ",".join(theme_symbols)
+    if not str(algo_params.get("theme_weights") or "").strip():
+        symbol_theme_map, theme_weights = _collect_project_theme_map(config)
+        if theme_weights:
+            algo_params["theme_weights"] = json.dumps(theme_weights, ensure_ascii=False)
+        if symbol_theme_map:
+            algo_params["symbol_theme_map"] = json.dumps(
+                symbol_theme_map, ensure_ascii=False
+            )
+    if not str(algo_params.get("theme_tilt") or "").strip():
+        algo_params["theme_tilt"] = "0.5"
+    backtest_cfg = config.get("backtest") if isinstance(config.get("backtest"), dict) else {}
+    backtest_start = (
+        config.get("backtest_start")
+        or backtest_cfg.get("start")
+        or backtest_cfg.get("start_date")
+    )
+    backtest_end = (
+        config.get("backtest_end")
+        or backtest_cfg.get("end")
+        or backtest_cfg.get("end_date")
+    )
+    if backtest_start and not str(algo_params.get("backtest_start") or "").strip():
+        algo_params["backtest_start"] = str(backtest_start)
+    if backtest_end and not str(algo_params.get("backtest_end") or "").strip():
+        algo_params["backtest_end"] = str(backtest_end)
+    backtest_params = config.get("backtest_params")
+    if isinstance(backtest_params, dict):
+        for key, value in backtest_params.items():
+            if key not in algo_params or str(algo_params.get(key) or "").strip() == "":
+                algo_params[key] = value
+    binding = (
+        session.query(ProjectAlgorithmBinding)
+        .filter(ProjectAlgorithmBinding.project_id == project_id)
+        .first()
+    )
+    algorithm_version_id = binding.algorithm_version_id if binding else None
+    if algorithm_version_id:
+        algo_version = session.get(AlgorithmVersion, algorithm_version_id)
+        if algo_version:
+            if isinstance(algo_version.params, dict):
+                for key, value in algo_version.params.items():
+                    if key not in algo_params or algo_params.get(key) in (None, ""):
+                        algo_params[key] = value
+            params["algorithm_version_id"] = algo_version.id
+            params["algorithm_id"] = algo_version.algorithm_id
+            params["algorithm_version"] = algo_version.version
+            if algo_version.language:
+                params["algorithm_language"] = algo_version.language
+            if algo_version.file_path:
+                params["algorithm_path"] = algo_version.file_path
+            if algo_version.type_name:
+                params["algorithm_type_name"] = algo_version.type_name
+    if algo_params:
+        params["algorithm_parameters"] = algo_params
+    return params
+
+
+def _trigger_pipeline_backtest(train_job_id: int) -> None:
+    session = SessionLocal()
+    run_id: int | None = None
+    try:
+        job = session.get(MLTrainJob, train_job_id)
+        if not job or not job.pipeline_id:
+            return
+        pipeline = session.get(MLPipelineRun, job.pipeline_id)
+        if not pipeline:
+            return
+        if not _pipeline_auto_backtest_enabled(pipeline):
+            return
+        score_path = None
+        if job.output_dir:
+            candidate = Path(job.output_dir) / "scores.csv"
+            if candidate.exists():
+                score_path = candidate
+        params = _build_pipeline_backtest_params(
+            session, job.project_id, pipeline, score_path
+        )
+        if not params:
+            return
+        params.setdefault("pipeline_train_job_id", job.id)
+        run = BacktestRun(
+            project_id=job.project_id, params=params, pipeline_id=job.pipeline_id
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        record_audit(
+            session,
+            action="backtest.create",
+            resource_type="backtest",
+            resource_id=run.id,
+            detail={"project_id": job.project_id, "source": "ml_train"},
+        )
+        session.commit()
+        run_id = run.id
+    finally:
+        session.close()
+    if run_id:
+        run_backtest(run_id)
 
 
 def _is_cancel_returncode(code: int | None) -> bool:
@@ -490,6 +636,11 @@ def run_ml_train(job_id: int) -> None:
         if metrics_path.exists():
             metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
         metrics = _attach_data_ranges(metrics, config.get("output_dir"))
+        metrics = attach_train_quality(metrics, config)
+        if metrics_path.exists() and metrics is not None:
+            metrics_path.write_text(
+                json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
 
         job.output_dir = str(output_dir)
         job.log_path = str(log_path)
@@ -507,6 +658,7 @@ def run_ml_train(job_id: int) -> None:
             detail={"project_id": job.project_id, "status": job.status},
         )
         session.commit()
+        _trigger_pipeline_backtest(job.id)
     except Exception as exc:
         job = session.get(MLTrainJob, job_id)
         if job:

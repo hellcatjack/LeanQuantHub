@@ -107,6 +107,10 @@ def _build_windows(
     valid_months = int(config["valid_months"])
     test_months = int(config["test_months"])
     step_months = int(config["step_months"])
+    allow_overlap = bool(config.get("allow_overlap", False))
+
+    if not allow_overlap and step_months < test_months:
+        step_months = test_months
 
     windows = []
     cursor = start

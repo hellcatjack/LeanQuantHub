@@ -24,6 +24,7 @@ class Project(Base):
         back_populates="project", uselist=False
     )
     ml_train_jobs: Mapped[list["MLTrainJob"]] = relationship(back_populates="project")
+    ml_pipelines: Mapped[list["MLPipelineRun"]] = relationship(back_populates="project")
     factor_score_jobs: Mapped[list["FactorScoreJob"]] = relationship(
         back_populates="project"
     )
@@ -34,6 +35,9 @@ class BacktestRun(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False)
+    pipeline_id: Mapped[int | None] = mapped_column(
+        ForeignKey("ml_pipeline_runs.id"), nullable=True
+    )
     status: Mapped[str] = mapped_column(String(32), default="queued")
     params: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     metrics: Mapped[dict | None] = mapped_column(JSON, nullable=True)
@@ -42,6 +46,7 @@ class BacktestRun(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     project: Mapped[Project] = relationship(back_populates="backtests")
+    pipeline: Mapped["MLPipelineRun | None"] = relationship(back_populates="backtests")
     reports: Mapped[list["Report"]] = relationship(back_populates="run")
 
 
@@ -62,6 +67,9 @@ class MLTrainJob(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False)
+    pipeline_id: Mapped[int | None] = mapped_column(
+        ForeignKey("ml_pipeline_runs.id"), nullable=True
+    )
     status: Mapped[str] = mapped_column(String(32), default="queued")
     config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     metrics: Mapped[dict | None] = mapped_column(JSON, nullable=True)
@@ -77,6 +85,25 @@ class MLTrainJob(Base):
     ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     project: Mapped[Project] = relationship(back_populates="ml_train_jobs")
+    pipeline: Mapped["MLPipelineRun | None"] = relationship(back_populates="train_jobs")
+
+
+class MLPipelineRun(Base):
+    __tablename__ = "ml_pipeline_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False)
+    name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="created")
+    params: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    project: Mapped[Project] = relationship(back_populates="ml_pipelines")
+    train_jobs: Mapped[list["MLTrainJob"]] = relationship(back_populates="pipeline")
+    backtests: Mapped[list["BacktestRun"]] = relationship(back_populates="pipeline")
 
 
 class FactorScoreJob(Base):

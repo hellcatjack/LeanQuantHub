@@ -837,6 +837,22 @@ def run_backtest(run_id: int) -> None:
         if price_policy:
             metrics["Price Policy"] = price_policy
 
+        turnover_week_val, _ = _parse_metric_value(metrics.get("Turnover_week"))
+        turnover_week_last_val, _ = _parse_metric_value(metrics.get("Turnover_week_last"))
+        portfolio_turnover_val, _ = _parse_metric_value(metrics.get("Portfolio Turnover"))
+        turnover_week_annualized = None
+        turnover_sanity_ratio = None
+        if turnover_week_val is not None:
+            turnover_week_annualized = turnover_week_val * 52
+            metrics["Turnover_week_annualized"] = _format_percent(turnover_week_annualized)
+        if (
+            portfolio_turnover_val is not None
+            and turnover_week_val is not None
+            and turnover_week_val > 0
+        ):
+            turnover_sanity_ratio = portfolio_turnover_val / turnover_week_val
+            metrics["Turnover_sanity_ratio"] = f"{turnover_sanity_ratio:.2f}"
+
         risk_params = params.get("risk", {}) if isinstance(params.get("risk"), dict) else {}
         risk_status, risk_warnings = _evaluate_risk(metrics, risk_params)
         if risk_status:
@@ -855,6 +871,14 @@ def run_backtest(run_id: int) -> None:
             cost_summary["总费用"] = _format_number(total_fees_val, total_fees_unit)
         if turnover_val is not None:
             cost_summary["换手率"] = _format_number(turnover_val, turnover_unit)
+        if turnover_week_val is not None:
+            cost_summary["周度换手率(均值)"] = _format_percent(turnover_week_val)
+        if turnover_week_last_val is not None:
+            cost_summary["周度换手率(最新)"] = _format_percent(turnover_week_last_val)
+        if turnover_week_annualized is not None:
+            cost_summary["周度换手率年化(估算)"] = _format_percent(turnover_week_annualized)
+        if turnover_sanity_ratio is not None:
+            cost_summary["换手率对照(组合/周度均值)"] = f"{turnover_sanity_ratio:.2f}x"
         if start_equity_val is not None and total_fees_val is not None:
             if start_equity_unit in {"currency", "number"} and total_fees_unit == "currency":
                 cost_summary["费用占初始资金"] = _format_percent(

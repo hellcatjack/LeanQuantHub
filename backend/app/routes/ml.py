@@ -8,7 +8,7 @@ from pathlib import Path
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 
 from app.db import get_session
-from app.models import MLTrainJob, Project
+from app.models import MLTrainJob, MLPipelineRun, Project
 from app.schemas import MLTrainCreate, MLTrainOut, MLTrainPageOut
 from app.services.audit_log import record_audit
 from app.services.ml_runner import (
@@ -116,11 +116,17 @@ def create_train_job(payload: MLTrainCreate, background_tasks: BackgroundTasks):
         project = session.get(Project, payload.project_id)
         if not project:
             raise HTTPException(status_code=404, detail="项目不存在")
+        pipeline_id = payload.pipeline_id
+        if pipeline_id is not None:
+            pipeline = session.get(MLPipelineRun, pipeline_id)
+            if not pipeline or pipeline.project_id != payload.project_id:
+                raise HTTPException(status_code=404, detail="Pipeline 不存在")
         config = build_ml_config(session, payload.project_id, overrides)
         job = MLTrainJob(
             project_id=payload.project_id,
             status="queued",
             config=config,
+            pipeline_id=pipeline_id,
         )
         session.add(job)
         session.commit()

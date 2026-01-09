@@ -14,6 +14,7 @@ from app.routes import (
     datasets,
     factor_scores,
     ml,
+    ml_pipelines,
     pit,
     projects,
     reports,
@@ -57,5 +58,6 @@ app.include_router(automation.router)
 app.include_router(system_themes.router)
 app.include_router(universe.router)
 app.include_router(ml.router)
+app.include_router(ml_pipelines.router)
 app.include_router(pit.router)
 app.include_router(factor_scores.router)

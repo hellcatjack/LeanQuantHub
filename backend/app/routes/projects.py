@@ -194,7 +194,7 @@ def _load_default_config(session=None) -> dict[str, Any]:
         "benchmark": benchmark,
         "rebalance": rebalance,
         "risk_free_rate": risk_free_rate,
-        "backtest_start": "",
+        "backtest_start": "2015-01-01",
         "backtest_end": "",
         "categories": categories,
         "themes": theme_items,
@@ -1096,7 +1096,7 @@ def list_project_backtests(project_id: int):
         return (
             session.query(BacktestRun)
             .filter(BacktestRun.project_id == project_id)
-            .order_by(BacktestRun.created_at.desc())
+            .order_by(BacktestRun.id.desc())
             .all()
         )
 
