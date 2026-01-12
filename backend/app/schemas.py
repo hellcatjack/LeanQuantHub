@@ -200,6 +200,14 @@ class MLTrainCreate(BaseModel):
     train_start_year: int | None = None
     model_type: str | None = None
     model_params: dict[str, Any] | None = None
+    sample_weighting: str | None = None
+    sample_weight_alpha: float | None = None
+    sample_weight_dv_window_days: int | None = None
+    pit_missing_policy: str | None = None
+    pit_sample_on_snapshot: bool | None = None
+    pit_min_coverage: float | None = None
+    symbol_source: str | None = None
+    system_theme_key: str | None = None
     pipeline_id: int | None = None
 
 
@@ -713,12 +721,192 @@ class DataSyncQueueClearOut(BaseModel):
     only_alpha: bool
 
 
+class AlphaFetchConfigOut(BaseModel):
+    alpha_incremental_enabled: bool
+    alpha_compact_days: int
+    updated_at: str | None = None
+    source: str
+    path: str
+
+
+class AlphaFetchConfigUpdate(BaseModel):
+    alpha_incremental_enabled: bool | None = None
+    alpha_compact_days: int | None = None
+
+
+class BulkAutoConfigOut(BaseModel):
+    status: str
+    batch_size: int
+    only_missing: bool
+    min_delay_seconds: float
+    refresh_listing_mode: str
+    refresh_listing_ttl_days: int
+    updated_at: str | None = None
+    source: str
+    path: str
+
+
+class BulkAutoConfigUpdate(BaseModel):
+    status: str | None = None
+    batch_size: int | None = None
+    only_missing: bool | None = None
+    min_delay_seconds: float | None = None
+    refresh_listing_mode: str | None = None
+    refresh_listing_ttl_days: int | None = None
+
+
+class AlphaGapSummaryOut(BaseModel):
+    latest_complete: str
+    total: int
+    with_coverage: int
+    missing_coverage: int
+    up_to_date: int
+    gap_0_30: int
+    gap_31_120: int
+    gap_120_plus: int
+    listing_updated_at: str | None
+    listing_age_days: int | None
+
+
 class DataSyncSpeedOut(BaseModel):
     window_seconds: int
     completed: int
     rate_per_min: float
     running: int
     pending: int
+    target_rpm: float | None = None
+    effective_min_delay_seconds: float | None = None
+
+
+class AlphaRateConfigOut(BaseModel):
+    max_rpm: float
+    rpm_floor: float = 80.0
+    rpm_ceil: float
+    rpm_step_down: float = 5.0
+    rpm_step_up: float = 1.0
+    min_delay_seconds: float
+    effective_min_delay_seconds: float
+    rate_limit_sleep: float
+    rate_limit_retries: int
+    max_retries: int
+    auto_tune: bool = False
+    min_delay_floor_seconds: float = 0.1
+    min_delay_ceil_seconds: float = 2.0
+    tune_step_seconds: float = 0.02
+    tune_window_seconds: float = 60.0
+    tune_target_ratio_low: float = 0.9
+    tune_target_ratio_high: float = 1.05
+    tune_cooldown_seconds: float = 10.0
+    source: str
+    updated_at: str | None
+    path: str
+
+
+class AlphaRateConfigUpdate(BaseModel):
+    max_rpm: float | None = None
+    rpm_floor: float | None = None
+    rpm_ceil: float | None = None
+    rpm_step_down: float | None = None
+    rpm_step_up: float | None = None
+    min_delay_seconds: float | None = None
+    rate_limit_sleep: float | None = None
+    rate_limit_retries: int | None = None
+    max_retries: int | None = None
+    auto_tune: bool | None = None
+    min_delay_floor_seconds: float | None = None
+    min_delay_ceil_seconds: float | None = None
+    tune_step_seconds: float | None = None
+    tune_window_seconds: float | None = None
+    tune_target_ratio_low: float | None = None
+    tune_target_ratio_high: float | None = None
+    tune_cooldown_seconds: float | None = None
+
+
+class TradingCalendarConfigOut(BaseModel):
+    source: str
+    config_source: str | None = None
+    exchange: str
+    start_date: str
+    end_date: str
+    refresh_days: int
+    override_enabled: bool
+    updated_at: str | None
+    path: str
+    calendar_source: str | None = None
+    calendar_exchange: str | None = None
+    calendar_start: str | None = None
+    calendar_end: str | None = None
+    calendar_generated_at: str | None = None
+    calendar_sessions: int | None = None
+    calendar_path: str | None = None
+    overrides_path: str | None = None
+    overrides_applied: int | None = None
+
+
+class TradingCalendarConfigUpdate(BaseModel):
+    source: str | None = None
+    exchange: str | None = None
+    start_date: str | None = None
+    end_date: str | None = None
+    refresh_days: int | None = None
+    override_enabled: bool | None = None
+
+
+class TradingCalendarRefreshOut(BaseModel):
+    status: str
+    log_path: str
+    return_code: int
+    calendar: TradingCalendarConfigOut | None = None
+
+
+class AlphaCoverageAuditRequest(BaseModel):
+    asset_types: list[str] | None = None
+    enqueue_missing: bool = True
+    enqueue_missing_adjusted: bool = True
+    sample_size: int = 50
+
+
+class AlphaCoverageAuditOut(BaseModel):
+    total_symbols: int
+    missing_dataset_count: int
+    missing_adjusted_count: int
+    enqueued: int
+    report_dir: str
+    missing_dataset_path: str | None
+    missing_adjusted_path: str | None
+    sample_missing_dataset: list[str]
+    sample_missing_adjusted: list[str]
+
+
+class TradeCoverageAuditRequest(BaseModel):
+    asset_types: list[str] | None = None
+    benchmark: str = "SPY"
+    vendor_preference: list[str] | None = None
+    start: str | None = None
+    end: str | None = None
+    sample_size: int = 50
+    pit_dir: str | None = None
+    fundamentals_dir: str | None = None
+    pit_fundamentals_dir: str | None = None
+
+
+class TradeCoverageAuditOut(BaseModel):
+    report_dir: str
+    price_missing_count: int
+    price_missing_path: str | None
+    pit_expected_count: int
+    pit_existing_count: int
+    pit_missing_count: int
+    pit_missing_path: str | None
+    pit_extra_count: int
+    pit_extra_path: str | None
+    fundamentals_missing_count: int
+    fundamentals_missing_path: str | None
+    fundamentals_missing_sample: list[str]
+    pit_fundamentals_missing_count: int
+    pit_fundamentals_missing_path: str | None
+    pit_fundamentals_extra_count: int
+    pit_fundamentals_extra_path: str | None
 
 
 class BulkSyncCreate(BaseModel):
@@ -727,6 +915,10 @@ class BulkSyncCreate(BaseModel):
     only_missing: bool = True
     auto_sync: bool = True
     refresh_listing: bool = True
+    refresh_listing_mode: str = "stale_only"
+    refresh_listing_ttl_days: int = 7
+    alpha_incremental_enabled: bool = True
+    alpha_compact_days: int = 120
     min_delay_seconds: float = 0.1
 
 
@@ -779,7 +971,7 @@ class PitWeeklyJobCreate(BaseModel):
     market_session_close: str = "16:00"
     asset_type: str = "Stock"
     require_data: bool = False
-    vendor_preference: str = "Alpha,Lean,Stooq"
+    vendor_preference: str = "Alpha"
     output_dir: str | None = None
     symbol_life: str | None = None
     data_root: str | None = None
@@ -806,17 +998,24 @@ class PitFundamentalJobCreate(BaseModel):
     start: str | None = None
     end: str | None = None
     report_delay_days: int = 1
+    missing_report_delay_days: int = 45
+    shares_delay_days: int = 45
+    shares_preference: str = "diluted"
+    price_source: str = "raw"
     benchmark: str = "SPY"
-    vendor_preference: str = "Alpha,Lean,Stooq"
+    vendor_preference: str = "Alpha"
+    asset_types: str = "STOCK"
     output_dir: str | None = None
     pit_dir: str | None = None
     fundamentals_dir: str | None = None
     data_root: str | None = None
     refresh_fundamentals: bool = False
-    refresh_days: int = 30
-    min_delay_seconds: float = 0.8
+    resume_fundamentals: bool = False
+    resume_from_job_id: int | None = None
+    refresh_days: int = 0
+    min_delay_seconds: float = 0.45
     max_retries: int = 3
-    rate_limit_sleep: float = 60.0
+    rate_limit_sleep: float = 10.0
     rate_limit_retries: int = 3
 
 

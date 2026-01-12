@@ -533,9 +533,7 @@
                     "ZTS"
                 ],
     "vendor_preference":  [
-                              "Alpha",
-                              "Stooq",
-                              "Lean"
+                              "Alpha"
                           ],
     "label_horizon_days":  20,
     "label_price":  "open",
@@ -550,6 +548,13 @@
                              "start":  "",
                              "end":  ""
                          },
+    "sample_weight":  {
+                          "scheme":  "mcap_dv_mix",
+                          "alpha":  0.6,
+                          "dv_window_days":  20,
+                          "log1p":  true,
+                          "normalize":  "mean"
+                      },
     "feature_windows":  {
                             "returns":  [
                                             5,

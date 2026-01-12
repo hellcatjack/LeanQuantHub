@@ -16,6 +16,8 @@ from app.models import (
     MLPipelineRun,
     MLTrainJob,
     ProjectAlgorithmBinding,
+    SystemTheme,
+    SystemThemeVersion,
 )
 from app.routes.backtests import (
     _collect_project_symbols as _collect_project_symbols_from_config,
@@ -51,7 +53,7 @@ def _load_base_config() -> dict[str, Any]:
             "output_dir": "ml/models",
             "benchmark_symbol": "SPY",
             "symbols": [],
-            "vendor_preference": ["Alpha", "Lean"],
+            "vendor_preference": ["Alpha"],
             "label_horizon_days": 20,
             "label_price": "open",
             "label_start_offset": 1,
@@ -91,6 +93,41 @@ def _load_exclude_symbols(data_root: Path | None) -> set[str]:
         except OSError:
             continue
     return symbols
+
+
+def _resolve_system_theme_symbols(session, key: str | None) -> list[str]:
+    if not key:
+        return []
+    theme = (
+        session.query(SystemTheme)
+        .filter(SystemTheme.key == key)
+        .order_by(SystemTheme.id.desc())
+        .first()
+    )
+    if not theme:
+        return []
+    version = (
+        session.query(SystemThemeVersion)
+        .filter(SystemThemeVersion.theme_id == theme.id)
+        .order_by(SystemThemeVersion.created_at.desc())
+        .first()
+    )
+    if not version:
+        return []
+    payload = version.payload or {}
+    symbols = payload.get("symbols") or []
+    manual = payload.get("manual") or []
+    exclude = payload.get("exclude") or []
+    merged = set()
+    for item in list(symbols) + list(manual):
+        symbol = str(item or "").strip().upper()
+        if symbol:
+            merged.add(symbol)
+    for item in exclude:
+        symbol = str(item or "").strip().upper()
+        if symbol:
+            merged.discard(symbol)
+    return sorted(merged)
 
 
 def _write_progress(path: Path, payload: dict[str, Any]) -> None:
@@ -345,12 +382,7 @@ def _collect_project_symbols(session, project_id: int) -> tuple[dict[str, Any], 
     from app.routes import projects as project_routes
 
     config = project_routes._resolve_project_config(session, project_id)
-    data_root = project_routes._get_data_root()
-    universe_path = data_root / "universe" / "universe.csv"
-    rows = project_routes._safe_read_csv(universe_path)
-    theme_index = project_routes._build_theme_index(config)
-    resolved = project_routes._resolve_theme_memberships(rows, theme_index)
-    symbols = sorted({symbol for values in resolved.values() for symbol in values})
+    symbols = _collect_project_symbols_from_config(config)
     return config, symbols
 
 
@@ -372,14 +404,6 @@ def build_ml_config(
     if benchmark and benchmark not in base.get("symbols", []):
         base["symbols"] = [benchmark] + list(base.get("symbols", []))
     base["benchmark_symbol"] = benchmark
-    exclude_symbols = _load_exclude_symbols(data_root)
-    if exclude_symbols:
-        filtered = [symbol for symbol in base.get("symbols", []) if symbol not in exclude_symbols]
-        if benchmark and benchmark not in filtered:
-            filtered = [benchmark] + filtered
-        base["symbols"] = filtered
-        base.setdefault("meta", {})
-        base["meta"]["excluded_symbols_count"] = len(exclude_symbols)
 
     if overrides:
         walk_forward = base.get("walk_forward") or {}
@@ -402,10 +426,68 @@ def build_ml_config(
             base["model_type"] = str(overrides["model_type"]).strip()
         if isinstance(overrides.get("model_params"), dict):
             base["model_params"] = dict(overrides["model_params"])
+        if (
+            overrides.get("sample_weighting") is not None
+            or overrides.get("sample_weight_alpha") is not None
+            or overrides.get("sample_weight_dv_window_days") is not None
+        ):
+            base.setdefault("sample_weight", {})
+        if overrides.get("sample_weighting") is not None:
+            base["sample_weight"]["scheme"] = str(overrides["sample_weighting"]).strip()
+        if overrides.get("sample_weight_alpha") is not None:
+            try:
+                base["sample_weight"]["alpha"] = float(overrides["sample_weight_alpha"])
+            except (TypeError, ValueError):
+                pass
+        if overrides.get("sample_weight_dv_window_days") is not None:
+            try:
+                base["sample_weight"]["dv_window_days"] = int(
+                    overrides["sample_weight_dv_window_days"]
+                )
+            except (TypeError, ValueError):
+                pass
+        if (
+            overrides.get("pit_missing_policy") is not None
+            or overrides.get("pit_sample_on_snapshot") is not None
+            or overrides.get("pit_min_coverage") is not None
+        ):
+            pit_cfg = base.get("pit_fundamentals") if isinstance(base.get("pit_fundamentals"), dict) else {}
+            if overrides.get("pit_missing_policy") is not None:
+                pit_cfg["missing_policy"] = str(overrides["pit_missing_policy"]).strip()
+            if overrides.get("pit_sample_on_snapshot") is not None:
+                pit_cfg["sample_on_snapshot"] = bool(overrides["pit_sample_on_snapshot"])
+            if overrides.get("pit_min_coverage") is not None:
+                try:
+                    pit_cfg["min_coverage"] = float(overrides["pit_min_coverage"])
+                except (TypeError, ValueError):
+                    pass
+            base["pit_fundamentals"] = pit_cfg
+        symbol_source = str(overrides.get("symbol_source") or "").strip().lower()
+        if symbol_source == "system_theme":
+            system_key = str(overrides.get("system_theme_key") or "").strip()
+            system_symbols = _resolve_system_theme_symbols(session, system_key)
+            if system_symbols:
+                base["symbols"] = system_symbols
+                if benchmark and benchmark not in base.get("symbols", []):
+                    base["symbols"] = [benchmark] + list(base.get("symbols", []))
+                base.setdefault("meta", {})
+                base["meta"]["symbol_source"] = "system_theme"
+                base["meta"]["symbol_source_key"] = system_key
+
+    exclude_symbols = _load_exclude_symbols(data_root)
+    if exclude_symbols:
+        filtered = [symbol for symbol in base.get("symbols", []) if symbol not in exclude_symbols]
+        if benchmark and benchmark not in filtered:
+            filtered = [benchmark] + filtered
+        base["symbols"] = filtered
+        base.setdefault("meta", {})
+        base["meta"]["excluded_symbols_count"] = len(exclude_symbols)
 
     base.setdefault("meta", {})
     base["meta"]["project_id"] = project_id
+    base["meta"].setdefault("symbol_source", "project")
     base["meta"]["symbol_count"] = len(base.get("symbols", []))
+    base["vendor_preference"] = ["Alpha"]
     return base
 
 

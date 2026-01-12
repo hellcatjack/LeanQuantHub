@@ -7,12 +7,15 @@ import math
 import re
 import shutil
 import time
+import subprocess
+import sys
 import urllib.error
 import urllib.request
 from urllib.parse import urlencode
 import zipfile
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from sqlalchemy import func, or_
@@ -33,6 +36,20 @@ from app.schemas import (
     DataSyncQueueRunOut,
     DataSyncQueueRunRequest,
     DataSyncSpeedOut,
+    AlphaCoverageAuditOut,
+    AlphaCoverageAuditRequest,
+    TradeCoverageAuditOut,
+    TradeCoverageAuditRequest,
+    AlphaFetchConfigOut,
+    AlphaFetchConfigUpdate,
+    AlphaGapSummaryOut,
+    AlphaRateConfigOut,
+    AlphaRateConfigUpdate,
+    TradingCalendarConfigOut,
+    TradingCalendarConfigUpdate,
+    TradingCalendarRefreshOut,
+    BulkAutoConfigOut,
+    BulkAutoConfigUpdate,
     DatasetCreate,
     DatasetDeleteOut,
     DatasetDeleteRequest,
@@ -52,6 +69,28 @@ from app.schemas import (
     DatasetUpdate,
 )
 from app.services.audit_log import record_audit
+from app.services.alpha_rate import (
+    DEFAULT_RATE_LIMIT_SLEEP,
+    load_alpha_rate_config,
+    note_alpha_request,
+    write_alpha_rate_config,
+)
+from app.services.alpha_fetch import (
+    DEFAULT_ALPHA_COMPACT_DAYS,
+    DEFAULT_ALPHA_INCREMENTAL_ENABLED,
+    load_alpha_fetch_config,
+    write_alpha_fetch_config,
+)
+from app.services.bulk_auto import load_bulk_auto_config, write_bulk_auto_config
+from app.services.trading_calendar import (
+    load_trading_calendar_config,
+    load_trading_calendar_meta,
+    load_trading_days,
+    trading_calendar_csv_path,
+    trading_calendar_overrides_path,
+    write_trading_calendar_config,
+)
+from app.services.job_lock import JobLock
 
 router = APIRouter(prefix="/api/datasets", tags=["datasets"])
 
@@ -63,10 +102,10 @@ _stooq_rate_limited_until: datetime | None = None
 YAHOO_RATE_LIMIT_WINDOW = timedelta(hours=6)
 _yahoo_rate_limited_until: datetime | None = None
 
-ALPHA_RATE_LIMIT_WINDOW = timedelta(seconds=10)
 _alpha_rate_limited_until: datetime | None = None
-ALPHA_RETRY_DELAY_SECONDS = 10
-ALPHA_RETRY_MAX_ATTEMPTS = 3
+_alpha_last_request_at: float | None = None
+
+ALPHA_ONLY_PRICES = True
 
 RETRY_IMMEDIATE_ATTEMPTS = 3
 RETRY_BASE_DELAY_SECONDS = 10
@@ -100,7 +139,32 @@ def _compute_retry_delay(retry_count: int, min_delay: int | None = None) -> int:
 
 
 def _wait_alpha_rate_slot() -> None:
-    return
+    global _alpha_last_request_at
+    config = load_alpha_rate_config(_get_data_root())
+    min_delay = max(float(config.get("effective_min_delay_seconds") or 0.0), 0.0)
+    now = time.monotonic()
+    if _alpha_last_request_at is not None:
+        elapsed = now - _alpha_last_request_at
+        if elapsed < min_delay:
+            time.sleep(min_delay - elapsed)
+
+
+def _note_alpha_request(rate_limited: bool = False) -> None:
+    global _alpha_last_request_at
+    _alpha_last_request_at = time.monotonic()
+    note_alpha_request(_get_data_root(), rate_limited=rate_limited)
+
+
+def _default_queue_min_delay() -> float:
+    config = load_alpha_rate_config(_get_data_root())
+    return max(float(config.get("effective_min_delay_seconds") or 0.0), 0.0)
+
+
+def _acquire_alpha_fetch_lock() -> JobLock | None:
+    lock = JobLock("alpha_fetch", _get_data_root())
+    if not lock.acquire():
+        return None
+    return lock
 
 
 def _schedule_retry(
@@ -126,25 +190,48 @@ def _schedule_retry(
         session.commit()
         return False
     delay = _compute_retry_delay(job.retry_count, min_delay=min_delay)
+    queued_at = datetime.utcnow()
     job.status = status
-    job.next_retry_at = datetime.utcnow() + timedelta(seconds=delay)
-    job.message = f"{reason}; retry_in={delay}s"
+    job.next_retry_at = queued_at + timedelta(seconds=delay)
+    job.created_at = queued_at
+    job.message = (
+        f"reason={reason}; retry_in={delay}s; retry_count={job.retry_count}; "
+        f"queued_at={queued_at.isoformat()}"
+    )
     session.commit()
     record_audit(
         session,
         action="data.sync.retry",
         resource_type="data_sync_job",
         resource_id=job.id,
-        detail={"dataset_id": job.dataset_id, "retry_in": delay, "reason": reason},
+        detail={
+            "dataset_id": job.dataset_id,
+            "retry_in": delay,
+            "reason": reason,
+            "retry_count": job.retry_count,
+            "queued_at": queued_at.isoformat(),
+        },
     )
 
     if spawn_thread:
         def _runner():
             time.sleep(delay)
-            run_data_sync(job.id)
+            _start_sync_queue_worker(0, _default_queue_min_delay())
 
         threading.Thread(target=_runner, daemon=True).start()
     return True
+
+
+def _set_job_stage(
+    session, job: DataSyncJob, stage: str, progress: float | None = None
+) -> None:
+    if job.status != "running":
+        return
+    message = f"stage={stage}"
+    if progress is not None:
+        message = f"{message}; progress={progress:.2f}"
+    job.message = message
+    session.commit()
 
 
 def _count_pending_sync_jobs(session) -> int:
@@ -168,6 +255,11 @@ def _start_sync_queue_worker(max_jobs: int, min_delay_seconds: float) -> bool:
 
     def _worker():
         global SYNC_QUEUE_RUNNING
+        queue_lock = JobLock("data_sync_queue", _get_data_root())
+        if not queue_lock.acquire():
+            with SYNC_QUEUE_LOCK:
+                SYNC_QUEUE_RUNNING = False
+            return
         processed = 0
         try:
             while True:
@@ -196,6 +288,7 @@ def _start_sync_queue_worker(max_jobs: int, min_delay_seconds: float) -> bool:
                 if min_delay_seconds > 0:
                     time.sleep(min_delay_seconds)
         finally:
+            queue_lock.release()
             with SYNC_QUEUE_LOCK:
                 SYNC_QUEUE_RUNNING = False
 
@@ -223,6 +316,75 @@ def _bulk_job_counts(session, job: BulkSyncJob) -> tuple[int | None, int | None,
     running = base.filter(DataSyncJob.status == "running").count()
     completed = base.filter(DataSyncJob.ended_at.isnot(None)).count()
     return pending, running, completed
+
+
+def _alpha_listing_age(data_root: Path) -> tuple[int | None, str | None]:
+    candidate_paths = [
+        data_root / "universe" / "alpha_symbol_life.csv",
+        data_root / "universe" / "alpha_listing_status_active_latest.csv",
+        data_root / "universe" / "alpha_listing_status_delisted_latest.csv",
+    ]
+    mtimes: list[float] = []
+    for path in candidate_paths:
+        if path.exists():
+            try:
+                mtimes.append(path.stat().st_mtime)
+            except OSError:
+                continue
+    if not mtimes:
+        return None, None
+    latest_mtime = max(mtimes)
+    updated_at = datetime.utcfromtimestamp(latest_mtime).isoformat()
+    age_days = int((datetime.utcnow().timestamp() - latest_mtime) // 86400)
+    return max(age_days, 0), updated_at
+
+
+def _build_alpha_gap_summary(session) -> dict[str, Any]:
+    latest_complete = _latest_complete_business_day()
+    data_root = _get_data_root()
+    age_days, updated_at = _alpha_listing_age(data_root)
+    datasets = (
+        session.query(Dataset)
+        .filter(func.lower(Dataset.vendor) == "alpha")
+        .filter(func.lower(Dataset.frequency) == "daily")
+        .all()
+    )
+    total = len(datasets)
+    missing_coverage = 0
+    with_coverage = 0
+    up_to_date = 0
+    gap_0_30 = 0
+    gap_31_120 = 0
+    gap_120_plus = 0
+    for dataset in datasets:
+        coverage_end = _parse_date(dataset.coverage_end)
+        if not coverage_end:
+            missing_coverage += 1
+            continue
+        with_coverage += 1
+        gap = (latest_complete - coverage_end).days
+        if gap <= 0:
+            up_to_date += 1
+            gap_0_30 += 1
+            continue
+        if gap <= 30:
+            gap_0_30 += 1
+        elif gap <= 120:
+            gap_31_120 += 1
+        else:
+            gap_120_plus += 1
+    return {
+        "latest_complete": latest_complete.isoformat(),
+        "total": total,
+        "with_coverage": with_coverage,
+        "missing_coverage": missing_coverage,
+        "up_to_date": up_to_date,
+        "gap_0_30": gap_0_30,
+        "gap_31_120": gap_31_120,
+        "gap_120_plus": gap_120_plus,
+        "listing_updated_at": updated_at,
+        "listing_age_days": age_days,
+    }
 
 
 def _bulk_append_error(errors: list[dict], phase: str, message: str) -> list[dict]:
@@ -304,11 +466,26 @@ def _load_bulk_symbols(
 
 def _run_bulk_sync_job(job_id: int) -> None:
     session = SessionLocal()
+    bulk_lock: JobLock | None = None
     try:
         job = session.get(BulkSyncJob, job_id)
         if not job:
             return
         if job.status in {"success", "failed", "canceled"}:
+            return
+        bulk_lock = JobLock("bulk_sync", _get_data_root())
+        if not bulk_lock.acquire():
+            job.status = "blocked"
+            job.message = "bulk_sync_lock_busy"
+            job.ended_at = datetime.utcnow()
+            record_audit(
+                session,
+                action="bulk_sync.blocked",
+                resource_type="bulk_sync_job",
+                resource_id=job_id,
+                detail={"error": job.message},
+            )
+            session.commit()
             return
         errors = list(job.errors or [])
         params = job.params or {}
@@ -317,7 +494,19 @@ def _run_bulk_sync_job(job_id: int) -> None:
         only_missing = bool(params.get("only_missing", True))
         auto_sync = bool(params.get("auto_sync", True))
         refresh_listing = bool(params.get("refresh_listing", True))
+        refresh_listing_mode = (params.get("refresh_listing_mode") or "stale_only").strip().lower()
+        refresh_listing_ttl_days = int(params.get("refresh_listing_ttl_days") or 7)
+        alpha_incremental_enabled = bool(params.get("alpha_incremental_enabled", True))
+        alpha_compact_days = int(params.get("alpha_compact_days") or DEFAULT_ALPHA_COMPACT_DAYS)
         min_delay_seconds = float(params.get("min_delay_seconds") or 0.9)
+
+        write_alpha_fetch_config(
+            {
+                "alpha_incremental_enabled": alpha_incremental_enabled,
+                "alpha_compact_days": alpha_compact_days,
+            },
+            _get_data_root(),
+        )
 
         if not job.started_at:
             job.started_at = datetime.utcnow()
@@ -329,7 +518,31 @@ def _run_bulk_sync_job(job_id: int) -> None:
 
         if job.phase in {"queued", "listing_refresh"}:
             job.phase = "listing_refresh"
-            job.message = "refresh_listing"
+            listing_age_days, listing_updated_at = _alpha_listing_age(_get_data_root())
+            refresh_reason = ""
+            if not refresh_listing:
+                refresh_reason = "disabled"
+            elif refresh_listing_mode == "always":
+                refresh_listing = True
+                refresh_reason = "mode=always"
+            elif refresh_listing_mode == "never":
+                refresh_listing = False
+                refresh_reason = "mode=never"
+            else:
+                if listing_age_days is None:
+                    refresh_listing = True
+                    refresh_reason = "missing_forced"
+                else:
+                    refresh_listing = listing_age_days >= max(refresh_listing_ttl_days, 1)
+                    refresh_reason = "stale_only"
+            job.message = (
+                "refresh_listing; "
+                f"mode={refresh_listing_mode}; "
+                f"ttl_days={refresh_listing_ttl_days}; "
+                f"listing_age_days={listing_age_days if listing_age_days is not None else 'none'}; "
+                f"refresh={int(refresh_listing)}; "
+                f"reason={refresh_reason}"
+            )
             session.commit()
             if refresh_listing:
                 try:
@@ -344,6 +557,10 @@ def _run_bulk_sync_job(job_id: int) -> None:
                     f"listing_ok; total={summary.get('total', 0)}"
                     f"; active={summary.get('active', 0)}"
                     f"; delisted={summary.get('delisted', 0)}"
+                    f"; mode={refresh_listing_mode}"
+                    f"; ttl_days={refresh_listing_ttl_days}"
+                    f"; listing_age_days={listing_age_days if listing_age_days is not None else 'none'}"
+                    "; refresh=1"
                 )
                 job.errors = errors
                 session.commit()
@@ -537,6 +754,8 @@ def _run_bulk_sync_job(job_id: int) -> None:
             job.ended_at = datetime.utcnow()
             session.commit()
     finally:
+        if bulk_lock:
+            bulk_lock.release()
         session.close()
 
 
@@ -633,13 +852,211 @@ def get_sync_speed(
         pending = base.filter(DataSyncJob.status.in_(("queued", "rate_limited"))).count()
 
     rate_per_min = completed * 60.0 / window_seconds
+    config = load_alpha_rate_config(_get_data_root())
     return DataSyncSpeedOut(
         window_seconds=window_seconds,
         completed=completed,
         rate_per_min=rate_per_min,
         running=running,
         pending=pending,
+        target_rpm=float(config.get("max_rpm") or 0.0) or None,
+        effective_min_delay_seconds=float(config.get("effective_min_delay_seconds") or 0.0)
+        or None,
     )
+
+
+@router.get("/alpha-rate", response_model=AlphaRateConfigOut)
+def get_alpha_rate_config():
+    config = load_alpha_rate_config(_get_data_root())
+    return AlphaRateConfigOut(**config)
+
+
+@router.post("/alpha-rate", response_model=AlphaRateConfigOut)
+def update_alpha_rate_config(payload: AlphaRateConfigUpdate):
+    config = write_alpha_rate_config(payload.model_dump(), _get_data_root())
+    return AlphaRateConfigOut(**config)
+
+
+@router.get("/alpha-fetch-config", response_model=AlphaFetchConfigOut)
+def get_alpha_fetch_config():
+    config = load_alpha_fetch_config(_get_data_root())
+    return AlphaFetchConfigOut(**config)
+
+
+@router.post("/alpha-fetch-config", response_model=AlphaFetchConfigOut)
+def update_alpha_fetch_config(payload: AlphaFetchConfigUpdate):
+    config = write_alpha_fetch_config(payload.model_dump(), _get_data_root())
+    return AlphaFetchConfigOut(**config)
+
+
+@router.get("/bulk-auto-config", response_model=BulkAutoConfigOut)
+def get_bulk_auto_config():
+    config = load_bulk_auto_config(_get_data_root())
+    return BulkAutoConfigOut(**config)
+
+
+@router.post("/bulk-auto-config", response_model=BulkAutoConfigOut)
+def update_bulk_auto_config(payload: BulkAutoConfigUpdate):
+    config = write_bulk_auto_config(payload.model_dump(), _get_data_root())
+    return BulkAutoConfigOut(**config)
+
+
+def _merge_trading_calendar_config(
+    config: dict[str, Any], meta: dict[str, Any], data_root: Path
+) -> TradingCalendarConfigOut:
+    exchange = str(config.get("exchange") or "")
+    calendar_path = trading_calendar_csv_path(data_root, exchange) if exchange else None
+    overrides_path = trading_calendar_overrides_path(data_root)
+    return TradingCalendarConfigOut(
+        source=str(config.get("source") or "auto"),
+        config_source=str(config.get("config_source") or "default"),
+        exchange=str(config.get("exchange") or "XNYS"),
+        start_date=str(config.get("start_date") or ""),
+        end_date=str(config.get("end_date") or ""),
+        refresh_days=int(config.get("refresh_days") or 0),
+        override_enabled=bool(config.get("override_enabled")),
+        updated_at=config.get("updated_at"),
+        path=str(config.get("path") or ""),
+        calendar_source=meta.get("source"),
+        calendar_exchange=meta.get("exchange"),
+        calendar_start=meta.get("start_date"),
+        calendar_end=meta.get("end_date"),
+        calendar_generated_at=meta.get("generated_at"),
+        calendar_sessions=meta.get("sessions"),
+        calendar_path=str(calendar_path) if calendar_path else None,
+        overrides_path=str(overrides_path),
+        overrides_applied=meta.get("overrides_applied"),
+    )
+
+
+@router.get("/trading-calendar", response_model=TradingCalendarConfigOut)
+def get_trading_calendar_config():
+    data_root = _get_data_root()
+    config = load_trading_calendar_config(data_root)
+    meta = load_trading_calendar_meta(data_root)
+    return _merge_trading_calendar_config(config, meta, data_root)
+
+
+@router.post("/trading-calendar", response_model=TradingCalendarConfigOut)
+def update_trading_calendar_config(payload: TradingCalendarConfigUpdate):
+    data_root = _get_data_root()
+    config = write_trading_calendar_config(payload.model_dump(), data_root)
+    meta = load_trading_calendar_meta(data_root)
+    return _merge_trading_calendar_config(config, meta, data_root)
+
+
+@router.post("/trading-calendar/refresh", response_model=TradingCalendarRefreshOut)
+def refresh_trading_calendar():
+    data_root = _get_data_root()
+    config = load_trading_calendar_config(data_root)
+    log_dir = Path(settings.artifact_root) / "trading_calendar"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"refresh_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.log"
+    script_path = Path(__file__).resolve().parents[3] / "scripts" / "build_trading_calendar.py"
+    cmd = [
+        sys.executable,
+        str(script_path),
+        "--data-root",
+        str(data_root),
+        "--exchange",
+        str(config.get("exchange") or "XNYS"),
+        "--start",
+        str(config.get("start_date") or ""),
+        "--end",
+        str(config.get("end_date") or ""),
+        "--refresh-days",
+        str(config.get("refresh_days") or 0),
+    ]
+    with log_path.open("w", encoding="utf-8") as handle:
+        proc = subprocess.run(cmd, stdout=handle, stderr=subprocess.STDOUT, check=False)
+    if proc.returncode != 0:
+        raise HTTPException(
+            status_code=500,
+            detail=f"trading_calendar_refresh_failed log={log_path}",
+        )
+    meta = load_trading_calendar_meta(data_root)
+    merged = _merge_trading_calendar_config(config, meta, data_root)
+    return TradingCalendarRefreshOut(
+        status="success",
+        log_path=str(log_path),
+        return_code=proc.returncode,
+        calendar=merged,
+    )
+
+
+@router.get("/alpha-gap-summary", response_model=AlphaGapSummaryOut)
+def get_alpha_gap_summary():
+    with get_session() as session:
+        summary = _build_alpha_gap_summary(session)
+    return AlphaGapSummaryOut(**summary)
+
+
+@router.post("/actions/audit-alpha", response_model=AlphaCoverageAuditOut)
+def audit_alpha_coverage(
+    payload: AlphaCoverageAuditRequest = AlphaCoverageAuditRequest(),
+):
+    asset_types = _normalize_asset_types(payload.asset_types)
+    sample_size = max(int(payload.sample_size or 0), 0)
+    with get_session() as session:
+        result = _audit_alpha_coverage(
+            session=session,
+            asset_types=asset_types,
+            enqueue_missing=bool(payload.enqueue_missing),
+            enqueue_missing_adjusted=bool(payload.enqueue_missing_adjusted),
+            sample_size=sample_size,
+        )
+        session.commit()
+    return AlphaCoverageAuditOut(**result)
+
+
+@router.post("/actions/audit-trade", response_model=TradeCoverageAuditOut)
+def audit_trade_coverage(
+    payload: TradeCoverageAuditRequest = TradeCoverageAuditRequest(),
+):
+    asset_types = _normalize_asset_types(payload.asset_types)
+    vendor_preference = payload.vendor_preference or ["Alpha"]
+    sample_size = max(int(payload.sample_size or 0), 0)
+    start = _parse_date_value(payload.start)
+    end = _parse_date_value(payload.end)
+    data_root = _get_data_root()
+    pit_dir = _resolve_path(payload.pit_dir) if payload.pit_dir else data_root / "universe" / "pit_weekly"
+    fundamentals_dir = (
+        _resolve_path(payload.fundamentals_dir)
+        if payload.fundamentals_dir
+        else data_root / "fundamentals" / "alpha"
+    )
+    pit_fundamentals_dir = (
+        _resolve_path(payload.pit_fundamentals_dir)
+        if payload.pit_fundamentals_dir
+        else data_root / "factors" / "pit_weekly_fundamentals"
+    )
+    result = _audit_trade_coverage(
+        asset_types=asset_types,
+        benchmark=(payload.benchmark or "SPY").strip().upper(),
+        vendor_preference=[item.strip() for item in vendor_preference if item and item.strip()],
+        start=start,
+        end=end,
+        sample_size=sample_size,
+        pit_dir=pit_dir,
+        fundamentals_root=fundamentals_dir,
+        pit_fundamentals_dir=pit_fundamentals_dir,
+    )
+    with get_session() as session:
+        record_audit(
+            session,
+            action="data.audit.trade",
+            resource_type="data_audit",
+            resource_id=None,
+            detail={
+                "report_dir": result.get("report_dir"),
+                "price_missing": result.get("price_missing_count"),
+                "pit_missing": result.get("pit_missing_count"),
+                "fundamentals_missing": result.get("fundamentals_missing_count"),
+                "pit_fundamentals_missing": result.get("pit_fundamentals_missing_count"),
+            },
+        )
+        session.commit()
+    return TradeCoverageAuditOut(**result)
 
 
 @router.get("/{dataset_id}/sync-jobs", response_model=list[DataSyncOut])
@@ -711,7 +1128,7 @@ def create_sync_job(
         session.commit()
 
     if payload.auto_run:
-        background_tasks.add_task(run_data_sync, job.id)
+        _start_sync_queue_worker(0, _default_queue_min_delay())
     return job
 
 
@@ -780,7 +1197,6 @@ def sync_all(background_tasks: BackgroundTasks, payload: DataSyncBatchRequest = 
             )
             session.add(job)
             session.flush()
-            background_tasks.add_task(run_data_sync, job.id)
             jobs.append(job)
             record_audit(
                 session,
@@ -790,6 +1206,8 @@ def sync_all(background_tasks: BackgroundTasks, payload: DataSyncBatchRequest = 
                 detail={"dataset_id": dataset.id, "source_path": job.source_path},
             )
         session.commit()
+    if payload.auto_run and jobs:
+        _start_sync_queue_worker(0, _default_queue_min_delay())
     return jobs
 
 
@@ -867,12 +1285,21 @@ def create_bulk_sync_job(payload: BulkSyncCreate):
         raise HTTPException(status_code=400, detail="状态参数无效")
     batch_size = max(int(payload.batch_size or 0), 1)
     min_delay_seconds = max(float(payload.min_delay_seconds or 0), 0.0)
+    refresh_listing_mode = (payload.refresh_listing_mode or "stale_only").strip().lower()
+    if refresh_listing_mode not in {"always", "stale_only", "never"}:
+        raise HTTPException(status_code=400, detail="刷新策略参数无效")
+    refresh_listing_ttl_days = max(int(payload.refresh_listing_ttl_days or 0), 1)
+    alpha_compact_days = max(int(payload.alpha_compact_days or 0), 1)
     params = {
         "status": status_filter,
         "batch_size": batch_size,
         "only_missing": bool(payload.only_missing),
         "auto_sync": bool(payload.auto_sync),
         "refresh_listing": bool(payload.refresh_listing),
+        "refresh_listing_mode": refresh_listing_mode,
+        "refresh_listing_ttl_days": refresh_listing_ttl_days,
+        "alpha_incremental_enabled": bool(payload.alpha_incremental_enabled),
+        "alpha_compact_days": alpha_compact_days,
         "min_delay_seconds": min_delay_seconds,
     }
     with get_session() as session:
@@ -1026,6 +1453,8 @@ def _resolve_factor_path(dataset: Dataset | None, symbol: str) -> Path:
     lean_root = _get_lean_root()
     lean_path = lean_root / "equity" / "usa" / "factor_files" / f"{symbol.lower()}.csv"
     cache_path = _factor_cache_path(symbol)
+    if ALPHA_ONLY_PRICES:
+        return cache_path
     if lean_path.exists():
         return lean_path
     if cache_path.exists():
@@ -1175,6 +1604,547 @@ def _load_listing_rows(paths: list[Path]) -> list[dict[str, str]]:
     return rows
 
 
+def _normalize_asset_types(values: list[str] | None) -> set[str]:
+    if not values:
+        return {"STOCK"}
+    normalized = {item.strip().upper() for item in values if item and item.strip()}
+    return normalized or {"STOCK"}
+
+
+def _parse_date_value(value: str | None) -> date | None:
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(text).date()
+    except ValueError:
+        return None
+
+
+def _extract_symbol_from_filename(path: Path) -> str:
+    stem = path.stem
+    parts = stem.split("_", 2)
+    if len(parts) >= 3:
+        symbol_part = parts[2]
+    else:
+        symbol_part = stem
+    for suffix in ("_Daily", "_daily", "_D", "_d"):
+        if symbol_part.endswith(suffix):
+            symbol_part = symbol_part[: -len(suffix)]
+            break
+    return symbol_part.strip().upper()
+
+
+def _load_available_symbols(adjusted_dir: Path) -> set[str]:
+    symbols = set()
+    for path in adjusted_dir.glob("*.csv"):
+        if ALPHA_ONLY_PRICES:
+            parts = path.stem.split("_", 2)
+            vendor = parts[1] if len(parts) >= 3 else ""
+            if vendor.upper() != "ALPHA":
+                continue
+        symbol = _extract_symbol_from_filename(path)
+        if symbol:
+            symbols.add(symbol)
+    return symbols
+
+
+def _load_symbol_alias_map(path: Path) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    if not path.exists():
+        return mapping
+    with path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            symbol = (row.get("symbol") or "").strip().upper()
+            canonical = (row.get("canonical") or "").strip().upper()
+            if not symbol or not canonical:
+                continue
+            mapping[symbol] = canonical
+    return mapping
+
+
+def _resolve_benchmark_path(
+    adjusted_dir: Path, benchmark: str, vendor_preference: list[str]
+) -> Path:
+    candidates = list(adjusted_dir.glob(f"*_{benchmark}_*.csv"))
+    if not candidates:
+        candidates = list(adjusted_dir.glob(f"*_{benchmark}.csv"))
+    if not candidates:
+        raise RuntimeError(f"missing benchmark data for {benchmark}")
+
+    def vendor_rank(path: Path) -> int:
+        stem = path.stem
+        parts = stem.split("_", 2)
+        vendor = parts[1] if len(parts) > 1 else ""
+        ranks = {v.upper(): i for i, v in enumerate(vendor_preference)}
+        return ranks.get(vendor.upper(), len(ranks) + 1)
+
+    return sorted(candidates, key=vendor_rank)[0]
+
+
+def _load_trading_days(
+    adjusted_dir: Path, benchmark: str, vendor_preference: list[str]
+) -> list[date]:
+    data_root = _get_data_root()
+    days, _info = load_trading_days(data_root, adjusted_dir, benchmark, vendor_preference)
+    if not days:
+        raise RuntimeError("no trading days found in trading calendar")
+    return days
+
+
+def _pick_rebalance_dates(
+    trading_days: list[date],
+    start: date | None,
+    end: date | None,
+    weekday: int | None,
+    mode: str,
+) -> list[date]:
+    dates: list[date] = []
+    if mode == "week_open":
+        last_week: tuple[int, int] | None = None
+        for day in trading_days:
+            if start and day < start:
+                continue
+            if end and day > end:
+                break
+            week_key = day.isocalendar()[:2]
+            if week_key != last_week:
+                dates.append(day)
+                last_week = week_key
+        return dates
+    if weekday is None:
+        raise RuntimeError("weekday required for rebalance-mode=weekday")
+    for day in trading_days:
+        if start and day < start:
+            continue
+        if end and day > end:
+            break
+        if day.weekday() == weekday:
+            dates.append(day)
+    return dates
+
+
+def _load_pit_weekly_meta(pit_dir: Path) -> dict[str, str]:
+    meta_path = pit_dir / "pit_weekly_calendar.json"
+    if not meta_path.exists():
+        return {"rebalance_mode": "week_open", "rebalance_day": "monday"}
+    try:
+        payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {"rebalance_mode": "week_open", "rebalance_day": "monday"}
+    return {
+        "rebalance_mode": str(payload.get("rebalance_mode") or "week_open"),
+        "rebalance_day": str(payload.get("rebalance_day") or "monday"),
+    }
+
+
+def _parse_snapshot_date(path: Path, prefix: str) -> date | None:
+    stem = path.stem
+    if not stem.startswith(prefix):
+        return None
+    suffix = stem[len(prefix) :]
+    if suffix.startswith("_"):
+        suffix = suffix[1:]
+    if not suffix:
+        return None
+    try:
+        return datetime.strptime(suffix, "%Y%m%d").date()
+    except ValueError:
+        return None
+
+
+def _load_snapshot_dates(pit_dir: Path, prefix: str) -> set[date]:
+    dates: set[date] = set()
+    for path in pit_dir.glob(f"{prefix}*.csv"):
+        parsed = _parse_snapshot_date(path, prefix.rstrip("_"))
+        if parsed:
+            dates.add(parsed)
+    return dates
+
+
+def _load_pit_symbols(pit_dir: Path, dates: list[date]) -> set[str]:
+    symbols: set[str] = set()
+    for day in dates:
+        path = pit_dir / f"pit_{day.strftime('%Y%m%d')}.csv"
+        if not path.exists():
+            continue
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                symbol = (row.get("symbol") or "").strip().upper()
+                if symbol:
+                    symbols.add(symbol)
+    return symbols
+
+
+def _load_fundamentals_status(path: Path) -> dict[str, dict[str, str]]:
+    if not path.exists():
+        return {}
+    rows: dict[str, dict[str, str]] = {}
+    with path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            symbol = (row.get("symbol") or "").strip().upper()
+            if not symbol:
+                continue
+            rows[symbol] = dict(row)
+    return rows
+
+
+def _has_fundamentals_cache(root: Path, symbol: str) -> bool:
+    path = root / symbol
+    if not path.exists() or not path.is_dir():
+        return False
+    return any(path.glob("*.json"))
+
+
+def _audit_trade_coverage(
+    asset_types: set[str],
+    benchmark: str,
+    vendor_preference: list[str],
+    start: date | None,
+    end: date | None,
+    sample_size: int,
+    pit_dir: Path,
+    fundamentals_root: Path,
+    pit_fundamentals_dir: Path,
+) -> dict[str, object]:
+    data_root = _get_data_root()
+    listing_rows = _load_listing_rows(_resolve_listing_paths(None))
+    symbol_meta: dict[str, str] = {}
+    for row in listing_rows:
+        symbol = _normalize_symbol(row.get("symbol", "")).upper()
+        asset_type = (row.get("assetType") or "").strip().upper()
+        if not symbol or symbol == "UNKNOWN":
+            continue
+        if asset_types and asset_type not in asset_types:
+            continue
+        symbol_meta[symbol] = asset_type or "STOCK"
+    symbols = sorted(symbol_meta.keys())
+
+    adjusted_dir = data_root / "curated_adjusted"
+    available_symbols = _load_available_symbols(adjusted_dir) if adjusted_dir.exists() else set()
+    symbol_map_path = data_root / "universe" / "symbol_map.csv"
+    symbol_alias_map = _load_symbol_alias_map(symbol_map_path)
+    missing_price: list[str] = []
+    for symbol in symbols:
+        if symbol in available_symbols:
+            continue
+        alias = symbol_alias_map.get(symbol)
+        if alias and alias in available_symbols:
+            continue
+        missing_price.append(symbol)
+
+    trading_days = _load_trading_days(adjusted_dir, benchmark, vendor_preference)
+    pit_meta = _load_pit_weekly_meta(pit_dir)
+    mode = pit_meta.get("rebalance_mode", "week_open").lower()
+    day_name = pit_meta.get("rebalance_day", "monday").lower()
+    weekday_map = {
+        "monday": 0,
+        "tuesday": 1,
+        "wednesday": 2,
+        "thursday": 3,
+        "friday": 4,
+    }
+    weekday = weekday_map.get(day_name)
+    rebalance_dates = _pick_rebalance_dates(trading_days, start, end, weekday, mode)
+    index_map = {day: idx for idx, day in enumerate(trading_days)}
+    expected_snapshot_dates: list[date] = []
+    for rebalance_date in rebalance_dates:
+        idx = index_map.get(rebalance_date)
+        if idx is None or idx == 0:
+            continue
+        expected_snapshot_dates.append(trading_days[idx - 1])
+    if start:
+        expected_snapshot_dates = [d for d in expected_snapshot_dates if d >= start]
+    if end:
+        expected_snapshot_dates = [d for d in expected_snapshot_dates if d <= end]
+
+    actual_snapshot_dates = sorted(_load_snapshot_dates(pit_dir, "pit_"))
+    expected_set = set(expected_snapshot_dates)
+    actual_set = set(actual_snapshot_dates)
+    pit_missing_dates = sorted(expected_set - actual_set)
+    pit_extra_dates = sorted(actual_set - expected_set)
+
+    pit_symbol_dates = actual_snapshot_dates or expected_snapshot_dates
+    pit_symbols = _load_pit_symbols(pit_dir, pit_symbol_dates)
+    status_map = _load_fundamentals_status(fundamentals_root / "fundamentals_status.csv")
+    missing_fundamentals: list[dict[str, str]] = []
+    for symbol in sorted(pit_symbols):
+        if _has_fundamentals_cache(fundamentals_root, symbol):
+            continue
+        status = status_map.get(symbol, {})
+        missing_fundamentals.append(
+            {
+                "symbol": symbol,
+                "status": status.get("status", "missing"),
+                "updated_at": status.get("updated_at", ""),
+                "message": status.get("message", "missing_cache"),
+            }
+        )
+
+    pit_fund_dates = sorted(_load_snapshot_dates(pit_fundamentals_dir, "pit_fundamentals_"))
+    pit_fund_set = set(pit_fund_dates)
+    pit_fund_missing = sorted(actual_set - pit_fund_set)
+    pit_fund_extra = sorted(pit_fund_set - actual_set)
+
+    report_dir = Path(settings.artifact_root) / "data_audit" / datetime.utcnow().strftime(
+        "trade_%Y%m%d_%H%M%S"
+    )
+    report_dir.mkdir(parents=True, exist_ok=True)
+    price_missing_path = report_dir / "price_missing_symbols.csv"
+    pit_missing_path = report_dir / "pit_weekly_missing_dates.csv"
+    pit_extra_path = report_dir / "pit_weekly_extra_dates.csv"
+    fundamentals_missing_path = report_dir / "fundamentals_missing_symbols.csv"
+    pit_fund_missing_path = report_dir / "pit_fundamentals_missing_dates.csv"
+    pit_fund_extra_path = report_dir / "pit_fundamentals_extra_dates.csv"
+
+    with price_missing_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["symbol", "assetType", "alias"])
+        for symbol in missing_price:
+            writer.writerow([symbol, symbol_meta.get(symbol, ""), symbol_alias_map.get(symbol, "")])
+    with pit_missing_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["snapshot_date"])
+        for day in pit_missing_dates:
+            writer.writerow([day.isoformat()])
+    with pit_extra_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["snapshot_date"])
+        for day in pit_extra_dates:
+            writer.writerow([day.isoformat()])
+    with fundamentals_missing_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["symbol", "status", "updated_at", "message"])
+        writer.writeheader()
+        for row in missing_fundamentals:
+            writer.writerow(row)
+    with pit_fund_missing_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["snapshot_date"])
+        for day in pit_fund_missing:
+            writer.writerow([day.isoformat()])
+    with pit_fund_extra_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["snapshot_date"])
+        for day in pit_fund_extra:
+            writer.writerow([day.isoformat()])
+
+    sample_count = max(sample_size, 0)
+    return {
+        "report_dir": str(report_dir),
+        "price_missing_count": len(missing_price),
+        "price_missing_path": str(price_missing_path) if missing_price else None,
+        "pit_expected_count": len(expected_set),
+        "pit_existing_count": len(actual_set),
+        "pit_missing_count": len(pit_missing_dates),
+        "pit_missing_path": str(pit_missing_path) if pit_missing_dates else None,
+        "pit_extra_count": len(pit_extra_dates),
+        "pit_extra_path": str(pit_extra_path) if pit_extra_dates else None,
+        "fundamentals_missing_count": len(missing_fundamentals),
+        "fundamentals_missing_path": str(fundamentals_missing_path)
+        if missing_fundamentals
+        else None,
+        "fundamentals_missing_sample": [
+            row["symbol"] for row in missing_fundamentals[:sample_count]
+        ],
+        "pit_fundamentals_missing_count": len(pit_fund_missing),
+        "pit_fundamentals_missing_path": str(pit_fund_missing_path)
+        if pit_fund_missing
+        else None,
+        "pit_fundamentals_extra_count": len(pit_fund_extra),
+        "pit_fundamentals_extra_path": str(pit_fund_extra_path)
+        if pit_fund_extra
+        else None,
+    }
+
+
+def _audit_alpha_coverage(
+    session,
+    asset_types: set[str],
+    enqueue_missing: bool,
+    enqueue_missing_adjusted: bool,
+    sample_size: int,
+) -> dict[str, object]:
+    data_root = _get_data_root()
+    rows = _load_listing_rows(_resolve_listing_paths(None))
+    symbol_meta: dict[str, str] = {}
+    for row in rows:
+        symbol = _normalize_symbol(row.get("symbol", "")).upper()
+        asset_type = (row.get("assetType") or "").strip().upper()
+        if not symbol or symbol == "UNKNOWN":
+            continue
+        if asset_types and asset_type not in asset_types:
+            continue
+        symbol_meta[symbol] = asset_type or "STOCK"
+
+    symbols = sorted(symbol_meta.keys())
+    alpha_datasets = (
+        session.query(Dataset)
+        .filter(func.lower(Dataset.vendor) == "alpha")
+        .all()
+    )
+    dataset_by_symbol: dict[str, Dataset] = {}
+    for dataset in alpha_datasets:
+        source = (dataset.source_path or "").strip()
+        if _is_alpha_source(source):
+            symbol = _alpha_source_symbol(source, dataset).upper()
+        else:
+            symbol = _alpha_symbol(_dataset_symbol(dataset), dataset).upper()
+        dataset_by_symbol[symbol] = dataset
+
+    missing_dataset = [sym for sym in symbols if sym not in dataset_by_symbol]
+    missing_adjusted: list[str] = []
+    for sym, dataset in dataset_by_symbol.items():
+        if sym not in symbol_meta:
+            continue
+        adjusted_path = _series_path(dataset, adjusted=True)
+        if not adjusted_path.exists():
+            missing_adjusted.append(sym)
+
+    enqueued = 0
+    if enqueue_missing or enqueue_missing_adjusted:
+        for sym in missing_dataset:
+            if not enqueue_missing:
+                break
+            asset_type = symbol_meta.get(sym, "STOCK")
+            asset_class = "ETF" if asset_type == "ETF" else "Equity"
+            source_path = f"alpha:{sym.lower()}"
+            dataset_name = f"Alpha_{sym}_Daily"
+            dataset = (
+                session.query(Dataset)
+                .filter(
+                    Dataset.source_path == source_path,
+                    Dataset.vendor == "Alpha",
+                    Dataset.frequency == "daily",
+                )
+                .first()
+            )
+            if not dataset:
+                dataset = session.query(Dataset).filter(Dataset.name == dataset_name).first()
+            if not dataset:
+                dataset = Dataset(
+                    name=dataset_name,
+                    vendor="Alpha",
+                    region="US",
+                    frequency="daily",
+                    asset_class=asset_class,
+                    source_path=source_path,
+                )
+                session.add(dataset)
+                session.flush()
+                record_audit(
+                    session,
+                    action="dataset.create",
+                    resource_type="dataset",
+                    resource_id=dataset.id,
+                    detail={"name": dataset.name, "source": "audit"},
+                )
+            stored_source = _resolve_market_source(dataset, source_path)
+            active = (
+                session.query(DataSyncJob)
+                .filter(
+                    DataSyncJob.dataset_id == dataset.id,
+                    DataSyncJob.source_path == stored_source,
+                    DataSyncJob.date_column == "timestamp",
+                    DataSyncJob.reset_history.is_(False),
+                    DataSyncJob.status.in_(ACTIVE_SYNC_STATUSES),
+                )
+                .first()
+            )
+            if not active:
+                job = DataSyncJob(
+                    dataset_id=dataset.id,
+                    source_path=stored_source,
+                    date_column="timestamp",
+                    reset_history=False,
+                )
+                session.add(job)
+                session.flush()
+                enqueued += 1
+                record_audit(
+                    session,
+                    action="data.sync.create",
+                    resource_type="data_sync_job",
+                    resource_id=job.id,
+                    detail={"dataset_id": dataset.id, "source_path": job.source_path},
+                )
+
+        if enqueue_missing_adjusted:
+            for sym in missing_adjusted:
+                dataset = dataset_by_symbol.get(sym)
+                if not dataset:
+                    continue
+                stored_source = _resolve_market_source(dataset, dataset.source_path)
+                active = (
+                    session.query(DataSyncJob)
+                    .filter(
+                        DataSyncJob.dataset_id == dataset.id,
+                        DataSyncJob.source_path == stored_source,
+                        DataSyncJob.date_column == "timestamp",
+                        DataSyncJob.reset_history.is_(False),
+                        DataSyncJob.status.in_(ACTIVE_SYNC_STATUSES),
+                    )
+                    .first()
+                )
+                if active:
+                    continue
+                job = DataSyncJob(
+                    dataset_id=dataset.id,
+                    source_path=stored_source,
+                    date_column="timestamp",
+                    reset_history=False,
+                )
+                session.add(job)
+                session.flush()
+                enqueued += 1
+                record_audit(
+                    session,
+                    action="data.sync.create",
+                    resource_type="data_sync_job",
+                    resource_id=job.id,
+                    detail={"dataset_id": dataset.id, "source_path": job.source_path},
+                )
+
+    report_dir = Path(settings.artifact_root) / "data_audit" / datetime.utcnow().strftime(
+        "alpha_%Y%m%d_%H%M%S"
+    )
+    report_dir.mkdir(parents=True, exist_ok=True)
+    missing_dataset_path = report_dir / "alpha_missing_datasets.csv"
+    missing_adjusted_path = report_dir / "alpha_missing_adjusted.csv"
+    with missing_dataset_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["symbol", "assetType"])
+        for sym in missing_dataset:
+            writer.writerow([sym, symbol_meta.get(sym, "")])
+    with missing_adjusted_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["symbol"])
+        for sym in missing_adjusted:
+            writer.writerow([sym])
+
+    sample_count = max(sample_size, 0)
+    return {
+        "total_symbols": len(symbols),
+        "missing_dataset_count": len(missing_dataset),
+        "missing_adjusted_count": len(missing_adjusted),
+        "enqueued": enqueued,
+        "report_dir": str(report_dir),
+        "missing_dataset_path": str(missing_dataset_path) if missing_dataset else None,
+        "missing_adjusted_path": str(missing_adjusted_path) if missing_adjusted else None,
+        "sample_missing_dataset": missing_dataset[:sample_count],
+        "sample_missing_adjusted": missing_adjusted[:sample_count],
+    }
+
+
 def _resolve_listing_paths(source_path: str | None) -> list[Path]:
     data_root = _get_data_root()
     if source_path:
@@ -1194,20 +2164,56 @@ def _resolve_listing_paths(source_path: str | None) -> list[Path]:
 
 
 def _fetch_alpha_listing_status(state: str, date_value: str | None = None) -> bytes:
+    global _alpha_rate_limited_until
     api_key = (settings.alpha_vantage_api_key or "").strip()
     if not api_key:
         raise RuntimeError("ALPHA_KEY_MISSING")
-    params = {"function": "LISTING_STATUS", "apikey": api_key, "state": state}
-    if date_value:
-        params["date"] = date_value
-    url = f"https://www.alphavantage.co/query?{urlencode(params)}"
-    request = urllib.request.Request(url, headers={"User-Agent": "stocklean/1.0"})
-    with urllib.request.urlopen(request, timeout=60) as handle:
-        payload = handle.read()
-    if payload[:1] == b"{":
-        decoded = json.loads(payload.decode("utf-8", errors="ignore"))
-        raise RuntimeError(f"alpha error: {decoded}")
-    return payload
+    lock = _acquire_alpha_fetch_lock()
+    if not lock:
+        raise RuntimeError("ALPHA_LOCK_BUSY")
+    try:
+        _wait_alpha_rate_slot()
+        params = {"function": "LISTING_STATUS", "apikey": api_key, "state": state}
+        if date_value:
+            params["date"] = date_value
+        url = f"https://www.alphavantage.co/query?{urlencode(params)}"
+        request = urllib.request.Request(url, headers={"User-Agent": "stocklean/1.0"})
+        with urllib.request.urlopen(request, timeout=60) as handle:
+            payload = handle.read()
+        if payload[:1] == b"{":
+            decoded = json.loads(payload.decode("utf-8", errors="ignore"))
+            note = decoded.get("Note") or decoded.get("Information")
+            if note:
+                config = load_alpha_rate_config(_get_data_root())
+                sleep_seconds = float(
+                    config.get("rate_limit_sleep") or DEFAULT_RATE_LIMIT_SLEEP
+                )
+                _alpha_rate_limited_until = datetime.utcnow() + timedelta(seconds=sleep_seconds)
+                _note_alpha_request(rate_limited=True)
+                raise RuntimeError("ALPHA_RATE_LIMIT")
+            _note_alpha_request()
+            raise RuntimeError(f"alpha error: {decoded}")
+        _note_alpha_request()
+        return payload
+    except urllib.error.HTTPError as exc:
+        if exc.code == 429:
+            config = load_alpha_rate_config(_get_data_root())
+            sleep_seconds = float(
+                config.get("rate_limit_sleep") or DEFAULT_RATE_LIMIT_SLEEP
+            )
+            _alpha_rate_limited_until = datetime.utcnow() + timedelta(seconds=sleep_seconds)
+            _note_alpha_request(rate_limited=True)
+            raise RuntimeError("ALPHA_RATE_LIMIT") from exc
+        _note_alpha_request()
+        raise RuntimeError(f"Alpha Vantage 请求失败: {exc}") from exc
+    except urllib.error.URLError as exc:
+        _note_alpha_request()
+        raise RuntimeError(f"Alpha Vantage 请求失败: {exc}") from exc
+    except Exception:
+        _note_alpha_request()
+        raise
+    finally:
+        lock.release()
 
 
 def _merge_symbol_life_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -1245,11 +2251,36 @@ def _write_symbol_life(rows: list[dict[str, str]], output_path: Path) -> None:
         "delistingDate",
         "status",
     ]
-    with output_path.open("w", encoding="utf-8", newline="") as handle:
+    tmp_path = output_path.with_suffix(".tmp")
+    with tmp_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=headers)
         writer.writeheader()
         for row in rows:
             writer.writerow({key: row.get(key, "") for key in headers})
+    tmp_path.replace(output_path)
+
+
+def _write_listing_bytes(payload: bytes, output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = output_path.with_suffix(".tmp")
+    tmp_path.write_bytes(payload)
+    tmp_path.replace(output_path)
+
+
+def _write_listing_versioned(
+    data_root: Path,
+    active_payload: bytes,
+    delisted_payload: bytes,
+    merged: list[dict[str, str]],
+    snapshot_suffix: str,
+) -> None:
+    version_dir = data_root / "universe" / "listing_versions"
+    active_path = version_dir / f"alpha_listing_status_active_{snapshot_suffix}.csv"
+    delisted_path = version_dir / f"alpha_listing_status_delisted_{snapshot_suffix}.csv"
+    symbol_life_path = version_dir / f"alpha_symbol_life_{snapshot_suffix}.csv"
+    _write_listing_bytes(active_payload, active_path)
+    _write_listing_bytes(delisted_payload, delisted_path)
+    _write_symbol_life(merged, symbol_life_path)
 
 
 def _refresh_alpha_listing() -> dict[str, int]:
@@ -1258,13 +2289,20 @@ def _refresh_alpha_listing() -> dict[str, int]:
     delisted_payload = _fetch_alpha_listing_status("delisted")
     active_path = data_root / "universe" / "alpha_listing_status_active_latest.csv"
     delisted_path = data_root / "universe" / "alpha_listing_status_delisted_latest.csv"
-    active_path.parent.mkdir(parents=True, exist_ok=True)
-    active_path.write_bytes(active_payload)
-    delisted_path.write_bytes(delisted_payload)
+    _write_listing_bytes(active_payload, active_path)
+    _write_listing_bytes(delisted_payload, delisted_path)
     rows = _load_listing_rows([active_path, delisted_path])
     merged = _merge_symbol_life_rows(rows)
     symbol_life_path = data_root / "universe" / "alpha_symbol_life.csv"
     _write_symbol_life(merged, symbol_life_path)
+    snapshot_suffix = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+    _write_listing_versioned(
+        data_root,
+        active_payload,
+        delisted_payload,
+        merged,
+        snapshot_suffix,
+    )
     return {
         "active": sum(1 for row in rows if (row.get("status") or "").strip().lower() == "active"),
         "delisted": sum(
@@ -1462,10 +2500,13 @@ def _fetch_alpha_csv(
     dataset_name: str,
     outputsize: str = "full",
 ) -> Path:
-    _wait_alpha_rate_slot()
+    global _alpha_rate_limited_until
     api_key = (settings.alpha_vantage_api_key or "").strip()
     if not api_key:
         raise RuntimeError("ALPHA_KEY_MISSING")
+    lock = _acquire_alpha_fetch_lock()
+    if not lock:
+        raise RuntimeError("ALPHA_LOCK_BUSY")
     entitlement = (settings.alpha_vantage_entitlement or "").strip()
     url = (
         "https://www.alphavantage.co/query"
@@ -1479,7 +2520,9 @@ def _fetch_alpha_csv(
     filename = f"{dataset_id}_{_safe_name(dataset_name)}.csv"
     target_path = target_dir / filename
     try:
-        global _alpha_rate_limited_until
+        _wait_alpha_rate_slot()
+        config = load_alpha_rate_config(_get_data_root())
+        rate_limit_sleep = float(config.get("rate_limit_sleep") or DEFAULT_RATE_LIMIT_SLEEP)
         if _alpha_rate_limited_until and datetime.utcnow() < _alpha_rate_limited_until:
             raise RuntimeError("ALPHA_RATE_LIMIT")
         request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -1487,13 +2530,22 @@ def _fetch_alpha_csv(
             data = response.read()
     except urllib.error.HTTPError as exc:
         if exc.code == 429:
-            _alpha_rate_limited_until = datetime.utcnow() + ALPHA_RATE_LIMIT_WINDOW
+            _alpha_rate_limited_until = datetime.utcnow() + timedelta(seconds=rate_limit_sleep)
+            _note_alpha_request(rate_limited=True)
             raise RuntimeError("ALPHA_RATE_LIMIT") from exc
+        _note_alpha_request()
         raise RuntimeError(f"Alpha Vantage 请求失败: {exc}") from exc
     except urllib.error.URLError as exc:
+        _note_alpha_request()
         raise RuntimeError(f"Alpha Vantage 请求失败: {exc}") from exc
+    except Exception:
+        _note_alpha_request()
+        raise
+    finally:
+        lock.release()
 
     if not data:
+        _note_alpha_request()
         raise RuntimeError("Alpha Vantage 返回空数据")
     if data.lstrip().startswith(b"{"):
         payload = json.loads(data.decode("utf-8", errors="ignore"))
@@ -1506,20 +2558,28 @@ def _fetch_alpha_csv(
             for keyword in ("premium endpoint", "premium only")
         )
         if premium_hint:
-            _alpha_rate_limited_until = datetime.utcnow() + ALPHA_RATE_LIMIT_WINDOW
+            _alpha_rate_limited_until = datetime.utcnow() + timedelta(seconds=rate_limit_sleep)
+            _note_alpha_request(rate_limited=True)
             raise RuntimeError("ALPHA_RATE_LIMIT")
         if note:
-            _alpha_rate_limited_until = datetime.utcnow() + ALPHA_RATE_LIMIT_WINDOW
+            _alpha_rate_limited_until = datetime.utcnow() + timedelta(seconds=rate_limit_sleep)
+            _note_alpha_request(rate_limited=True)
             raise RuntimeError("ALPHA_RATE_LIMIT")
         if error_msg:
+            _note_alpha_request()
             raise RuntimeError("ALPHA_NOT_FOUND")
+        _note_alpha_request()
         raise RuntimeError("Alpha Vantage 返回异常响应")
 
     header = data.splitlines()[0].decode("utf-8", errors="ignore").lower()
     if "timestamp" not in header:
+        _note_alpha_request()
         raise RuntimeError("Alpha Vantage 返回缺少时间列")
 
-    target_path.write_bytes(data)
+    _note_alpha_request()
+    tmp_path = target_path.with_suffix(".tmp")
+    tmp_path.write_bytes(data)
+    tmp_path.replace(target_path)
     return target_path
 
 
@@ -1530,14 +2590,24 @@ def _fetch_alpha_csv_with_retry(
     outputsize: str = "full",
 ) -> Path:
     last_error: Exception | None = None
-    for attempt in range(1, ALPHA_RETRY_MAX_ATTEMPTS + 1):
+    config = load_alpha_rate_config(_get_data_root())
+    max_retries = int(config.get("max_retries") or 1)
+    rate_limit_retries = int(config.get("rate_limit_retries") or 0)
+    rate_limit_sleep = float(config.get("rate_limit_sleep") or DEFAULT_RATE_LIMIT_SLEEP)
+    for attempt in range(1, max_retries + 1):
         try:
             return _fetch_alpha_csv(symbol, dataset_id, dataset_name, outputsize=outputsize)
         except RuntimeError as exc:
             last_error = exc
-            if str(exc) != "ALPHA_RATE_LIMIT" or attempt >= ALPHA_RETRY_MAX_ATTEMPTS:
+            code = str(exc)
+            if code == "ALPHA_RATE_LIMIT":
+                if attempt > rate_limit_retries:
+                    raise
+                time.sleep(rate_limit_sleep)
+                continue
+            if attempt >= max_retries:
                 raise
-            time.sleep(ALPHA_RETRY_DELAY_SECONDS)
+            time.sleep(_compute_retry_delay(attempt))
     if last_error:
         raise last_error
     raise RuntimeError("Alpha Vantage 请求失败")
@@ -2308,7 +3378,7 @@ def run_data_sync(job_id: int, spawn_retry_thread: bool = True) -> None:
         job.next_retry_at = None
         job.status = "running"
         job.started_at = datetime.utcnow()
-        session.commit()
+        _set_job_stage(session, job, "fetch", 0.2)
 
         dataset = session.get(Dataset, job.dataset_id)
         dataset_name = dataset.name if dataset else f"dataset_{job.dataset_id}"
@@ -2323,6 +3393,12 @@ def run_data_sync(job_id: int, spawn_retry_thread: bool = True) -> None:
         symbol_override: str | None = None
         reset_history = bool(job.reset_history)
         factor_source: str | None = None
+        alpha_meta: dict[str, Any] | None = None
+        alpha_coverage_end: date | None = None
+        alpha_latest_complete: date | None = None
+        alpha_outputsize: str | None = None
+        alpha_compact_fallback = False
+        alpha_symbol: str | None = None
         stooq_only = _is_stooq_only_source(source_path)
         stooq_symbol: str | None = None
         stooq_logged_start = False
@@ -2343,15 +3419,19 @@ def run_data_sync(job_id: int, spawn_retry_thread: bool = True) -> None:
                         symbol_hint, lean_root
                     )
                     symbol_override = canonical_symbol
-                    factor_path = _resolve_factor_path(dataset, canonical_symbol)
-                    factors = _load_factor_file(factor_path)
-                    if factors:
-                        factor_source = "lean"
+                    if ALPHA_ONLY_PRICES:
+                        factors = []
+                        factor_source = "alpha_only_skip"
                     else:
-                        factors = _build_factors_from_yahoo(canonical_symbol, dataset)
+                        factor_path = _resolve_factor_path(dataset, canonical_symbol)
+                        factors = _load_factor_file(factor_path)
                         if factors:
-                            factor_source = "yahoo"
-                            _write_factor_file(_factor_cache_path(canonical_symbol), factors)
+                            factor_source = "lean"
+                        else:
+                            factors = _build_factors_from_yahoo(canonical_symbol, dataset)
+                            if factors:
+                                factor_source = "yahoo"
+                                _write_factor_file(_factor_cache_path(canonical_symbol), factors)
                     adjusted_records = _apply_price_factors(curated_records, factors)
                     adjusted_records, cliff_count = _sanitize_cliffs(adjusted_records)
                     if adjusted_records:
@@ -2375,10 +3455,12 @@ def run_data_sync(job_id: int, spawn_retry_thread: bool = True) -> None:
                 ]
                 if needs_adjusted:
                     message_parts.append("backfill_adjusted")
-                if factor_source == "yahoo":
+                if factor_source in {"alpha", "alpha_cache"}:
+                    message_parts.append("factor=alpha")
+                elif factor_source == "yahoo":
                     message_parts.append("factor=yahoo")
                 elif factor_source == "lean":
-                    message_parts.append("factor=ok")
+                    message_parts.append("factor=lean")
                 else:
                     message_parts.append("factor=missing")
                 if cliff_count:
@@ -2582,16 +3664,63 @@ def run_data_sync(job_id: int, spawn_retry_thread: bool = True) -> None:
         elif _is_alpha_source(source_path):
             alpha_symbol = _alpha_source_symbol(source_path, dataset)
             base_symbol = alpha_symbol.split(".", 1)[0] if alpha_symbol.endswith(".HK") else alpha_symbol
+            alpha_fetch_cfg = load_alpha_fetch_config(_get_data_root())
+            alpha_incremental_enabled = bool(
+                alpha_fetch_cfg.get(
+                    "alpha_incremental_enabled", DEFAULT_ALPHA_INCREMENTAL_ENABLED
+                )
+            )
+            alpha_compact_days = int(
+                alpha_fetch_cfg.get("alpha_compact_days") or DEFAULT_ALPHA_COMPACT_DAYS
+            )
+            alpha_coverage_end = _parse_date(dataset.coverage_end if dataset else None)
+            alpha_latest_complete = _latest_complete_business_day()
+            gap_days = None
+            if alpha_coverage_end:
+                gap_days = (alpha_latest_complete - alpha_coverage_end).days
+                if gap_days < 0:
+                    gap_days = 0
+            outputsize = "full"
+            if (
+                alpha_incremental_enabled
+                and not reset_history
+                and alpha_coverage_end
+                and gap_days is not None
+            ):
+                outputsize = "compact" if gap_days <= alpha_compact_days else "full"
+            alpha_outputsize = outputsize
+            alpha_meta = {
+                "alpha_outputsize": outputsize,
+                "gap_days": gap_days,
+                "coverage_end": alpha_coverage_end.isoformat() if alpha_coverage_end else None,
+                "latest_complete": alpha_latest_complete.isoformat()
+                if alpha_latest_complete
+                else None,
+                "alpha_incremental_enabled": alpha_incremental_enabled,
+                "alpha_compact_days": alpha_compact_days,
+                "alpha_compact_fallback": False,
+            }
             try:
-                path = _fetch_alpha_csv_with_retry(alpha_symbol, job.dataset_id, dataset_name)
+                path = _fetch_alpha_csv_with_retry(
+                    alpha_symbol,
+                    job.dataset_id,
+                    dataset_name,
+                    outputsize=outputsize,
+                )
             except RuntimeError as exc:
                 code = str(exc)
-                if code == "ALPHA_RATE_LIMIT":
+                if code in {"ALPHA_RATE_LIMIT", "ALPHA_PREMIUM", "ALPHA_LOCK_BUSY"}:
+                    config = load_alpha_rate_config(_get_data_root())
+                    min_delay = int(config.get("rate_limit_sleep") or DEFAULT_RATE_LIMIT_SLEEP)
+                    tune_hint = (
+                        f"tune=max_rpm={config.get('max_rpm')};"
+                        f"min_delay={config.get('min_delay_seconds')}"
+                    )
                     _schedule_retry(
                         session,
                         job,
-                        reason="ALPHA_RATE_LIMIT",
-                        min_delay=int(ALPHA_RATE_LIMIT_WINDOW.total_seconds()),
+                        reason=f"{code}; {tune_hint}",
+                        min_delay=min_delay,
                         status="rate_limited",
                         spawn_thread=spawn_retry_thread,
                     )
@@ -2599,16 +3728,6 @@ def run_data_sync(job_id: int, spawn_retry_thread: bool = True) -> None:
                 elif code == "ALPHA_NOT_FOUND":
                     job.status = "not_found"
                     job.message = "Alpha Vantage 未覆盖该代码"
-                elif code == "ALPHA_PREMIUM":
-                    _schedule_retry(
-                        session,
-                        job,
-                        reason="ALPHA_RATE_LIMIT",
-                        min_delay=int(ALPHA_RATE_LIMIT_WINDOW.total_seconds()),
-                        status="rate_limited",
-                        spawn_thread=spawn_retry_thread,
-                    )
-                    return
                 elif code == "ALPHA_KEY_MISSING":
                     job.status = "failed"
                     job.message = "Alpha Vantage API Key 未配置"
@@ -2646,25 +3765,52 @@ def run_data_sync(job_id: int, spawn_retry_thread: bool = True) -> None:
         symbol_override = canonical_symbol
         factor_path = _resolve_factor_path(dataset, canonical_symbol)
         factors: list[tuple[date, float]] = []
-        if _is_alpha_source(source_path):
-            factors = _build_factors_from_alpha_csv(path)
-            if factors:
-                factor_source = "alpha"
-                _write_factor_file(_factor_cache_path(canonical_symbol), factors)
-        if not factors:
-            factors = _load_factor_file(factor_path)
-            if factors:
-                factor_source = "lean"
-        if not factors:
-            factors = _build_factors_from_yahoo(canonical_symbol, dataset)
-            if factors:
-                factor_source = "yahoo"
-                _write_factor_file(_factor_cache_path(canonical_symbol), factors)
+        if ALPHA_ONLY_PRICES and not _is_alpha_source(source_path):
+            factor_source = "alpha_only_skip"
+        else:
+            if _is_alpha_source(source_path):
+                factors = _build_factors_from_alpha_csv(path)
+                if factors:
+                    factor_source = "alpha"
+                    _write_factor_file(_factor_cache_path(canonical_symbol), factors)
+            if not factors:
+                factors = _load_factor_file(factor_path)
+                if factors:
+                    factor_source = "alpha_cache" if ALPHA_ONLY_PRICES else "lean"
+            if not factors and not ALPHA_ONLY_PRICES:
+                factors = _build_factors_from_yahoo(canonical_symbol, dataset)
+                if factors:
+                    factor_source = "yahoo"
+                    _write_factor_file(_factor_cache_path(canonical_symbol), factors)
 
+        _set_job_stage(session, job, "normalize", 0.6)
         source_files = _collect_csv_files(path)
         records, raw_rows, _, _, issues = _normalize_records(
             source_files, job.date_column, dataset_name, symbol_override
         )
+        if (
+            alpha_outputsize == "compact"
+            and alpha_symbol
+            and alpha_coverage_end
+            and records
+        ):
+            earliest_date = min(ts.date() for ts, _ in records)
+            if earliest_date > alpha_coverage_end:
+                alpha_compact_fallback = True
+                alpha_outputsize = "full"
+                if alpha_meta is not None:
+                    alpha_meta["alpha_outputsize"] = "full"
+                    alpha_meta["alpha_compact_fallback"] = True
+                path = _fetch_alpha_csv_with_retry(
+                    alpha_symbol,
+                    job.dataset_id,
+                    dataset_name,
+                    outputsize="full",
+                )
+                source_files = _collect_csv_files(path)
+                records, raw_rows, _, _, issues = _normalize_records(
+                    source_files, job.date_column, dataset_name, symbol_override
+                )
         if not records:
             raise RuntimeError("未找到可用记录")
 
@@ -2701,6 +3847,7 @@ def run_data_sync(job_id: int, spawn_retry_thread: bool = True) -> None:
             lean_adjusted_path = _export_lean_daily_to_root(
                 dataset, adjusted_records, dataset_name, lean_adjusted_root
             )
+        _set_job_stage(session, job, "finalize", 0.9)
         snapshot_path = _write_snapshot(job.dataset_id, dataset_name, curated_records)
         lean_path = _export_lean_daily(dataset, curated_records, dataset_name)
 
@@ -2723,12 +3870,29 @@ def run_data_sync(job_id: int, spawn_retry_thread: bool = True) -> None:
         ]
         if source_label:
             message_parts.append(f"source={source_label}")
+        if alpha_meta:
+            outputsize = alpha_meta.get("alpha_outputsize")
+            if outputsize:
+                message_parts.append(f"alpha_outputsize={outputsize}")
+            gap_days = alpha_meta.get("gap_days")
+            if gap_days is not None:
+                message_parts.append(f"gap_days={gap_days}")
+            if alpha_meta.get("coverage_end"):
+                message_parts.append(f"coverage_end={alpha_meta.get('coverage_end')}")
+            if alpha_meta.get("latest_complete"):
+                message_parts.append(f"latest_complete={alpha_meta.get('latest_complete')}")
+            if alpha_meta.get("alpha_compact_fallback"):
+                message_parts.append("alpha_compact_fallback=1")
         if map_path:
             message_parts.append(f"map=ok({map_path.name})")
         else:
             message_parts.append("map=missing")
-        if factor_source == "yahoo":
+        if factor_source in {"alpha", "alpha_cache"}:
+            message_parts.append("factor=alpha")
+        elif factor_source == "yahoo":
             message_parts.append("factor=yahoo")
+        elif factor_source == "lean":
+            message_parts.append("factor=lean")
         elif factors:
             message_parts.append("factor=ok")
         else:

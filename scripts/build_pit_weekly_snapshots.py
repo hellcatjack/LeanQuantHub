@@ -9,7 +9,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Iterable
 
-import pandas as pd
+import trading_calendar
 
 
 def _resolve_data_root(value: str | None) -> Path:
@@ -92,6 +92,10 @@ def _extract_symbol_from_filename(path: Path) -> str:
 def _load_available_symbols(adjusted_dir: Path) -> set[str]:
     symbols = set()
     for path in adjusted_dir.glob("*.csv"):
+        parts = path.stem.split("_", 2)
+        vendor = parts[1] if len(parts) >= 3 else ""
+        if vendor.upper() != "ALPHA":
+            continue
         symbol = _extract_symbol_from_filename(path)
         if symbol:
             symbols.add(symbol)
@@ -116,31 +120,6 @@ def _load_symbol_life(
             delist = _parse_date(row.get("delistingDate"))
             life[symbol] = (ipo, delist)
     return life
-
-
-def _load_trading_days(
-    adjusted_dir: Path, benchmark: str, vendor_preference: list[str]
-) -> list[date]:
-    candidates = list(adjusted_dir.glob(f"*_{benchmark}_*.csv"))
-    if not candidates:
-        candidates = list(adjusted_dir.glob(f"*_{benchmark}.csv"))
-    if not candidates:
-        raise RuntimeError(f"missing benchmark data for {benchmark}")
-
-    def vendor_rank(path: Path) -> int:
-        stem = path.stem
-        parts = stem.split("_", 2)
-        vendor = parts[1] if len(parts) > 1 else ""
-        ranks = {v.upper(): i for i, v in enumerate(vendor_preference)}
-        return ranks.get(vendor.upper(), len(ranks) + 1)
-
-    path = sorted(candidates, key=vendor_rank)[0]
-    dates = pd.read_csv(path, usecols=["date"])["date"]
-    series = pd.to_datetime(dates, errors="coerce").dropna()
-    days = sorted({d.date() for d in series})
-    if not days:
-        raise RuntimeError("no trading days found in benchmark data")
-    return days
 
 
 def _pick_rebalance_dates(
@@ -201,7 +180,8 @@ def _write_snapshot(
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     filename = output_dir / f"pit_{snapshot_date.strftime('%Y%m%d')}.csv"
-    with filename.open("w", encoding="utf-8", newline="") as handle:
+    tmp_path = filename.with_suffix(f"{filename.suffix}.tmp")
+    with tmp_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=["symbol", "snapshot_date", "rebalance_date"])
         writer.writeheader()
         for symbol in symbols:
@@ -212,6 +192,7 @@ def _write_snapshot(
                     "rebalance_date": rebalance_date.isoformat(),
                 }
             )
+    tmp_path.replace(filename)
     return filename
 
 
@@ -229,8 +210,13 @@ def main() -> int:
     parser.add_argument("--session-open", default="09:30")
     parser.add_argument("--session-close", default="16:00")
     parser.add_argument("--asset-type", default="Stock")
+    parser.add_argument(
+        "--calendar-source",
+        default="",
+        help="trading calendar source override (auto/local/exchange_calendars/lean/spy)",
+    )
     parser.add_argument("--require-data", action="store_true")
-    parser.add_argument("--vendor-preference", default="Alpha,Lean,Stooq")
+    parser.add_argument("--vendor-preference", default="Alpha")
     parser.add_argument("--symbol-map", default="")
     args = parser.parse_args()
 
@@ -269,7 +255,17 @@ def main() -> int:
             raise RuntimeError("rebalance-day must be monday..friday")
 
     vendor_preference = [item.strip() for item in args.vendor_preference.split(",") if item.strip()]
-    trading_days = _load_trading_days(adjusted_dir, args.benchmark.strip().upper(), vendor_preference)
+    vendor_preference = [
+        item for item in vendor_preference if item.upper() == "ALPHA"
+    ] or ["Alpha"]
+    calendar_override = args.calendar_source.strip().lower() or None
+    trading_days, calendar_info = trading_calendar.load_trading_days(
+        data_root,
+        adjusted_dir,
+        args.benchmark.strip().upper(),
+        vendor_preference,
+        source_override=calendar_override,
+    )
     start = _parse_date(args.start) if args.start else None
     end = _parse_date(args.end) if args.end else None
     calendar_meta = {
@@ -280,9 +276,22 @@ def main() -> int:
         "rebalance_mode": rebalance_mode,
         "rebalance_day": args.rebalance_day.strip().lower(),
         "snapshot_rule": "previous_trading_close",
+        "calendar_source": calendar_info.get("calendar_source"),
+        "calendar_exchange": calendar_info.get("calendar_exchange"),
+        "calendar_start": calendar_info.get("calendar_start"),
+        "calendar_end": calendar_info.get("calendar_end"),
+        "calendar_generated_at": calendar_info.get("calendar_generated_at"),
+        "calendar_sessions": calendar_info.get("calendar_sessions"),
+        "calendar_path": calendar_info.get("calendar_path"),
+        "overrides_path": calendar_info.get("overrides_path"),
+        "overrides_applied": calendar_info.get("overrides_applied"),
+        "spy_last_date": calendar_info.get("spy_last_date"),
     }
+    output_dir.mkdir(parents=True, exist_ok=True)
     meta_path = output_dir / "pit_weekly_calendar.json"
-    meta_path.write_text(json.dumps(calendar_meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_meta = meta_path.with_suffix(".tmp")
+    tmp_meta.write_text(json.dumps(calendar_meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_meta.replace(meta_path)
     print(
         "calendar: "
         f"{calendar_meta['calendar_symbol']} "

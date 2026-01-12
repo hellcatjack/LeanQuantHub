@@ -8,7 +8,7 @@ import os
 from datetime import date, datetime
 from pathlib import Path
 
-import pandas as pd
+import trading_calendar
 
 
 def _resolve_data_root(value: str | None) -> Path:
@@ -45,7 +45,7 @@ def _parse_snapshot_date(path: Path) -> date | None:
     try:
         return datetime.strptime(suffix, "%Y%m%d").date()
     except ValueError:
-    return None
+        return None
 
 
 def _load_symbol_map(
@@ -88,29 +88,6 @@ def _resolve_symbol_alias(
         if match:
             return match
     return entries[-1][2]
-
-
-def _load_trading_days(adjusted_dir: Path, benchmark: str, vendor_preference: list[str]) -> list[date]:
-    candidates = list(adjusted_dir.glob(f"*_{benchmark}_*.csv"))
-    if not candidates:
-        candidates = list(adjusted_dir.glob(f"*_{benchmark}.csv"))
-    if not candidates:
-        raise RuntimeError(f"missing benchmark data for {benchmark}")
-
-    def vendor_rank(path: Path) -> int:
-        stem = path.stem
-        parts = stem.split("_", 2)
-        vendor = parts[1] if len(parts) > 1 else ""
-        ranks = {v.upper(): i for i, v in enumerate(vendor_preference)}
-        return ranks.get(vendor.upper(), len(ranks) + 1)
-
-    path = sorted(candidates, key=vendor_rank)[0]
-    dates = pd.read_csv(path, usecols=["date"])["date"]
-    series = pd.to_datetime(dates, errors="coerce").dropna()
-    days = sorted({d.date() for d in series})
-    if not days:
-        raise RuntimeError("no trading days found in benchmark data")
-    return days
 
 
 def _next_trading_day(days: list[date], anchor: date) -> date | None:
@@ -159,6 +136,10 @@ def _extract_symbol_from_filename(path: Path) -> str:
 def _load_available_symbols(adjusted_dir: Path) -> set[str]:
     symbols = set()
     for path in adjusted_dir.glob("*.csv"):
+        parts = path.stem.split("_", 2)
+        vendor = parts[1] if len(parts) >= 3 else ""
+        if vendor.upper() != "ALPHA":
+            continue
         symbol = _extract_symbol_from_filename(path)
         if symbol:
             symbols.add(symbol)
@@ -175,11 +156,13 @@ def _write_summary(path: Path | None, payload: dict) -> None:
 
 
 def _write_snapshot(path: Path, rows: list[dict[str, str]]) -> None:
-    with path.open("w", encoding="utf-8", newline="") as handle:
+    tmp_path = path.with_suffix(f"{path.suffix}.tmp")
+    with tmp_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=["symbol", "snapshot_date", "rebalance_date"])
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
+    tmp_path.replace(path)
 
 
 def main() -> int:
@@ -188,8 +171,9 @@ def main() -> int:
     parser.add_argument("--pit-dir", default="")
     parser.add_argument("--symbol-life", default="")
     parser.add_argument("--benchmark", default="SPY")
+    parser.add_argument("--calendar-source", default="")
     parser.add_argument("--asset-type", default="Stock")
-    parser.add_argument("--vendor-preference", default="Alpha,Lean,Stooq")
+    parser.add_argument("--vendor-preference", default="Alpha")
     parser.add_argument("--require-data", action="store_true")
     parser.add_argument("--symbol-map", default="")
     parser.add_argument("--fix", action="store_true")
@@ -219,7 +203,17 @@ def main() -> int:
         symbol_life_file = data_root / symbol_life_file
 
     vendor_preference = [item.strip() for item in args.vendor_preference.split(",") if item.strip()]
-    trading_days = _load_trading_days(adjusted_dir, args.benchmark.strip().upper(), vendor_preference)
+    vendor_preference = [
+        item for item in vendor_preference if item.upper() == "ALPHA"
+    ] or ["Alpha"]
+    calendar_override = args.calendar_source.strip().lower() or None
+    trading_days, _calendar_info = trading_calendar.load_trading_days(
+        data_root,
+        adjusted_dir,
+        args.benchmark.strip().upper(),
+        vendor_preference,
+        source_override=calendar_override,
+    )
 
     life = _load_symbol_life(symbol_life_file, args.asset_type.strip() or None)
     symbol_map_path = args.symbol_map.strip()

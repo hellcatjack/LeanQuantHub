@@ -28,6 +28,12 @@ ml/models/metrics.csv
 - `pit_fundamentals.enabled=true` 启用周度基本面快照特征（默认目录 `DATA_ROOT/factors/pit_weekly_fundamentals`）。
 - `label_price=open` + `label_start_offset=1` 表示标签从下一交易日开盘起算。
 
+## 样本权重（市值/成交额）
+- `sample_weight.scheme` 支持：`none` / `dollar_volume` / `market_cap` / `mcap_dv_mix`。
+- `mcap_dv_mix`：`w = α·log1p(mcap) + (1-α)·log1p(dv)`，默认 `alpha=0.6`。
+- 市值来源：优先使用 PIT 快照中的 `pit_market_cap`，fallback 到 `overview.json` 的 `MarketCapitalization`。
+- 成交额：使用 **raw close × raw volume**（`data/curated`），可配置滚动窗口 `dv_window_days`。
+
 ## 基线因子打分（周度）
 使用 PIT 周度快照 + 复权行情生成基线因子分数（动量/质量/估值/低波/流动性）：
 ```bash

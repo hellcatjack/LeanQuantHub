@@ -42,6 +42,8 @@ interface DataSyncJob {
   source_path: string;
   date_column: string;
   reset_history?: boolean;
+  retry_count?: number | null;
+  next_retry_at?: string | null;
   status: string;
   rows_scanned?: number | null;
   coverage_start?: string | null;
@@ -64,6 +66,93 @@ interface DataSyncSpeed {
   rate_per_min: number;
   running: number;
   pending: number;
+  target_rpm?: number | null;
+  effective_min_delay_seconds?: number | null;
+}
+
+interface AlphaRateConfig {
+  max_rpm: number;
+  rpm_floor?: number;
+  rpm_ceil?: number;
+  rpm_step_down?: number;
+  rpm_step_up?: number;
+  min_delay_seconds: number;
+  effective_min_delay_seconds: number;
+  rate_limit_sleep: number;
+  rate_limit_retries: number;
+  max_retries: number;
+  auto_tune?: boolean;
+  min_delay_floor_seconds?: number;
+  min_delay_ceil_seconds?: number;
+  tune_step_seconds?: number;
+  tune_window_seconds?: number;
+  tune_target_ratio_low?: number;
+  tune_target_ratio_high?: number;
+  tune_cooldown_seconds?: number;
+  source: string;
+  updated_at?: string | null;
+  path: string;
+}
+
+interface AlphaFetchConfig {
+  alpha_incremental_enabled: boolean;
+  alpha_compact_days: number;
+  updated_at?: string | null;
+  source: string;
+  path: string;
+}
+
+interface TradingCalendarConfig {
+  source: string;
+  config_source?: string | null;
+  exchange: string;
+  start_date: string;
+  end_date: string;
+  refresh_days: number;
+  override_enabled: boolean;
+  updated_at?: string | null;
+  path: string;
+  calendar_source?: string | null;
+  calendar_exchange?: string | null;
+  calendar_start?: string | null;
+  calendar_end?: string | null;
+  calendar_generated_at?: string | null;
+  calendar_sessions?: number | null;
+  calendar_path?: string | null;
+  overrides_path?: string | null;
+  overrides_applied?: number | null;
+}
+
+interface TradingCalendarRefreshResult {
+  status: string;
+  log_path: string;
+  return_code: number;
+  calendar?: TradingCalendarConfig | null;
+}
+
+interface BulkAutoConfig {
+  status: string;
+  batch_size: number;
+  only_missing: boolean;
+  min_delay_seconds: number;
+  refresh_listing_mode: string;
+  refresh_listing_ttl_days: number;
+  updated_at?: string | null;
+  source: string;
+  path: string;
+}
+
+interface AlphaGapSummary {
+  latest_complete: string;
+  total: number;
+  with_coverage: number;
+  missing_coverage: number;
+  up_to_date: number;
+  gap_0_30: number;
+  gap_31_120: number;
+  gap_120_plus: number;
+  listing_updated_at?: string | null;
+  listing_age_days?: number | null;
 }
 
 interface DataSyncQueueClearOut {
@@ -121,6 +210,14 @@ interface PitWeeklyQuality {
   updated_at?: string;
 }
 
+interface PitWeeklyProgress {
+  stage?: string | null;
+  status?: string | null;
+  message?: string | null;
+  snapshot_count?: number | null;
+  updated_at?: string | null;
+}
+
 interface PitFundamentalJob {
   id: number;
   status: string;
@@ -147,7 +244,17 @@ interface PitFundamentalProgress {
   current_symbol?: string;
   updated_at?: string;
   snapshot_count?: number | null;
+  total_symbols?: number;
+  missing_count?: number;
+  missing_path?: string;
   message?: string | null;
+  rate_per_min?: number | null;
+  target_rpm?: number | null;
+  min_delay_seconds?: number | null;
+  effective_min_delay_seconds?: number | null;
+  auto_tune?: boolean | null;
+  tune_window_seconds?: number | null;
+  tune_action?: Record<string, unknown> | null;
 }
 
 
@@ -177,6 +284,8 @@ interface ThemeCoverage {
 
 export default function DataPage() {
   const { t, formatDateTime } = useI18n();
+  const pitFundDefaultStart = "1995-01-01";
+  const pitFundDefaultEnd = new Date().toISOString().slice(0, 10);
   const [datasets, setDatasets] = useState<DatasetSummary[]>([]);
   const [datasetTotal, setDatasetTotal] = useState(0);
   const [datasetPage, setDatasetPage] = useState(1);
@@ -234,11 +343,64 @@ export default function DataPage() {
   const [clearQueueLoading, setClearQueueLoading] = useState(false);
   const [clearQueueResult, setClearQueueResult] = useState("");
   const [clearQueueError, setClearQueueError] = useState("");
+  const [alphaRate, setAlphaRate] = useState<AlphaRateConfig | null>(null);
+  const [alphaRateForm, setAlphaRateForm] = useState({
+    max_rpm: "75",
+    rpm_floor: "80",
+    rpm_ceil: "75",
+    rpm_step_down: "5",
+    rpm_step_up: "1",
+    min_delay_seconds: "0.8",
+    rate_limit_sleep: "10",
+    rate_limit_retries: "3",
+    max_retries: "3",
+    auto_tune: false,
+    min_delay_floor_seconds: "0.1",
+    min_delay_ceil_seconds: "2.0",
+    tune_step_seconds: "0.02",
+    tune_window_seconds: "60",
+    tune_target_ratio_low: "0.9",
+    tune_target_ratio_high: "1.05",
+    tune_cooldown_seconds: "10",
+  });
+  const [alphaRateSaving, setAlphaRateSaving] = useState(false);
+  const [alphaRateResult, setAlphaRateResult] = useState("");
+  const [alphaRateError, setAlphaRateError] = useState("");
+  const [alphaFetchConfig, setAlphaFetchConfig] = useState<AlphaFetchConfig | null>(null);
+  const [alphaFetchForm, setAlphaFetchForm] = useState({
+    alpha_incremental_enabled: true,
+    alpha_compact_days: "120",
+  });
+  const [alphaFetchSaving, setAlphaFetchSaving] = useState(false);
+  const [alphaFetchError, setAlphaFetchError] = useState("");
+  const [tradingCalendar, setTradingCalendar] = useState<TradingCalendarConfig | null>(null);
+  const [tradingCalendarForm, setTradingCalendarForm] = useState({
+    source: "auto",
+    exchange: "XNYS",
+    start_date: "1990-01-01",
+    end_date: "",
+    refresh_days: "7",
+    override_enabled: true,
+  });
+  const [tradingCalendarSaving, setTradingCalendarSaving] = useState(false);
+  const [tradingCalendarRefreshing, setTradingCalendarRefreshing] = useState(false);
+  const [tradingCalendarResult, setTradingCalendarResult] = useState("");
+  const [tradingCalendarError, setTradingCalendarError] = useState("");
+  const [bulkAutoConfig, setBulkAutoConfig] = useState<BulkAutoConfig | null>(null);
+  const [bulkAutoLoadError, setBulkAutoLoadError] = useState("");
+  const [bulkDefaultsSaving, setBulkDefaultsSaving] = useState(false);
+  const [bulkDefaultsResult, setBulkDefaultsResult] = useState("");
+  const [bulkDefaultsError, setBulkDefaultsError] = useState("");
+  const [alphaGapSummary, setAlphaGapSummary] = useState<AlphaGapSummary | null>(null);
+  const [alphaGapLoading, setAlphaGapLoading] = useState(false);
+  const [alphaGapError, setAlphaGapError] = useState("");
   const [bulkAutoForm, setBulkAutoForm] = useState({
     status: "all",
     batch_size: "200",
     only_missing: true,
     min_delay_seconds: "0.1",
+    refresh_listing_mode: "stale_only",
+    refresh_listing_ttl_days: "7",
   });
   const [bulkJob, setBulkJob] = useState<BulkSyncJob | null>(null);
   const [bulkJobLoading, setBulkJobLoading] = useState(false);
@@ -260,12 +422,20 @@ export default function DataPage() {
   const [pitActionResult, setPitActionResult] = useState("");
   const [pitQuality, setPitQuality] = useState<PitWeeklyQuality | null>(null);
   const [pitQualityError, setPitQualityError] = useState("");
+  const [pitProgress, setPitProgress] = useState<PitWeeklyProgress | null>(null);
+  const [pitProgressError, setPitProgressError] = useState("");
   const [pitFundForm, setPitFundForm] = useState({
-    start: "",
-    end: "",
+    start: pitFundDefaultStart,
+    end: pitFundDefaultEnd,
     report_delay_days: "1",
-    min_delay_seconds: "0.8",
+    missing_report_delay_days: "45",
+    shares_delay_days: "45",
+    shares_preference: "diluted",
+    price_source: "raw",
+    min_delay_seconds: "0.45",
+    refresh_days: "0",
     refresh_fundamentals: false,
+    asset_types: "STOCK",
   });
   const [pitFundJobs, setPitFundJobs] = useState<PitFundamentalJob[]>([]);
   const [pitFundLoadError, setPitFundLoadError] = useState("");
@@ -274,6 +444,15 @@ export default function DataPage() {
   const [pitFundActionResult, setPitFundActionResult] = useState("");
   const [pitFundProgress, setPitFundProgress] = useState<PitFundamentalProgress | null>(null);
   const [pitFundProgressError, setPitFundProgressError] = useState("");
+  const [pitFundProgressMap, setPitFundProgressMap] = useState<
+    Record<number, PitFundamentalProgress | null>
+  >({});
+  const [pitFundResumeLoading, setPitFundResumeLoading] = useState<Record<number, boolean>>(
+    {}
+  );
+  const [pitFundCancelLoading, setPitFundCancelLoading] = useState<Record<number, boolean>>(
+    {}
+  );
   const [expandedGroupKey, setExpandedGroupKey] = useState<string | null>(null);
   const [chartSelection, setChartSelection] = useState<Record<string, number>>({});
 
@@ -337,6 +516,22 @@ export default function DataPage() {
     }
   };
 
+  const loadPitProgress = async (jobId: number) => {
+    try {
+      const res = await api.get<PitWeeklyProgress>(`/api/pit/weekly-jobs/${jobId}/progress`);
+      setPitProgress(res.data);
+      setPitProgressError("");
+    } catch (err: any) {
+      if (err?.response?.status === 404) {
+        setPitProgress(null);
+        setPitProgressError("");
+        return;
+      }
+      const detail = err?.response?.data?.detail || t("data.pit.progressError");
+      setPitProgressError(String(detail));
+    }
+  };
+
   const loadPitFundJobs = async () => {
     try {
       const res = await api.get<PitFundamentalJob[]>("/api/pit/fundamental-jobs", {
@@ -375,11 +570,323 @@ export default function DataPage() {
     }
   };
 
+  const loadPitFundProgressMap = async (jobs: PitFundamentalJob[]) => {
+    if (!jobs.length) {
+      setPitFundProgressMap({});
+      return;
+    }
+    const entries = await Promise.all(
+      jobs.map(async (job) => {
+        try {
+          const res = await api.get<PitFundamentalProgress>(
+            `/api/pit/fundamental-jobs/${job.id}/progress`
+          );
+          return [job.id, res.data] as const;
+        } catch (err: any) {
+          return [job.id, null] as const;
+        }
+      })
+    );
+    setPitFundProgressMap(Object.fromEntries(entries));
+  };
+
   const loadSyncSpeed = async () => {
     const res = await api.get<DataSyncSpeed>("/api/datasets/sync-jobs/speed", {
       params: { window_seconds: 60 },
     });
     return res.data;
+  };
+
+  const loadAlphaRate = async () => {
+    try {
+      const res = await api.get<AlphaRateConfig>("/api/datasets/alpha-rate");
+      setAlphaRate(res.data);
+      setAlphaRateForm({
+        max_rpm: String(res.data.max_rpm ?? ""),
+        rpm_floor: String(res.data.rpm_floor ?? ""),
+        rpm_ceil: String(res.data.rpm_ceil ?? ""),
+        rpm_step_down: String(res.data.rpm_step_down ?? ""),
+        rpm_step_up: String(res.data.rpm_step_up ?? ""),
+        min_delay_seconds: String(res.data.min_delay_seconds ?? ""),
+        rate_limit_sleep: String(res.data.rate_limit_sleep ?? ""),
+        rate_limit_retries: String(res.data.rate_limit_retries ?? ""),
+        max_retries: String(res.data.max_retries ?? ""),
+        auto_tune: !!res.data.auto_tune,
+        min_delay_floor_seconds: String(res.data.min_delay_floor_seconds ?? ""),
+        min_delay_ceil_seconds: String(res.data.min_delay_ceil_seconds ?? ""),
+        tune_step_seconds: String(res.data.tune_step_seconds ?? ""),
+        tune_window_seconds: String(res.data.tune_window_seconds ?? ""),
+        tune_target_ratio_low: String(res.data.tune_target_ratio_low ?? ""),
+        tune_target_ratio_high: String(res.data.tune_target_ratio_high ?? ""),
+        tune_cooldown_seconds: String(res.data.tune_cooldown_seconds ?? ""),
+      });
+      setAlphaRateError("");
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("data.alphaRate.loadError");
+      setAlphaRateError(String(detail));
+    }
+  };
+
+  const loadAlphaFetchConfig = async () => {
+    try {
+      const res = await api.get<AlphaFetchConfig>("/api/datasets/alpha-fetch-config");
+      setAlphaFetchConfig(res.data);
+      setAlphaFetchForm({
+        alpha_incremental_enabled: !!res.data.alpha_incremental_enabled,
+        alpha_compact_days: String(res.data.alpha_compact_days ?? ""),
+      });
+      setAlphaFetchError("");
+      return res.data;
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("data.bulk.incremental.loadError");
+      setAlphaFetchError(String(detail));
+      return null;
+    }
+  };
+
+  const loadTradingCalendar = async () => {
+    try {
+      const res = await api.get<TradingCalendarConfig>("/api/datasets/trading-calendar");
+      setTradingCalendar(res.data);
+      setTradingCalendarForm({
+        source: res.data.source || "auto",
+        exchange: res.data.exchange || "XNYS",
+        start_date: res.data.start_date || "1990-01-01",
+        end_date: res.data.end_date || "",
+        refresh_days: String(res.data.refresh_days ?? ""),
+        override_enabled: !!res.data.override_enabled,
+      });
+      setTradingCalendarError("");
+      return res.data;
+    } catch (err: any) {
+      const detail =
+        err?.response?.data?.detail || t("data.tradingCalendar.loadError");
+      setTradingCalendarError(String(detail));
+      return null;
+    }
+  };
+
+  const loadBulkAutoConfig = async () => {
+    try {
+      const res = await api.get<BulkAutoConfig>("/api/datasets/bulk-auto-config");
+      setBulkAutoConfig(res.data);
+      setBulkAutoForm({
+        status: res.data.status || "all",
+        batch_size: String(res.data.batch_size ?? ""),
+        only_missing: !!res.data.only_missing,
+        min_delay_seconds: String(res.data.min_delay_seconds ?? ""),
+        refresh_listing_mode: res.data.refresh_listing_mode || "stale_only",
+        refresh_listing_ttl_days: String(res.data.refresh_listing_ttl_days ?? ""),
+      });
+      setBulkAutoLoadError("");
+      return res.data;
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("data.bulk.defaults.loadError");
+      setBulkAutoLoadError(String(detail));
+      return null;
+    }
+  };
+
+  const saveBulkAutoConfig = async () => {
+    try {
+      const payload = {
+        status: bulkAutoForm.status,
+        batch_size: Number.parseInt(bulkAutoForm.batch_size, 10) || 0,
+        only_missing: !!bulkAutoForm.only_missing,
+        min_delay_seconds: Number.parseFloat(bulkAutoForm.min_delay_seconds) || 0,
+        refresh_listing_mode: bulkAutoForm.refresh_listing_mode,
+        refresh_listing_ttl_days: Number.parseInt(bulkAutoForm.refresh_listing_ttl_days, 10) || 0,
+      };
+      const res = await api.post<BulkAutoConfig>("/api/datasets/bulk-auto-config", payload);
+      setBulkAutoConfig(res.data);
+      return true;
+    } catch (err) {
+      return false;
+    }
+  };
+
+  const saveBulkDefaults = async (silent = false) => {
+    setBulkDefaultsSaving(true);
+    if (!silent) {
+      setBulkDefaultsResult("");
+      setBulkDefaultsError("");
+    }
+    const autoOk = await saveBulkAutoConfig();
+    const fetchOk = await saveAlphaFetchConfig(true);
+    const ok = autoOk && fetchOk;
+    if (!silent) {
+      if (ok) {
+        setBulkDefaultsResult(t("data.bulk.defaults.saved"));
+      } else {
+        setBulkDefaultsError(t("data.bulk.defaults.saveError"));
+      }
+    }
+    setBulkDefaultsSaving(false);
+    return ok;
+  };
+
+  const saveAlphaFetchConfig = async (silent = false) => {
+    setAlphaFetchSaving(true);
+    if (!silent) {
+      setAlphaFetchError("");
+    }
+    try {
+      const payload = {
+        alpha_incremental_enabled: !!alphaFetchForm.alpha_incremental_enabled,
+        alpha_compact_days: Number.parseInt(alphaFetchForm.alpha_compact_days, 10) || 0,
+      };
+      const res = await api.post<AlphaFetchConfig>(
+        "/api/datasets/alpha-fetch-config",
+        payload
+      );
+      setAlphaFetchConfig(res.data);
+      return true;
+    } catch (err: any) {
+      if (!silent) {
+        const detail = err?.response?.data?.detail || t("data.bulk.incremental.saveError");
+        setAlphaFetchError(String(detail));
+      }
+      return false;
+    } finally {
+      setAlphaFetchSaving(false);
+    }
+  };
+
+  const loadAlphaGapSummary = async () => {
+    setAlphaGapLoading(true);
+    setAlphaGapError("");
+    try {
+      const res = await api.get<AlphaGapSummary>("/api/datasets/alpha-gap-summary");
+      setAlphaGapSummary(res.data);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("data.bulk.gap.loadError");
+      setAlphaGapError(String(detail));
+      setAlphaGapSummary(null);
+    } finally {
+      setAlphaGapLoading(false);
+    }
+  };
+
+  const updateAlphaRateForm = (
+    key: keyof typeof alphaRateForm,
+    value: string | boolean
+  ) => {
+    setAlphaRateForm((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const updateAlphaFetchForm = (
+    key: keyof typeof alphaFetchForm,
+    value: string | boolean
+  ) => {
+    setAlphaFetchForm((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const updateTradingCalendarForm = (
+    key: keyof typeof tradingCalendarForm,
+    value: string | boolean
+  ) => {
+    setTradingCalendarForm((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const saveTradingCalendar = async () => {
+    setTradingCalendarSaving(true);
+    setTradingCalendarResult("");
+    setTradingCalendarError("");
+    try {
+      const payload = {
+        source: tradingCalendarForm.source,
+        exchange: tradingCalendarForm.exchange,
+        start_date: tradingCalendarForm.start_date,
+        end_date: tradingCalendarForm.end_date,
+        refresh_days: Number.parseInt(tradingCalendarForm.refresh_days, 10) || 0,
+        override_enabled: !!tradingCalendarForm.override_enabled,
+      };
+      const res = await api.post<TradingCalendarConfig>(
+        "/api/datasets/trading-calendar",
+        payload
+      );
+      setTradingCalendar(res.data);
+      setTradingCalendarResult(t("data.tradingCalendar.saved"));
+      return true;
+    } catch (err: any) {
+      const detail =
+        err?.response?.data?.detail || t("data.tradingCalendar.saveError");
+      setTradingCalendarError(String(detail));
+      return false;
+    } finally {
+      setTradingCalendarSaving(false);
+    }
+  };
+
+  const refreshTradingCalendar = async () => {
+    setTradingCalendarRefreshing(true);
+    setTradingCalendarResult("");
+    setTradingCalendarError("");
+    try {
+      const res = await api.post<TradingCalendarRefreshResult>(
+        "/api/datasets/trading-calendar/refresh"
+      );
+      if (res.data.calendar) {
+        setTradingCalendar(res.data.calendar);
+        setTradingCalendarForm({
+          source: res.data.calendar.source || "auto",
+          exchange: res.data.calendar.exchange || "XNYS",
+          start_date: res.data.calendar.start_date || "1990-01-01",
+          end_date: res.data.calendar.end_date || "",
+          refresh_days: String(res.data.calendar.refresh_days ?? ""),
+          override_enabled: !!res.data.calendar.override_enabled,
+        });
+      } else {
+        await loadTradingCalendar();
+      }
+      setTradingCalendarResult(t("data.tradingCalendar.refreshed"));
+    } catch (err: any) {
+      const detail =
+        err?.response?.data?.detail || t("data.tradingCalendar.refreshError");
+      setTradingCalendarError(String(detail));
+    } finally {
+      setTradingCalendarRefreshing(false);
+    }
+  };
+
+  const saveAlphaRate = async () => {
+    setAlphaRateSaving(true);
+    setAlphaRateResult("");
+    setAlphaRateError("");
+    try {
+      const payload = {
+        max_rpm: Number.parseFloat(alphaRateForm.max_rpm) || 0,
+        rpm_floor: Number.parseFloat(alphaRateForm.rpm_floor) || 0,
+        rpm_ceil: Number.parseFloat(alphaRateForm.rpm_ceil) || 0,
+        rpm_step_down: Number.parseFloat(alphaRateForm.rpm_step_down) || 0,
+        rpm_step_up: Number.parseFloat(alphaRateForm.rpm_step_up) || 0,
+        min_delay_seconds: Number.parseFloat(alphaRateForm.min_delay_seconds) || 0,
+        rate_limit_sleep: Number.parseFloat(alphaRateForm.rate_limit_sleep) || 0,
+        rate_limit_retries: Number.parseInt(alphaRateForm.rate_limit_retries, 10) || 0,
+        max_retries: Number.parseInt(alphaRateForm.max_retries, 10) || 0,
+        auto_tune: !!alphaRateForm.auto_tune,
+        min_delay_floor_seconds:
+          Number.parseFloat(alphaRateForm.min_delay_floor_seconds) || 0,
+        min_delay_ceil_seconds:
+          Number.parseFloat(alphaRateForm.min_delay_ceil_seconds) || 0,
+        tune_step_seconds: Number.parseFloat(alphaRateForm.tune_step_seconds) || 0,
+        tune_window_seconds: Number.parseFloat(alphaRateForm.tune_window_seconds) || 0,
+        tune_target_ratio_low:
+          Number.parseFloat(alphaRateForm.tune_target_ratio_low) || 0,
+        tune_target_ratio_high:
+          Number.parseFloat(alphaRateForm.tune_target_ratio_high) || 0,
+        tune_cooldown_seconds:
+          Number.parseFloat(alphaRateForm.tune_cooldown_seconds) || 0,
+      };
+      const res = await api.post<AlphaRateConfig>("/api/datasets/alpha-rate", payload);
+      setAlphaRate(res.data);
+      setAlphaRateResult(t("data.alphaRate.saved"));
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("data.alphaRate.saveError");
+      setAlphaRateError(String(detail));
+    } finally {
+      setAlphaRateSaving(false);
+    }
   };
 
   const clearSyncQueue = async () => {
@@ -469,6 +976,14 @@ export default function DataPage() {
   }, [bulkHistoryPage, bulkHistoryPageSize]);
 
   useEffect(() => {
+    loadAlphaRate();
+    loadAlphaFetchConfig();
+    loadTradingCalendar();
+    loadBulkAutoConfig();
+    loadAlphaGapSummary();
+  }, []);
+
+  useEffect(() => {
     let mounted = true;
     const refresh = async () => {
       try {
@@ -500,17 +1015,22 @@ export default function DataPage() {
         const latestWeeklyJob = weeklyJobs && weeklyJobs.length > 0 ? weeklyJobs[0] : null;
         if (latestWeeklyJob) {
           await loadPitQuality(latestWeeklyJob.id);
+          await loadPitProgress(latestWeeklyJob.id);
         } else {
           setPitQuality(null);
           setPitQualityError("");
+          setPitProgress(null);
+          setPitProgressError("");
         }
         const fundJobs = await loadPitFundJobs();
         const latestFundJob = fundJobs && fundJobs.length > 0 ? fundJobs[0] : null;
         if (latestFundJob) {
           await loadPitFundProgress(latestFundJob.id);
+          await loadPitFundProgressMap(fundJobs);
         } else {
           setPitFundProgress(null);
           setPitFundProgressError("");
+          setPitFundProgressMap({});
         }
       } finally {
         if (!mounted) {
@@ -631,13 +1151,31 @@ export default function DataPage() {
     setPitFundActionResult("");
     try {
       const delayDays = Math.max(Number.parseInt(pitFundForm.report_delay_days, 10) || 1, 0);
+      const missingDelayDays = Math.max(
+        Number.parseInt(pitFundForm.missing_report_delay_days, 10) || 45,
+        0
+      );
+      const sharesDelayDays = Math.max(
+        Number.parseInt(pitFundForm.shares_delay_days, 10) || 45,
+        0
+      );
       const minDelay = Math.max(Number.parseFloat(pitFundForm.min_delay_seconds) || 0, 0);
+      const refreshDaysInput = Number.parseInt(pitFundForm.refresh_days, 10);
+      const refreshDays = Number.isFinite(refreshDaysInput)
+        ? Math.max(refreshDaysInput, 0)
+        : 30;
       const payload = {
         start: pitFundForm.start || null,
         end: pitFundForm.end || null,
         report_delay_days: delayDays,
+        missing_report_delay_days: missingDelayDays,
+        shares_delay_days: sharesDelayDays,
+        shares_preference: pitFundForm.shares_preference || "diluted",
+        price_source: pitFundForm.price_source || "raw",
         min_delay_seconds: minDelay,
+        refresh_days: refreshDays,
         refresh_fundamentals: pitFundForm.refresh_fundamentals,
+        asset_types: pitFundForm.asset_types || "STOCK",
       };
       const res = await api.post<PitFundamentalJob>("/api/pit/fundamental-jobs", payload);
       setPitFundActionResult(t("data.pitFund.created", { id: res.data.id }));
@@ -647,6 +1185,42 @@ export default function DataPage() {
       setPitFundActionError(String(detail));
     } finally {
       setPitFundActionLoading(false);
+    }
+  };
+
+  const resumePitFundJob = async (jobId: number) => {
+    setPitFundActionError("");
+    setPitFundActionResult("");
+    setPitFundResumeLoading((prev) => ({ ...prev, [jobId]: true }));
+    try {
+      const res = await api.post<PitFundamentalJob>(
+        `/api/pit/fundamental-jobs/${jobId}/resume`
+      );
+      setPitFundActionResult(t("data.pitFund.resumed", { id: res.data.id }));
+      await loadPitFundJobs();
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("data.pitFund.resumeError");
+      setPitFundActionError(String(detail));
+    } finally {
+      setPitFundResumeLoading((prev) => ({ ...prev, [jobId]: false }));
+    }
+  };
+
+  const cancelPitFundJob = async (jobId: number) => {
+    setPitFundActionError("");
+    setPitFundActionResult("");
+    setPitFundCancelLoading((prev) => ({ ...prev, [jobId]: true }));
+    try {
+      const res = await api.post<PitFundamentalJob>(
+        `/api/pit/fundamental-jobs/${jobId}/cancel`
+      );
+      setPitFundActionResult(t("data.pitFund.canceled", { id: res.data.id }));
+      await loadPitFundJobs();
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("data.pitFund.cancelError");
+      setPitFundActionError(String(detail));
+    } finally {
+      setPitFundCancelLoading((prev) => ({ ...prev, [jobId]: false }));
     }
   };
 
@@ -940,12 +1514,26 @@ export default function DataPage() {
         Number.parseFloat(bulkAutoForm.min_delay_seconds) || 0,
         0
       );
+      const saved = await saveBulkDefaults(true);
+      if (!saved) {
+        setBulkJobError(t("data.bulk.defaults.saveError"));
+        return;
+      }
+      const refreshListingTtlDays = Math.max(
+        Number.parseInt(bulkAutoForm.refresh_listing_ttl_days, 10) || 1,
+        1
+      );
       const res = await api.post<BulkSyncJob>("/api/datasets/actions/bulk-sync", {
         status: bulkAutoForm.status,
         batch_size: batchSize,
         only_missing: bulkAutoForm.only_missing,
         min_delay_seconds: minDelay,
         refresh_listing: true,
+        refresh_listing_mode: bulkAutoForm.refresh_listing_mode,
+        refresh_listing_ttl_days: refreshListingTtlDays,
+        alpha_incremental_enabled: !!alphaFetchForm.alpha_incremental_enabled,
+        alpha_compact_days:
+          Number.parseInt(alphaFetchForm.alpha_compact_days, 10) || 0,
         auto_sync: true,
       });
       setBulkJob(res.data);
@@ -1010,6 +1598,72 @@ export default function DataPage() {
     return "";
   };
 
+  const resolveJobStage = (job: DataSyncJob) => {
+    if (!job.message || !job.message.startsWith("stage=")) {
+      return "";
+    }
+    const [, stage] = job.message.split("stage=");
+    return (stage || "").split(";")[0].trim();
+  };
+
+  const resolveJobProgress = (job: DataSyncJob) => {
+    if (!job.message || !job.message.startsWith("stage=")) {
+      return null;
+    }
+    const parts = job.message.split(";").map((part) => part.trim());
+    const progressPart = parts.find((part) => part.startsWith("progress="));
+    if (!progressPart) {
+      return null;
+    }
+    const raw = progressPart.split("progress=")[1] || "";
+    const value = Number.parseFloat(raw);
+    if (!Number.isFinite(value)) {
+      return null;
+    }
+    if (value > 1) {
+      return Math.round(value);
+    }
+    return Math.round(value * 100);
+  };
+
+  const parseJobMeta = (message?: string | null) => {
+    if (!message || message.startsWith("stage=")) {
+      return {};
+    }
+    const parts = message.split(";").map((part) => part.trim());
+    const meta: Record<string, string> = {};
+    for (const part of parts) {
+      const [key, rawValue] = part.split("=");
+      if (!key || rawValue === undefined) {
+        continue;
+      }
+      meta[key.trim()] = rawValue.trim();
+    }
+    return meta;
+  };
+
+  const resolveAlphaMeta = (job: DataSyncJob) => {
+    const meta = parseJobMeta(job.message);
+    const hasGapDays = Object.prototype.hasOwnProperty.call(meta, "gap_days");
+    if (!meta.alpha_outputsize && !hasGapDays && !meta.alpha_compact_fallback) {
+      return null;
+    }
+    return {
+      outputsize: meta.alpha_outputsize || "",
+      gapDays: hasGapDays ? Number.parseInt(meta.gap_days, 10) : null,
+      compactFallback: meta.alpha_compact_fallback === "1",
+    };
+  };
+
+  const renderJobStage = (stage: string) => {
+    if (!stage) {
+      return "";
+    }
+    const key = `data.jobs.stageLabel.${stage}`;
+    const text = t(key);
+    return text === key ? stage : text;
+  };
+
   const reasonClass = (status: string) => {
     if (status === "failed") {
       return "danger";
@@ -1030,6 +1684,33 @@ export default function DataPage() {
     const key = `data.bulk.phaseLabel.${value}`;
     const text = t(key);
     return text === key ? value : text;
+  };
+
+  const formatDuration = (ms: number | null | undefined) => {
+    if (!ms || ms < 0) {
+      return "-";
+    }
+    const totalSeconds = Math.floor(ms / 1000);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    const pad = (value: number) => String(value).padStart(2, "0");
+    if (hours > 0) {
+      return `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
+    }
+    return `${pad(minutes)}:${pad(seconds)}`;
+  };
+
+  const resolveJobElapsed = (job: DataSyncJob) => {
+    const createdAt = job.created_at ? new Date(job.created_at).getTime() : null;
+    const startedAt = job.started_at ? new Date(job.started_at).getTime() : null;
+    const endedAt = job.ended_at ? new Date(job.ended_at).getTime() : null;
+    const base = startedAt ?? createdAt;
+    if (!base) {
+      return null;
+    }
+    const end = endedAt ?? Date.now();
+    return Math.max(0, end - base);
   };
 
   const bulkErrorSummary = (errors?: Array<{ message?: string; phase?: string }>) => {
@@ -1838,9 +2519,19 @@ export default function DataPage() {
         )}
 
         <div className="card">
-          <div className="card-title">{t("data.sync.title")}</div>
-          <div className="card-meta">{t("data.sync.meta")}</div>
-          <div style={{ marginTop: "12px", display: "grid", gap: "8px" }}>
+            <div className="card-title">{t("data.sync.title")}</div>
+            <div className="card-meta">{t("data.sync.meta")}</div>
+            {alphaFetchConfig && (
+              <div className="card-meta">
+                {t("data.sync.incrementalHint", {
+                  mode: alphaFetchConfig.alpha_incremental_enabled
+                    ? t("data.sync.incremental.enabled")
+                    : t("data.sync.incremental.disabled"),
+                  days: alphaFetchConfig.alpha_compact_days,
+                })}
+              </div>
+            )}
+            <div style={{ marginTop: "12px", display: "grid", gap: "8px" }}>
             <select
               value={syncForm.dataset_id}
               onChange={(e) => updateSyncForm("dataset_id", e.target.value)}
@@ -1986,7 +2677,42 @@ export default function DataPage() {
                     )}
                   </div>
                 )}
+                {pitProgress && (
+                  <div className="progress-block">
+                    <div className="progress-meta">
+                      <span>
+                        {t("data.pit.progress.stage", {
+                          stage: pitProgress.stage || "-",
+                        })}
+                      </span>
+                      <span>
+                        {t("data.pit.progress.status", {
+                          status: pitProgress.status || "-",
+                        })}
+                      </span>
+                      {pitProgress.snapshot_count !== null &&
+                        pitProgress.snapshot_count !== undefined && (
+                          <span>
+                            {t("data.pit.progress.count", {
+                              count: pitProgress.snapshot_count,
+                            })}
+                          </span>
+                        )}
+                    </div>
+                    {pitProgress.updated_at && (
+                      <div className="progress-meta">
+                        {t("data.pit.progress.updated", {
+                          at: formatDateTime(pitProgress.updated_at),
+                        })}
+                      </div>
+                    )}
+                    {pitProgress.message && (
+                      <div className="progress-meta">{pitProgress.message}</div>
+                    )}
+                  </div>
+                )}
                 {pitQualityError && <div className="form-error">{pitQualityError}</div>}
+                {pitProgressError && <div className="form-error">{pitProgressError}</div>}
                 {pitJobs[0].snapshot_count !== null && pitJobs[0].snapshot_count !== undefined && (
                   <div>{t("data.pit.snapshotCount", { count: pitJobs[0].snapshot_count })}</div>
                 )}
@@ -2095,6 +2821,79 @@ export default function DataPage() {
             </div>
             <div className="form-grid two-col">
               <div>
+                <input
+                  type="number"
+                  min="0"
+                  className="form-input"
+                  value={pitFundForm.missing_report_delay_days}
+                  onChange={(e) =>
+                    updatePitFundForm("missing_report_delay_days", e.target.value)
+                  }
+                  placeholder={t("data.pitFund.missingDelay")}
+                />
+                <div className="form-hint">{t("data.pitFund.missingDelayHint")}</div>
+              </div>
+              <div>
+                <input
+                  type="text"
+                  className="form-input"
+                  value={pitFundForm.asset_types}
+                  onChange={(e) => updatePitFundForm("asset_types", e.target.value)}
+                  placeholder={t("data.pitFund.assetTypes")}
+                />
+                <div className="form-hint">{t("data.pitFund.assetTypesHint")}</div>
+              </div>
+            </div>
+            <div className="form-grid two-col">
+              <div>
+                <input
+                  type="number"
+                  min="0"
+                  className="form-input"
+                  value={pitFundForm.shares_delay_days}
+                  onChange={(e) => updatePitFundForm("shares_delay_days", e.target.value)}
+                  placeholder={t("data.pitFund.sharesDelay")}
+                />
+                <div className="form-hint">{t("data.pitFund.sharesDelayHint")}</div>
+              </div>
+              <div>
+                <select
+                  className="form-select"
+                  value={pitFundForm.shares_preference}
+                  onChange={(e) => updatePitFundForm("shares_preference", e.target.value)}
+                >
+                  <option value="diluted">{t("data.pitFund.sharesPreferenceDiluted")}</option>
+                  <option value="basic">{t("data.pitFund.sharesPreferenceBasic")}</option>
+                </select>
+                <div className="form-hint">{t("data.pitFund.sharesPreferenceHint")}</div>
+              </div>
+            </div>
+            <div className="form-grid two-col">
+              <div>
+                <select
+                  className="form-select"
+                  value={pitFundForm.price_source}
+                  onChange={(e) => updatePitFundForm("price_source", e.target.value)}
+                >
+                  <option value="raw">{t("data.pitFund.priceSourceRaw")}</option>
+                  <option value="adjusted">{t("data.pitFund.priceSourceAdjusted")}</option>
+                </select>
+                <div className="form-hint">{t("data.pitFund.priceSourceHint")}</div>
+              </div>
+              <div>
+                <input
+                  type="number"
+                  min="0"
+                  className="form-input"
+                  value={pitFundForm.refresh_days}
+                  onChange={(e) => updatePitFundForm("refresh_days", e.target.value)}
+                  placeholder={t("data.pitFund.refreshDays")}
+                />
+                <div className="form-hint">{t("data.pitFund.refreshDaysHint")}</div>
+              </div>
+            </div>
+            <div className="form-grid two-col">
+              <div>
                 <label className="checkbox-row" style={{ marginTop: 0 }}>
                   <input
                     type="checkbox"
@@ -2168,11 +2967,69 @@ export default function DataPage() {
                         })}
                       </span>
                     </div>
+                    {pitFundProgress.rate_per_min !== undefined ? (
+                      <div className="progress-meta">
+                        {t("data.pitFund.progress.speed", {
+                          rate:
+                            pitFundProgress.rate_per_min !== null
+                              ? pitFundProgress.rate_per_min.toFixed(1)
+                              : "-",
+                          target:
+                            pitFundProgress.target_rpm &&
+                            pitFundProgress.target_rpm > 0
+                              ? pitFundProgress.target_rpm.toFixed(1)
+                              : "-",
+                          interval:
+                            pitFundProgress.effective_min_delay_seconds &&
+                            pitFundProgress.effective_min_delay_seconds > 0
+                              ? pitFundProgress.effective_min_delay_seconds.toFixed(2)
+                              : "-",
+                        })}
+                      </div>
+                    ) : null}
+                    {(() => {
+                      const tuneAction = pitFundProgress.tune_action || null;
+                      const reason =
+                        tuneAction && typeof tuneAction.reason === "string"
+                          ? tuneAction.reason
+                          : "";
+                      const delay =
+                        tuneAction && typeof tuneAction.min_delay_seconds === "number"
+                          ? tuneAction.min_delay_seconds
+                          : null;
+                      if (!reason) {
+                        return null;
+                      }
+                      return (
+                        <div className="progress-meta">
+                          {t("data.pitFund.progress.tune", {
+                            reason,
+                            delay: delay !== null ? delay.toFixed(2) : "-",
+                          })}
+                        </div>
+                      );
+                    })()}
                     {pitFundProgress.current_symbol ? (
                       <div className="progress-meta">
                         {t("data.pitFund.progress.current", {
                           symbol: pitFundProgress.current_symbol,
                         })}
+                      </div>
+                    ) : null}
+                    {pitFundProgress.missing_count !== undefined ? (
+                      <div className="progress-meta">
+                        <span>
+                          {t("data.pitFund.progress.missing", {
+                            count: pitFundProgress.missing_count ?? 0,
+                          })}
+                        </span>
+                        {pitFundProgress.missing_path ? (
+                          <span>
+                            {t("data.pitFund.progress.missingPath", {
+                              path: pitFundProgress.missing_path,
+                            })}
+                          </span>
+                        ) : null}
                       </div>
                     ) : null}
                   </div>
@@ -2222,7 +3079,9 @@ export default function DataPage() {
                     <th>{t("data.pitFund.history.id")}</th>
                     <th>{t("data.pitFund.history.status")}</th>
                     <th>{t("data.pitFund.history.count")}</th>
+                    <th>{t("data.pitFund.history.progress")}</th>
                     <th>{t("common.labels.createdAt")}</th>
+                    <th>{t("data.pitFund.history.actions")}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -2231,7 +3090,52 @@ export default function DataPage() {
                       <td>{job.id}</td>
                       <td>{renderStatus(job.status)}</td>
                       <td>{job.snapshot_count ?? t("common.none")}</td>
+                      <td>
+                        {(() => {
+                          const progress = pitFundProgressMap[job.id];
+                          if (!progress) {
+                            return t("common.none");
+                          }
+                          if (progress.total) {
+                            const done = progress.done ?? 0;
+                            const total = progress.total ?? 0;
+                            const percent =
+                              total > 0 ? Math.round((done / total) * 100) : 0;
+                            return `${done}/${total} (${percent}%)`;
+                          }
+                          return progress.stage || t("common.none");
+                        })()}
+                      </td>
                       <td>{formatDateTime(job.created_at)}</td>
+                      <td>
+                        <div className="table-actions">
+                          <button
+                            type="button"
+                            className="button-secondary button-compact"
+                            disabled={pitFundResumeLoading[job.id] || job.status === "running"}
+                            onClick={() => resumePitFundJob(job.id)}
+                          >
+                            {pitFundResumeLoading[job.id]
+                              ? t("common.actions.loading")
+                              : t("data.pitFund.history.resume")}
+                          </button>
+                          <button
+                            type="button"
+                            className="button-secondary button-compact"
+                            disabled={
+                              pitFundCancelLoading[job.id] ||
+                              job.status === "cancel_requested" ||
+                              !["running", "queued"].includes(job.status)
+                            }
+                            onClick={() => cancelPitFundJob(job.id)}
+                          >
+                            {pitFundCancelLoading[job.id] ||
+                            job.status === "cancel_requested"
+                              ? t("data.pitFund.history.canceling")
+                              : t("data.pitFund.history.stop")}
+                          </button>
+                        </div>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -2243,14 +3147,90 @@ export default function DataPage() {
           </div>
           <div className="data-stack">
             <div className="card">
-              <div className="card-title">{t("data.bulk.title")}</div>
-              <div className="card-meta">{t("data.bulk.meta")}</div>
-              <div className="form-grid">
-                <div className="form-hint">{t("data.bulk.autoTitle")}</div>
-                <div className="form-grid two-col">
-                  <select
-                    className="form-select"
-                    value={bulkAutoForm.status}
+          <div className="card-title">{t("data.bulk.title")}</div>
+          <div className="card-meta">{t("data.bulk.meta")}</div>
+          <div className="form-grid">
+            <div className="form-row">
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: "12px",
+                }}
+              >
+                <div className="form-hint">{t("data.bulk.gap.title")}</div>
+                <button
+                  type="button"
+                  className="button-secondary button-compact"
+                  onClick={loadAlphaGapSummary}
+                  disabled={alphaGapLoading}
+                >
+                  {alphaGapLoading ? t("common.actions.loading") : t("common.actions.refresh")}
+                </button>
+              </div>
+              {alphaGapError && <div className="form-error">{alphaGapError}</div>}
+              {alphaGapSummary && (
+                <div className="progress-block">
+                  <div className="progress-meta">
+                    <span>
+                      {t("data.bulk.gap.latestComplete", {
+                        date: alphaGapSummary.latest_complete,
+                      })}
+                    </span>
+                    <span>
+                      {t("data.bulk.gap.total", { count: alphaGapSummary.total })}
+                    </span>
+                    <span>
+                      {t("data.bulk.gap.withCoverage", {
+                        count: alphaGapSummary.with_coverage,
+                      })}
+                    </span>
+                    <span>
+                      {t("data.bulk.gap.missingCoverage", {
+                        count: alphaGapSummary.missing_coverage,
+                      })}
+                    </span>
+                    <span>
+                      {t("data.bulk.gap.upToDate", {
+                        count: alphaGapSummary.up_to_date,
+                      })}
+                    </span>
+                  </div>
+                  <div className="progress-meta">
+                    <span>
+                      {t("data.bulk.gap.bucket0_30", {
+                        count: alphaGapSummary.gap_0_30,
+                      })}
+                    </span>
+                    <span>
+                      {t("data.bulk.gap.bucket31_120", {
+                        count: alphaGapSummary.gap_31_120,
+                      })}
+                    </span>
+                    <span>
+                      {t("data.bulk.gap.bucket120Plus", {
+                        count: alphaGapSummary.gap_120_plus,
+                      })}
+                    </span>
+                    <span>
+                      {t("data.bulk.gap.listingAge", {
+                        days:
+                          alphaGapSummary.listing_age_days !== null &&
+                          alphaGapSummary.listing_age_days !== undefined
+                            ? alphaGapSummary.listing_age_days
+                            : "-",
+                      })}
+                    </span>
+                  </div>
+                </div>
+              )}
+            </div>
+            <div className="form-hint">{t("data.bulk.autoTitle")}</div>
+            <div className="form-grid two-col">
+              <select
+                className="form-select"
+                value={bulkAutoForm.status}
                     onChange={(e) => updateBulkAutoForm("status", e.target.value)}
                   >
                     <option value="all">{t("data.bulk.status.all")}</option>
@@ -2279,6 +3259,66 @@ export default function DataPage() {
                     />
                     <span>{t("data.bulk.onlyMissing")}</span>
                   </label>
+                </div>
+                <div className="form-hint">{t("data.bulk.listing.title")}</div>
+                <div className="form-grid two-col">
+                  <select
+                    className="form-select"
+                    value={bulkAutoForm.refresh_listing_mode}
+                    onChange={(e) => updateBulkAutoForm("refresh_listing_mode", e.target.value)}
+                  >
+                    <option value="always">{t("data.bulk.listing.modeAlways")}</option>
+                    <option value="stale_only">{t("data.bulk.listing.modeStale")}</option>
+                    <option value="never">{t("data.bulk.listing.modeNever")}</option>
+                  </select>
+                  <input
+                    className="form-input"
+                    value={bulkAutoForm.refresh_listing_ttl_days}
+                    onChange={(e) =>
+                      updateBulkAutoForm("refresh_listing_ttl_days", e.target.value)
+                    }
+                    placeholder={t("data.bulk.listing.ttlDays")}
+                  />
+                </div>
+                <div className="form-hint">{t("data.bulk.listing.hint")}</div>
+                <div className="form-hint">{t("data.bulk.incremental.title")}</div>
+                <div className="form-grid two-col">
+                  <label className="checkbox-row" style={{ marginTop: 0 }}>
+                    <input
+                      type="checkbox"
+                      checked={alphaFetchForm.alpha_incremental_enabled}
+                      onChange={(e) =>
+                        updateAlphaFetchForm("alpha_incremental_enabled", e.target.checked)
+                      }
+                    />
+                    <span>{t("data.bulk.incremental.enabled")}</span>
+                  </label>
+                  <input
+                    className="form-input"
+                    value={alphaFetchForm.alpha_compact_days}
+                    onChange={(e) =>
+                      updateAlphaFetchForm("alpha_compact_days", e.target.value)
+                    }
+                    placeholder={t("data.bulk.incremental.compactDays")}
+                  />
+                </div>
+                <div className="form-hint">{t("data.bulk.incremental.hint")}</div>
+                {bulkAutoLoadError && <div className="form-error">{bulkAutoLoadError}</div>}
+                {alphaFetchError && <div className="form-error">{alphaFetchError}</div>}
+                {bulkDefaultsResult && <div className="form-success">{bulkDefaultsResult}</div>}
+                {bulkDefaultsError && <div className="form-error">{bulkDefaultsError}</div>}
+                <div className="form-actions">
+                  <button
+                    type="button"
+                    className="button-secondary"
+                    onClick={() => saveBulkDefaults(false)}
+                    disabled={bulkDefaultsSaving || alphaFetchSaving}
+                  >
+                    {bulkDefaultsSaving || alphaFetchSaving
+                      ? t("common.actions.loading")
+                      : t("common.actions.save")}
+                  </button>
+                  <span className="form-note">{t("data.bulk.defaults.note")}</span>
                 </div>
                 <div className="form-hint">{t("data.bulk.autoHint")}</div>
                 {bulkJobError && <div className="form-error">{bulkJobError}</div>}
@@ -2443,6 +3483,15 @@ export default function DataPage() {
                 {" · "}
                 {t("data.jobs.speed", {
                   rate: syncSpeed.rate_per_min.toFixed(1),
+                  target:
+                    syncSpeed.target_rpm && syncSpeed.target_rpm > 0
+                      ? syncSpeed.target_rpm.toFixed(1)
+                      : "-",
+                  interval:
+                    syncSpeed.effective_min_delay_seconds &&
+                    syncSpeed.effective_min_delay_seconds > 0
+                      ? syncSpeed.effective_min_delay_seconds.toFixed(2)
+                      : "-",
                   window: syncSpeed.window_seconds,
                   running: syncSpeed.running,
                   pending: syncSpeed.pending,
@@ -2508,6 +3557,10 @@ export default function DataPage() {
               {syncJobs.map((job) => {
                 const normalized = normalizeJobStatus(job);
                 const reason = resolveJobReason(job);
+                const stage = resolveJobStage(job);
+                const progress = resolveJobProgress(job);
+                const elapsed = resolveJobElapsed(job);
+                const alphaMeta = resolveAlphaMeta(job);
                 return (
                   <tr key={job.id}>
                     <td>{job.id}</td>
@@ -2557,7 +3610,52 @@ export default function DataPage() {
                         {reason && (
                           <span className={`pill ${reasonClass(normalized)}`}>{reason}</span>
                         )}
-                        <span>{job.message || t("common.none")}</span>
+                        {stage ? (
+                          <span className="pill">
+                            {progress !== null
+                              ? t("data.jobs.stageProgress", {
+                                  stage: renderJobStage(stage),
+                                  progress,
+                                })
+                              : t("data.jobs.stage", { stage: renderJobStage(stage) })}
+                          </span>
+                        ) : (
+                          <span>{job.message || t("common.none")}</span>
+                        )}
+                        {alphaMeta?.outputsize ? (
+                          <span className="pill">
+                            {t("data.jobs.alpha.outputsize", {
+                              value: alphaMeta.outputsize,
+                            })}
+                          </span>
+                        ) : null}
+                        {alphaMeta && alphaMeta.gapDays !== null ? (
+                          <span className="pill">
+                            {t("data.jobs.alpha.gapDays", {
+                              value: alphaMeta.gapDays,
+                            })}
+                          </span>
+                        ) : null}
+                        {alphaMeta?.compactFallback ? (
+                          <span className="pill warn">
+                            {t("data.jobs.alpha.fallback")}
+                          </span>
+                        ) : null}
+                        {(job.retry_count ?? 0) > 0 || job.next_retry_at ? (
+                          <span className="market-subtle">
+                            {t("data.jobs.retry", {
+                              count: job.retry_count ?? 0,
+                              next: job.next_retry_at
+                                ? formatDateTime(job.next_retry_at)
+                                : t("common.none"),
+                            })}
+                          </span>
+                        ) : null}
+                        {elapsed !== null ? (
+                          <span className="market-subtle">
+                            {t("data.jobs.elapsed", { value: formatDuration(elapsed) })}
+                          </span>
+                        ) : null}
                       </div>
                     </td>
                     <td>{formatDateTime(job.created_at)}</td>
@@ -2576,6 +3674,402 @@ export default function DataPage() {
               setSyncPageSize(size);
             }}
           />
+        </div>
+
+        <div className="card">
+          <div className="card-title">{t("data.tradingCalendar.title")}</div>
+          <div className="card-meta">
+            {t("data.tradingCalendar.meta", { path: tradingCalendar?.path || "-" })}
+          </div>
+          {tradingCalendar && (
+            <div className="meta-list">
+              <div className="meta-row">
+                <span>{t("data.tradingCalendar.source")}</span>
+                <strong>{tradingCalendar.config_source || "-"}</strong>
+              </div>
+              <div className="meta-row">
+                <span>{t("data.tradingCalendar.calendarSource")}</span>
+                <strong>{tradingCalendar.calendar_source || "-"}</strong>
+              </div>
+              <div className="meta-row">
+                <span>{t("data.tradingCalendar.coverage")}</span>
+                <strong>
+                  {tradingCalendar.calendar_start || "-"} ~{" "}
+                  {tradingCalendar.calendar_end || "-"}
+                </strong>
+              </div>
+              <div className="meta-row">
+                <span>{t("data.tradingCalendar.generatedAt")}</span>
+                <strong>
+                  {tradingCalendar.calendar_generated_at
+                    ? formatDateTime(tradingCalendar.calendar_generated_at)
+                    : "-"}
+                </strong>
+              </div>
+              <div className="meta-row">
+                <span>{t("common.labels.updatedAt")}</span>
+                <strong>
+                  {tradingCalendar.updated_at
+                    ? formatDateTime(tradingCalendar.updated_at)
+                    : "-"}
+                </strong>
+              </div>
+            </div>
+          )}
+          <div className="trading-calendar-section">
+            <div className="section-title">{t("data.tradingCalendar.configTitle")}</div>
+            <div className="form-grid trading-calendar-grid">
+              <div className="form-row">
+                <label className="form-label">{t("data.tradingCalendar.sourceMode")}</label>
+                <select
+                  className="form-select"
+                  value={tradingCalendarForm.source}
+                  onChange={(e) => updateTradingCalendarForm("source", e.target.value)}
+                >
+                  <option value="auto">auto</option>
+                  <option value="local">local</option>
+                  <option value="exchange_calendars">exchange_calendars</option>
+                  <option value="lean">lean</option>
+                  <option value="spy">spy</option>
+                </select>
+                <div className="form-hint">{t("data.tradingCalendar.sourceModeHint")}</div>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("data.tradingCalendar.exchange")}</label>
+                <input
+                  type="text"
+                  className="form-input"
+                  value={tradingCalendarForm.exchange}
+                  onChange={(e) => updateTradingCalendarForm("exchange", e.target.value)}
+                />
+                <div className="form-hint">{t("data.tradingCalendar.exchangeHint")}</div>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("data.tradingCalendar.startDate")}</label>
+                <input
+                  type="date"
+                  className="form-input"
+                  value={tradingCalendarForm.start_date}
+                  onChange={(e) => updateTradingCalendarForm("start_date", e.target.value)}
+                />
+                <div className="form-hint">{t("data.tradingCalendar.startDateHint")}</div>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("data.tradingCalendar.endDate")}</label>
+                <input
+                  type="date"
+                  className="form-input"
+                  value={tradingCalendarForm.end_date}
+                  onChange={(e) => updateTradingCalendarForm("end_date", e.target.value)}
+                />
+                <div className="form-hint">{t("data.tradingCalendar.endDateHint")}</div>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("data.tradingCalendar.refreshDays")}</label>
+                <input
+                  type="number"
+                  className="form-input"
+                  value={tradingCalendarForm.refresh_days}
+                  onChange={(e) => updateTradingCalendarForm("refresh_days", e.target.value)}
+                />
+                <div className="form-hint">{t("data.tradingCalendar.refreshDaysHint")}</div>
+              </div>
+              <div className="form-row trading-calendar-toggle">
+                <label className="form-label">{t("data.tradingCalendar.overrides")}</label>
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    checked={tradingCalendarForm.override_enabled}
+                    onChange={(e) =>
+                      updateTradingCalendarForm("override_enabled", e.target.checked)
+                    }
+                  />
+                  <span className="slider" />
+                </label>
+                <div className="form-hint">{t("data.tradingCalendar.overridesHint")}</div>
+              </div>
+            </div>
+          </div>
+          {tradingCalendarResult && (
+            <div className="form-success">{tradingCalendarResult}</div>
+          )}
+          {tradingCalendarError && <div className="form-error">{tradingCalendarError}</div>}
+          <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+            <button
+              className="button-secondary"
+              onClick={saveTradingCalendar}
+              disabled={tradingCalendarSaving}
+            >
+              {tradingCalendarSaving ? t("common.actions.loading") : t("common.actions.save")}
+            </button>
+            <button
+              className="button-secondary"
+              onClick={refreshTradingCalendar}
+              disabled={tradingCalendarRefreshing}
+            >
+              {tradingCalendarRefreshing
+                ? t("common.actions.loading")
+                : t("data.tradingCalendar.refresh")}
+            </button>
+          </div>
+          {tradingCalendar?.calendar_path && (
+            <div className="form-note">
+              {t("data.tradingCalendar.calendarPath", {
+                path: tradingCalendar.calendar_path,
+              })}
+            </div>
+          )}
+          {tradingCalendar?.overrides_path && (
+            <div className="form-note">
+              {t("data.tradingCalendar.overridesPath", {
+                path: tradingCalendar.overrides_path,
+              })}
+            </div>
+          )}
+        </div>
+
+        <div className="card">
+          <div className="card-title">{t("data.alphaRate.title")}</div>
+          <div className="card-meta">
+            {t("data.alphaRate.meta", { path: alphaRate?.path || "-" })}
+          </div>
+          {alphaRate && (
+            <div className="meta-list">
+              <div className="meta-row">
+                <span>{t("data.alphaRate.source")}</span>
+                <strong>{alphaRate.source}</strong>
+              </div>
+              <div className="meta-row">
+                <span>{t("data.alphaRate.effective")}</span>
+                <strong>
+                  {Number.isFinite(alphaRate.effective_min_delay_seconds)
+                    ? alphaRate.effective_min_delay_seconds.toFixed(2)
+                    : "-"}
+                  s
+                </strong>
+              </div>
+              <div className="meta-row">
+                <span>{t("common.labels.updatedAt")}</span>
+                <strong>
+                  {alphaRate.updated_at ? formatDateTime(alphaRate.updated_at) : "-"}
+                </strong>
+              </div>
+            </div>
+          )}
+          <div className="alpha-rate-section">
+            <div className="section-title">{t("data.alphaRate.baseTitle")}</div>
+            <div className="form-grid alpha-rate-grid">
+              <div className="form-row">
+                <label className="form-label">{t("data.alphaRate.maxRpm")}</label>
+                <input
+                  type="number"
+                  className="form-input"
+                  value={alphaRateForm.max_rpm}
+                  onChange={(e) => updateAlphaRateForm("max_rpm", e.target.value)}
+                />
+                <div className="form-hint">{t("data.alphaRate.maxRpmHint")}</div>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("data.alphaRate.minDelay")}</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  className="form-input"
+                  value={alphaRateForm.min_delay_seconds}
+                  onChange={(e) => updateAlphaRateForm("min_delay_seconds", e.target.value)}
+                />
+                <div className="form-hint">{t("data.alphaRate.minDelayHint")}</div>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("data.alphaRate.rateLimitSleep")}</label>
+                <input
+                  type="number"
+                  step="1"
+                  className="form-input"
+                  value={alphaRateForm.rate_limit_sleep}
+                  onChange={(e) => updateAlphaRateForm("rate_limit_sleep", e.target.value)}
+                />
+                <div className="form-hint">{t("data.alphaRate.rateLimitSleepHint")}</div>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("data.alphaRate.rateLimitRetries")}</label>
+                <input
+                  type="number"
+                  className="form-input"
+                  value={alphaRateForm.rate_limit_retries}
+                  onChange={(e) => updateAlphaRateForm("rate_limit_retries", e.target.value)}
+                />
+                <div className="form-hint">{t("data.alphaRate.rateLimitRetriesHint")}</div>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("data.alphaRate.maxRetries")}</label>
+                <input
+                  type="number"
+                  className="form-input"
+                  value={alphaRateForm.max_retries}
+                  onChange={(e) => updateAlphaRateForm("max_retries", e.target.value)}
+                />
+                <div className="form-hint">{t("data.alphaRate.maxRetriesHint")}</div>
+              </div>
+            </div>
+          </div>
+          <div className="alpha-rate-section">
+            <div className="section-title">{t("data.alphaRate.tuneTitle")}</div>
+            <div className="form-grid alpha-rate-grid">
+              <div className="form-row alpha-rate-toggle">
+                <label className="form-label">{t("data.alphaRate.autoTune")}</label>
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    checked={alphaRateForm.auto_tune}
+                    onChange={(e) => updateAlphaRateForm("auto_tune", e.target.checked)}
+                  />
+                  <span className="slider" />
+                </label>
+                <div className="form-hint">{t("data.alphaRate.autoTuneHint")}</div>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("data.alphaRate.rpmFloor")}</label>
+                <input
+                  type="number"
+                  step="1"
+                  className="form-input"
+                  value={alphaRateForm.rpm_floor}
+                  onChange={(e) => updateAlphaRateForm("rpm_floor", e.target.value)}
+                />
+                <div className="form-hint">{t("data.alphaRate.rpmFloorHint")}</div>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("data.alphaRate.rpmCeil")}</label>
+                <input
+                  type="number"
+                  step="1"
+                  className="form-input"
+                  value={alphaRateForm.rpm_ceil}
+                  onChange={(e) => updateAlphaRateForm("rpm_ceil", e.target.value)}
+                />
+                <div className="form-hint">{t("data.alphaRate.rpmCeilHint")}</div>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("data.alphaRate.rpmStepDown")}</label>
+                <input
+                  type="number"
+                  step="1"
+                  className="form-input"
+                  value={alphaRateForm.rpm_step_down}
+                  onChange={(e) => updateAlphaRateForm("rpm_step_down", e.target.value)}
+                />
+                <div className="form-hint">{t("data.alphaRate.rpmStepDownHint")}</div>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("data.alphaRate.rpmStepUp")}</label>
+                <input
+                  type="number"
+                  step="1"
+                  className="form-input"
+                  value={alphaRateForm.rpm_step_up}
+                  onChange={(e) => updateAlphaRateForm("rpm_step_up", e.target.value)}
+                />
+                <div className="form-hint">{t("data.alphaRate.rpmStepUpHint")}</div>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("data.alphaRate.minDelayFloor")}</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  className="form-input"
+                  value={alphaRateForm.min_delay_floor_seconds}
+                  onChange={(e) =>
+                    updateAlphaRateForm("min_delay_floor_seconds", e.target.value)
+                  }
+                />
+                <div className="form-hint">{t("data.alphaRate.minDelayFloorHint")}</div>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("data.alphaRate.minDelayCeil")}</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  className="form-input"
+                  value={alphaRateForm.min_delay_ceil_seconds}
+                  onChange={(e) =>
+                    updateAlphaRateForm("min_delay_ceil_seconds", e.target.value)
+                  }
+                />
+                <div className="form-hint">{t("data.alphaRate.minDelayCeilHint")}</div>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("data.alphaRate.tuneStep")}</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  className="form-input"
+                  value={alphaRateForm.tune_step_seconds}
+                  onChange={(e) => updateAlphaRateForm("tune_step_seconds", e.target.value)}
+                />
+                <div className="form-hint">{t("data.alphaRate.tuneStepHint")}</div>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("data.alphaRate.tuneWindow")}</label>
+                <input
+                  type="number"
+                  step="1"
+                  className="form-input"
+                  value={alphaRateForm.tune_window_seconds}
+                  onChange={(e) => updateAlphaRateForm("tune_window_seconds", e.target.value)}
+                />
+                <div className="form-hint">{t("data.alphaRate.tuneWindowHint")}</div>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("data.alphaRate.tuneLow")}</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  className="form-input"
+                  value={alphaRateForm.tune_target_ratio_low}
+                  onChange={(e) =>
+                    updateAlphaRateForm("tune_target_ratio_low", e.target.value)
+                  }
+                />
+                <div className="form-hint">{t("data.alphaRate.tuneLowHint")}</div>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("data.alphaRate.tuneHigh")}</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  className="form-input"
+                  value={alphaRateForm.tune_target_ratio_high}
+                  onChange={(e) =>
+                    updateAlphaRateForm("tune_target_ratio_high", e.target.value)
+                  }
+                />
+                <div className="form-hint">{t("data.alphaRate.tuneHighHint")}</div>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("data.alphaRate.tuneCooldown")}</label>
+                <input
+                  type="number"
+                  step="1"
+                  className="form-input"
+                  value={alphaRateForm.tune_cooldown_seconds}
+                  onChange={(e) =>
+                    updateAlphaRateForm("tune_cooldown_seconds", e.target.value)
+                  }
+                />
+                <div className="form-hint">{t("data.alphaRate.tuneCooldownHint")}</div>
+              </div>
+            </div>
+          </div>
+          {alphaRateResult && <div className="form-success">{alphaRateResult}</div>}
+          {alphaRateError && <div className="form-error">{alphaRateError}</div>}
+          <button
+            className="button-secondary"
+            onClick={saveAlphaRate}
+            disabled={alphaRateSaving}
+          >
+            {alphaRateSaving ? t("common.actions.loading") : t("common.actions.save")}
+          </button>
         </div>
       </div>
     </div>

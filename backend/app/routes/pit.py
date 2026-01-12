@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
@@ -16,6 +17,22 @@ from app.schemas import (
 )
 from app.services.audit_log import record_audit
 from app.services.pit_runner import run_pit_fundamental_job, run_pit_weekly_job
+
+
+def _write_progress(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def _touch_cancel_flag(job_id: int) -> Path:
+    cancel_path = (
+        Path(settings.artifact_root) / f"pit_fundamental_job_{job_id}" / "cancel.flag"
+    )
+    cancel_path.parent.mkdir(parents=True, exist_ok=True)
+    cancel_path.write_text("cancel", encoding="utf-8")
+    return cancel_path
 
 router = APIRouter(prefix="/api/pit", tags=["pit"])
 
@@ -60,6 +77,25 @@ def get_weekly_job_quality(job_id: int):
         payload.setdefault("available", True)
         return payload
     return {"status": job.status, "available": False}
+
+
+@router.get("/weekly-jobs/{job_id}/progress")
+def get_weekly_job_progress(job_id: int):
+    with get_session() as session:
+        job = session.get(PitWeeklyJob, job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="job not found")
+    progress_path = Path(settings.artifact_root) / f"pit_weekly_job_{job_id}" / "progress.json"
+    if not progress_path.exists():
+        return {"stage": "idle", "status": job.status}
+    try:
+        payload = json.loads(progress_path.read_text(encoding="utf-8", errors="ignore"))
+    except json.JSONDecodeError:
+        return {"stage": "unknown", "status": job.status}
+    if isinstance(payload, dict):
+        payload.setdefault("status", job.status)
+        return payload
+    return {"stage": "unknown", "status": job.status}
 
 
 @router.post("/weekly-jobs", response_model=PitWeeklyJobOut)
@@ -147,3 +183,68 @@ def create_fundamental_job(
         session.commit()
     background_tasks.add_task(run_pit_fundamental_job, job.id)
     return job
+
+
+@router.post("/fundamental-jobs/{job_id}/resume", response_model=PitFundamentalJobOut)
+def resume_fundamental_job(job_id: int, background_tasks: BackgroundTasks):
+    with get_session() as session:
+        job = session.get(PitFundamentalJob, job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="job not found")
+        params = dict(job.params or {})
+        params["resume_fundamentals"] = True
+        params["resume_from_job_id"] = job_id
+        new_job = PitFundamentalJob(status="queued", params=params)
+        session.add(new_job)
+        session.commit()
+        session.refresh(new_job)
+        record_audit(
+            session,
+            action="pit_fundamental_job.resume",
+            resource_type="pit_fundamental_job",
+            resource_id=new_job.id,
+            detail={"resume_from": job_id, "params": params},
+        )
+        session.commit()
+    background_tasks.add_task(run_pit_fundamental_job, new_job.id)
+    return new_job
+
+
+@router.post("/fundamental-jobs/{job_id}/cancel", response_model=PitFundamentalJobOut)
+def cancel_fundamental_job(job_id: int):
+    with get_session() as session:
+        job = session.get(PitFundamentalJob, job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="job not found")
+        if job.status in {"success", "failed", "canceled"}:
+            return job
+        if job.status == "queued":
+            job.status = "canceled"
+            job.message = "用户取消"
+            job.ended_at = datetime.utcnow()
+            _write_progress(
+                Path(settings.artifact_root)
+                / f"pit_fundamental_job_{job_id}"
+                / "progress.json",
+                {
+                    "stage": "canceled",
+                    "status": "canceled",
+                    "message": job.message,
+                    "updated_at": datetime.utcnow().isoformat(),
+                },
+            )
+        else:
+            if job.status != "cancel_requested":
+                job.status = "cancel_requested"
+                job.message = "取消中"
+            _touch_cancel_flag(job_id)
+        record_audit(
+            session,
+            action="pit_fundamental_job.cancel",
+            resource_type="pit_fundamental_job",
+            resource_id=job.id,
+            detail={"status": job.status},
+        )
+        session.commit()
+        session.refresh(job)
+        return job

@@ -58,6 +58,8 @@ def _load_series(path: Path) -> pd.DataFrame:
     df["date"] = pd.to_datetime(df["date"])
     df = df.set_index("date").sort_index()
     df = df[["open", "high", "low", "close", "volume"]]
+    for col in ("open", "high", "low", "close", "volume"):
+        df[col] = pd.to_numeric(df[col], errors="coerce")
     df = df.dropna(subset=["close"])
     df = df[~df.index.duplicated(keep="last")]
     return df
@@ -270,13 +272,23 @@ def main() -> None:
         pit_coverage_action = str(pit_cfg.get("coverage_action", "warn"))
         pit_start = pit_cfg.get("start")
         pit_end = pit_cfg.get("end")
-        pit_map, pit_fields, _ = load_pit_fundamentals(
+        pit_map, pit_fields, pit_summary = load_pit_fundamentals(
             pit_dir,
             symbols,
             start=pit_start,
             end=pit_end,
             min_coverage=pit_min_coverage,
             coverage_action=pit_coverage_action,
+        )
+        print(
+            "pit fundamentals: rows={total_rows} coverage={coverage:.4f} missing_policy={missing_policy} sample_on_snapshot={sample_on_snapshot}".format(
+                **{
+                    "total_rows": pit_summary.get("total_rows", 0.0),
+                    "coverage": pit_summary.get("coverage", 0.0),
+                    "missing_policy": pit_missing_policy,
+                    "sample_on_snapshot": pit_sample_on_snapshot,
+                }
+            )
         )
 
     spy_path = _pick_dataset_file(benchmark_symbol, adjusted_dir, vendor_pref)

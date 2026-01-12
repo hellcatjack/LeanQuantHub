@@ -22,6 +22,7 @@ from app.models import (
     Algorithm,
     AlgorithmVersion,
     BacktestRun,
+    MLPipelineRun,
     Project,
     ProjectAlgorithmBinding,
     ProjectSystemThemeBinding,
@@ -56,6 +57,8 @@ MAX_PAGE_SIZE = 200
 PROJECT_CONFIG_TAG = "project_config"
 PROJECT_BACKTEST_TAG = "thematic_backtest"
 CSV_ENCODING = "utf-8-sig"
+PIPELINE_BACKTEST_PRESET_E35 = 0.35
+PIPELINE_BACKTEST_PRESET_E45 = 0.45
 
 
 def _get_data_root() -> Path:
@@ -90,6 +93,45 @@ def _parse_date(value: str | None) -> datetime | None:
         return datetime.fromisoformat(text)
     except ValueError:
         return None
+
+
+def _resolve_backtest_preset(backtest_params: dict[str, Any]) -> str:
+    raw = backtest_params.get("max_exposure")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return "custom"
+    if abs(value - PIPELINE_BACKTEST_PRESET_E35) < 1e-4:
+        return "E35"
+    if abs(value - PIPELINE_BACKTEST_PRESET_E45) < 1e-4:
+        return "E45"
+    return "custom"
+
+
+def _sync_pipeline_backtest_template(
+    session,
+    project_id: int,
+    config: dict[str, Any],
+) -> None:
+    backtest_params = config.get("backtest_params")
+    if not isinstance(backtest_params, dict):
+        return
+    preset = _resolve_backtest_preset(backtest_params)
+    pipelines = (
+        session.query(MLPipelineRun)
+        .filter(MLPipelineRun.project_id == project_id)
+        .all()
+    )
+    if not pipelines:
+        return
+    template = dict(backtest_params)
+    for pipeline in pipelines:
+        params = pipeline.params if isinstance(pipeline.params, dict) else {}
+        backtest = params.get("backtest") if isinstance(params.get("backtest"), dict) else {}
+        backtest["preset"] = preset
+        backtest["algorithm_parameters"] = template
+        params["backtest"] = backtest
+        pipeline.params = params
 
 
 def _format_mtime(path: Path) -> str | None:
@@ -189,7 +231,7 @@ def _load_default_config(session=None) -> dict[str, Any]:
             "asset_types": ["STOCK"],
             "pit_universe_only": False,
         },
-        "data": {"primary_vendor": "stooq", "fallback_vendor": "yahoo", "frequency": "daily"},
+        "data": {"primary_vendor": "alpha", "fallback_vendor": "", "frequency": "daily"},
         "weights": weights,
         "benchmark": benchmark,
         "rebalance": rebalance,
@@ -592,9 +634,15 @@ def _build_theme_index(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
         if not key:
             continue
         label = str(item.get("label", "")).strip() or key
+        system_base = item.get("system_base") or {}
         manual = [
             str(symbol).strip().upper()
             for symbol in _coerce_list(item.get("manual"))
+            if str(symbol).strip()
+        ]
+        manual += [
+            str(symbol).strip().upper()
+            for symbol in _coerce_list(system_base.get("manual"))
             if str(symbol).strip()
         ]
         exclude = [
@@ -602,6 +650,13 @@ def _build_theme_index(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
             for symbol in _coerce_list(item.get("exclude"))
             if str(symbol).strip()
         ]
+        exclude += [
+            str(symbol).strip().upper()
+            for symbol in _coerce_list(system_base.get("exclude"))
+            if str(symbol).strip()
+        ]
+        manual = list(dict.fromkeys(manual))
+        exclude = list(dict.fromkeys(exclude))
         priority = _coerce_int(item.get("priority") or 0)
         index[key] = {
             "label": label,
@@ -1324,24 +1379,40 @@ def get_project_config(project_id: int):
             source = "default"
             updated_at = None
             version_id = None
+        normalized = _normalize_project_config(config)
         return ProjectConfigOut(
             project_id=project_id,
-            config=config,
+            config=normalized,
             source=source,
             updated_at=updated_at,
             version_id=version_id,
         )
 
 
+def _normalize_project_config(payload: dict[str, Any]) -> dict[str, Any]:
+    config = dict(payload)
+    data_cfg = config.get("data") if isinstance(config.get("data"), dict) else {}
+    data_cfg["primary_vendor"] = "alpha"
+    data_cfg["fallback_vendor"] = ""
+    config["data"] = data_cfg
+    universe_cfg = (
+        config.get("universe") if isinstance(config.get("universe"), dict) else {}
+    )
+    universe_cfg["asset_types"] = ["STOCK"]
+    config["universe"] = universe_cfg
+    return config
+
+
 @router.post("/{project_id}/config", response_model=ProjectConfigOut)
 def save_project_config(project_id: int, payload: ProjectConfigCreate):
     if not isinstance(payload.config, dict) or not payload.config:
         raise HTTPException(status_code=400, detail="配置不能为空")
+    normalized = _normalize_project_config(payload.config)
     with get_session() as session:
         project = session.get(Project, project_id)
         if not project:
             raise HTTPException(status_code=404, detail="项目不存在")
-        content = json.dumps(payload.config, ensure_ascii=False, indent=2)
+        content = json.dumps(normalized, ensure_ascii=False, indent=2)
         version = _save_project_version(
             session,
             project_id=project_id,
@@ -1349,7 +1420,8 @@ def save_project_config(project_id: int, payload: ProjectConfigCreate):
             content=content,
             version=payload.version,
         )
-        _sync_system_theme_bindings(session, project_id, payload.config)
+        _sync_system_theme_bindings(session, project_id, normalized)
+        _sync_pipeline_backtest_template(session, project_id, normalized)
         record_audit(
             session,
             action="project.config.save",
@@ -1360,7 +1432,7 @@ def save_project_config(project_id: int, payload: ProjectConfigCreate):
         session.commit()
         return ProjectConfigOut(
             project_id=project_id,
-            config=payload.config,
+            config=normalized,
             source="version",
             updated_at=version.created_at.isoformat(),
             version_id=version.id,

@@ -36,6 +36,7 @@ from app.schemas import (
 from app.services.audit_log import record_audit
 from app.services.lean_runner import run_backtest
 from app.routes.projects import (
+    _build_symbol_type_index,
     _build_theme_index,
     _get_data_root,
     _resolve_project_config,
@@ -47,6 +48,22 @@ from app.routes.datasets import _dataset_symbol
 router = APIRouter(prefix="/api/backtests", tags=["backtests"])
 
 MAX_PAGE_SIZE = 200
+
+
+def _extract_asset_type_filter(config: dict) -> set[str]:
+    asset_types = config.get("asset_types")
+    if not asset_types and isinstance(config.get("universe"), dict):
+        asset_types = config.get("universe", {}).get("asset_types")
+    if not asset_types:
+        return set()
+    if isinstance(asset_types, str):
+        items = [asset_types]
+    elif isinstance(asset_types, (list, tuple, set)):
+        items = asset_types
+    else:
+        return set()
+    normalized = {str(item).strip().upper() for item in items if str(item).strip()}
+    return normalized
 
 
 def _coerce_pagination(page: int, page_size: int, total: int) -> tuple[int, int, int]:
@@ -119,6 +136,8 @@ def _collect_project_symbols(config: dict) -> list[str]:
     universe_path = data_root / "universe" / "universe.csv"
     rows = _safe_read_csv(universe_path)
     resolved = _resolve_theme_memberships(rows, theme_index)
+    asset_filter = _extract_asset_type_filter(config)
+    symbol_types = _build_symbol_type_index(rows, config) if asset_filter else {}
     weights = _build_theme_weight_index(config)
     has_weights = bool(weights)
     symbols: set[str] = set()
@@ -126,7 +145,10 @@ def _collect_project_symbols(config: dict) -> list[str]:
         weight = weights.get(key)
         if has_weights and weight is not None and weight <= 0:
             continue
-        symbols.update(resolved.get(key, set()))
+        for symbol in resolved.get(key, set()):
+            if asset_filter and symbol_types.get(symbol, "UNKNOWN") not in asset_filter:
+                continue
+            symbols.add(symbol)
     return sorted(symbols)
 
 
@@ -138,11 +160,16 @@ def _collect_project_theme_map(config: dict) -> tuple[dict[str, str], dict[str, 
     universe_path = data_root / "universe" / "universe.csv"
     rows = _safe_read_csv(universe_path)
     resolved = _resolve_theme_memberships(rows, theme_index)
+    asset_filter = _extract_asset_type_filter(config)
+    symbol_types = _build_symbol_type_index(rows, config) if asset_filter else {}
     symbol_theme_map: dict[str, str] = {}
     for key, symbols in resolved.items():
         for symbol in symbols:
             if symbol:
-                symbol_theme_map[str(symbol).upper()] = str(key).upper()
+                symbol_text = str(symbol).upper()
+                if asset_filter and symbol_types.get(symbol_text, "UNKNOWN") not in asset_filter:
+                    continue
+                symbol_theme_map[symbol_text] = str(key).upper()
     weights = _build_theme_weight_index(config)
     theme_weights = {str(k).upper(): float(v) for k, v in weights.items() if k}
     return symbol_theme_map, theme_weights
@@ -410,6 +437,11 @@ def create_backtest(payload: BacktestCreate, background_tasks: BackgroundTasks):
         if not isinstance(algo_params, dict):
             algo_params = {}
         train_job_id = params.get("pipeline_train_job_id")
+        if not train_job_id:
+            config_train_job_id = config.get("backtest_train_job_id")
+            if config_train_job_id not in (None, ""):
+                params["pipeline_train_job_id"] = config_train_job_id
+                train_job_id = config_train_job_id
         if train_job_id:
             train_job = session.get(MLTrainJob, int(train_job_id))
             if train_job and train_job.project_id == payload.project_id:

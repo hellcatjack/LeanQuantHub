@@ -208,6 +208,7 @@ a {
 .form-row {
   display: grid;
   gap: 6px;
+  min-width: 0;
 }
 
 .form-label {
@@ -217,6 +218,8 @@ a {
 
 .form-input,
 .form-select {
+  width: 100%;
+  box-sizing: border-box;
   padding: 8px 10px;
   border-radius: 10px;
   border: 1px solid var(--border);
@@ -554,6 +557,12 @@ a {
 .button-secondary {
   background: #eef2ff;
   color: #1f3c88;
+}
+
+.button-compact {
+  padding: 6px 10px;
+  font-size: 12px;
+  border-radius: 8px;
 }
 
 .empty-state {
@@ -1484,12 +1493,12 @@ a {
 
 .ml-train-table th:nth-child(8),
 .ml-train-table td:nth-child(8) {
-  width: 40px;
+  width: 60px;
 }
 
 .ml-train-table th:nth-child(9),
 .ml-train-table td:nth-child(9) {
-  width: 96px;
+  width: 90px;
 }
 
 .ml-train-table .ml-range-cell {
@@ -1527,6 +1536,22 @@ a {
 
 .ml-train-table .ml-actions-cell .link-button {
   font-size: 10px;
+}
+
+.ml-train-table td.ml-symbol-cell {
+  white-space: normal;
+}
+
+.ml-train-table .ml-symbol-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ml-train-table .ml-symbol-source {
+  font-size: 9px;
+  line-height: 1.1;
+  color: #6b7280;
 }
 
 .pipeline-train-table {
@@ -2167,8 +2192,16 @@ a {
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
 }
 
+.form-grid.alpha-rate-grid {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px 16px;
+  align-items: start;
+}
+
 .form-input,
 .form-select {
+  width: 100%;
+  box-sizing: border-box;
   padding: 10px;
   border-radius: 10px;
   border: 1px solid var(--border);
@@ -2179,10 +2212,41 @@ a {
 .form-hint {
   font-size: 12px;
   color: var(--muted);
+  word-break: break-word;
 }
 
 .form-hint.danger {
   color: #d64545;
+}
+
+.alpha-rate-section {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #f8faff;
+}
+
+.alpha-rate-toggle .switch {
+  margin-top: 2px;
+}
+
+.trading-calendar-section {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #f6f9ff;
+}
+
+.form-grid.trading-calendar-grid {
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px 16px;
+  align-items: start;
+}
+
+.trading-calendar-toggle .switch {
+  margin-top: 2px;
 }
 
 .form-note {

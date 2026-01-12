@@ -69,6 +69,20 @@ systemctl --user restart stocklean-backend stocklean-frontend
 - 覆盖优先级：`symbol_life_override.csv` **高于** `alpha_symbol_life.csv`
 - 可通过权重配置 `symbol_life_override_path` 指定自定义路径
 
+## 数据源文档
+- 统一目录：`docs/data_sources/`
+- 已整理数据源：
+  - Alpha Vantage：`docs/data_sources/alpha.md`
+
+## TODOLIST 规范
+- 统一目录：`docs/todolists/`
+- 文件命名：`<主题>TODO.md` / `<主题>TestTODO.md`
+- 项目根目录不再存放 TODO 文件
+
+## 报告归档
+- 回测报告：`docs/reports/backtests/`
+- 训练对比与曲线：`docs/reports/ml/`
+
 ## ML 评分（统一 venv）
 - Lean 与 ML 统一使用 Python 3.11（兼容 Python.NET）
 - 在 `.env` 中配置：

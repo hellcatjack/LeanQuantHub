@@ -111,6 +111,14 @@ def create_train_job(payload: MLTrainCreate, background_tasks: BackgroundTasks):
         "train_start_year": payload.train_start_year,
         "model_type": payload.model_type,
         "model_params": payload.model_params,
+        "sample_weighting": payload.sample_weighting,
+        "sample_weight_alpha": payload.sample_weight_alpha,
+        "sample_weight_dv_window_days": payload.sample_weight_dv_window_days,
+        "pit_missing_policy": payload.pit_missing_policy,
+        "pit_sample_on_snapshot": payload.pit_sample_on_snapshot,
+        "pit_min_coverage": payload.pit_min_coverage,
+        "symbol_source": payload.symbol_source,
+        "system_theme_key": payload.system_theme_key,
     }
     with get_session() as session:
         project = session.get(Project, payload.project_id)

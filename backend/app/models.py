@@ -3,6 +3,7 @@
 from datetime import datetime
 
 from sqlalchemy import Boolean, JSON, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -150,7 +151,9 @@ class ProjectVersion(Base):
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False)
     version: Mapped[str | None] = mapped_column(String(32), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    content: Mapped[str | None] = mapped_column(
+        Text().with_variant(LONGTEXT, "mysql"), nullable=True
+    )
     content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

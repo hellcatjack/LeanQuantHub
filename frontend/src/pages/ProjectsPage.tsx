@@ -95,6 +95,20 @@ interface ThemeConfigItem {
   snapshot?: { theme_id?: number; version_id?: number; version?: string } | null;
 }
 
+interface SystemThemeItem {
+  id: number;
+  key: string;
+  label: string;
+  source?: string | null;
+}
+
+interface SystemThemePage {
+  items: SystemThemeItem[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
 interface ProjectStrategyConfig {
   source?: string | null;
   score_csv_path?: string | null;
@@ -121,6 +135,7 @@ interface ProjectConfig {
   backtest_start?: string | null;
   backtest_end?: string | null;
   backtest_params?: Record<string, any>;
+  backtest_train_job_id?: number | null;
   backtest_plugins?: Record<string, any>;
   categories?: { key: string; label: string }[];
   themes?: ThemeConfigItem[];
@@ -498,6 +513,8 @@ export default function ProjectsPage() {
   const [themeDrafts, setThemeDrafts] = useState<ThemeConfigItem[]>([]);
   const [themeSummary, setThemeSummary] = useState<ProjectThemeSummary | null>(null);
   const [themeSummaryMessage, setThemeSummaryMessage] = useState("");
+  const [systemThemes, setSystemThemes] = useState<SystemThemeItem[]>([]);
+  const [systemThemeMessage, setSystemThemeMessage] = useState("");
   const [themeFilterText, setThemeFilterText] = useState("");
   const [themeSearchSymbol, setThemeSearchSymbol] = useState("");
   const [themeSearchResult, setThemeSearchResult] = useState<ProjectThemeSearch | null>(null);
@@ -551,7 +568,21 @@ export default function ProjectsPage() {
     labelHorizonDays: "5",
     walkForwardEnabled: true,
     modelType: "lgbm_ranker",
+    lgbmLearningRate: "0.05",
+    lgbmNumLeaves: "31",
+    lgbmMinDataInLeaf: "50",
+    lgbmEstimators: "200",
+    lgbmSubsample: "0.8",
+    lgbmColsampleBytree: "0.8",
     modelParams: "",
+    sampleWeighting: "mcap_dv_mix",
+    sampleWeightAlpha: "0.6",
+    sampleWeightDvWindowDays: "20",
+    pitMissingPolicy: "fill_zero",
+    pitSampleOnSnapshot: false,
+    pitMinCoverage: "0.05",
+    symbolSource: "project",
+    systemThemeKey: "",
   });
   const [mlSweep, setMlSweep] = useState({
     paramKey: "learning_rate",
@@ -611,6 +642,9 @@ export default function ProjectsPage() {
     { value: "INDEX", label: t("symbols.types.index") },
     { value: "UNKNOWN", label: t("symbols.types.unknown") },
   ];
+  const lockedSymbolTypeOptions = symbolTypeOptions.filter(
+    (option) => option.value === "STOCK"
+  );
 
   const normalizeThemeDrafts = (config: ProjectConfig): ThemeConfigItem[] => {
     if (config.themes && config.themes.length) {
@@ -768,6 +802,29 @@ export default function ProjectsPage() {
     }
   };
 
+  const loadSystemThemes = async () => {
+    try {
+      const res = await api.get<SystemThemePage>("/api/system-themes", {
+        params: { page: 1, page_size: 200 },
+      });
+      const items = res.data.items || [];
+      setSystemThemes(items);
+      setSystemThemeMessage("");
+      if (items.length) {
+        const preferred = items.find((item) => item.key === "DATA_COMPLETE") || items[0];
+        setMlForm((prev) => {
+          if (prev.systemThemeKey) {
+            return prev;
+          }
+          return { ...prev, systemThemeKey: preferred.key };
+        });
+      }
+    } catch (err) {
+      setSystemThemes([]);
+      setSystemThemeMessage(t("projects.ml.systemThemeError"));
+    }
+  };
+
   const loadAlgorithms = async () => {
     try {
       const res = await api.get<Algorithm[]>("/api/algorithms");
@@ -845,16 +902,20 @@ export default function ProjectsPage() {
     }
   };
 
-  const fetchPipelineDetail = async (pipelineId: number) => {
+  const fetchPipelineDetail = async (pipelineId: unknown) => {
+    const id = typeof pipelineId === "number" ? pipelineId : Number(pipelineId);
+    if (!Number.isFinite(id)) {
+      return null;
+    }
     try {
-      const res = await api.get<MLPipelineDetail>(`/api/ml/pipelines/${pipelineId}`);
+      const res = await api.get<MLPipelineDetail>(`/api/ml/pipelines/${id}`);
       return res.data || null;
     } catch (err) {
       return null;
     }
   };
 
-  const loadPipelineDetail = async (pipelineId: number) => {
+  const loadPipelineDetail = async (pipelineId: unknown) => {
     const detail = await fetchPipelineDetail(pipelineId);
     setPipelineDetail(detail);
     return detail;
@@ -903,11 +964,15 @@ export default function ProjectsPage() {
     }
   };
 
-  const savePipelineBacktestParams = async (pipelineIdOverride?: number) => {
+  const savePipelineBacktestParams = async (pipelineIdOverride?: number | unknown) => {
     if (!configDraft) {
       setPipelineBacktestMessage(t("projects.pipeline.backtest.saveError"));
       return false;
     }
+    const pipelineId =
+      typeof pipelineIdOverride === "number" && Number.isFinite(pipelineIdOverride)
+        ? pipelineIdOverride
+        : undefined;
     setPipelineBacktestSaving(true);
     setPipelineBacktestMessage("");
     const algorithmParams = buildPipelineBacktestAlgorithmParams();
@@ -918,20 +983,20 @@ export default function ProjectsPage() {
     const configOk = await persistProjectConfig(undefined, undefined, false, nextConfig);
     let pipelineOk = true;
     let pipelineTarget: MLPipeline | MLPipelineDetail | null = null;
-    if (pipelineIdOverride) {
-      if (pipelineEditor?.id === pipelineIdOverride) {
+    if (pipelineId) {
+      if (pipelineEditor?.id === pipelineId) {
         pipelineTarget = pipelineEditor;
       } else {
         pipelineTarget =
-          pipelines.find((item) => item.id === pipelineIdOverride) || null;
+          pipelines.find((item) => item.id === pipelineId) || null;
       }
       if (!pipelineTarget) {
-        pipelineTarget = await fetchPipelineDetail(pipelineIdOverride);
+        pipelineTarget = await fetchPipelineDetail(pipelineId);
       }
     } else {
       pipelineTarget = pipelineEditor;
     }
-    if (pipelineIdOverride && !pipelineTarget) {
+    if (pipelineId && !pipelineTarget) {
       pipelineOk = false;
     }
     if (pipelineTarget?.id) {
@@ -1077,8 +1142,12 @@ export default function ProjectsPage() {
       const num = Number(value);
       return Number.isFinite(num) ? num : undefined;
     };
-    const modelParams = parseModelParams(mlForm.modelParams, setMlMessage);
+    const modelParams = buildModelParams(setMlMessage);
     if (modelParams === null) {
+      return;
+    }
+    if (mlForm.symbolSource === "system_theme" && !mlForm.systemThemeKey) {
+      setMlMessage(t("projects.ml.systemThemeRequired"));
       return;
     }
     const walkForwardEnabled = !!mlForm.walkForwardEnabled;
@@ -1099,6 +1168,15 @@ export default function ProjectsPage() {
             test_months: walkForwardEnabled ? toNumber(mlForm.testMonths) : 0,
             step_months: walkForwardEnabled ? toNumber(mlForm.stepMonths) : 0,
             label_horizon_days: toNumber(mlForm.labelHorizonDays),
+            sample_weighting: mlForm.sampleWeighting,
+            sample_weight_alpha: toNumber(mlForm.sampleWeightAlpha),
+            sample_weight_dv_window_days: toNumber(mlForm.sampleWeightDvWindowDays),
+            pit_missing_policy: mlForm.pitMissingPolicy,
+            pit_sample_on_snapshot: mlForm.pitSampleOnSnapshot,
+            pit_min_coverage: toNumber(mlForm.pitMinCoverage),
+            symbol_source: mlForm.symbolSource,
+            system_theme_key:
+              mlForm.symbolSource === "system_theme" ? mlForm.systemThemeKey : undefined,
           },
           model: {
             model_type: mlForm.modelType,
@@ -1124,6 +1202,15 @@ export default function ProjectsPage() {
         label_horizon_days: toNumber(mlForm.labelHorizonDays),
         model_type: mlForm.modelType,
         model_params: modelParams,
+        sample_weighting: mlForm.sampleWeighting,
+        sample_weight_alpha: toNumber(mlForm.sampleWeightAlpha),
+        sample_weight_dv_window_days: toNumber(mlForm.sampleWeightDvWindowDays),
+        pit_missing_policy: mlForm.pitMissingPolicy,
+        pit_sample_on_snapshot: mlForm.pitSampleOnSnapshot,
+        pit_min_coverage: toNumber(mlForm.pitMinCoverage),
+        symbol_source: mlForm.symbolSource,
+        system_theme_key:
+          mlForm.symbolSource === "system_theme" ? mlForm.systemThemeKey : undefined,
         pipeline_id: pipelineId || undefined,
       });
       await loadMlJobs(selectedProjectId);
@@ -1157,8 +1244,12 @@ export default function ProjectsPage() {
       );
       return;
     }
-    const modelParams = parseModelParams(mlForm.modelParams, setMlSweepMessage);
+    const modelParams = buildModelParams(setMlSweepMessage);
     if (modelParams === null) {
+      return;
+    }
+    if (mlForm.symbolSource === "system_theme" && !mlForm.systemThemeKey) {
+      setMlSweepMessage(t("projects.ml.systemThemeRequired"));
       return;
     }
     const toNumber = (value: string) => {
@@ -1202,6 +1293,15 @@ export default function ProjectsPage() {
             test_months: walkForwardEnabled ? toNumber(mlForm.testMonths) : 0,
             step_months: walkForwardEnabled ? toNumber(mlForm.stepMonths) : 0,
             label_horizon_days: toNumber(mlForm.labelHorizonDays),
+            sample_weighting: mlForm.sampleWeighting,
+            sample_weight_alpha: toNumber(mlForm.sampleWeightAlpha),
+            sample_weight_dv_window_days: toNumber(mlForm.sampleWeightDvWindowDays),
+            pit_missing_policy: mlForm.pitMissingPolicy,
+            pit_sample_on_snapshot: mlForm.pitSampleOnSnapshot,
+            pit_min_coverage: toNumber(mlForm.pitMinCoverage),
+            symbol_source: mlForm.symbolSource,
+            system_theme_key:
+              mlForm.symbolSource === "system_theme" ? mlForm.systemThemeKey : undefined,
           },
           model: {
             model_type: mlForm.modelType,
@@ -1248,6 +1348,15 @@ export default function ProjectsPage() {
           label_horizon_days: toNumber(mlForm.labelHorizonDays),
           model_type: mlForm.modelType,
           model_params: mergedParams,
+          sample_weighting: mlForm.sampleWeighting,
+          sample_weight_alpha: toNumber(mlForm.sampleWeightAlpha),
+          sample_weight_dv_window_days: toNumber(mlForm.sampleWeightDvWindowDays),
+          pit_missing_policy: mlForm.pitMissingPolicy,
+          pit_sample_on_snapshot: mlForm.pitSampleOnSnapshot,
+          pit_min_coverage: toNumber(mlForm.pitMinCoverage),
+          symbol_source: mlForm.symbolSource,
+          system_theme_key:
+            mlForm.symbolSource === "system_theme" ? mlForm.systemThemeKey : undefined,
           pipeline_id: pipelineId || undefined,
         });
         createdCount += 1;
@@ -1331,6 +1440,7 @@ export default function ProjectsPage() {
 
   useEffect(() => {
     loadAlgorithms();
+    loadSystemThemes();
   }, []);
 
   useEffect(() => {
@@ -1569,6 +1679,20 @@ export default function ProjectsPage() {
       plugins[section] = sectionValue;
       next.backtest_plugins = plugins;
       return next;
+    });
+  };
+
+  const updateBacktestTrainJobId = (value: string) => {
+    const cleaned = value.trim();
+    const numeric = cleaned ? Number(cleaned) : NaN;
+    setConfigDraft((prev) => {
+      if (!prev) {
+        return prev;
+      }
+      return {
+        ...prev,
+        backtest_train_job_id: Number.isFinite(numeric) ? numeric : null,
+      };
     });
   };
 
@@ -1933,6 +2057,10 @@ export default function ProjectsPage() {
       } else {
         await loadProjectConfig(selectedProjectId);
         await loadThemeSummary(selectedProjectId);
+        await loadPipelines(selectedProjectId);
+        if (pipelineDetailId) {
+          await loadPipelineDetail(pipelineDetailId);
+        }
       }
       return true;
     } catch (err) {
@@ -1982,10 +2110,18 @@ export default function ProjectsPage() {
     }
     try {
       setBacktestMessage(t("projects.backtest.queued"));
-      const res = await api.post<BacktestRun>("/api/backtests", {
+      const params: Record<string, any> = {};
+      if (backtestTrainJobId) {
+        params.pipeline_train_job_id = backtestTrainJobId;
+      }
+      const payload: Record<string, any> = {
         project_id: selectedProjectId,
         pipeline_id: activePipelineId || undefined,
-      });
+      };
+      if (Object.keys(params).length) {
+        payload.params = params;
+      }
+      const res = await api.post<BacktestRun>("/api/backtests", payload);
       setLatestBacktest(res.data || null);
       scheduleBacktestRefresh(selectedProjectId);
     } catch (err) {
@@ -2068,6 +2204,13 @@ export default function ProjectsPage() {
     () => (mlDetailJob?.metrics as Record<string, any> | null) || null,
     [mlDetailJob]
   );
+  const mlDetailSymbolSource = useMemo(() => {
+    const meta = (mlDetailJob?.config as Record<string, any> | null)?.meta || {};
+    return {
+      source: String(meta.symbol_source || "project"),
+      key: meta.symbol_source_key ? String(meta.symbol_source_key) : "",
+    };
+  }, [mlDetailJob]);
   const mlCurve = useMemo(() => extractMlCurve(mlDetailMetrics), [mlDetailMetrics]);
   const mlCurveMetric = useMemo(
     () => extractCurveMetricName(mlDetailMetrics),
@@ -2219,6 +2362,37 @@ export default function ProjectsPage() {
     return entries.filter((item) => item.value !== undefined && item.value !== null && item.value !== "");
   }, [pipelineDetail, t]);
 
+  const backtestTrainJobIdRaw = configDraft?.backtest_train_job_id;
+  const backtestTrainJobId =
+    typeof backtestTrainJobIdRaw === "number" && Number.isFinite(backtestTrainJobIdRaw)
+      ? backtestTrainJobIdRaw
+      : Number.isFinite(Number(backtestTrainJobIdRaw))
+        ? Number(backtestTrainJobIdRaw)
+        : null;
+  const backtestTrainJobOptions = useMemo(() => {
+    const items = mlJobs.filter((job) => job.status === "success");
+    return items.sort((a, b) => (b.id || 0) - (a.id || 0));
+  }, [mlJobs]);
+  const backtestTrainJob = useMemo(() => {
+    if (!backtestTrainJobId) {
+      return null;
+    }
+    return backtestTrainJobOptions.find((job) => job.id === backtestTrainJobId) || null;
+  }, [backtestTrainJobId, backtestTrainJobOptions]);
+  const backtestTrainJobScorePath =
+    backtestTrainJob?.scores_path ||
+    (backtestTrainJob?.output_dir ? `${backtestTrainJob.output_dir}/scores.csv` : "");
+  const formatBacktestTrainJobLabel = (job: MLTrainJob) => {
+    const model = job.config?.model_type
+      ? String(job.config.model_type).toUpperCase()
+      : "";
+    const parts = [`#${job.id}`];
+    if (model) {
+      parts.push(model);
+    }
+    return parts.join(" · ");
+  };
+
   const renderSharedBacktestTemplate = (options?: { showTarget?: boolean }) => (
     <>
       <div className="card-title">{t("projects.pipeline.backtest.title")}</div>
@@ -2244,6 +2418,31 @@ export default function ProjectsPage() {
         </strong>
       </div>
       <div className="form-grid">
+        <div className="form-row" style={{ gridColumn: "1 / -1" }}>
+          <label className="form-label">
+            {t("projects.pipeline.backtest.trainJob")}
+          </label>
+          <select
+            className="form-select"
+            value={backtestTrainJobId ?? ""}
+            onChange={(e) => updateBacktestTrainJobId(e.target.value)}
+          >
+            <option value="">{t("projects.pipeline.backtest.trainJobAuto")}</option>
+            {backtestTrainJobOptions.map((job) => (
+              <option key={job.id} value={job.id}>
+                {formatBacktestTrainJobLabel(job)}
+              </option>
+            ))}
+          </select>
+          <div className="form-hint">{t("projects.pipeline.backtest.trainJobHint")}</div>
+          {backtestTrainJobScorePath && (
+            <div className="form-hint">
+              {t("projects.pipeline.backtest.trainJobScorePath", {
+                path: backtestTrainJobScorePath,
+              })}
+            </div>
+          )}
+        </div>
         <div className="form-row" style={{ gridColumn: "1 / -1" }}>
           <label className="form-label">
             {t("projects.pipeline.backtest.preset")}
@@ -2813,7 +3012,7 @@ export default function ProjectsPage() {
         </button>
         <button
           className="button-secondary"
-          onClick={savePipelineBacktestParams}
+          onClick={() => savePipelineBacktestParams()}
           disabled={pipelineBacktestSaving}
         >
           {pipelineBacktestSaving
@@ -3181,6 +3380,36 @@ export default function ProjectsPage() {
       onError(t("projects.ml.modelParamsError"));
       return null;
     }
+  };
+
+  const buildModelParams = (onError: (message: string) => void) => {
+    const params: Record<string, any> = {};
+    const addNumber = (key: string, raw: string) => {
+      const trimmed = raw?.trim() ?? "";
+      if (!trimmed) {
+        return;
+      }
+      const num = Number(trimmed);
+      if (Number.isFinite(num)) {
+        params[key] = num;
+      }
+    };
+    if (mlForm.modelType === "lgbm_ranker") {
+      addNumber("learning_rate", mlForm.lgbmLearningRate);
+      addNumber("num_leaves", mlForm.lgbmNumLeaves);
+      addNumber("min_data_in_leaf", mlForm.lgbmMinDataInLeaf);
+      addNumber("n_estimators", mlForm.lgbmEstimators);
+      addNumber("subsample", mlForm.lgbmSubsample);
+      addNumber("colsample_bytree", mlForm.lgbmColsampleBytree);
+    }
+    const extraParams = parseModelParams(mlForm.modelParams, onError);
+    if (extraParams === null) {
+      return null;
+    }
+    if (extraParams) {
+      Object.assign(params, extraParams);
+    }
+    return Object.keys(params).length ? params : undefined;
   };
 
   const buildSweepValues = (
@@ -3688,9 +3917,19 @@ export default function ProjectsPage() {
     const preset = backtest?.preset;
     return preset === "E35" || preset === "E45" || preset === "custom" ? preset : null;
   }, [pipelineEditor]);
+  const backtestTrainJobSavedRaw =
+    (configMeta?.config as Record<string, any> | null | undefined)?.backtest_train_job_id;
+  const backtestTrainJobSaved =
+    typeof backtestTrainJobSavedRaw === "number" &&
+    Number.isFinite(backtestTrainJobSavedRaw)
+      ? backtestTrainJobSavedRaw
+      : Number.isFinite(Number(backtestTrainJobSavedRaw))
+        ? Number(backtestTrainJobSavedRaw)
+        : null;
   const pipelineBacktestDirty =
     !areBacktestParamsEqual(pipelineBacktestDraftParams, pipelineBacktestSavedParams) ||
-    (!!pipelinePresetSaved && pipelinePresetSaved !== pipelineBacktestPreset);
+    (!!pipelinePresetSaved && pipelinePresetSaved !== pipelineBacktestPreset) ||
+    backtestTrainJobId !== backtestTrainJobSaved;
 
   const backtestPlugins = (configDraft?.backtest_plugins || {}) as Record<string, any>;
   const scoreSmoothing = (backtestPlugins.score_smoothing || {}) as Record<string, any>;
@@ -3956,6 +4195,20 @@ export default function ProjectsPage() {
     { key: "Risk Status", label: t("metrics.riskStatus") },
   ];
   const backtestSummary = latestBacktest?.metrics as Record<string, any> | null;
+  const latestBacktestParams =
+    (latestBacktest?.params as Record<string, any> | null | undefined) || {};
+  const latestBacktestAlgoParams =
+    (latestBacktestParams.algorithm_parameters as Record<string, any> | null | undefined) ||
+    {};
+  const latestBacktestTrainJobId =
+    latestBacktestParams.pipeline_train_job_id ??
+    latestBacktestParams.ml_train_job_id ??
+    latestBacktestParams.train_job_id ??
+    null;
+  const latestBacktestScorePath =
+    (latestBacktestAlgoParams.score_csv_path as string | undefined) ??
+    (latestBacktestParams.score_csv_path as string | undefined) ??
+    "";
   const benchmarkSummary =
     (backtestSummary?.benchmark as Record<string, any> | undefined) || {};
   const backtestErrorMessage =
@@ -4357,6 +4610,18 @@ export default function ProjectsPage() {
                             )}
                           </strong>
                         </div>
+                        <div className="meta-row">
+                          <span>{t("projects.backtest.trainJob")}</span>
+                          <strong>
+                            {latestBacktestTrainJobId
+                              ? `#${latestBacktestTrainJobId}`
+                              : t("common.none")}
+                          </strong>
+                        </div>
+                        <div className="meta-row">
+                          <span>{t("projects.backtest.scorePath")}</span>
+                          <strong>{latestBacktestScorePath || t("common.none")}</strong>
+                        </div>
                   {missingScores.length > 0 && (
                     <div className="missing-score-block">
                       <div className="missing-score-title">
@@ -4442,20 +4707,20 @@ export default function ProjectsPage() {
                     <div className="form-row">
                       <label className="form-label">{t("projects.config.assetTypes")}</label>
                       <div className="checkbox-group">
-                        {symbolTypeOptions.map((option) => (
+                        {lockedSymbolTypeOptions.map((option) => (
                           <label className="checkbox-row" key={option.value}>
                             <input
                               type="checkbox"
-                              checked={
-                                configDraft.universe?.asset_types?.includes(option.value) || false
-                              }
-                              onChange={() => toggleUniverseAssetType(option.value)}
+                              disabled
+                              checked
                             />
                             {option.label}
                           </label>
                         ))}
                       </div>
-                      <div className="form-hint">{t("projects.config.assetTypesHint")}</div>
+                      <div className="form-hint">
+                        {t("projects.config.assetTypesLockedHint")}
+                      </div>
                     </div>
                     <label className="checkbox-row">
                       <input
@@ -4488,10 +4753,8 @@ export default function ProjectsPage() {
                       <label className="form-label">{t("projects.config.vendorPrimary")}</label>
                       <select
                         className="form-select"
-                        value={configDraft.data?.primary_vendor || "alpha"}
-                        onChange={(e) =>
-                          updateConfigSection("data", "primary_vendor", e.target.value)
-                        }
+                        value="alpha"
+                        disabled
                       >
                         <option value="alpha">Alpha</option>
                       </select>
@@ -4500,13 +4763,14 @@ export default function ProjectsPage() {
                       <label className="form-label">{t("projects.config.vendorFallback")}</label>
                       <select
                         className="form-select"
-                        value={configDraft.data?.fallback_vendor || "alpha"}
-                        onChange={(e) =>
-                          updateConfigSection("data", "fallback_vendor", e.target.value)
-                        }
+                        value="alpha"
+                        disabled
                       >
                         <option value="alpha">Alpha</option>
                       </select>
+                      <div className="form-hint">
+                        {t("projects.config.vendorLockedHint")}
+                      </div>
                     </div>
                   </div>
                 )}
@@ -5658,6 +5922,47 @@ export default function ProjectsPage() {
                     <div className="form-hint">{t("projects.ml.modelTypeHint")}</div>
                   </div>
                   <div className="form-row">
+                    <label className="form-label">{t("projects.ml.symbolSource")}</label>
+                    <select
+                      className="form-select"
+                      value={mlForm.symbolSource}
+                      onChange={(e) =>
+                        setMlForm((prev) => ({ ...prev, symbolSource: e.target.value }))
+                      }
+                    >
+                      <option value="project">{t("projects.ml.symbolSourceProject")}</option>
+                      <option value="system_theme">
+                        {t("projects.ml.symbolSourceSystem")}
+                      </option>
+                    </select>
+                    <div className="form-hint">{t("projects.ml.symbolSourceHint")}</div>
+                  </div>
+                  {mlForm.symbolSource === "system_theme" && (
+                    <div className="form-row">
+                      <label className="form-label">{t("projects.ml.systemTheme")}</label>
+                      <select
+                        className="form-select"
+                        value={mlForm.systemThemeKey}
+                        onChange={(e) =>
+                          setMlForm((prev) => ({
+                            ...prev,
+                            systemThemeKey: e.target.value,
+                          }))
+                        }
+                        disabled={!systemThemes.length}
+                      >
+                        {systemThemes.map((theme) => (
+                          <option key={theme.key} value={theme.key}>
+                            {theme.key} {theme.label}
+                          </option>
+                        ))}
+                      </select>
+                      <div className="form-hint">
+                        {systemThemeMessage || t("projects.ml.systemThemeHint")}
+                      </div>
+                    </div>
+                  )}
+                  <div className="form-row">
                     <label className="form-label">{t("projects.pipeline.link")}</label>
                     <select
                       className="form-select"
@@ -5784,6 +6089,248 @@ export default function ProjectsPage() {
                         }))
                       }
                     />
+                  </div>
+                  {mlForm.modelType === "lgbm_ranker" && (
+                    <>
+                      <div className="form-row">
+                        <label className="form-label">
+                          {t("projects.ml.lgbm.learningRate")}
+                        </label>
+                        <input
+                          type="number"
+                          step="0.001"
+                          min={0}
+                          className="form-input"
+                          value={mlForm.lgbmLearningRate}
+                          onChange={(e) =>
+                            setMlForm((prev) => ({
+                              ...prev,
+                              lgbmLearningRate: e.target.value,
+                            }))
+                          }
+                        />
+                        <div className="form-hint">
+                          {t("projects.ml.lgbm.learningRateHint")}
+                        </div>
+                      </div>
+                      <div className="form-row">
+                        <label className="form-label">
+                          {t("projects.ml.lgbm.numLeaves")}
+                        </label>
+                        <input
+                          type="number"
+                          min={2}
+                          className="form-input"
+                          value={mlForm.lgbmNumLeaves}
+                          onChange={(e) =>
+                            setMlForm((prev) => ({
+                              ...prev,
+                              lgbmNumLeaves: e.target.value,
+                            }))
+                          }
+                        />
+                        <div className="form-hint">
+                          {t("projects.ml.lgbm.numLeavesHint")}
+                        </div>
+                      </div>
+                      <div className="form-row">
+                        <label className="form-label">
+                          {t("projects.ml.lgbm.minDataInLeaf")}
+                        </label>
+                        <input
+                          type="number"
+                          min={1}
+                          className="form-input"
+                          value={mlForm.lgbmMinDataInLeaf}
+                          onChange={(e) =>
+                            setMlForm((prev) => ({
+                              ...prev,
+                              lgbmMinDataInLeaf: e.target.value,
+                            }))
+                          }
+                        />
+                        <div className="form-hint">
+                          {t("projects.ml.lgbm.minDataInLeafHint")}
+                        </div>
+                      </div>
+                      <div className="form-row">
+                        <label className="form-label">
+                          {t("projects.ml.lgbm.estimators")}
+                        </label>
+                        <input
+                          type="number"
+                          min={1}
+                          className="form-input"
+                          value={mlForm.lgbmEstimators}
+                          onChange={(e) =>
+                            setMlForm((prev) => ({
+                              ...prev,
+                              lgbmEstimators: e.target.value,
+                            }))
+                          }
+                        />
+                        <div className="form-hint">
+                          {t("projects.ml.lgbm.estimatorsHint")}
+                        </div>
+                      </div>
+                      <div className="form-row">
+                        <label className="form-label">
+                          {t("projects.ml.lgbm.subsample")}
+                        </label>
+                        <input
+                          type="number"
+                          step="0.05"
+                          min={0}
+                          max={1}
+                          className="form-input"
+                          value={mlForm.lgbmSubsample}
+                          onChange={(e) =>
+                            setMlForm((prev) => ({
+                              ...prev,
+                              lgbmSubsample: e.target.value,
+                            }))
+                          }
+                        />
+                        <div className="form-hint">{t("projects.ml.lgbm.subsampleHint")}</div>
+                      </div>
+                      <div className="form-row">
+                        <label className="form-label">
+                          {t("projects.ml.lgbm.colsampleBytree")}
+                        </label>
+                        <input
+                          type="number"
+                          step="0.05"
+                          min={0}
+                          max={1}
+                          className="form-input"
+                          value={mlForm.lgbmColsampleBytree}
+                          onChange={(e) =>
+                            setMlForm((prev) => ({
+                              ...prev,
+                              lgbmColsampleBytree: e.target.value,
+                            }))
+                          }
+                        />
+                        <div className="form-hint">
+                          {t("projects.ml.lgbm.colsampleBytreeHint")}
+                        </div>
+                      </div>
+                    </>
+                  )}
+                  <div className="form-row">
+                    <label className="form-label">{t("projects.ml.sampleWeighting")}</label>
+                    <select
+                      className="form-select"
+                      value={mlForm.sampleWeighting}
+                      onChange={(e) =>
+                        setMlForm((prev) => ({
+                          ...prev,
+                          sampleWeighting: e.target.value,
+                        }))
+                      }
+                    >
+                      <option value="none">{t("projects.ml.sampleWeightingNone")}</option>
+                      <option value="dollar_volume">
+                        {t("projects.ml.sampleWeightingDollarVolume")}
+                      </option>
+                      <option value="market_cap">
+                        {t("projects.ml.sampleWeightingMarketCap")}
+                      </option>
+                      <option value="mcap_dv_mix">{t("projects.ml.sampleWeightingMix")}</option>
+                    </select>
+                    <div className="form-hint">{t("projects.ml.sampleWeightingHint")}</div>
+                  </div>
+                  <div className="form-row">
+                    <label className="form-label">{t("projects.ml.sampleWeightAlpha")}</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min={0}
+                      max={1}
+                      className="form-input"
+                      value={mlForm.sampleWeightAlpha}
+                      onChange={(e) =>
+                        setMlForm((prev) => ({
+                          ...prev,
+                          sampleWeightAlpha: e.target.value,
+                        }))
+                      }
+                    />
+                    <div className="form-hint">{t("projects.ml.sampleWeightAlphaHint")}</div>
+                  </div>
+                  <div className="form-row">
+                    <label className="form-label">
+                      {t("projects.ml.sampleWeightDvWindow")}
+                    </label>
+                    <input
+                      type="number"
+                      min={1}
+                      className="form-input"
+                      value={mlForm.sampleWeightDvWindowDays}
+                      onChange={(e) =>
+                        setMlForm((prev) => ({
+                          ...prev,
+                          sampleWeightDvWindowDays: e.target.value,
+                        }))
+                      }
+                    />
+                    <div className="form-hint">{t("projects.ml.sampleWeightDvWindowHint")}</div>
+                  </div>
+                  <div className="form-row">
+                    <label className="form-label">{t("projects.ml.pitMissingPolicy")}</label>
+                    <select
+                      className="form-select"
+                      value={mlForm.pitMissingPolicy}
+                      onChange={(e) =>
+                        setMlForm((prev) => ({
+                          ...prev,
+                          pitMissingPolicy: e.target.value,
+                        }))
+                      }
+                    >
+                      <option value="fill_zero">
+                        {t("projects.ml.pitMissingPolicyFillZero")}
+                      </option>
+                      <option value="drop">
+                        {t("projects.ml.pitMissingPolicyDrop")}
+                      </option>
+                    </select>
+                    <div className="form-hint">{t("projects.ml.pitMissingPolicyHint")}</div>
+                  </div>
+                  <div className="form-row">
+                    <label className="form-label">{t("projects.ml.pitSampleOnSnapshot")}</label>
+                    <label className="switch">
+                      <input
+                        type="checkbox"
+                        checked={!!mlForm.pitSampleOnSnapshot}
+                        onChange={(e) =>
+                          setMlForm((prev) => ({
+                            ...prev,
+                            pitSampleOnSnapshot: e.target.checked,
+                          }))
+                        }
+                      />
+                      <span className="slider" />
+                    </label>
+                    <div className="form-hint">{t("projects.ml.pitSampleOnSnapshotHint")}</div>
+                  </div>
+                  <div className="form-row">
+                    <label className="form-label">{t("projects.ml.pitMinCoverage")}</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min={0}
+                      max={1}
+                      className="form-input"
+                      value={mlForm.pitMinCoverage}
+                      onChange={(e) =>
+                        setMlForm((prev) => ({
+                          ...prev,
+                          pitMinCoverage: e.target.value,
+                        }))
+                      }
+                    />
+                    <div className="form-hint">{t("projects.ml.pitMinCoverageHint")}</div>
                   </div>
                   <div className="form-row" style={{ gridColumn: "1 / -1" }}>
                     <label className="form-label">{t("projects.ml.modelParams")}</label>
@@ -5921,6 +6468,20 @@ export default function ProjectsPage() {
                           const modelType = cfg.model_type || cfg.model?.type || "torch_mlp";
                           const symbolCount =
                             cfg.meta?.symbol_count ?? (cfg.symbols?.length ?? 0);
+                          const symbolSource = cfg.meta?.symbol_source || "project";
+                          const symbolSourceKey = cfg.meta?.symbol_source_key;
+                          const symbolSourceLabel =
+                            symbolSource === "system_theme"
+                              ? `${t("projects.ml.symbolSourceSystemShort")}:${
+                                  symbolSourceKey || "-"
+                                }`
+                              : t("projects.ml.symbolSourceProjectShort");
+                          const symbolSourceTitle =
+                            symbolSource === "system_theme"
+                              ? `${t("projects.ml.symbolSourceSystem")}: ${
+                                  symbolSourceKey || "-"
+                                }`
+                              : t("projects.ml.symbolSourceProject");
                           const ranges = mlTrainRangeDetail(job);
                           const trainLabel = t("projects.ml.table.trainRangeShort");
                           const validLabel = t("projects.ml.table.validRangeShort");
@@ -5967,7 +6528,14 @@ export default function ProjectsPage() {
                               </td>
                               <td>{String(modelType)}</td>
                               <td>{cfg.label_horizon_days ?? "-"}</td>
-                              <td>{symbolCount || "-"}</td>
+                              <td className="ml-symbol-cell">
+                                <div className="ml-symbol-wrap">
+                                  <div>{symbolCount || "-"}</div>
+                                  <div className="ml-symbol-source" title={symbolSourceTitle}>
+                                    {symbolSourceLabel}
+                                  </div>
+                                </div>
+                              </td>
                               <td>{formatDateTime(job.created_at)}</td>
                               <td className="ml-actions-cell">
                                 <div className="table-actions">
@@ -6030,6 +6598,16 @@ export default function ProjectsPage() {
                             mlDetailJob.config?.model?.type ||
                             "torch_mlp"
                         )}
+                      </strong>
+                    </div>
+                    <div className="meta-row">
+                      <span>{t("projects.ml.symbolSource")}</span>
+                      <strong>
+                        {mlDetailSymbolSource.source === "system_theme"
+                          ? `${t("projects.ml.symbolSourceSystem")}: ${
+                              mlDetailSymbolSource.key || "-"
+                            }`
+                          : t("projects.ml.symbolSourceProject")}
                       </strong>
                     </div>
                     <div className="meta-row">
@@ -7085,6 +7663,18 @@ export default function ProjectsPage() {
                         (backtestSummary?.price_source_policy as string | undefined)
                     )}
                   </strong>
+                </div>
+                <div className="meta-row">
+                  <span>{t("projects.backtest.trainJob")}</span>
+                  <strong>
+                    {latestBacktestTrainJobId
+                      ? `#${latestBacktestTrainJobId}`
+                      : t("common.none")}
+                  </strong>
+                </div>
+                <div className="meta-row">
+                  <span>{t("projects.backtest.scorePath")}</span>
+                  <strong>{latestBacktestScorePath || t("common.none")}</strong>
                 </div>
                 {missingScores.length > 0 && (
                   <div className="missing-score-block">

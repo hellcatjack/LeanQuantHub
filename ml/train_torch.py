@@ -153,6 +153,8 @@ def _load_series(path: Path) -> pd.DataFrame:
     df["date"] = pd.to_datetime(df["date"])
     df = df.set_index("date").sort_index()
     df = df[["open", "high", "low", "close", "volume"]]
+    for col in ("open", "high", "low", "close", "volume"):
+        df[col] = pd.to_numeric(df[col], errors="coerce")
     df = df.dropna(subset=["close"])
     df = df[~df.index.duplicated(keep="last")]
     return df
@@ -228,6 +230,194 @@ def _coerce_int(value: object, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _coerce_float(value: object) -> float | None:
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(num):
+        return None
+    return num
+
+
+def _resolve_sample_weight_config(config: dict) -> dict[str, object]:
+    raw = config.get("sample_weight")
+    if not isinstance(raw, dict):
+        raw = {}
+    scheme = raw.get("scheme") or config.get("sample_weighting") or "none"
+    scheme = str(scheme).strip().lower()
+    if scheme in {"", "none", "off", "false", "disabled"}:
+        scheme = "none"
+    elif scheme in {"market_capitalization", "marketcap", "mcap"}:
+        scheme = "market_cap"
+    elif scheme in {"dollar_volume", "volume", "turnover", "dollar_turnover"}:
+        scheme = "dollar_volume"
+    elif scheme in {
+        "mcap_dv_mix",
+        "market_cap_dollar_volume_mix",
+        "market_cap_dv_mix",
+        "market_cap+dollar_volume",
+        "mcap_plus_dv",
+    }:
+        scheme = "mcap_dv_mix"
+    elif scheme in {
+        "market_cap_x_dollar_volume",
+        "market_cap*dollar_volume",
+        "market_cap_volume",
+        "mcap_x_dv",
+    }:
+        scheme = "mcap_dv_product"
+
+    log1p = raw.get("log1p", True)
+    alpha = _coerce_float(raw.get("alpha"))
+    if alpha is None:
+        alpha = 0.6
+    alpha = min(max(alpha, 0.0), 1.0)
+    dv_window_days = _coerce_int(raw.get("dv_window_days"), 20)
+    if dv_window_days <= 0:
+        dv_window_days = 1
+    normalize = str(raw.get("normalize") or "mean").strip().lower()
+    clip_min = _coerce_float(raw.get("clip_min"))
+    clip_max = _coerce_float(raw.get("clip_max"))
+    return {
+        "scheme": scheme,
+        "log1p": bool(log1p),
+        "alpha": alpha,
+        "dv_window_days": dv_window_days,
+        "normalize": normalize,
+        "clip_min": clip_min,
+        "clip_max": clip_max,
+    }
+
+
+def _load_market_caps(data_root: Path, symbols: Iterable[str]) -> dict[str, float]:
+    base_dir = data_root / "fundamentals" / "alpha"
+    if not base_dir.exists():
+        return {}
+    caps: dict[str, float] = {}
+    for symbol in sorted({str(item).strip().upper() for item in symbols if item}):
+        overview_path = base_dir / symbol / "overview.json"
+        if not overview_path.exists():
+            continue
+        try:
+            payload = json.loads(overview_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        raw_cap = (
+            payload.get("MarketCapitalization")
+            or payload.get("market_cap")
+            or payload.get("marketCap")
+        )
+        cap = _coerce_float(raw_cap)
+        if cap and cap > 0:
+            caps[symbol] = cap
+    return caps
+
+
+def _transform_weight_series(series: pd.Series, log1p: bool) -> pd.Series:
+    values = series.copy()
+    values = values.clip(lower=0)
+    if log1p:
+        values = np.log1p(values)
+        values = values + 1.0
+    return values
+
+
+def _apply_sample_weights(
+    data: pd.DataFrame,
+    cfg: dict[str, object],
+    market_caps: dict[str, float],
+) -> tuple[pd.Series, dict[str, float]]:
+    scheme = str(cfg.get("scheme") or "none")
+    log1p = bool(cfg.get("log1p", True))
+    alpha = float(cfg.get("alpha") or 0.6)
+    normalize = str(cfg.get("normalize") or "mean").strip().lower()
+    clip_min = cfg.get("clip_min")
+    clip_max = cfg.get("clip_max")
+
+    weights = pd.Series(1.0, index=data.index, dtype="float64")
+    summary: dict[str, float] = {}
+
+    mcap_series = None
+    mcap_raw = None
+    if scheme in {"market_cap", "mcap_dv_mix", "mcap_dv_product"}:
+        if "pit_market_cap" in data.columns:
+            mcap_raw = pd.to_numeric(data["pit_market_cap"], errors="coerce")
+        else:
+            symbols = data["symbol"].astype(str).str.upper()
+            mcap_raw = symbols.map(market_caps)
+            mcap_raw = pd.to_numeric(mcap_raw, errors="coerce")
+        if mcap_raw is not None:
+            mcap_raw = mcap_raw.where(mcap_raw > 0)
+            mcap_series = _transform_weight_series(mcap_raw.fillna(0.0), log1p)
+            mcap_series = mcap_series.replace(0.0, 1.0)
+            summary["market_cap_coverage"] = float(mcap_raw.notna().mean())
+
+    dv_series = None
+    if scheme in {"dollar_volume", "mcap_dv_mix", "mcap_dv_product"}:
+        if "dollar_volume_raw" in data.columns:
+            dv_raw = pd.to_numeric(data["dollar_volume_raw"], errors="coerce").fillna(0.0)
+        else:
+            dv_raw = pd.Series(0.0, index=data.index, dtype="float64")
+        dv_series = _transform_weight_series(dv_raw, log1p)
+        dv_series = dv_series.replace(0.0, 1.0)
+
+    if scheme == "market_cap" and mcap_series is not None:
+        weights *= mcap_series
+    elif scheme == "dollar_volume" and dv_series is not None:
+        weights *= dv_series
+    elif scheme == "mcap_dv_product":
+        if mcap_series is not None and dv_series is not None:
+            weights *= mcap_series * dv_series
+        elif mcap_series is not None:
+            weights *= mcap_series
+        elif dv_series is not None:
+            weights *= dv_series
+    elif scheme == "mcap_dv_mix":
+        if mcap_series is None and dv_series is None:
+            weights = weights
+        elif mcap_series is None:
+            weights *= dv_series
+        elif dv_series is None:
+            weights *= mcap_series
+        else:
+            weights *= alpha * mcap_series + (1.0 - alpha) * dv_series
+
+    weights = weights.replace([np.inf, -np.inf], np.nan).fillna(1.0)
+    if clip_min is not None or clip_max is not None:
+        lower = float(clip_min) if clip_min is not None else None
+        upper = float(clip_max) if clip_max is not None else None
+        weights = weights.clip(lower=lower, upper=upper)
+
+    if normalize in {"mean", "avg"}:
+        mean = float(weights.mean()) if len(weights) else 1.0
+        if mean > 0:
+            weights = weights / mean
+    elif normalize in {"sum"}:
+        total = float(weights.sum()) if len(weights) else 1.0
+        if total > 0:
+            weights = weights / total
+
+    summary.update(
+        {
+            "alpha": float(alpha),
+            "mean": float(weights.mean()) if len(weights) else 1.0,
+            "min": float(weights.min()) if len(weights) else 1.0,
+            "max": float(weights.max()) if len(weights) else 1.0,
+        }
+    )
+    return weights.astype(np.float32, copy=False), summary
+
+
+def _extract_sample_weight(frame: pd.DataFrame) -> np.ndarray | None:
+    if "sample_weight" not in frame.columns:
+        return None
+    values = frame["sample_weight"].to_numpy(dtype=np.float32, copy=False)
+    if values.size == 0:
+        return None
+    return values
 
 
 def _build_walk_forward_windows(
@@ -529,9 +719,11 @@ def _train_lgbm_ranker(
     x_train: np.ndarray,
     y_train: np.ndarray,
     train_groups: list[int],
+    train_weights: np.ndarray | None,
     x_valid: np.ndarray,
     y_valid: np.ndarray,
     valid_groups: list[int],
+    valid_weights: np.ndarray | None,
     eval_at: list[int],
 ) -> "lgb.LGBMRanker":
     if lgb is None:
@@ -542,16 +734,22 @@ def _train_lgbm_ranker(
     callbacks = []
     if early_rounds:
         callbacks.append(lgb.early_stopping(int(early_rounds), verbose=False))
-    model.fit(
-        x_train,
-        y_train,
-        group=train_groups,
-        eval_set=[(x_train, y_train), (x_valid, y_valid)],
-        eval_group=[train_groups, valid_groups],
-        eval_names=["train", "valid"],
-        eval_at=[int(item) for item in eval_at if int(item) > 0] or [1],
-        callbacks=callbacks or None,
-    )
+    fit_kwargs: dict[str, object] = {
+        "X": x_train,
+        "y": y_train,
+        "group": train_groups,
+        "eval_set": [(x_train, y_train), (x_valid, y_valid)],
+        "eval_group": [train_groups, valid_groups],
+        "eval_names": ["train", "valid"],
+        "eval_at": [int(item) for item in eval_at if int(item) > 0] or [1],
+        "callbacks": callbacks or None,
+    }
+    if train_weights is not None:
+        if valid_weights is None:
+            valid_weights = np.ones_like(y_valid, dtype=np.float32)
+        fit_kwargs["sample_weight"] = train_weights
+        fit_kwargs["eval_sample_weight"] = [train_weights, valid_weights]
+    model.fit(**fit_kwargs)
     return model
 
 
@@ -608,7 +806,19 @@ def _train_loop(
     patience = int(config.get("patience", 6))
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-    loss_fn = nn.MSELoss()
+    loss_fn = nn.MSELoss(reduction="none")
+
+    def _compute_loss(
+        preds: torch.Tensor, targets: torch.Tensor, weights: torch.Tensor | None
+    ) -> torch.Tensor:
+        losses = loss_fn(preds, targets)
+        if weights is None:
+            return losses.mean()
+        weights = weights.to(losses.device).float()
+        if weights.ndim > 1:
+            weights = weights.view(-1)
+        denom = torch.clamp(weights.sum(), min=1e-8)
+        return (losses * weights).sum() / denom
 
     best_loss = None
     best_state = None
@@ -619,23 +829,33 @@ def _train_loop(
         if cancel_cb:
             cancel_cb()
         model.train()
-        for batch_x, batch_y in train_loader:
+        for batch in train_loader:
+            if len(batch) == 3:
+                batch_x, batch_y, batch_w = batch
+            else:
+                batch_x, batch_y = batch
+                batch_w = None
             batch_x = batch_x.to(device)
             batch_y = batch_y.to(device)
             optimizer.zero_grad()
-            preds = model(batch_x)
-            loss = loss_fn(preds, batch_y)
+            preds = model(batch_x).squeeze(-1)
+            loss = _compute_loss(preds, batch_y, batch_w)
             loss.backward()
             optimizer.step()
 
         model.eval()
         losses = []
         with torch.no_grad():
-            for batch_x, batch_y in valid_loader:
+            for batch in valid_loader:
+                if len(batch) == 3:
+                    batch_x, batch_y, batch_w = batch
+                else:
+                    batch_x, batch_y = batch
+                    batch_w = None
                 batch_x = batch_x.to(device)
                 batch_y = batch_y.to(device)
-                preds = model(batch_x)
-                loss = loss_fn(preds, batch_y)
+                preds = model(batch_x).squeeze(-1)
+                loss = _compute_loss(preds, batch_y, batch_w)
                 losses.append(loss.item())
         valid_loss = float(np.mean(losses)) if losses else float("inf")
         history.append({"epoch": epoch, "valid_loss": valid_loss})
@@ -679,11 +899,23 @@ def main() -> None:
 
     symbol_life = _load_symbol_life(data_root, config)
 
-    vendor_pref = config.get("vendor_preference", ["Alpha", "Stooq", "Lean"])
+    vendor_pref = config.get("vendor_preference") or ["Alpha"]
+    if isinstance(vendor_pref, str):
+        vendor_pref = [item.strip() for item in vendor_pref.split(",") if item.strip()]
+    vendor_pref = [
+        item for item in vendor_pref if str(item).strip().upper() == "ALPHA"
+    ] or ["Alpha"]
     benchmark_symbol = config.get("benchmark_symbol", "SPY")
     symbols = config.get("symbols", [])
     if benchmark_symbol not in symbols:
         symbols = [benchmark_symbol] + list(symbols)
+
+    weight_cfg = _resolve_sample_weight_config(config)
+    weight_scheme = str(weight_cfg.get("scheme") or "none")
+    weight_needs_cap = weight_scheme in {"market_cap", "mcap_dv_mix", "mcap_dv_product"}
+    weight_needs_dv = weight_scheme in {"dollar_volume", "mcap_dv_mix", "mcap_dv_product"}
+    market_caps = _load_market_caps(data_root, symbols) if weight_needs_cap else {}
+    raw_dir = data_root / "curated"
 
     feature_windows = config.get("feature_windows", {})
     feat_config = FeatureConfig(
@@ -724,10 +956,12 @@ def main() -> None:
             coverage_action=pit_coverage_action,
         )
         print(
-            "pit fundamentals: rows={total_rows} coverage={coverage:.4f}".format(
+            "pit fundamentals: rows={total_rows} coverage={coverage:.4f} missing_policy={missing_policy} sample_on_snapshot={sample_on_snapshot}".format(
                 **{
                     "total_rows": pit_summary.get("total_rows", 0.0),
                     "coverage": pit_summary.get("coverage", 0.0),
+                    "missing_policy": pit_missing_policy,
+                    "sample_on_snapshot": pit_sample_on_snapshot,
                 }
             )
         )
@@ -781,6 +1015,18 @@ def main() -> None:
         merged = features.join(label.rename("label")).dropna()
         if merged.empty:
             continue
+        if weight_needs_dv:
+            raw_path = _pick_dataset_file(symbol, raw_dir, vendor_pref)
+            if raw_path:
+                raw_df = _load_series(raw_path)
+                life = symbol_life.get(symbol)
+                if life:
+                    raw_df = _apply_symbol_life(raw_df, life)
+                dv_series = (raw_df["close"] * raw_df["volume"])
+                dv_window = int(weight_cfg.get("dv_window_days") or 1)
+                if dv_window > 1:
+                    dv_series = dv_series.rolling(window=dv_window, min_periods=1).mean()
+                merged["dollar_volume_raw"] = dv_series.reindex(merged.index)
         merged["symbol"] = symbol
         dataset.append(merged)
 
@@ -788,7 +1034,33 @@ def main() -> None:
         raise RuntimeError("未生成有效训练样本")
 
     data = pd.concat(dataset).sort_index()
-    feature_cols = [col for col in data.columns if col not in {"label", "symbol"}]
+    weight_summary = None
+    weight_meta = None
+    if weight_scheme != "none":
+        weights, weight_summary = _apply_sample_weights(data, weight_cfg, market_caps)
+        data["sample_weight"] = weights
+        if weight_summary:
+            summary_msg = " ".join(
+                f"{key}={value:.4f}"
+                for key, value in weight_summary.items()
+                if isinstance(value, (int, float))
+            )
+            print(f"sample_weight scheme={weight_scheme} {summary_msg}")
+        if weight_summary:
+            weight_meta = {
+                "scheme": weight_scheme,
+                "dv_window_days": int(weight_cfg.get("dv_window_days") or 1),
+                **weight_summary,
+            }
+    exclude_cols = {
+        "label",
+        "symbol",
+        "sample_weight",
+        "dollar_volume_raw",
+        "shares_available_date",
+        "shares_source",
+    }
+    feature_cols = [col for col in data.columns if col not in exclude_cols]
 
     lookback = required_lookback(feat_config, horizon)
     walk_config = config.get("walk_forward", {})
@@ -846,15 +1118,19 @@ def main() -> None:
 
             train_groups = _build_rank_groups(train_df)
             valid_groups = _build_rank_groups(valid_df)
+            train_weights = _extract_sample_weight(train_df)
+            valid_weights = _extract_sample_weight(valid_df)
 
             model = _train_lgbm_ranker(
                 config,
                 x_train,
                 y_train,
                 train_groups,
+                train_weights,
                 x_valid,
                 y_valid,
                 valid_groups,
+                valid_weights,
                 eval_at_list,
             )
             model.booster_.save_model(str(output_dir / "lgbm_model.txt"))
@@ -888,6 +1164,8 @@ def main() -> None:
                 "ic": ic,
                 "rank_ic": rank_ic,
             }
+            if weight_meta:
+                metrics["sample_weight"] = weight_meta
             curve_payload = _build_curve_payload(metric_name, train_curve, valid_curve)
             if curve_payload:
                 metrics["curve"] = curve_payload
@@ -926,15 +1204,19 @@ def main() -> None:
 
             train_groups = _build_rank_groups(train_df)
             valid_groups = _build_rank_groups(valid_df)
+            train_weights = _extract_sample_weight(train_df)
+            valid_weights = _extract_sample_weight(valid_df)
 
             model = _train_lgbm_ranker(
                 config,
                 x_train,
                 y_train,
                 train_groups,
+                train_weights,
                 x_valid,
                 y_valid,
                 valid_groups,
+                valid_weights,
                 eval_at_list,
             )
             metric_name, train_curve, valid_curve = _extract_lgbm_curve(model)
@@ -1047,6 +1329,7 @@ def main() -> None:
                     "model_type": "lgbm_ranker",
                     "curve": curve_payload,
                     "walk_forward": {"windows": window_metrics, "config": walk_config},
+                    **({"sample_weight": weight_meta} if weight_meta else {}),
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -1091,17 +1374,28 @@ def main() -> None:
         y_train = scaled_train["label"].values.astype(np.float32)
         x_valid = scaled_valid[feature_cols].values.astype(np.float32)
         y_valid = scaled_valid["label"].values.astype(np.float32)
+        train_weights = _extract_sample_weight(train_df)
+        valid_weights = _extract_sample_weight(valid_df)
 
-        train_loader = DataLoader(
-            TensorDataset(torch.from_numpy(x_train), torch.from_numpy(y_train)),
-            batch_size=batch_size,
-            shuffle=True,
-        )
-        valid_loader = DataLoader(
-            TensorDataset(torch.from_numpy(x_valid), torch.from_numpy(y_valid)),
-            batch_size=batch_size,
-            shuffle=False,
-        )
+        if train_weights is not None:
+            train_dataset = TensorDataset(
+                torch.from_numpy(x_train),
+                torch.from_numpy(y_train),
+                torch.from_numpy(train_weights),
+            )
+        else:
+            train_dataset = TensorDataset(torch.from_numpy(x_train), torch.from_numpy(y_train))
+        if valid_weights is not None:
+            valid_dataset = TensorDataset(
+                torch.from_numpy(x_valid),
+                torch.from_numpy(y_valid),
+                torch.from_numpy(valid_weights),
+            )
+        else:
+            valid_dataset = TensorDataset(torch.from_numpy(x_valid), torch.from_numpy(y_valid))
+
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        valid_loader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False)
 
         model = TorchMLP(
             input_dim=len(feature_cols),
@@ -1132,6 +1426,8 @@ def main() -> None:
         curve_payload = _build_loss_curve(metrics.get("history", []))
         if curve_payload:
             metrics["curve"] = curve_payload
+        if weight_meta:
+            metrics["sample_weight"] = weight_meta
         torch.save(model.state_dict(), output_dir / "torch_model.pt")
 
         payload = LinearModelPayload(
@@ -1190,17 +1486,28 @@ def main() -> None:
         y_train = scaled_train["label"].values.astype(np.float32)
         x_valid = scaled_valid[feature_cols].values.astype(np.float32)
         y_valid = scaled_valid["label"].values.astype(np.float32)
+        train_weights = _extract_sample_weight(train_df)
+        valid_weights = _extract_sample_weight(valid_df)
 
-        train_loader = DataLoader(
-            TensorDataset(torch.from_numpy(x_train), torch.from_numpy(y_train)),
-            batch_size=batch_size,
-            shuffle=True,
-        )
-        valid_loader = DataLoader(
-            TensorDataset(torch.from_numpy(x_valid), torch.from_numpy(y_valid)),
-            batch_size=batch_size,
-            shuffle=False,
-        )
+        if train_weights is not None:
+            train_dataset = TensorDataset(
+                torch.from_numpy(x_train),
+                torch.from_numpy(y_train),
+                torch.from_numpy(train_weights),
+            )
+        else:
+            train_dataset = TensorDataset(torch.from_numpy(x_train), torch.from_numpy(y_train))
+        if valid_weights is not None:
+            valid_dataset = TensorDataset(
+                torch.from_numpy(x_valid),
+                torch.from_numpy(y_valid),
+                torch.from_numpy(valid_weights),
+            )
+        else:
+            valid_dataset = TensorDataset(torch.from_numpy(x_valid), torch.from_numpy(y_valid))
+
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        valid_loader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False)
 
         model = TorchMLP(
             input_dim=len(feature_cols),
@@ -1329,6 +1636,7 @@ def main() -> None:
                 "model_type": "torch_mlp",
                 "curve": curve_payload,
                 "walk_forward": {"windows": window_metrics, "config": walk_config},
+                **({"sample_weight": weight_meta} if weight_meta else {}),
             },
             ensure_ascii=False,
             indent=2,

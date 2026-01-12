@@ -125,6 +125,28 @@ def _load_sp500_payloads() -> dict[str, dict[str, Any]]:
     return payloads
 
 
+def _load_data_complete_payload() -> dict[str, Any] | None:
+    data_root = _get_data_root()
+    path = data_root / "universe" / "data_complete_symbols.csv"
+    if not path.exists():
+        return None
+    symbols: list[str] = []
+    with path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            symbol = (row.get("symbol") or "").strip().upper()
+            if symbol:
+                symbols.append(symbol)
+    symbols = sorted({sym for sym in symbols if sym})
+    if not symbols:
+        return None
+    return {
+        "key": "DATA_COMPLETE",
+        "label": "数据完整（在市）",
+        "manual": symbols,
+    }
+
+
 def _normalize_list(value: Any) -> list[str]:
     if not value:
         return []
@@ -163,6 +185,7 @@ def _ensure_system_themes(session) -> None:
     themes = session.query(SystemTheme).all()
     existing = {theme.key: theme for theme in themes}
     sp500_payloads = _load_sp500_payloads()
+    data_complete_payload = _load_data_complete_payload()
 
     if not existing:
         for category in _load_theme_keywords():
@@ -190,6 +213,19 @@ def _ensure_system_themes(session) -> None:
                     theme_id=theme.id,
                     version=datetime.utcnow().isoformat(),
                     payload=payload,
+                )
+            )
+        if data_complete_payload:
+            key = data_complete_payload.get("key") or "DATA_COMPLETE"
+            label = data_complete_payload.get("label") or key
+            theme = SystemTheme(key=key, label=label, source="data_complete")
+            session.add(theme)
+            session.flush()
+            session.add(
+                SystemThemeVersion(
+                    theme_id=theme.id,
+                    version=datetime.utcnow().isoformat(),
+                    payload=data_complete_payload,
                 )
             )
         session.commit()
@@ -239,6 +275,29 @@ def _ensure_system_themes(session) -> None:
                     theme_id=theme.id,
                     version=datetime.utcnow().isoformat(),
                     payload=payload,
+                )
+            )
+
+    if data_complete_payload:
+        key = data_complete_payload.get("key") or "DATA_COMPLETE"
+        theme = existing.get(key)
+        if not theme:
+            label = data_complete_payload.get("label") or key
+            theme = SystemTheme(key=key, label=label, source="data_complete")
+            session.add(theme)
+            session.flush()
+            existing[key] = theme
+        else:
+            label = data_complete_payload.get("label") or key
+            if label and label != theme.label:
+                theme.label = label
+        latest = _get_latest_version(session, theme.id)
+        if not latest or (latest.payload or {}) != data_complete_payload:
+            session.add(
+                SystemThemeVersion(
+                    theme_id=theme.id,
+                    version=datetime.utcnow().isoformat(),
+                    payload=data_complete_payload,
                 )
             )
 
@@ -510,6 +569,12 @@ def refresh_system_theme(theme_id: int):
         elif theme.source == "membership":
             payloads = _load_sp500_payloads()
             next_payload = payloads.get(theme.key)
+            if next_payload:
+                next_label = next_payload.get("label")
+                if next_label and next_label != theme.label:
+                    theme.label = next_label
+        elif theme.source == "data_complete":
+            next_payload = _load_data_complete_payload()
             if next_payload:
                 next_label = next_payload.get("label")
                 if next_label and next_label != theme.label:

@@ -4,6 +4,7 @@
 - 项目页「算法」已集成模型训练区块，可在同一页完成参数配置、训练任务查看与模型激活。
 - 后端新增训练作业接口与执行器，训练产物统一输出到 `ml/models/`（`torch_model.pt`、`torch_payload.json`、`scores.csv`）。
 - 数据源默认使用 Alpha，训练与回测均基于 `data_root/curated_adjusted` 的复权数据。
+- Stooq/Yahoo 已彻底禁用，禁止恢复或作为价格回退来源。
 
 ## 项目结构
 - `backend/`：FastAPI + MySQL，负责配置、数据同步、回测与训练任务。
@@ -47,8 +48,10 @@
 
 ## 编码与安全
 - 保持 UTF-8，前后端新增文案同步在 `frontend/src/i18n.tsx`。
+- SSL 证书路径优先使用 `/app/stocklean/.venv/ssl/cert.pem`，如需备用可用 `/app/stocklean/.venv/lib/python3.11/site-packages/pip/_vendor/certifi/cacert.pem`；出现 SSL 错误时，务必设置 `SSL_CERT_FILE` 指向上述路径。
 - 禁止提交 `.env`、API Key、数据库口令与数据文件；配置示例写入 `.env.example`。
 - 禁止无意义地使用完全相同参数并发回测或训练；并发仅用于探索不同参数或不同模型的对比。
+- 禁止重新引入 Stooq/Yahoo 作为数据源或价格回退。
 
 
 # 通用编程与执行规则（Agent Engineering Rules）

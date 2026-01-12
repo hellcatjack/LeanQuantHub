@@ -9,6 +9,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Iterable
 
+import trading_calendar
 
 def _resolve_data_root(value: str | None) -> Path:
     if value:
@@ -64,36 +65,6 @@ def _extract_symbol_from_filename(path: Path) -> str:
             symbol_part = symbol_part[: -len(suffix)]
             break
     return symbol_part.strip().upper()
-
-
-def _load_trading_days(
-    adjusted_dir: Path, benchmark: str, vendor_preference: list[str]
-) -> list[date]:
-    candidates = list(adjusted_dir.glob(f"*_{benchmark}_*.csv"))
-    if not candidates:
-        candidates = list(adjusted_dir.glob(f"*_{benchmark}.csv"))
-    if not candidates:
-        raise RuntimeError(f"missing benchmark data for {benchmark}")
-
-    def vendor_rank(path: Path) -> int:
-        stem = path.stem
-        parts = stem.split("_", 2)
-        vendor = parts[1] if len(parts) > 1 else ""
-        ranks = {v.upper(): i for i, v in enumerate(vendor_preference)}
-        return ranks.get(vendor.upper(), len(ranks) + 1)
-
-    path = sorted(candidates, key=vendor_rank)[0]
-    dates: set[date] = set()
-    with path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
-        reader = csv.DictReader(handle)
-        for row in reader:
-            parsed = _parse_date(row.get("date"))
-            if parsed:
-                dates.add(parsed)
-    days = sorted(dates)
-    if not days:
-        raise RuntimeError("no trading days found in benchmark data")
-    return days
 
 
 def _load_symbol_life(path: Path) -> dict[str, tuple[date | None, date | None]]:
@@ -178,7 +149,12 @@ def main() -> int:
     parser.add_argument("--summary", default="")
     parser.add_argument("--issues", default="")
     parser.add_argument("--benchmark", default="SPY")
-    parser.add_argument("--vendor-preference", default="Alpha,Lean,Stooq")
+    parser.add_argument(
+        "--calendar-source",
+        default="",
+        help="trading calendar source override (auto/local/exchange_calendars/lean/spy)",
+    )
+    parser.add_argument("--vendor-preference", default="Alpha")
     parser.add_argument("--symbol-life", default="")
     parser.add_argument("--outlier-threshold", type=float, default=0.2)
     parser.add_argument("--cliff-threshold", type=float, default=0.6)
@@ -221,7 +197,18 @@ def main() -> int:
         fix_output_dir.mkdir(parents=True, exist_ok=True)
 
     vendor_preference = [item.strip() for item in args.vendor_preference.split(",") if item.strip()]
-    trading_days = _load_trading_days(source_dir, args.benchmark.strip().upper(), vendor_preference)
+    vendor_preference = [
+        item for item in vendor_preference if item.upper() == "ALPHA"
+    ] or ["Alpha"]
+    vendor_allowed = {item.upper() for item in vendor_preference}
+    calendar_override = args.calendar_source.strip().lower() or None
+    trading_days, _calendar_info = trading_calendar.load_trading_days(
+        data_root,
+        source_dir,
+        args.benchmark.strip().upper(),
+        vendor_preference,
+        source_override=calendar_override,
+    )
     symbol_life_path = args.symbol_life.strip()
     if not symbol_life_path:
         symbol_life_path = str(data_root / "universe" / "alpha_symbol_life.csv")
@@ -230,7 +217,13 @@ def main() -> int:
         symbol_life_file = data_root / symbol_life_file
     symbol_life = _load_symbol_life(symbol_life_file)
 
-    all_files = sorted(source_dir.glob("*.csv"))
+    all_files = []
+    for path in sorted(source_dir.glob("*.csv")):
+        parts = path.stem.split("_", 2)
+        vendor = parts[1] if len(parts) >= 3 else ""
+        if vendor_allowed and vendor.upper() not in vendor_allowed:
+            continue
+        all_files.append(path)
     offset = max(args.offset, 0)
     limit = max(args.limit, 0)
     files = all_files[offset:]

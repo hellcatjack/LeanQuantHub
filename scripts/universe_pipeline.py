@@ -1206,6 +1206,18 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
     price_source_policy = str(weights_cfg.get("price_source_policy", "adjusted_only")).strip().lower()
     if price_source_policy not in {"adjusted_only", "adjusted_prefer", "raw_only"}:
         raise SystemExit("price_source_policy must be adjusted_only, adjusted_prefer, or raw_only")
+    vendor_preference = weights_cfg.get("price_vendor_preference") or weights_cfg.get(
+        "vendor_preference"
+    )
+    if not vendor_preference:
+        vendor_preference = ["Alpha"]
+    if isinstance(vendor_preference, str):
+        vendor_preference = [item.strip() for item in vendor_preference.split(",") if item.strip()]
+    vendor_preference = [
+        item for item in vendor_preference if str(item).strip().upper() == "ALPHA"
+    ] or ["Alpha"]
+    if price_source_policy != "adjusted_only":
+        price_source_policy = "adjusted_only"
     signal_mode = str(weights_cfg.get("signal_mode") or "theme_weights").strip().lower()
     if signal_mode not in {"theme_weights", "ml_scores"}:
         raise SystemExit("signal_mode must be theme_weights or ml_scores")
@@ -1449,9 +1461,36 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
                 symbol_map[symbol] = file
         return symbol_map
 
+    def build_adjusted_vendor_map(source_dir: Path) -> dict[str, dict[str, Path]]:
+        symbol_map: dict[str, dict[str, Path]] = {}
+        if not source_dir.exists():
+            return symbol_map
+        for file in source_dir.glob("*.csv"):
+            parts = file.stem.split("_")
+            if len(parts) < 4:
+                continue
+            vendor = parts[1].strip().upper()
+            symbol_parts = parts[2:-1]
+            if not symbol_parts:
+                continue
+            symbol = "_".join(symbol_parts).strip().upper()
+            if not symbol:
+                continue
+            symbol_map.setdefault(symbol, {})[vendor] = file
+        return symbol_map
+
     curated_map = build_symbol_map(curated_dir)
-    curated_adjusted_map = build_symbol_map(curated_adjusted_dir)
+    curated_adjusted_map = build_adjusted_vendor_map(curated_adjusted_dir)
     normalized_map = build_symbol_map(normalized_dir)
+
+    def _pick_vendor_path(vendor_map: dict[str, Path]) -> Path | None:
+        if not vendor_map:
+            return None
+        for vendor in vendor_preference:
+            candidate = vendor_map.get(str(vendor).strip().upper())
+            if candidate:
+                return candidate
+        return None
 
     def _expand_symbol_variants(value: str) -> list[str]:
         variants = [value]
@@ -1477,7 +1516,7 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
             if not candidate or candidate in seen:
                 continue
             seen.add(candidate)
-            adjusted_path = curated_adjusted_map.get(candidate)
+            adjusted_path = _pick_vendor_path(curated_adjusted_map.get(candidate, {}))
             if price_source_policy != "raw_only" and adjusted_path:
                 return adjusted_path, "adjusted", candidate
             if price_source_policy == "adjusted_only":

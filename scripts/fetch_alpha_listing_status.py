@@ -10,6 +10,10 @@ from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT / "backend"))
+
+from app.services.job_lock import JobLock  # noqa: E402
 
 def _resolve_data_root(value: str | None) -> Path:
     if value:
@@ -21,6 +25,19 @@ def _resolve_data_root(value: str | None) -> Path:
     if default_root.exists():
         return default_root
     return Path.cwd() / "data"
+
+
+def _acquire_lock(data_root: Path) -> JobLock | None:
+    lock = JobLock("alpha_fetch", data_root)
+    if not lock.acquire():
+        return None
+    return lock
+
+
+def _release_lock(lock: JobLock | None) -> None:
+    if not lock:
+        return
+    lock.release()
 
 
 def _resolve_api_key(value: str | None) -> str:
@@ -76,20 +93,26 @@ def main() -> int:
         return 2
 
     date = _validate_date(args.date) if args.date else None
-    payload = _fetch_listing_status(api_key, args.state, date)
-
     data_root = _resolve_data_root(args.data_root)
-    if args.output:
-        output_path = Path(args.output).expanduser()
-        if not output_path.is_absolute():
-            output_path = data_root / output_path
-    else:
-        suffix = date or "latest"
-        output_path = data_root / "universe" / f"alpha_listing_status_{args.state}_{suffix}.csv"
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_bytes(payload)
-    print(f"saved: {output_path}")
-    return 0
+    lock_handle = _acquire_lock(data_root)
+    if not lock_handle:
+        print("alpha_lock_busy", file=sys.stderr)
+        return 3
+    try:
+        payload = _fetch_listing_status(api_key, args.state, date)
+        if args.output:
+            output_path = Path(args.output).expanduser()
+            if not output_path.is_absolute():
+                output_path = data_root / output_path
+        else:
+            suffix = date or "latest"
+            output_path = data_root / "universe" / f"alpha_listing_status_{args.state}_{suffix}.csv"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(payload)
+        print(f"saved: {output_path}")
+        return 0
+    finally:
+        _release_lock(lock_handle)
 
 
 if __name__ == "__main__":
