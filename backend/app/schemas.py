@@ -15,6 +15,7 @@ class ProjectOut(BaseModel):
     id: int
     name: str
     description: str | None
+    is_archived: bool = False
     created_at: datetime
 
     class Config:
@@ -1104,6 +1105,135 @@ class AutoWeeklyJobOut(BaseModel):
     class Config:
         from_attributes = True
 
+
+class PreTradeTemplateCreate(BaseModel):
+    project_id: int | None = None
+    name: str
+    params: dict | None = None
+    is_active: bool = False
+
+
+class PreTradeTemplateUpdate(BaseModel):
+    name: str | None = None
+    params: dict | None = None
+    is_active: bool | None = None
+
+
+class PreTradeTemplateOut(BaseModel):
+    id: int
+    project_id: int | None
+    name: str
+    params: dict | None
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class PreTradeSettingsUpdate(BaseModel):
+    current_template_id: int | None = None
+    telegram_bot_token: str | None = None
+    telegram_chat_id: str | None = None
+    max_retries: int | None = None
+    retry_base_delay_seconds: int | None = None
+    retry_max_delay_seconds: int | None = None
+    deadline_time: str | None = None
+    deadline_timezone: str | None = None
+
+
+class PreTradeSettingsOut(BaseModel):
+    id: int
+    current_template_id: int | None
+    telegram_bot_token: str | None
+    telegram_chat_id: str | None
+    max_retries: int
+    retry_base_delay_seconds: int
+    retry_max_delay_seconds: int
+    deadline_time: str | None
+    deadline_timezone: str | None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class PreTradeRunCreate(BaseModel):
+    project_id: int
+    template_id: int | None = None
+    window_start: datetime | None = None
+    window_end: datetime | None = None
+    deadline_at: datetime | None = None
+    params: dict | None = None
+
+
+class PreTradeRunOut(BaseModel):
+    id: int
+    project_id: int
+    template_id: int | None
+    status: str
+    window_start: datetime | None
+    window_end: datetime | None
+    deadline_at: datetime | None
+    params: dict | None
+    message: str | None
+    fallback_used: bool
+    fallback_run_id: int | None
+    created_at: datetime
+    started_at: datetime | None
+    ended_at: datetime | None
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class PreTradeStepOut(BaseModel):
+    id: int
+    run_id: int
+    step_key: str
+    step_order: int
+    status: str
+    progress: float | None
+    retry_count: int
+    next_retry_at: datetime | None
+    message: str | None
+    log_path: str | None
+    params: dict | None
+    artifacts: dict | None
+    created_at: datetime
+    started_at: datetime | None
+    ended_at: datetime | None
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class PreTradeRunDetail(BaseModel):
+    run: PreTradeRunOut
+    steps: list[PreTradeStepOut]
+
+
+class PreTradeSummaryOut(BaseModel):
+    run: PreTradeRunOut | None
+    steps_total: int
+    steps_success: int
+    steps_failed: int
+    steps_running: int
+    steps_queued: int
+    steps_skipped: int
+    progress: float
+
+
+class PreTradeTelegramTest(BaseModel):
+    message: str | None = None
+
+
+class PreTradeTelegramTestOut(BaseModel):
+    ok: bool
 
 class AuditLogOut(BaseModel):
     id: int

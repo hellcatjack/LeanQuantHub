@@ -16,6 +16,7 @@ from app.routes import (
     ml,
     ml_pipelines,
     pit,
+    pretrade,
     projects,
     reports,
     system_themes,
@@ -60,4 +61,5 @@ app.include_router(universe.router)
 app.include_router(ml.router)
 app.include_router(ml_pipelines.router)
 app.include_router(pit.router)
+app.include_router(pretrade.router)
 app.include_router(factor_scores.router)

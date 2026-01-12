@@ -9,6 +9,7 @@ interface Project {
   id: number;
   name: string;
   description?: string | null;
+  is_archived?: boolean;
   created_at: string;
 }
 
@@ -488,9 +489,12 @@ export default function ProjectsPage() {
   const [projectTotal, setProjectTotal] = useState(0);
   const [projectPage, setProjectPage] = useState(1);
   const [projectPageSize, setProjectPageSize] = useState(10);
+  const [showArchived, setShowArchived] = useState(false);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [projectErrorKey, setProjectErrorKey] = useState("");
+  const [projectActionMessage, setProjectActionMessage] = useState("");
+  const [projectActionError, setProjectActionError] = useState("");
   const [selectedProjectId, setSelectedProjectId] = useState<number | null>(null);
   const [versions, setVersions] = useState<ProjectVersion[]>([]);
   const [versionOptions, setVersionOptions] = useState<ProjectVersion[]>([]);
@@ -687,7 +691,11 @@ export default function ProjectsPage() {
     const nextPage = pageOverride ?? projectPage;
     const nextSize = pageSizeOverride ?? projectPageSize;
     const res = await api.get<Paginated<Project>>("/api/projects/page", {
-      params: { page: nextPage, page_size: nextSize },
+      params: {
+        page: nextPage,
+        page_size: nextSize,
+        include_archived: showArchived,
+      },
     });
     setProjects(res.data.items);
     setProjectTotal(res.data.total);
@@ -1436,7 +1444,7 @@ export default function ProjectsPage() {
 
   useEffect(() => {
     loadProjects();
-  }, [projectPage, projectPageSize]);
+  }, [projectPage, projectPageSize, showArchived]);
 
   useEffect(() => {
     loadAlgorithms();
@@ -1461,6 +1469,8 @@ export default function ProjectsPage() {
       setBacktestMessage("");
       setBenchmarkMessage("");
       setBindingMessage("");
+      setProjectActionMessage("");
+      setProjectActionError("");
       setNewThemeSymbol("");
       setNewThemeSymbolType("STOCK");
       setThemeSymbolMessage("");
@@ -1581,11 +1591,46 @@ export default function ProjectsPage() {
       return;
     }
     setProjectErrorKey("");
+    setProjectActionMessage("");
+    setProjectActionError("");
     await api.post("/api/projects", { name, description });
     setName("");
     setDescription("");
     setProjectPage(1);
     loadProjects(1, projectPageSize);
+  };
+
+  const archiveProject = async (project: Project) => {
+    const confirmText = t("projects.detail.archiveConfirm", { name: project.name });
+    if (!window.confirm(confirmText)) {
+      return;
+    }
+    setProjectActionMessage("");
+    setProjectActionError("");
+    try {
+      await api.post(`/api/projects/${project.id}/archive`);
+      setProjectActionMessage(t("projects.detail.archiveSuccess"));
+      setProjectPage(1);
+      await loadProjects(1, projectPageSize);
+    } catch (err) {
+      setProjectActionError(t("projects.detail.archiveError"));
+    }
+  };
+
+  const restoreProject = async (project: Project) => {
+    const confirmText = t("projects.detail.restoreConfirm", { name: project.name });
+    if (!window.confirm(confirmText)) {
+      return;
+    }
+    setProjectActionMessage("");
+    setProjectActionError("");
+    try {
+      await api.post(`/api/projects/${project.id}/restore`);
+      setProjectActionMessage(t("projects.detail.restoreSuccess"));
+      await loadProjects(projectPage, projectPageSize);
+    } catch (err) {
+      setProjectActionError(t("projects.detail.restoreError"));
+    }
   };
 
   const updateVersionForm = (key: keyof typeof versionForm, value: string) => {
@@ -3036,15 +3081,18 @@ export default function ProjectsPage() {
   const strategySource = (strategyDraft.source || "theme_weights").toString();
   const filteredProjects = useMemo(() => {
     const keyword = projectSearch.trim().toLowerCase();
+    const base = showArchived
+      ? projects
+      : projects.filter((item) => !item.is_archived);
     if (!keyword) {
-      return projects;
+      return base;
     }
-    return projects.filter(
+    return base.filter(
       (item) =>
         item.name.toLowerCase().includes(keyword) ||
         (item.description || "").toLowerCase().includes(keyword)
     );
-  }, [projects, projectSearch]);
+  }, [projects, projectSearch, showArchived]);
 
   const weightTotal = useMemo(() => {
     if (!themeDrafts.length) {
@@ -4369,6 +4417,17 @@ export default function ProjectsPage() {
                 className="form-input"
                 style={{ marginTop: "12px" }}
               />
+              <label className="checkbox-row" style={{ marginTop: "8px" }}>
+                <input
+                  type="checkbox"
+                  checked={showArchived}
+                  onChange={(e) => {
+                    setShowArchived(e.target.checked);
+                    setProjectPage(1);
+                  }}
+                />
+                <span>{t("projects.list.showArchived")}</span>
+              </label>
               <div className="project-list">
                 {filteredProjects.map((project) => (
                   <div
@@ -4380,7 +4439,15 @@ export default function ProjectsPage() {
                     }
                     onClick={() => setSelectedProjectId(project.id)}
                   >
-                    <div className="project-item-title">{project.name}</div>
+                    <div
+                      className="project-item-title"
+                      style={{ display: "flex", alignItems: "center", gap: "6px" }}
+                    >
+                      <span>{project.name}</span>
+                      {project.is_archived && (
+                        <span className="pill warn">{t("projects.list.archivedTag")}</span>
+                      )}
+                    </div>
                     <div className="project-item-meta">
                       #{project.id} | {formatDateTime(project.created_at)}
                     </div>
@@ -4421,6 +4488,21 @@ export default function ProjectsPage() {
                 <button className="button-secondary" onClick={refreshProjectData}>
                   {t("projects.dataStatus.action")}
                 </button>
+                {selectedProject.is_archived ? (
+                  <button
+                    className="button-secondary"
+                    onClick={() => restoreProject(selectedProject)}
+                  >
+                    {t("projects.detail.restore")}
+                  </button>
+                ) : (
+                  <button
+                    className="danger-button"
+                    onClick={() => archiveProject(selectedProject)}
+                  >
+                    {t("projects.detail.archive")}
+                  </button>
+                )}
                 <button className="button-primary" onClick={runThematicBacktest}>
                   {t("projects.backtest.action")}
                 </button>
@@ -4428,6 +4510,12 @@ export default function ProjectsPage() {
             </div>
             {backtestMessage && (
               <div className="project-detail-status">{backtestMessage}</div>
+            )}
+            {projectActionMessage && (
+              <div className="project-detail-status">{projectActionMessage}</div>
+            )}
+            {projectActionError && (
+              <div className="project-detail-status">{projectActionError}</div>
             )}
             <div className="project-detail-meta-grid">
               <div className="meta-row">
@@ -4437,6 +4525,14 @@ export default function ProjectsPage() {
                 <div className="meta-row">
                   <span>{t("common.labels.createdAt")}</span>
                   <strong>{formatDateTime(selectedProject.created_at)}</strong>
+                </div>
+                <div className="meta-row">
+                  <span>{t("projects.detail.archivedLabel")}</span>
+                  <strong>
+                    {selectedProject.is_archived
+                      ? t("common.boolean.true")
+                      : t("common.boolean.false")}
+                  </strong>
                 </div>
                 <div className="meta-row">
                   <span>{t("projects.config.source")}</span>

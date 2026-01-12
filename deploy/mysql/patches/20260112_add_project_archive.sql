@@ -1,0 +1,2 @@
+ALTER TABLE projects
+  ADD COLUMN is_archived TINYINT(1) NOT NULL DEFAULT 0;

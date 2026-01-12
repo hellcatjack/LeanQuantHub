@@ -1085,21 +1085,28 @@ def _coerce_pagination(page: int, page_size: int, total: int) -> tuple[int, int,
 
 
 @router.get("", response_model=list[ProjectOut])
-def list_projects():
+def list_projects(include_archived: bool = Query(False)):
     with get_session() as session:
-        return session.query(Project).order_by(Project.created_at.desc()).all()
+        query = session.query(Project)
+        if not include_archived:
+            query = query.filter(Project.is_archived.is_(False))
+        return query.order_by(Project.created_at.desc()).all()
 
 
 @router.get("/page", response_model=ProjectPageOut)
 def list_projects_page(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=MAX_PAGE_SIZE),
+    include_archived: bool = Query(False),
 ):
     with get_session() as session:
-        total = session.query(Project).count()
+        query = session.query(Project)
+        if not include_archived:
+            query = query.filter(Project.is_archived.is_(False))
+        total = query.count()
         safe_page, safe_page_size, offset = _coerce_pagination(page, page_size, total)
         items = (
-            session.query(Project)
+            query
             .order_by(Project.created_at.desc())
             .offset(offset)
             .limit(safe_page_size)
@@ -1139,6 +1146,46 @@ def get_project(project_id: int):
         project = session.get(Project, project_id)
         if not project:
             raise HTTPException(status_code=404, detail="项目不存在")
+        return project
+
+
+@router.post("/{project_id}/archive", response_model=ProjectOut)
+def archive_project(project_id: int):
+    with get_session() as session:
+        project = session.get(Project, project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="项目不存在")
+        project.is_archived = True
+        session.commit()
+        session.refresh(project)
+        record_audit(
+            session,
+            action="project.archive",
+            resource_type="project",
+            resource_id=project.id,
+            detail={"name": project.name},
+        )
+        session.commit()
+        return project
+
+
+@router.post("/{project_id}/restore", response_model=ProjectOut)
+def restore_project(project_id: int):
+    with get_session() as session:
+        project = session.get(Project, project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="项目不存在")
+        project.is_archived = False
+        session.commit()
+        session.refresh(project)
+        record_audit(
+            session,
+            action="project.restore",
+            resource_type="project",
+            resource_id=project.id,
+            detail={"name": project.name},
+        )
+        session.commit()
         return project
 
 

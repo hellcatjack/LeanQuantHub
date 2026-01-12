@@ -1,0 +1,811 @@
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from datetime import date, datetime, time as time_cls, timedelta
+from pathlib import Path
+from typing import Any, Callable
+
+import urllib.request
+from zoneinfo import ZoneInfo
+
+from app.core.config import settings
+from app.db import SessionLocal
+from app.models import (
+    BulkSyncJob,
+    Dataset,
+    FactorScoreJob,
+    MLTrainJob,
+    PitFundamentalJob,
+    PitWeeklyJob,
+    PreTradeRun,
+    PreTradeSettings,
+    PreTradeStep,
+    PreTradeTemplate,
+)
+from app.routes.datasets import (
+    _alpha_listing_age,
+    _audit_alpha_coverage,
+    _audit_trade_coverage,
+    _bulk_job_counts,
+    _refresh_alpha_listing,
+    _start_bulk_sync_worker,
+)
+from app.services.alpha_fetch import load_alpha_fetch_config
+from app.services.alpha_rate import load_alpha_rate_config
+from app.services.bulk_auto import load_bulk_auto_config
+from app.services.factor_score_runner import run_factor_score_job
+from app.services.job_lock import JobLock
+from app.services.ml_runner import build_ml_config, run_ml_train
+from app.services.pit_runner import (
+    _build_fundamental_fetch_command,
+    run_pit_fundamental_job,
+    run_pit_weekly_job,
+)
+from app.services.trading_calendar import (
+    load_trading_calendar_config,
+    load_trading_calendar_meta,
+    load_trading_days,
+    trading_calendar_csv_path,
+)
+
+PRETRADE_ACTIVE_STATUSES = {"queued", "running"}
+
+
+@dataclass
+class StepResult:
+    artifacts: dict[str, Any] | None = None
+    log_path: str | None = None
+
+
+class StepSkip(RuntimeError):
+    def __init__(self, reason: str, artifacts: dict[str, Any] | None = None):
+        super().__init__(reason)
+        self.reason = reason
+        self.artifacts = artifacts or {}
+
+
+def _resolve_data_root() -> Path:
+    if settings.data_root:
+        return Path(settings.data_root)
+    env_root = os.getenv("DATA_ROOT")
+    if env_root:
+        return Path(env_root)
+    return Path("/data/share/stock/data")
+
+
+def _ensure_log_dir(run_id: int) -> Path:
+    log_dir = Path(settings.artifact_root) / f"pretrade_run_{run_id}"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return log_dir
+
+
+@dataclass
+class StepContext:
+    session: SessionLocal
+    run: PreTradeRun
+    step: PreTradeStep
+
+    def update(
+        self,
+        *,
+        status: str | None = None,
+        progress: float | None = None,
+        message: str | None = None,
+        artifacts: dict[str, Any] | None = None,
+        log_path: str | None = None,
+    ) -> None:
+        if status is not None:
+            self.step.status = status
+        if progress is not None:
+            self.step.progress = progress
+        if message is not None:
+            self.step.message = message
+        if artifacts is not None:
+            merged = dict(self.step.artifacts or {})
+            merged.update(artifacts)
+            self.step.artifacts = merged
+        if log_path is not None:
+            self.step.log_path = log_path
+        self.step.updated_at = datetime.utcnow()
+        self.session.commit()
+
+
+def _get_or_create_settings(session) -> PreTradeSettings:
+    settings_row = session.query(PreTradeSettings).first()
+    if settings_row:
+        return settings_row
+    settings_row = PreTradeSettings(
+        max_retries=0,
+        retry_base_delay_seconds=60,
+        retry_max_delay_seconds=1800,
+        deadline_timezone="America/New_York",
+    )
+    session.add(settings_row)
+    session.commit()
+    session.refresh(settings_row)
+    return settings_row
+
+
+def _compute_deadline_at(run: PreTradeRun, settings_row: PreTradeSettings) -> datetime | None:
+    if run.deadline_at:
+        return run.deadline_at
+    deadline_time = (settings_row.deadline_time or "").strip()
+    if not deadline_time:
+        return None
+    tz_name = (settings_row.deadline_timezone or "America/New_York").strip()
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = ZoneInfo("America/New_York")
+    if run.window_end:
+        base_date = run.window_end.date()
+    else:
+        base_date = datetime.now(tz).date()
+    parts = deadline_time.split(":")
+    hour = int(parts[0]) if parts and parts[0].isdigit() else 9
+    minute = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 30
+    dt = datetime.combine(base_date, time_cls(hour=hour, minute=minute))
+    return dt.replace(tzinfo=tz).astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+
+
+def _should_retry(
+    now: datetime,
+    deadline_at: datetime | None,
+    settings_row: PreTradeSettings,
+    retry_count: int,
+) -> bool:
+    if deadline_at and now >= deadline_at:
+        return False
+    max_retries = int(settings_row.max_retries or 0)
+    if max_retries <= 0:
+        return True
+    if deadline_at and now < deadline_at:
+        return True
+    return retry_count <= max_retries
+
+
+def _compute_retry_delay(settings_row: PreTradeSettings, retry_count: int) -> int:
+    base = int(settings_row.retry_base_delay_seconds or 60)
+    max_delay = int(settings_row.retry_max_delay_seconds or 1800)
+    if retry_count <= 1:
+        delay = base
+    else:
+        delay = base * (2 ** (retry_count - 1))
+    return max(1, min(delay, max_delay))
+
+
+def _notify_telegram(settings_row: PreTradeSettings, message: str) -> None:
+    token = (settings_row.telegram_bot_token or "").strip()
+    chat_id = (settings_row.telegram_chat_id or "").strip()
+    if not token or not chat_id:
+        return
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": message}
+    data = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as _:
+            return
+    except Exception:
+        return
+
+
+def _resolve_spy_dataset(session) -> Dataset | None:
+    dataset = (
+        session.query(Dataset)
+        .filter(Dataset.source_path == "alpha:spy")
+        .first()
+    )
+    if dataset:
+        return dataset
+    return session.query(Dataset).filter(Dataset.name == "Alpha_SPY_Daily").first()
+
+
+def _parse_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(value, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _latest_trading_day(data_root: Path, benchmark: str) -> tuple[date | None, dict[str, Any]]:
+    adjusted_dir = data_root / "curated_adjusted"
+    vendor_preference = ["Alpha"]
+    days, info = load_trading_days(data_root, adjusted_dir, benchmark, vendor_preference)
+    today = datetime.utcnow().date()
+    candidates = [day for day in days if day < today]
+    if not candidates:
+        return None, info
+    return max(candidates), info
+
+
+StepHandler = Callable[[StepContext, dict[str, Any]], StepResult]
+
+
+STEP_DEFS: list[tuple[str, StepHandler]] = []
+
+
+def step_calendar_refresh(ctx: StepContext, params: dict[str, Any]) -> StepResult:
+    data_root = _resolve_data_root()
+    config = load_trading_calendar_config(data_root)
+    meta = load_trading_calendar_meta(data_root)
+    refresh_days = int(config.get("refresh_days") or 0)
+    generated_at = meta.get("generated_at")
+    artifacts = {
+        "calendar_source": meta.get("source"),
+        "calendar_generated_at": generated_at,
+        "calendar_path": str(trading_calendar_csv_path(data_root, config.get("exchange") or "")),
+        "refresh_days": refresh_days,
+    }
+    if generated_at and refresh_days > 0:
+        try:
+            generated = datetime.fromisoformat(generated_at)
+        except ValueError:
+            generated = None
+        if generated:
+            age_days = (datetime.utcnow() - generated).days
+            artifacts["calendar_age_days"] = age_days
+            if age_days < refresh_days:
+                raise StepSkip("calendar_fresh", artifacts=artifacts)
+
+    log_dir = _ensure_log_dir(ctx.run.id)
+    log_path = log_dir / "trading_calendar_refresh.log"
+    script_path = Path(__file__).resolve().parents[3] / "scripts" / "build_trading_calendar.py"
+    cmd = [
+        sys.executable,
+        str(script_path),
+        "--data-root",
+        str(data_root),
+        "--exchange",
+        str(config.get("exchange") or "XNYS"),
+        "--start",
+        str(config.get("start_date") or ""),
+        "--end",
+        str(config.get("end_date") or ""),
+        "--refresh-days",
+        str(config.get("refresh_days") or 0),
+    ]
+    with log_path.open("w", encoding="utf-8") as handle:
+        proc = subprocess.run(cmd, stdout=handle, stderr=subprocess.STDOUT, check=False)
+    if proc.returncode != 0:
+        raise RuntimeError(f"trading_calendar_refresh_failed log={log_path}")
+    return StepResult(artifacts=artifacts, log_path=str(log_path))
+
+
+def step_trading_day_check(ctx: StepContext, params: dict[str, Any]) -> StepResult:
+    data_root = _resolve_data_root()
+    benchmark = (params.get("benchmark") or "SPY").strip().upper()
+    last_day, info = _latest_trading_day(data_root, benchmark)
+    if not last_day:
+        raise RuntimeError("missing_trading_day")
+    dataset = _resolve_spy_dataset(ctx.session)
+    coverage_end = _parse_date(dataset.coverage_end if dataset else None)
+    if not coverage_end:
+        raise RuntimeError("spy_coverage_missing")
+    if coverage_end < last_day:
+        raise RuntimeError(
+            f"coverage_end_lt_last_trading_day: {coverage_end} < {last_day}"
+        )
+    artifacts = {
+        "benchmark": benchmark,
+        "last_trading_day": last_day.isoformat(),
+        "coverage_end": coverage_end.isoformat(),
+        "calendar_source": info.get("calendar_source"),
+        "calendar_start": info.get("calendar_start"),
+        "calendar_end": info.get("calendar_end"),
+        "calendar_path": info.get("calendar_path"),
+    }
+    return StepResult(artifacts=artifacts)
+
+
+def step_price_incremental(ctx: StepContext, params: dict[str, Any]) -> StepResult:
+    data_root = _resolve_data_root()
+    bulk_config = load_bulk_auto_config(data_root)
+    fetch_config = load_alpha_fetch_config(data_root)
+    rate_config = load_alpha_rate_config(data_root)
+    min_delay = float(params.get("min_delay_seconds") or bulk_config.get("min_delay_seconds") or 0)
+    effective_min_delay = float(rate_config.get("effective_min_delay_seconds") or 0)
+    if effective_min_delay > min_delay:
+        min_delay = effective_min_delay
+    payload = {
+        "status": bulk_config.get("status") or "all",
+        "batch_size": int(bulk_config.get("batch_size") or 200),
+        "only_missing": bool(bulk_config.get("only_missing", True)),
+        "auto_sync": True,
+        "refresh_listing": False,
+        "refresh_listing_mode": bulk_config.get("refresh_listing_mode") or "stale_only",
+        "refresh_listing_ttl_days": int(bulk_config.get("refresh_listing_ttl_days") or 7),
+        "alpha_incremental_enabled": bool(fetch_config.get("alpha_incremental_enabled", True)),
+        "alpha_compact_days": int(fetch_config.get("alpha_compact_days") or 120),
+        "min_delay_seconds": min_delay,
+    }
+    active = (
+        ctx.session.query(BulkSyncJob)
+        .filter(BulkSyncJob.status.in_("queued running paused".split()))
+        .first()
+    )
+    if active:
+        raise RuntimeError("bulk_sync_running")
+    job = BulkSyncJob(
+        status="queued",
+        phase="listing_refresh",
+        params=payload,
+        batch_size=payload["batch_size"],
+    )
+    ctx.session.add(job)
+    ctx.session.commit()
+    ctx.session.refresh(job)
+    _start_bulk_sync_worker(job.id)
+
+    artifacts = {"bulk_job_id": job.id}
+    while True:
+        ctx.session.refresh(job)
+        pending, running, completed = _bulk_job_counts(ctx.session, job)
+        total = job.total_symbols or 0
+        processed = job.processed_symbols or 0
+        progress = None
+        if total > 0:
+            progress = min(max(processed / total, 0.0), 1.0)
+        ctx.update(
+            progress=progress,
+            artifacts={
+                **artifacts,
+                "phase": job.phase,
+                "pending": pending,
+                "running": running,
+                "completed": completed,
+                "processed": processed,
+                "total": total,
+            },
+        )
+        if job.status in {"success", "failed", "canceled"}:
+            break
+        if ctx.run.status == "cancel_requested":
+            job.cancel_requested = True
+            ctx.session.commit()
+        time.sleep(10)
+    if job.status != "success":
+        raise RuntimeError(f"bulk_sync_{job.status}")
+    artifacts.update(
+        {
+            "status": job.status,
+            "message": job.message,
+            "error": job.error,
+        }
+    )
+    return StepResult(artifacts=artifacts)
+
+
+def step_listing_refresh(ctx: StepContext, params: dict[str, Any]) -> StepResult:
+    data_root = _resolve_data_root()
+    bulk_config = load_bulk_auto_config(data_root)
+    mode = (bulk_config.get("refresh_listing_mode") or "stale_only").strip().lower()
+    ttl_days = int(bulk_config.get("refresh_listing_ttl_days") or 7)
+    age_days, updated_at = _alpha_listing_age(data_root)
+    artifacts = {
+        "mode": mode,
+        "ttl_days": ttl_days,
+        "listing_age_days": age_days,
+        "listing_updated_at": updated_at,
+    }
+    if mode == "never":
+        raise StepSkip("listing_refresh_disabled", artifacts=artifacts)
+    if mode == "stale_only" and age_days is not None and age_days < ttl_days:
+        raise StepSkip("listing_fresh", artifacts=artifacts)
+    summary = _refresh_alpha_listing()
+    artifacts.update(summary)
+    return StepResult(artifacts=artifacts)
+
+
+def _read_progress_ratio(progress_path: Path) -> tuple[float | None, dict[str, Any] | None]:
+    if not progress_path.exists():
+        return None, None
+    try:
+        payload = json.loads(progress_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None, None
+    if not isinstance(payload, dict):
+        return None, None
+    total = payload.get("total")
+    done = payload.get("done")
+    if isinstance(total, (int, float)) and total:
+        ratio = float(done or 0) / float(total)
+        return min(max(ratio, 0.0), 1.0), payload
+    return None, payload
+
+
+def step_fundamentals_refresh(ctx: StepContext, params: dict[str, Any]) -> StepResult:
+    log_dir = _ensure_log_dir(ctx.run.id)
+    log_path = log_dir / "fundamentals_fetch.log"
+    progress_path = log_dir / "fundamentals_progress.json"
+    cancel_path = log_dir / "fundamentals_cancel.flag"
+    status_path = log_dir / "fundamentals_status.csv"
+
+    cmd = _build_fundamental_fetch_command(
+        params,
+        progress_path=progress_path,
+        status_path=status_path,
+        cancel_path=cancel_path,
+        skip_lock=False,
+    )
+
+    with log_path.open("w", encoding="utf-8") as handle:
+        proc = subprocess.Popen(cmd, stdout=handle, stderr=subprocess.STDOUT)
+        while proc.poll() is None:
+            ratio, payload = _read_progress_ratio(progress_path)
+            ctx.update(progress=ratio, artifacts={"progress": payload} if payload else None)
+            if ctx.run.status == "cancel_requested":
+                cancel_path.write_text("cancel", encoding="utf-8")
+            time.sleep(10)
+        code = proc.returncode
+    if code != 0:
+        raise RuntimeError(f"fundamentals_fetch_failed={code}")
+    return StepResult(
+        artifacts={
+            "progress_path": str(progress_path),
+            "status_path": str(status_path),
+        },
+        log_path=str(log_path),
+    )
+
+
+def step_pit_weekly(ctx: StepContext, params: dict[str, Any]) -> StepResult:
+    job = PitWeeklyJob(status="queued", params=params)
+    ctx.session.add(job)
+    ctx.session.commit()
+    ctx.session.refresh(job)
+    run_pit_weekly_job(job.id)
+    ctx.session.refresh(job)
+    if job.status != "success":
+        raise RuntimeError(f"pit_weekly_{job.status}")
+    return StepResult(
+        artifacts={
+            "job_id": job.id,
+            "output_dir": job.output_dir,
+            "snapshot_count": job.snapshot_count,
+            "last_snapshot_path": job.last_snapshot_path,
+        },
+        log_path=job.log_path,
+    )
+
+
+def step_pit_fundamentals(ctx: StepContext, params: dict[str, Any]) -> StepResult:
+    job = PitFundamentalJob(status="queued", params=params)
+    ctx.session.add(job)
+    ctx.session.commit()
+    ctx.session.refresh(job)
+    run_pit_fundamental_job(job.id)
+    ctx.session.refresh(job)
+    if job.status != "success":
+        raise RuntimeError(f"pit_fundamentals_{job.status}")
+    return StepResult(
+        artifacts={
+            "job_id": job.id,
+            "output_dir": job.output_dir,
+            "snapshot_count": job.snapshot_count,
+            "last_snapshot_path": job.last_snapshot_path,
+        },
+        log_path=job.log_path,
+    )
+
+
+def step_training_scoring(ctx: StepContext, params: dict[str, Any]) -> StepResult:
+    mode = (params.get("training_mode") or "skip").strip().lower()
+    if mode == "skip":
+        raise StepSkip("training_skipped")
+    if mode == "factor":
+        job = FactorScoreJob(project_id=ctx.run.project_id, status="queued", params=params)
+        ctx.session.add(job)
+        ctx.session.commit()
+        ctx.session.refresh(job)
+        run_factor_score_job(job.id)
+        ctx.session.refresh(job)
+        if job.status != "success":
+            raise RuntimeError(f"factor_score_{job.status}")
+        return StepResult(
+            artifacts={"job_id": job.id, "scores_path": job.scores_path},
+            log_path=job.log_path,
+        )
+    if mode != "ml":
+        raise StepSkip("training_mode_unknown")
+    overrides = params.get("train_overrides") or {}
+    config = build_ml_config(ctx.session, ctx.run.project_id, overrides)
+    job = MLTrainJob(project_id=ctx.run.project_id, status="queued", config=config)
+    ctx.session.add(job)
+    ctx.session.commit()
+    ctx.session.refresh(job)
+    run_ml_train(job.id)
+    ctx.session.refresh(job)
+    if job.status != "success":
+        raise RuntimeError(f"ml_train_{job.status}")
+    return StepResult(
+        artifacts={
+            "job_id": job.id,
+            "scores_path": job.scores_path,
+            "output_dir": job.output_dir,
+        },
+        log_path=job.log_path,
+    )
+
+
+def step_audit(ctx: StepContext, params: dict[str, Any]) -> StepResult:
+    asset_types = {"STOCK"}
+    alpha_report = _audit_alpha_coverage(
+        session=ctx.session,
+        asset_types=asset_types,
+        enqueue_missing=False,
+        enqueue_missing_adjusted=False,
+        sample_size=0,
+    )
+    trade_report = _audit_trade_coverage(
+        asset_types=asset_types,
+        benchmark=(params.get("benchmark") or "SPY").strip().upper(),
+        vendor_preference=["Alpha"],
+        start=None,
+        end=None,
+        sample_size=0,
+        pit_dir=_resolve_data_root() / "universe" / "pit_weekly",
+        fundamentals_root=_resolve_data_root() / "fundamentals" / "alpha",
+        pit_fundamentals_dir=_resolve_data_root() / "factors" / "pit_weekly_fundamentals",
+    )
+    return StepResult(
+        artifacts={
+            "alpha_report": alpha_report,
+            "trade_report": trade_report,
+        }
+    )
+
+
+STEP_DEFS = [
+    ("calendar_refresh", step_calendar_refresh),
+    ("trading_day_check", step_trading_day_check),
+    ("price_incremental", step_price_incremental),
+    ("listing_refresh", step_listing_refresh),
+    ("fundamentals_refresh", step_fundamentals_refresh),
+    ("pit_weekly", step_pit_weekly),
+    ("pit_fundamentals", step_pit_fundamentals),
+    ("training_scoring", step_training_scoring),
+    ("audit", step_audit),
+]
+
+
+def build_default_steps() -> list[dict[str, Any]]:
+    return [
+        {"key": key, "enabled": True, "params": {}} for key, _ in STEP_DEFS
+    ]
+
+
+def _build_step_plan(template: PreTradeTemplate | None) -> list[dict[str, Any]]:
+    if template and isinstance(template.params, dict):
+        steps = template.params.get("steps")
+        if isinstance(steps, list):
+            return steps
+    return build_default_steps()
+
+
+def _create_steps(session, run: PreTradeRun, template: PreTradeTemplate | None) -> None:
+    step_plan = _build_step_plan(template)
+    order_index = 0
+    for item in step_plan:
+        key = str(item.get("key") or "").strip()
+        if not key:
+            continue
+        enabled = bool(item.get("enabled", True))
+        params = item.get("params") if isinstance(item.get("params"), dict) else None
+        status = "queued" if enabled else "skipped"
+        step = PreTradeStep(
+            run_id=run.id,
+            step_key=key,
+            step_order=order_index,
+            status=status,
+            params=params,
+        )
+        order_index += 1
+        session.add(step)
+    session.commit()
+
+
+def _load_step_handler(step_key: str) -> StepHandler | None:
+    for key, handler in STEP_DEFS:
+        if key == step_key:
+            return handler
+    return None
+
+
+def _prepare_run_snapshot(run: PreTradeRun) -> dict[str, Any]:
+    data_root = _resolve_data_root()
+    alpha_rate = load_alpha_rate_config(data_root)
+    alpha_fetch = load_alpha_fetch_config(data_root)
+    bulk_auto = load_bulk_auto_config(data_root)
+    snapshot = {
+        "alpha_rate": {
+            "max_rpm": alpha_rate.get("max_rpm"),
+            "min_delay_seconds": alpha_rate.get("min_delay_seconds"),
+            "effective_min_delay_seconds": alpha_rate.get("effective_min_delay_seconds"),
+            "auto_tune": alpha_rate.get("auto_tune"),
+            "path": alpha_rate.get("path"),
+        },
+        "alpha_fetch": {
+            "alpha_incremental_enabled": alpha_fetch.get("alpha_incremental_enabled"),
+            "alpha_compact_days": alpha_fetch.get("alpha_compact_days"),
+            "path": alpha_fetch.get("path"),
+        },
+        "bulk_auto": bulk_auto,
+    }
+    params = dict(run.params or {})
+    params.setdefault("snapshot", {})
+    params["snapshot"].update(snapshot)
+    return params
+
+
+def run_pretrade_run(run_id: int, resume_step_id: int | None = None) -> None:
+    session = SessionLocal()
+    lock: JobLock | None = None
+    try:
+        run = session.get(PreTradeRun, run_id)
+        if not run:
+            return
+        if run.status in {"success", "failed", "canceled"}:
+            return
+        lock = JobLock("pretrade_checklist", _resolve_data_root())
+        if not lock.acquire():
+            run.status = "failed"
+            run.message = "pretrade_lock_busy"
+            run.ended_at = datetime.utcnow()
+            session.commit()
+            return
+        alpha_lock = JobLock("alpha_fetch", _resolve_data_root())
+        if not alpha_lock.acquire():
+            run.status = "failed"
+            run.message = "alpha_lock_busy"
+            run.ended_at = datetime.utcnow()
+            session.commit()
+            return
+        alpha_lock.release()
+
+        settings_row = _get_or_create_settings(session)
+        deadline_at = _compute_deadline_at(run, settings_row)
+        run.deadline_at = deadline_at
+        run.status = "running"
+        run.started_at = run.started_at or datetime.utcnow()
+        run.params = _prepare_run_snapshot(run)
+        session.commit()
+
+        steps = (
+            session.query(PreTradeStep)
+            .filter(PreTradeStep.run_id == run_id)
+            .order_by(PreTradeStep.step_order.asc())
+            .all()
+        )
+        resume_reached = resume_step_id is None
+        for step in steps:
+            if run.status == "cancel_requested":
+                step.status = "canceled"
+                step.message = "run_canceled"
+                step.ended_at = datetime.utcnow()
+                session.commit()
+                break
+            if not resume_reached:
+                if step.id == resume_step_id:
+                    resume_reached = True
+                else:
+                    continue
+            if step.status in {"success", "skipped"}:
+                continue
+            handler = _load_step_handler(step.step_key)
+            if not handler:
+                step.status = "skipped"
+                step.message = "unknown_step"
+                step.ended_at = datetime.utcnow()
+                session.commit()
+                continue
+            retry_count = step.retry_count or 0
+            while True:
+                if run.status == "cancel_requested":
+                    step.status = "canceled"
+                    step.message = "run_canceled"
+                    step.ended_at = datetime.utcnow()
+                    session.commit()
+                    break
+                step.status = "running"
+                step.started_at = step.started_at or datetime.utcnow()
+                step.updated_at = datetime.utcnow()
+                session.commit()
+                ctx = StepContext(session=session, run=run, step=step)
+                try:
+                    result = handler(ctx, dict(step.params or {}))
+                except StepSkip as exc:
+                    step.status = "skipped"
+                    step.message = exc.reason
+                    step.progress = 1.0
+                    step.artifacts = exc.artifacts or step.artifacts
+                    step.ended_at = datetime.utcnow()
+                    session.commit()
+                    break
+                except Exception as exc:
+                    retry_count += 1
+                    step.retry_count = retry_count
+                    step.status = "failed"
+                    step.message = str(exc)
+                    step.ended_at = datetime.utcnow()
+                    session.commit()
+                    now = datetime.utcnow()
+                    if _should_retry(now, deadline_at, settings_row, retry_count):
+                        delay = _compute_retry_delay(settings_row, retry_count)
+                        step.status = "queued"
+                        step.next_retry_at = now + timedelta(seconds=delay)
+                        step.ended_at = None
+                        session.commit()
+                        time.sleep(delay)
+                        continue
+                    _notify_telegram(
+                        settings_row,
+                        f"PreTrade step failed: run={run_id} step={step.step_key} error={exc}",
+                    )
+                    run.status = "failed"
+                    run.message = f"step_failed:{step.step_key}"
+                    run.ended_at = datetime.utcnow()
+                    session.commit()
+                    break
+                else:
+                    step.status = "success"
+                    step.progress = 1.0
+                    step.message = "success"
+                    if result.artifacts:
+                        step.artifacts = {
+                            **(step.artifacts or {}),
+                            **result.artifacts,
+                        }
+                    if result.log_path:
+                        step.log_path = result.log_path
+                    step.ended_at = datetime.utcnow()
+                    session.commit()
+                    break
+            if run.status in {"failed", "canceled"}:
+                break
+        session.refresh(run)
+        if run.status == "cancel_requested":
+            run.status = "canceled"
+            run.message = "canceled"
+            run.ended_at = datetime.utcnow()
+            session.commit()
+        elif run.status == "running":
+            run.status = "success"
+            run.message = "success"
+            run.ended_at = datetime.utcnow()
+            session.commit()
+            _notify_telegram(settings_row, f"PreTrade run success: run={run_id}")
+        elif run.status == "failed":
+            if deadline_at and datetime.utcnow() >= deadline_at:
+                last_success = (
+                    session.query(PreTradeRun)
+                    .filter(
+                        PreTradeRun.project_id == run.project_id,
+                        PreTradeRun.status == "success",
+                        PreTradeRun.id != run.id,
+                    )
+                    .order_by(PreTradeRun.created_at.desc())
+                    .first()
+                )
+                if last_success:
+                    run.fallback_used = True
+                    run.fallback_run_id = last_success.id
+                    run.message = f"fallback_to_run={last_success.id}"
+                    session.commit()
+    finally:
+        if lock:
+            lock.release()
+        session.close()

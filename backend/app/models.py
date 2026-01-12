@@ -17,6 +17,7 @@ class Project(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_archived: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     backtests: Mapped[list["BacktestRun"]] = relationship(back_populates="project")
@@ -431,6 +432,83 @@ class AutoWeeklyJob(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class PreTradeTemplate(Base):
+    __tablename__ = "pretrade_templates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int | None] = mapped_column(ForeignKey("projects.id"), nullable=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    params: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class PreTradeSettings(Base):
+    __tablename__ = "pretrade_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    current_template_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    telegram_bot_token: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    telegram_chat_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    max_retries: Mapped[int] = mapped_column(Integer, default=0)
+    retry_base_delay_seconds: Mapped[int] = mapped_column(Integer, default=60)
+    retry_max_delay_seconds: Mapped[int] = mapped_column(Integer, default=1800)
+    deadline_time: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    deadline_timezone: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class PreTradeRun(Base):
+    __tablename__ = "pretrade_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False)
+    template_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="queued")
+    window_start: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    window_end: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    deadline_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    params: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fallback_used: Mapped[bool] = mapped_column(Boolean, default=False)
+    fallback_run_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class PreTradeStep(Base):
+    __tablename__ = "pretrade_steps"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("pretrade_runs.id"), nullable=False)
+    step_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    step_order: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(32), default="queued")
+    progress: Mapped[float | None] = mapped_column(nullable=True)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    log_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    params: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    artifacts: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
