@@ -3,10 +3,12 @@
 > 目标：在周一开盘前完成「价格增量 + 基本面增量 + PIT 快照 + 训练/评分」闭环，确保可回退、可复跑、可审计。
 
 ## 前提与约束
-- Alpha 限速：75 次/分钟（实时可调）
+- Alpha 限速：~154 次/分钟（实测上限，实时可调；以 `alpha_rate.json` 为准）
 - 基本面刷新耗时：~13 小时（当前评估）
 - 价格历史增量耗时：~3 小时（当前评估）
 - `alpha_fetch` 全局锁：价格同步与基本面刷新必须串行
+- PreTrade checklist 全局锁：同一时间只允许一个 checklist 运行
+- 最新交易日判定必须基于交易日历（节假日不偏差）
 - 交易日历刷新耗时：秒级（exchange_calendars，本地生成）
 
 ## 周度时间轴（ET）
@@ -46,6 +48,7 @@
 - [ ] Checklist 全局锁：同一时间只允许一个 checklist 运行
 - [ ] 确认 `alpha_fetch` 未被占用（避免并发抓取）
 - [ ] 确认 `alpha_rate.json` 与 `alpha_fetch.json` 配置正确
+- [ ] 校验 `alpha_rate.json` 目标 `max_rpm≈154`（可调）并记录到本次 run
 - [ ] 确认 `trading_calendar.json` 配置有效，必要时执行 refresh
 - [ ] 检查最新 `alpha_symbol_life.csv` 更新时间（TTL）
 - [ ] 交易日校验：以交易日历为准确认“上一交易日”日期（auto=exchange_calendars+spy）
@@ -53,6 +56,7 @@
 
 ### Phase 1 — 价格增量同步（T-2）
 - [ ] 触发批量增量同步（仅缺口）
+- [ ] 价格增量 latest_complete 由交易日历驱动（非仅周末回退）
 - [ ] 确认 `alpha_outputsize` 与 `gap_days` 记录入 job message
 - [ ] 运行价格质量扫描（可选）
 
@@ -83,6 +87,7 @@
 - 步骤状态机：`queued → running → success | failed | skipped | canceled`
 - 记录：时间窗、耗时、错误原因、产物路径、回退记录
 - 数据更新互斥：涉及数据更新的步骤严禁并发与重复触发
+- 互斥实现：PreTrade checklist 锁 + `alpha_fetch`/`pit_*` 细粒度锁协同
 
 ## 提醒机制（Telegram）
 - 统一使用 Telegram Bot 通知
@@ -108,12 +113,14 @@
 - Telegram 配置存储（token/chat_id），UI 侧掩码显示
 - 重试配置：最大重试次数/退避参数/最后允许完成时间（deadline）
 - 复用现有配置：读取 data 页已存在的 alpha_rate / alpha_fetch / listing TTL
+- PreTrade 记录追加 `max_rpm` 与 `min_delay` 的实际取值（便于回溯）
 
 ### Phase 2 — 执行器与调度
 - Checklist 状态机（串行执行，失败后重试，重试失败触发回退）
 - 步骤：交易日历刷新 → 交易日校验 → 价格增量 → Listing TTL → 基本面增量 → PIT 周度 → PIT 基本面 → 训练评分 → 审计验收
 - 执行窗口：周六/周日/周一开盘前均可触发
 - 互斥规则：全局 checklist 锁 + 数据更新步骤锁（拒绝并发重复触发）
+- 交易日历驱动：替换“最新交易日”判定为交易日历（节假日一致）
 - 编排复用：直接调用现有数据页 API（bulk sync / PIT / audit），仅新增编排与记录
 
 ### Phase 3 — API
