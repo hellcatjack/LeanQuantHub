@@ -1,10 +1,12 @@
 ﻿from __future__ import annotations
 
+import logging
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import Response
 
-from app.db import engine
+from app.db import engine, get_session
 from app.models import Base
 from app.routes import (
     algorithms,
@@ -25,6 +27,7 @@ from app.routes import (
 )
 
 app = FastAPI(title="StockLean Platform API")
+logger = logging.getLogger(__name__)
 
 app.add_middleware(
     CORSMiddleware,
@@ -47,6 +50,11 @@ async def enforce_utf8_json_charset(request, call_next):
 @app.on_event("startup")
 def on_startup() -> None:
     Base.metadata.create_all(bind=engine)
+    try:
+        with get_session() as session:
+            system_themes._ensure_system_themes(session)
+    except Exception:
+        logger.exception("Failed to ensure system themes on startup")
     datasets.resume_bulk_sync_jobs()
 
 
