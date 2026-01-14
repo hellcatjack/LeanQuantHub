@@ -89,6 +89,41 @@ export default function BacktestsPage() {
     [t]
   );
 
+  const parseDateParts = (raw: unknown) => {
+    const text = String(raw ?? "").trim();
+    if (!text) {
+      return null;
+    }
+    const match = text.match(/(\d{4})[-/](\d{2})[-/](\d{2})/);
+    if (!match) {
+      return null;
+    }
+    return {
+      full: `${match[1]}-${match[2]}-${match[3]}`,
+      short: `${match[1]}-${match[2]}`,
+    };
+  };
+
+  const resolveBacktestRange = (run: Backtest) => {
+    const params = (run.params ?? {}) as Record<string, unknown>;
+    const algoParams =
+      params && typeof params.algorithm_parameters === "object"
+        ? (params.algorithm_parameters as Record<string, unknown>)
+        : {};
+    const startRaw =
+      algoParams.backtest_start ?? params.backtest_start ?? params.backtestStart;
+    const endRaw =
+      algoParams.backtest_end ?? params.backtest_end ?? params.backtestEnd;
+    const start = parseDateParts(startRaw);
+    const end = parseDateParts(endRaw);
+    if (!start && !end) {
+      return { text: t("common.none"), title: "" };
+    }
+    const text = `${start?.short ?? "--"}~${end?.short ?? "--"}`;
+    const title = `${start?.full ?? "--"} ~ ${end?.full ?? "--"}`;
+    return { text, title };
+  };
+
   const loadProgress = async (items: Backtest[]) => {
     const activeRuns = items.filter(
       (run) => run.status !== "success" && run.status !== "failed"
@@ -235,37 +270,52 @@ export default function BacktestsPage() {
           </div>
         </div>
 
-        <table className="table">
+        <table className="table backtest-table">
           <thead>
             <tr>
-              <th>{t("backtests.table.id")}</th>
-              <th>{t("backtests.table.project")}</th>
-              <th>{t("backtests.table.status")}</th>
-              <th>{t("backtests.table.progress")}</th>
+              <th className="backtest-id">{t("backtests.table.id")}</th>
+              <th className="backtest-project">{t("backtests.table.project")}</th>
+              <th className="backtest-status">{t("backtests.table.status")}</th>
+              <th className="backtest-progress">{t("backtests.table.progress")}</th>
+              <th className="backtest-range-cell">{t("backtests.table.range")}</th>
               {metricItems.map((item) => (
-                <th key={item.key}>{item.label}</th>
+                <th key={item.key} className="backtest-metric">
+                  {item.label}
+                </th>
               ))}
-              <th>{t("backtests.table.report")}</th>
-              <th>{t("backtests.table.actions")}</th>
-              <th>{t("backtests.table.createdAt")}</th>
-              <th>{t("backtests.table.endedAt")}</th>
+              <th className="backtest-report">{t("backtests.table.report")}</th>
+              <th className="backtest-actions">{t("backtests.table.actions")}</th>
+              <th className="backtest-created">{t("backtests.table.createdAt")}</th>
+              <th className="backtest-ended">{t("backtests.table.endedAt")}</th>
             </tr>
           </thead>
           <tbody>
             {runs.map((run) => (
               <tr key={run.id}>
-                <td>{run.id}</td>
-                <td>{run.project_id}</td>
-                <td>
+                <td className="backtest-id">{run.id}</td>
+                <td className="backtest-project">{run.project_id}</td>
+                <td className="backtest-status">
                   <span className={`pill ${run.status === "success" ? "success" : "danger"}`}>
                     {renderStatus(run.status)}
                   </span>
                 </td>
-                <td>{renderProgress(run)}</td>
+                <td className="backtest-progress">{renderProgress(run)}</td>
+                <td className="backtest-range-cell">
+                  {(() => {
+                    const range = resolveBacktestRange(run);
+                    return (
+                      <span className="backtest-range-text" title={range.title}>
+                        {range.text}
+                      </span>
+                    );
+                  })()}
+                </td>
                 {metricItems.map((item) => (
-                  <td key={item.key}>{run.metrics?.[item.key] ?? t("common.none")}</td>
+                  <td key={item.key} className="backtest-metric">
+                    {run.metrics?.[item.key] ?? t("common.none")}
+                  </td>
                 ))}
-                <td>
+                <td className="backtest-report">
                   {run.report_id ? (
                     <button
                       type="button"
@@ -278,7 +328,7 @@ export default function BacktestsPage() {
                     t("common.none")
                   )}
                 </td>
-                <td>
+                <td className="backtest-actions">
                   <div className="table-actions">
                     <button
                       type="button"
@@ -296,8 +346,10 @@ export default function BacktestsPage() {
                     </button>
                   </div>
                 </td>
-                <td>{formatDateTime(run.created_at)}</td>
-                <td>{run.ended_at ? formatDateTime(run.ended_at) : t("common.none")}</td>
+                <td className="backtest-created">{formatDateTime(run.created_at)}</td>
+                <td className="backtest-ended">
+                  {run.ended_at ? formatDateTime(run.ended_at) : t("common.none")}
+                </td>
               </tr>
             ))}
           </tbody>

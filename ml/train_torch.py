@@ -976,16 +976,44 @@ def main() -> None:
 
     dataset = []
     features_map: dict[str, pd.DataFrame] = {}
+    total_symbols = len(symbols)
+    update_every = max(1, total_symbols // 20) if total_symbols else 1
+    processed = 0
+    usable = 0
     for symbol in symbols:
         _check_cancel(cancel_path, progress_path)
         symbol_path = _pick_dataset_file(symbol, adjusted_dir, vendor_pref)
         if not symbol_path:
+            processed += 1
+            if processed % update_every == 0 or processed == total_symbols:
+                _write_progress(
+                    progress_path,
+                    {
+                        "phase": "prepare_features",
+                        "progress": min(processed / max(total_symbols, 1), 1.0) * 0.4,
+                        "processed_symbols": processed,
+                        "total_symbols": total_symbols,
+                        "usable_symbols": usable,
+                    },
+                )
             continue
         df = _load_series(symbol_path)
         life = symbol_life.get(symbol)
         if life:
             df = _apply_symbol_life(df, life)
             if df.empty:
+                processed += 1
+                if processed % update_every == 0 or processed == total_symbols:
+                    _write_progress(
+                        progress_path,
+                        {
+                            "phase": "prepare_features",
+                            "progress": min(processed / max(total_symbols, 1), 1.0) * 0.4,
+                            "processed_symbols": processed,
+                            "total_symbols": total_symbols,
+                            "usable_symbols": usable,
+                        },
+                    )
                 continue
         features = compute_features(df, spy_df, feat_config)
         if pit_enabled:
@@ -1000,6 +1028,18 @@ def main() -> None:
         if train_start is not None:
             features = features[features.index >= train_start]
             if features.empty:
+                processed += 1
+                if processed % update_every == 0 or processed == total_symbols:
+                    _write_progress(
+                        progress_path,
+                        {
+                            "phase": "prepare_features",
+                            "progress": min(processed / max(total_symbols, 1), 1.0) * 0.4,
+                            "processed_symbols": processed,
+                            "total_symbols": total_symbols,
+                            "usable_symbols": usable,
+                        },
+                    )
                 continue
         score_features = features.copy()
         if "vol_z_20" in score_features.columns:
@@ -1014,6 +1054,18 @@ def main() -> None:
         )
         merged = features.join(label.rename("label")).dropna()
         if merged.empty:
+            processed += 1
+            if processed % update_every == 0 or processed == total_symbols:
+                _write_progress(
+                    progress_path,
+                    {
+                        "phase": "prepare_features",
+                        "progress": min(processed / max(total_symbols, 1), 1.0) * 0.4,
+                        "processed_symbols": processed,
+                        "total_symbols": total_symbols,
+                        "usable_symbols": usable,
+                    },
+                )
             continue
         if weight_needs_dv:
             raw_path = _pick_dataset_file(symbol, raw_dir, vendor_pref)
@@ -1029,11 +1081,44 @@ def main() -> None:
                 merged["dollar_volume_raw"] = dv_series.reindex(merged.index)
         merged["symbol"] = symbol
         dataset.append(merged)
+        usable += 1
+        processed += 1
+        if processed % update_every == 0 or processed == total_symbols:
+            _write_progress(
+                progress_path,
+                {
+                    "phase": "prepare_features",
+                    "progress": min(processed / max(total_symbols, 1), 1.0) * 0.4,
+                    "processed_symbols": processed,
+                    "total_symbols": total_symbols,
+                    "usable_symbols": usable,
+                },
+            )
 
     if not dataset:
         raise RuntimeError("未生成有效训练样本")
 
     data = pd.concat(dataset).sort_index()
+    mcap_drop_meta = None
+    if weight_needs_cap and "pit_market_cap" in data.columns:
+        mcap_raw = pd.to_numeric(data["pit_market_cap"], errors="coerce")
+        missing_mask = mcap_raw.isna() | (mcap_raw <= 0)
+        missing_count = int(missing_mask.sum())
+        missing_ratio = float(missing_count / len(data)) if len(data) else 0.0
+        if missing_count:
+            print(
+                "pit_market_cap missing: {count}/{total} ({ratio:.2%})".format(
+                    count=missing_count,
+                    total=len(data),
+                    ratio=missing_ratio,
+                )
+            )
+        mcap_drop_meta = {
+            "pit_market_cap_missing_count": missing_count,
+            "pit_market_cap_missing_ratio": missing_ratio,
+        }
+    elif weight_needs_cap:
+        print("warning: pit_market_cap not found; fallback weight=1")
     weight_summary = None
     weight_meta = None
     if weight_scheme != "none":
@@ -1051,12 +1136,14 @@ def main() -> None:
                 "scheme": weight_scheme,
                 "dv_window_days": int(weight_cfg.get("dv_window_days") or 1),
                 **weight_summary,
+                **(mcap_drop_meta or {}),
             }
     exclude_cols = {
         "label",
         "symbol",
         "sample_weight",
         "dollar_volume_raw",
+        "pit_market_cap",
         "shares_available_date",
         "shares_source",
     }

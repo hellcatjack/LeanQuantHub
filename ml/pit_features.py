@@ -38,6 +38,9 @@ PIT_FEATURE_FIELDS = [
 
 PIT_RENAME = {field: f"pit_{field}" for field in PIT_FEATURE_FIELDS}
 PIT_FEATURE_COLUMNS = list(PIT_RENAME.values())
+PIT_EXTRA_FIELDS = ["pit_market_cap"]
+PIT_ALL_COLUMNS = PIT_FEATURE_COLUMNS + PIT_EXTRA_FIELDS
+PIT_MISSING_RATIO_FIELD = "pit_missing_ratio"
 
 
 def _parse_date(value: str | None) -> pd.Timestamp | None:
@@ -50,7 +53,7 @@ def _parse_date(value: str | None) -> pd.Timestamp | None:
 
 
 def _read_snapshot(path: Path) -> pd.DataFrame:
-    usecols = ["symbol", "snapshot_date", *PIT_FEATURE_FIELDS]
+    usecols = ["symbol", "snapshot_date", *PIT_FEATURE_FIELDS, *PIT_EXTRA_FIELDS]
     try:
         df = pd.read_csv(path, usecols=usecols)
     except ValueError:
@@ -110,15 +113,18 @@ def load_pit_fundamentals(
                 .sum()
             )
 
-        snapshot = _coerce_numeric(snapshot, PIT_FEATURE_FIELDS)
+        snapshot = _coerce_numeric(snapshot, [*PIT_FEATURE_FIELDS, *PIT_EXTRA_FIELDS])
         snapshot = snapshot.rename(columns=PIT_RENAME)
         for col in PIT_FEATURE_COLUMNS:
+            if col not in snapshot.columns:
+                snapshot[col] = np.nan
+        for col in PIT_EXTRA_FIELDS:
             if col not in snapshot.columns:
                 snapshot[col] = np.nan
 
         for symbol, group in snapshot.groupby("symbol"):
             frame = group.drop(columns=["symbol"]).set_index("snapshot_date").sort_index()
-            frame = frame[PIT_FEATURE_COLUMNS]
+            frame = frame[PIT_ALL_COLUMNS]
             pit_frames.setdefault(symbol, []).append(frame)
 
     result: dict[str, pd.DataFrame] = {}
@@ -144,7 +150,7 @@ def load_pit_fundamentals(
         "with_data": float(total_with_data),
         "coverage": float(coverage),
     }
-    return result, PIT_FEATURE_COLUMNS, summary
+    return result, PIT_ALL_COLUMNS, summary
 
 
 def apply_pit_features(
@@ -157,15 +163,16 @@ def apply_pit_features(
     pit_fields = list(pit_fields)
     policy = str(missing_policy or "fill_zero").strip().lower()
     if pit_frame is None or pit_frame.empty:
-        if policy == "drop":
-            return features.iloc[0:0]
         if sample_on_snapshot:
             return features.iloc[0:0]
-        if policy == "fill_zero" and pit_fields:
+        if pit_fields:
             for col in pit_fields:
                 features[col] = 0.0
             if "pit_has_fundamentals" in features.columns:
-                features["pit_has_fundamentals"] = features["pit_has_fundamentals"].fillna(0.0)
+                features["pit_has_fundamentals"] = 0.0
+            features[PIT_MISSING_RATIO_FIELD] = 1.0
+        if policy == "drop":
+            return features.iloc[0:0]
         return features
     if sample_on_snapshot:
         features = features.loc[features.index.isin(pit_frame.index)]
@@ -185,14 +192,12 @@ def apply_pit_features(
         )
     if merged.empty:
         return merged
-    if policy == "drop":
-        if "pit_has_fundamentals" in merged.columns:
-            merged = merged[merged["pit_has_fundamentals"].fillna(0) > 0]
-        if pit_fields:
-            merged = merged.dropna(subset=pit_fields)
-    else:
-        if pit_fields:
-            merged[pit_fields] = merged[pit_fields].fillna(0.0)
-        if "pit_has_fundamentals" in merged.columns:
-            merged["pit_has_fundamentals"] = merged["pit_has_fundamentals"].fillna(0.0)
+    if policy == "drop" and "pit_has_fundamentals" in merged.columns:
+        merged = merged[merged["pit_has_fundamentals"].fillna(0) > 0]
+    missing_fields = [col for col in pit_fields if col != "pit_has_fundamentals"]
+    if missing_fields:
+        merged[PIT_MISSING_RATIO_FIELD] = merged[missing_fields].isna().mean(axis=1)
+        merged[missing_fields] = merged[missing_fields].fillna(0.0)
+    if "pit_has_fundamentals" in merged.columns:
+        merged["pit_has_fundamentals"] = merged["pit_has_fundamentals"].fillna(0.0)
     return merged

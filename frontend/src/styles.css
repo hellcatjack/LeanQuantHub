@@ -1347,6 +1347,85 @@ a {
   font-size: 14px;
 }
 
+.backtest-table th,
+.backtest-table td {
+  padding: 10px 12px;
+  font-size: 13px;
+}
+
+.backtest-table th.backtest-range-cell,
+.backtest-table td.backtest-range-cell {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.backtest-table td.backtest-range-cell {
+  color: var(--muted);
+}
+
+.backtest-table th.backtest-range-cell {
+  width: 118px;
+}
+
+.backtest-table th.backtest-id,
+.backtest-table td.backtest-id {
+  width: 64px;
+  white-space: nowrap;
+}
+
+.backtest-table th.backtest-project,
+.backtest-table td.backtest-project {
+  width: 72px;
+  white-space: nowrap;
+}
+
+.backtest-table th.backtest-status,
+.backtest-table td.backtest-status {
+  width: 96px;
+  white-space: nowrap;
+}
+
+.backtest-table th.backtest-progress,
+.backtest-table td.backtest-progress {
+  width: 120px;
+}
+
+.backtest-table th.backtest-metric,
+.backtest-table td.backtest-metric {
+  width: 96px;
+  white-space: nowrap;
+}
+
+.backtest-table td.backtest-metric {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.backtest-table th.backtest-report,
+.backtest-table td.backtest-report {
+  width: 80px;
+  white-space: nowrap;
+}
+
+.backtest-table th.backtest-actions,
+.backtest-table td.backtest-actions {
+  width: 140px;
+  white-space: nowrap;
+}
+
+.backtest-table th.backtest-created,
+.backtest-table td.backtest-created,
+.backtest-table th.backtest-ended,
+.backtest-table td.backtest-ended {
+  width: 150px;
+  white-space: nowrap;
+}
+
+.backtest-table .table-actions {
+  flex-wrap: nowrap;
+  gap: 6px;
+}
+
 .table th {
   background: var(--panel-alt);
   font-weight: 600;

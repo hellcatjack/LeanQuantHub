@@ -3680,6 +3680,20 @@ def _load_factor_file(path: Path) -> list[tuple[date, float]]:
     return factors
 
 
+def _merge_factor_history(
+    base: list[tuple[date, float]],
+    updates: list[tuple[date, float]],
+) -> list[tuple[date, float]]:
+    if not base:
+        return updates
+    if not updates:
+        return base
+    merged = {day: factor for day, factor in base}
+    for day, factor in updates:
+        merged[day] = factor
+    return sorted(merged.items(), key=lambda item: item[0])
+
+
 def _apply_price_factors(
     records: dict[datetime, dict], factors: list[tuple[date, float]]
 ) -> dict[datetime, dict]:
@@ -4352,14 +4366,29 @@ def run_data_sync(job_id: int, spawn_retry_thread: bool = True) -> None:
         symbol_override = canonical_symbol
         factor_path = _resolve_factor_path(dataset, canonical_symbol)
         factors: list[tuple[date, float]] = []
-        if ALPHA_ONLY_PRICES and not _is_alpha_source(source_path):
+        alpha_factors: list[tuple[date, float]] = []
+        existing_factors: list[tuple[date, float]] = []
+        cache_factor_path = _factor_cache_path(canonical_symbol)
+        is_alpha_source = _is_alpha_source(source_path)
+        if ALPHA_ONLY_PRICES and not is_alpha_source:
             factor_source = "alpha_only_skip"
         else:
-            if _is_alpha_source(source_path):
-                factors = _build_factors_from_alpha_csv(path)
-                if factors:
-                    factor_source = "alpha"
-                    _write_factor_file(_factor_cache_path(canonical_symbol), factors)
+            if is_alpha_source:
+                alpha_factors = _build_factors_from_alpha_csv(path)
+                existing_factors = _load_factor_file(cache_factor_path)
+                if alpha_outputsize == "compact":
+                    if existing_factors:
+                        factors = _merge_factor_history(existing_factors, alpha_factors)
+                        if factors:
+                            factor_source = "alpha_compact_merge"
+                    else:
+                        factors = alpha_factors
+                        if factors:
+                            factor_source = "alpha_compact_only"
+                else:
+                    factors = alpha_factors
+                    if factors:
+                        factor_source = "alpha"
             if not factors:
                 factors = _load_factor_file(factor_path)
                 if factors:
@@ -4368,7 +4397,6 @@ def run_data_sync(job_id: int, spawn_retry_thread: bool = True) -> None:
                 factors = _build_factors_from_yahoo(canonical_symbol, dataset)
                 if factors:
                     factor_source = "yahoo"
-                    _write_factor_file(_factor_cache_path(canonical_symbol), factors)
 
         _set_job_stage(session, job, "normalize", 0.6)
         source_files = _collect_csv_files(path)
@@ -4422,6 +4450,32 @@ def run_data_sync(job_id: int, spawn_retry_thread: bool = True) -> None:
             if existing is None or _row_score(row) >= _row_score(existing):
                 curated_records[timestamp] = row
         _write_curated(curated_path, curated_records)
+        if is_alpha_source and alpha_outputsize == "compact" and curated_records:
+            earliest_data = min(curated_records.keys()).date()
+            earliest_factor = factors[0][0] if factors else None
+            if earliest_factor is None or earliest_factor > earliest_data:
+                full_path = _fetch_alpha_csv_with_retry(
+                    alpha_symbol,
+                    job.dataset_id,
+                    dataset_name,
+                    outputsize="full",
+                )
+                full_factors = _build_factors_from_alpha_csv(full_path)
+                if full_factors:
+                    factors = full_factors
+                    factor_source = "alpha_full"
+                    alpha_compact_fallback = True
+                    if alpha_meta is not None:
+                        alpha_meta["alpha_outputsize"] = "full"
+                        alpha_meta["alpha_compact_fallback"] = True
+        if factors and factor_source in {
+            "alpha",
+            "alpha_compact_merge",
+            "alpha_compact_only",
+            "alpha_full",
+            "yahoo",
+        }:
+            _write_factor_file(cache_factor_path, factors)
         adjusted_records = _apply_price_factors(curated_records, factors)
         adjusted_records, cliff_count = _sanitize_cliffs(adjusted_records)
         lean_adjusted_path = None
