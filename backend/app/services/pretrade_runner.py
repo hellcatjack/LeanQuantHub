@@ -26,6 +26,7 @@ from app.models import (
     PreTradeSettings,
     PreTradeStep,
     PreTradeTemplate,
+    Project,
 )
 from app.routes.datasets import (
     _alpha_listing_age,
@@ -38,6 +39,7 @@ from app.routes.datasets import (
 from app.services.alpha_fetch import load_alpha_fetch_config
 from app.services.alpha_rate import load_alpha_rate_config
 from app.services.bulk_auto import load_bulk_auto_config
+from app.services.decision_snapshot import generate_decision_snapshot
 from app.services.factor_score_runner import run_factor_score_job
 from app.services.job_lock import JobLock
 from app.services.ml_runner import build_ml_config, run_ml_train
@@ -52,6 +54,7 @@ from app.services.trading_calendar import (
     load_trading_days,
     trading_calendar_csv_path,
 )
+from app.services.project_symbols import collect_active_project_symbols, write_symbol_list
 
 PRETRADE_ACTIVE_STATUSES = {"queued", "running"}
 
@@ -124,6 +127,7 @@ def _get_or_create_settings(session) -> PreTradeSettings:
         retry_base_delay_seconds=60,
         retry_max_delay_seconds=1800,
         deadline_timezone="America/New_York",
+        update_project_only=True,
     )
     session.add(settings_row)
     session.commit()
@@ -316,6 +320,24 @@ def step_price_incremental(ctx: StepContext, params: dict[str, Any]) -> StepResu
     bulk_config = load_bulk_auto_config(data_root)
     fetch_config = load_alpha_fetch_config(data_root)
     rate_config = load_alpha_rate_config(data_root)
+    settings_row = _get_or_create_settings(ctx.session)
+    symbol_whitelist_path: str | None = None
+    symbol_whitelist_count: int | None = None
+    if settings_row.update_project_only:
+        symbols, benchmarks = collect_active_project_symbols(ctx.session)
+        if not symbols:
+            raise StepSkip(
+                "project_symbols_empty",
+                artifacts={
+                    "symbol_whitelist_count": 0,
+                    "symbol_whitelist_benchmarks": benchmarks,
+                },
+            )
+        log_dir = _ensure_log_dir(ctx.run.id)
+        symbol_path = log_dir / "project_symbols.csv"
+        write_symbol_list(symbol_path, symbols)
+        symbol_whitelist_path = str(symbol_path)
+        symbol_whitelist_count = len(symbols)
     min_delay = float(params.get("min_delay_seconds") or bulk_config.get("min_delay_seconds") or 0)
     effective_min_delay = float(rate_config.get("effective_min_delay_seconds") or 0)
     if effective_min_delay > min_delay:
@@ -332,6 +354,9 @@ def step_price_incremental(ctx: StepContext, params: dict[str, Any]) -> StepResu
         "alpha_compact_days": int(fetch_config.get("alpha_compact_days") or 120),
         "min_delay_seconds": min_delay,
     }
+    if symbol_whitelist_path:
+        payload["symbol_whitelist_path"] = symbol_whitelist_path
+        payload["symbol_whitelist_count"] = symbol_whitelist_count
     active = (
         ctx.session.query(BulkSyncJob)
         .filter(BulkSyncJob.status.in_("queued running paused".split()))
@@ -351,6 +376,13 @@ def step_price_incremental(ctx: StepContext, params: dict[str, Any]) -> StepResu
     _start_bulk_sync_worker(job.id)
 
     artifacts = {"bulk_job_id": job.id}
+    if symbol_whitelist_path:
+        artifacts.update(
+            {
+                "symbol_whitelist_path": symbol_whitelist_path,
+                "symbol_whitelist_count": symbol_whitelist_count,
+            }
+        )
     while True:
         ctx.session.refresh(job)
         pending, running, completed = _bulk_job_counts(ctx.session, job)
@@ -434,8 +466,25 @@ def step_fundamentals_refresh(ctx: StepContext, params: dict[str, Any]) -> StepR
     cancel_path = log_dir / "fundamentals_cancel.flag"
     status_path = log_dir / "fundamentals_status.csv"
 
+    settings_row = _get_or_create_settings(ctx.session)
+    cmd_params = dict(params or {})
+    if settings_row.update_project_only:
+        symbols, benchmarks = collect_active_project_symbols(ctx.session)
+        if not symbols:
+            raise StepSkip(
+                "project_symbols_empty",
+                artifacts={
+                    "symbol_whitelist_count": 0,
+                    "symbol_whitelist_benchmarks": benchmarks,
+                },
+            )
+        symbol_path = log_dir / "project_symbols.csv"
+        write_symbol_list(symbol_path, symbols)
+        cmd_params["symbol_file"] = str(symbol_path)
+        cmd_params["symbol_whitelist_count"] = len(symbols)
+
     cmd = _build_fundamental_fetch_command(
-        params,
+        cmd_params,
         progress_path=progress_path,
         status_path=status_path,
         cancel_path=cancel_path,
@@ -453,13 +502,14 @@ def step_fundamentals_refresh(ctx: StepContext, params: dict[str, Any]) -> StepR
         code = proc.returncode
     if code != 0:
         raise RuntimeError(f"fundamentals_fetch_failed={code}")
-    return StepResult(
-        artifacts={
-            "progress_path": str(progress_path),
-            "status_path": str(status_path),
-        },
-        log_path=str(log_path),
-    )
+    artifacts = {
+        "progress_path": str(progress_path),
+        "status_path": str(status_path),
+    }
+    if cmd_params.get("symbol_file"):
+        artifacts["symbol_whitelist_path"] = cmd_params["symbol_file"]
+        artifacts["symbol_whitelist_count"] = cmd_params.get("symbol_whitelist_count")
+    return StepResult(artifacts=artifacts, log_path=str(log_path))
 
 
 def step_pit_weekly(ctx: StepContext, params: dict[str, Any]) -> StepResult:
@@ -468,37 +518,68 @@ def step_pit_weekly(ctx: StepContext, params: dict[str, Any]) -> StepResult:
     ctx.session.commit()
     ctx.session.refresh(job)
     run_pit_weekly_job(job.id)
-    ctx.session.refresh(job)
-    if job.status != "success":
-        raise RuntimeError(f"pit_weekly_{job.status}")
+    with SessionLocal() as check_session:
+        fresh = check_session.get(PitWeeklyJob, job.id)
+        if not fresh:
+            raise RuntimeError("pit_weekly_missing")
+        if fresh.status != "success":
+            raise RuntimeError(f"pit_weekly_{fresh.status}")
     return StepResult(
         artifacts={
             "job_id": job.id,
-            "output_dir": job.output_dir,
-            "snapshot_count": job.snapshot_count,
-            "last_snapshot_path": job.last_snapshot_path,
+            "output_dir": fresh.output_dir,
+            "snapshot_count": fresh.snapshot_count,
+            "last_snapshot_path": fresh.last_snapshot_path,
         },
-        log_path=job.log_path,
+        log_path=fresh.log_path,
     )
 
 
 def step_pit_fundamentals(ctx: StepContext, params: dict[str, Any]) -> StepResult:
-    job = PitFundamentalJob(status="queued", params=params)
+    settings_row = _get_or_create_settings(ctx.session)
+    cmd_params = dict(params or {})
+    project_symbols: list[str] | None = None
+    project_benchmarks: list[str] | None = None
+    if settings_row.update_project_only:
+        symbols, benchmarks = collect_active_project_symbols(ctx.session)
+        if not symbols:
+            raise StepSkip(
+                "project_symbols_empty",
+                artifacts={
+                    "symbol_whitelist_count": 0,
+                    "symbol_whitelist_benchmarks": benchmarks,
+                },
+            )
+        project_symbols = symbols
+        project_benchmarks = benchmarks
+    job = PitFundamentalJob(status="queued", params=cmd_params)
     ctx.session.add(job)
     ctx.session.commit()
     ctx.session.refresh(job)
+    if project_symbols:
+        log_dir = Path(settings.artifact_root) / f"pit_fundamental_job_{job.id}"
+        symbol_path = log_dir / "project_symbols.csv"
+        write_symbol_list(symbol_path, project_symbols)
+        cmd_params["symbol_file"] = str(symbol_path)
+        cmd_params["symbol_whitelist_count"] = len(project_symbols)
+        cmd_params["symbol_whitelist_benchmarks"] = project_benchmarks or []
+        job.params = cmd_params
+        ctx.session.commit()
     run_pit_fundamental_job(job.id)
-    ctx.session.refresh(job)
-    if job.status != "success":
-        raise RuntimeError(f"pit_fundamentals_{job.status}")
+    with SessionLocal() as check_session:
+        fresh = check_session.get(PitFundamentalJob, job.id)
+        if not fresh:
+            raise RuntimeError("pit_fundamentals_missing")
+        if fresh.status != "success":
+            raise RuntimeError(f"pit_fundamentals_{fresh.status}")
     return StepResult(
         artifacts={
             "job_id": job.id,
-            "output_dir": job.output_dir,
-            "snapshot_count": job.snapshot_count,
-            "last_snapshot_path": job.last_snapshot_path,
+            "output_dir": fresh.output_dir,
+            "snapshot_count": fresh.snapshot_count,
+            "last_snapshot_path": fresh.last_snapshot_path,
         },
-        log_path=job.log_path,
+        log_path=fresh.log_path,
     )
 
 
@@ -569,6 +650,31 @@ def step_audit(ctx: StepContext, params: dict[str, Any]) -> StepResult:
     )
 
 
+def step_decision_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResult:
+    settings_row = _get_or_create_settings(ctx.session)
+    if not settings_row.auto_decision_snapshot:
+        raise StepSkip("decision_snapshot_disabled")
+    algo_params = params.get("algorithm_parameters")
+    if not isinstance(algo_params, dict):
+        algo_params = {}
+    result = generate_decision_snapshot(
+        ctx.session,
+        project_id=ctx.run.project_id,
+        train_job_id=params.get("train_job_id"),
+        pipeline_id=params.get("pipeline_id"),
+        snapshot_date=params.get("snapshot_date"),
+        algorithm_parameters=algo_params,
+        preview=False,
+    )
+    return StepResult(
+        artifacts={
+            "decision_snapshot": result.get("summary"),
+            "decision_snapshot_path": result.get("summary_path"),
+        },
+        log_path=result.get("log_path"),
+    )
+
+
 STEP_DEFS = [
     ("calendar_refresh", step_calendar_refresh),
     ("trading_day_check", step_trading_day_check),
@@ -578,6 +684,7 @@ STEP_DEFS = [
     ("pit_weekly", step_pit_weekly),
     ("pit_fundamentals", step_pit_fundamentals),
     ("training_scoring", step_training_scoring),
+    ("decision_snapshot", step_decision_snapshot),
     ("audit", step_audit),
 ]
 

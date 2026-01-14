@@ -17,6 +17,7 @@ from app.schemas import (
 )
 from app.services.audit_log import record_audit
 from app.services.pit_runner import run_pit_fundamental_job, run_pit_weekly_job
+from app.services.project_symbols import collect_active_project_symbols, write_symbol_list
 
 
 def _write_progress(path: Path, payload: dict) -> None:
@@ -168,11 +169,35 @@ def create_fundamental_job(
     payload: PitFundamentalJobCreate, background_tasks: BackgroundTasks
 ):
     params = payload.model_dump()
+    if not params.get("refresh_fundamentals") and not params.get(
+        "build_pit_fundamentals", True
+    ):
+        raise HTTPException(status_code=400, detail="至少选择缓存刷新或快照生成")
+    project_only = bool(params.get("project_only", True))
+    project_symbols: list[str] | None = None
+    project_benchmarks: list[str] | None = None
     with get_session() as session:
+        if project_only:
+            symbols, benchmarks = collect_active_project_symbols(session)
+            project_symbols = symbols
+            project_benchmarks = benchmarks
+            if not project_symbols:
+                raise HTTPException(status_code=400, detail="项目标的为空")
+            params.pop("symbols", None)
+            params.pop("symbol_file", None)
         job = PitFundamentalJob(status="queued", params=params)
         session.add(job)
         session.commit()
         session.refresh(job)
+        if project_only and project_symbols:
+            log_dir = Path(settings.artifact_root) / f"pit_fundamental_job_{job.id}"
+            symbol_path = log_dir / "project_symbols.csv"
+            write_symbol_list(symbol_path, project_symbols)
+            params["symbol_file"] = str(symbol_path)
+            params["symbol_whitelist_count"] = len(project_symbols)
+            params["symbol_whitelist_benchmarks"] = project_benchmarks or []
+            job.params = params
+            session.commit()
         record_audit(
             session,
             action="pit_fundamental_job.create",

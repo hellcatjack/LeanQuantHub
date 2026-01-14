@@ -161,6 +161,18 @@ a {
   gap: 16px;
 }
 
+.project-tab-stack .algorithm-top-ml {
+  order: -3;
+}
+
+.project-tab-stack .algorithm-top-pipeline {
+  order: -2;
+}
+
+.project-tab-stack .algorithm-top-decision {
+  order: -1;
+}
+
 @media (min-width: 1440px) {
   .project-tab-stack {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -224,7 +236,7 @@ a {
   border-radius: 10px;
   border: 1px solid var(--border);
   background: #fff;
-  font-size: 14px;
+  font-size: 15px;
 }
 
 .progress-block {
@@ -1340,6 +1352,148 @@ a {
   font-weight: 600;
 }
 
+.pretrade-steps-table th,
+.pretrade-steps-table td {
+  padding: 8px 12px;
+  vertical-align: top;
+}
+
+.pretrade-steps-table td.pretrade-steps-status,
+.pretrade-steps-table td.pretrade-steps-progress,
+.pretrade-steps-table td.pretrade-steps-updated,
+.pretrade-steps-table th.pretrade-steps-status,
+.pretrade-steps-table th.pretrade-steps-progress,
+.pretrade-steps-table th.pretrade-steps-updated {
+  white-space: nowrap;
+}
+
+.pretrade-steps-table td.pretrade-steps-actions,
+.pretrade-steps-table th.pretrade-steps-actions {
+  white-space: nowrap;
+  text-align: right;
+}
+
+.pretrade-steps-note {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.pretrade-template-editor {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.pretrade-template-editing {
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--panel-alt);
+  border-radius: 8px;
+  padding: 6px 10px;
+}
+
+.pretrade-template-steps {
+  display: grid;
+  gap: 8px;
+}
+
+.pretrade-step-group {
+  display: grid;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px dashed var(--border);
+  background: var(--panel-alt);
+}
+
+.pretrade-step-group-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.pretrade-step-group-hint {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.pretrade-step-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 6px 12px;
+}
+
+.pretrade-step-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.pretrade-step-info {
+  display: grid;
+  gap: 2px;
+}
+
+.pretrade-step-name {
+  font-size: 13px;
+  color: var(--text);
+}
+
+.pretrade-step-desc {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.pretrade-template-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.pretrade-template-advanced,
+.pretrade-template-preview {
+  display: grid;
+  gap: 6px;
+}
+
+.pretrade-template-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.pretrade-templates-table th,
+.pretrade-templates-table td {
+  padding: 8px 12px;
+}
+
+.pretrade-template-detail {
+  margin-top: 12px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  display: grid;
+  gap: 10px;
+}
+
+.pretrade-template-detail-title {
+  font-weight: 600;
+}
+
+.pretrade-template-detail-table th,
+.pretrade-template-detail-table td {
+  padding: 6px 10px;
+}
+
 .pagination {
   display: flex;
   align-items: center;
@@ -1658,6 +1812,79 @@ a {
 .pipeline-backtest-table td.pipeline-backtest-created {
   width: 128px;
   text-overflow: clip;
+}
+
+.decision-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.decision-table {
+  width: 100%;
+  table-layout: fixed;
+}
+
+.decision-table th,
+.decision-table td {
+  font-size: 12px;
+}
+
+.decision-table th:nth-child(1),
+.decision-table td:nth-child(1) {
+  width: 56px;
+}
+
+.decision-table th:nth-child(2),
+.decision-table td:nth-child(2) {
+  width: 180px;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.decision-table th:nth-child(3),
+.decision-table td:nth-child(3),
+.decision-table th:nth-child(4),
+.decision-table td:nth-child(4) {
+  width: 88px;
+}
+
+.decision-table th:nth-child(5),
+.decision-table td:nth-child(5) {
+  width: 120px;
+}
+
+.decision-table th:nth-child(6),
+.decision-table td:nth-child(6) {
+  width: 220px;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.decision-symbol {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--primary);
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.decision-symbol:hover {
+  text-decoration: underline;
+}
+
+.decision-company {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.2;
+}
+
+.decision-filter-list .meta-row {
+  gap: 12px;
 }
 
 .ml-curve-chart {
@@ -2237,6 +2464,124 @@ a {
   border: 1px solid var(--border);
   border-radius: 12px;
   background: #f6f9ff;
+}
+
+.trading-calendar-preview {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #f8fafc;
+  display: grid;
+  gap: 12px;
+}
+
+.calendar-view {
+  display: grid;
+  gap: 12px;
+}
+
+.calendar-view-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.calendar-view-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.calendar-view-meta {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.calendar-view-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.calendar-view-month {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: #fff;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.calendar-weekday {
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted);
+  padding: 4px 0;
+}
+
+.calendar-day {
+  min-height: 54px;
+  padding: 6px;
+  border-radius: 10px;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.calendar-day.trading {
+  border-color: #c7d6f7;
+  background: #f5f8ff;
+}
+
+.calendar-day.closed {
+  background: #f2f4f7;
+}
+
+.calendar-day.outside {
+  opacity: 0.45;
+}
+
+.calendar-day.today {
+  border-color: #0f62fe;
+  box-shadow: 0 0 0 1px rgba(15, 98, 254, 0.2);
+}
+
+.calendar-day-number {
+  font-size: 12px;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.calendar-day-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #9aa1ad;
+}
+
+.calendar-day-dot.trading {
+  background: #0f62fe;
+}
+
+.calendar-day-dot.closed {
+  background: #c4c9d1;
+}
+
+.calendar-empty {
+  grid-column: 1 / -1;
+  font-size: 12px;
+  color: var(--muted);
 }
 
 .form-grid.trading-calendar-grid {

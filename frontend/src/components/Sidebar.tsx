@@ -6,9 +6,7 @@ export default function Sidebar() {
   const links = [
     { to: "/projects", label: t("nav.projects") },
     { to: "/themes", label: t("nav.themes") },
-    { to: "/algorithms", label: t("nav.algorithms") },
     { to: "/backtests", label: t("nav.backtests") },
-    { to: "/reports", label: t("nav.reports") },
     { to: "/data", label: t("nav.data") },
     { to: "/audit-logs", label: t("nav.audit") },
   ];

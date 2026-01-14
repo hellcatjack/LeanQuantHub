@@ -7,6 +7,40 @@ import TopBar from "../components/TopBar";
 import { useI18n } from "../i18n";
 import { DatasetSummary, Paginated } from "../types";
 
+const PRETRADE_STEP_KEYS = [
+  "calendar_refresh",
+  "trading_day_check",
+  "price_incremental",
+  "listing_refresh",
+  "fundamentals_refresh",
+  "pit_weekly",
+  "pit_fundamentals",
+  "training_scoring",
+  "decision_snapshot",
+  "audit",
+];
+
+const PRETRADE_STEP_GROUPS = [
+  {
+    key: "data",
+    steps: [
+      "calendar_refresh",
+      "trading_day_check",
+      "listing_refresh",
+      "price_incremental",
+      "fundamentals_refresh",
+    ],
+  },
+  {
+    key: "pit",
+    steps: ["pit_weekly", "pit_fundamentals"],
+  },
+  {
+    key: "model",
+    steps: ["training_scoring", "decision_snapshot", "audit"],
+  },
+];
+
 interface DatasetQuality {
   dataset_id: number;
   frequency?: string | null;
@@ -130,6 +164,30 @@ interface TradingCalendarRefreshResult {
   calendar?: TradingCalendarConfig | null;
 }
 
+interface TradingCalendarPreviewDay {
+  date: string;
+  weekday: number;
+  is_trading: boolean;
+  in_month?: boolean | null;
+}
+
+interface TradingCalendarPreview {
+  timezone: string;
+  as_of_date?: string | null;
+  month?: string | null;
+  latest_trading_day?: string | null;
+  next_trading_day?: string | null;
+  recent_trading_days: string[];
+  upcoming_trading_days: string[];
+  week_days: TradingCalendarPreviewDay[];
+  month_days: TradingCalendarPreviewDay[];
+  calendar_source?: string | null;
+  overrides_applied?: number | null;
+  calendar_sessions?: number | null;
+  calendar_start?: string | null;
+  calendar_end?: string | null;
+}
+
 interface BulkAutoConfig {
   status: string;
   batch_size: number;
@@ -137,6 +195,7 @@ interface BulkAutoConfig {
   min_delay_seconds: number;
   refresh_listing_mode: string;
   refresh_listing_ttl_days: number;
+  project_only: boolean;
   updated_at?: string | null;
   source: string;
   path: string;
@@ -274,6 +333,8 @@ interface PreTradeSettings {
   retry_max_delay_seconds: number;
   deadline_time?: string | null;
   deadline_timezone?: string | null;
+  update_project_only?: boolean | null;
+  auto_decision_snapshot?: boolean | null;
   created_at: string;
   updated_at: string;
 }
@@ -330,6 +391,12 @@ interface PreTradeRunDetail {
   steps: PreTradeStep[];
 }
 
+interface PreTradeTemplateStepPlan {
+  key: string;
+  enabled: boolean;
+  params?: Record<string, unknown> | null;
+}
+
 
 interface UniverseTheme {
   key: string;
@@ -372,18 +439,7 @@ export default function DataPage() {
   const [themeCoverage, setThemeCoverage] = useState<ThemeCoverage | null>(null);
   const [themeCoverageLoading, setThemeCoverageLoading] = useState(false);
   const [themeCoverageError, setThemeCoverageError] = useState("");
-  const [form, setForm] = useState({
-    name: "",
-    vendor: "",
-    asset_class: "",
-    region: "",
-    frequency: "",
-    coverage_start: "",
-    coverage_end: "",
-    source_path: "",
-  });
   const [resetHistory, setResetHistory] = useState(false);
-  const [formError, setFormError] = useState("");
   const [qualityMap, setQualityMap] = useState<Record<number, DatasetQuality>>({});
   const [qualityLoading, setQualityLoading] = useState<Record<number, boolean>>({});
   const [qualityErrors, setQualityErrors] = useState<Record<number, string>>({});
@@ -447,6 +503,9 @@ export default function DataPage() {
   const [alphaFetchSaving, setAlphaFetchSaving] = useState(false);
   const [alphaFetchError, setAlphaFetchError] = useState("");
   const [tradingCalendar, setTradingCalendar] = useState<TradingCalendarConfig | null>(null);
+  const [tradingCalendarPreview, setTradingCalendarPreview] =
+    useState<TradingCalendarPreview | null>(null);
+  const [tradingCalendarMonth, setTradingCalendarMonth] = useState("");
   const [tradingCalendarForm, setTradingCalendarForm] = useState({
     source: "auto",
     exchange: "XNYS",
@@ -459,6 +518,7 @@ export default function DataPage() {
   const [tradingCalendarRefreshing, setTradingCalendarRefreshing] = useState(false);
   const [tradingCalendarResult, setTradingCalendarResult] = useState("");
   const [tradingCalendarError, setTradingCalendarError] = useState("");
+  const [tradingCalendarPreviewError, setTradingCalendarPreviewError] = useState("");
   const [bulkAutoConfig, setBulkAutoConfig] = useState<BulkAutoConfig | null>(null);
   const [bulkAutoLoadError, setBulkAutoLoadError] = useState("");
   const [bulkDefaultsSaving, setBulkDefaultsSaving] = useState(false);
@@ -474,6 +534,7 @@ export default function DataPage() {
     min_delay_seconds: "0.1",
     refresh_listing_mode: "stale_only",
     refresh_listing_ttl_days: "7",
+    project_only: true,
   });
   const [bulkJob, setBulkJob] = useState<BulkSyncJob | null>(null);
   const [bulkJobLoading, setBulkJobLoading] = useState(false);
@@ -507,12 +568,13 @@ export default function DataPage() {
     price_source: "raw",
     min_delay_seconds: "0.45",
     refresh_days: "0",
-    refresh_fundamentals: false,
     asset_types: "STOCK",
+    project_only: true,
   });
   const [pitFundJobs, setPitFundJobs] = useState<PitFundamentalJob[]>([]);
   const [pitFundLoadError, setPitFundLoadError] = useState("");
-  const [pitFundActionLoading, setPitFundActionLoading] = useState(false);
+  const [pitFundCacheLoading, setPitFundCacheLoading] = useState(false);
+  const [pitFundSnapshotLoading, setPitFundSnapshotLoading] = useState(false);
   const [pitFundActionError, setPitFundActionError] = useState("");
   const [pitFundActionResult, setPitFundActionResult] = useState("");
   const [pitFundProgress, setPitFundProgress] = useState<PitFundamentalProgress | null>(null);
@@ -535,6 +597,16 @@ export default function DataPage() {
     name: "",
     params: "",
   });
+  const [pretradeTemplateSteps, setPretradeTemplateSteps] = useState<
+    PreTradeTemplateStepPlan[]
+  >(() => buildPretradeStepPlan());
+  const [pretradeTemplateEditingId, setPretradeTemplateEditingId] = useState<number | null>(
+    null
+  );
+  const [pretradeTemplatePreviewId, setPretradeTemplatePreviewId] = useState<number | null>(
+    null
+  );
+  const [pretradeTemplateUseAdvanced, setPretradeTemplateUseAdvanced] = useState(false);
   const [pretradeTemplateId, setPretradeTemplateId] = useState("");
   const [pretradeWindowStart, setPretradeWindowStart] = useState("");
   const [pretradeWindowEnd, setPretradeWindowEnd] = useState("");
@@ -547,6 +619,8 @@ export default function DataPage() {
     retry_max_delay_seconds: "1800",
     deadline_time: "",
     deadline_timezone: "America/New_York",
+    update_project_only: true,
+    auto_decision_snapshot: true,
   });
   const [pretradeSettingsSaving, setPretradeSettingsSaving] = useState(false);
   const [pretradeSettingsResult, setPretradeSettingsResult] = useState("");
@@ -569,6 +643,9 @@ export default function DataPage() {
     Record<number, boolean>
   >({});
   const [pretradeTemplateActivateLoading, setPretradeTemplateActivateLoading] = useState<
+    Record<number, boolean>
+  >({});
+  const [pretradeTemplateDeleteLoading, setPretradeTemplateDeleteLoading] = useState<
     Record<number, boolean>
   >({});
   const [expandedGroupKey, setExpandedGroupKey] = useState<string | null>(null);
@@ -736,12 +813,14 @@ export default function DataPage() {
       setPretradeSettings(res.data);
       setPretradeSettingsForm({
         telegram_bot_token: "",
-        telegram_chat_id: res.data.telegram_chat_id || "",
+        telegram_chat_id: "",
         max_retries: String(res.data.max_retries ?? 0),
         retry_base_delay_seconds: String(res.data.retry_base_delay_seconds ?? 60),
         retry_max_delay_seconds: String(res.data.retry_max_delay_seconds ?? 1800),
         deadline_time: res.data.deadline_time || "",
         deadline_timezone: res.data.deadline_timezone || "America/New_York",
+        update_project_only: res.data.update_project_only ?? true,
+        auto_decision_snapshot: res.data.auto_decision_snapshot ?? true,
       });
       setPretradeTemplateId(
         res.data.current_template_id ? String(res.data.current_template_id) : ""
@@ -822,7 +901,6 @@ export default function DataPage() {
     setPretradeSettingsError("");
     try {
       const payload: Record<string, unknown> = {
-        telegram_chat_id: pretradeSettingsForm.telegram_chat_id || "",
         max_retries: Number.parseInt(pretradeSettingsForm.max_retries, 10) || 0,
         retry_base_delay_seconds:
           Number.parseInt(pretradeSettingsForm.retry_base_delay_seconds, 10) || 0,
@@ -830,12 +908,22 @@ export default function DataPage() {
           Number.parseInt(pretradeSettingsForm.retry_max_delay_seconds, 10) || 0,
         deadline_time: pretradeSettingsForm.deadline_time || "",
         deadline_timezone: pretradeSettingsForm.deadline_timezone || "",
+        update_project_only: !!pretradeSettingsForm.update_project_only,
+        auto_decision_snapshot: !!pretradeSettingsForm.auto_decision_snapshot,
       };
       if (pretradeSettingsForm.telegram_bot_token.trim()) {
         payload.telegram_bot_token = pretradeSettingsForm.telegram_bot_token.trim();
       }
+      if (pretradeSettingsForm.telegram_chat_id.trim()) {
+        payload.telegram_chat_id = pretradeSettingsForm.telegram_chat_id.trim();
+      }
       const res = await api.post<PreTradeSettings>("/api/pretrade/settings", payload);
       setPretradeSettings(res.data);
+      setPretradeSettingsForm((prev) => ({
+        ...prev,
+        telegram_bot_token: "",
+        telegram_chat_id: "",
+      }));
       setPretradeSettingsResult(t("data.pretrade.settingsSaved"));
     } catch (err: any) {
       const detail = err?.response?.data?.detail || t("data.pretrade.settingsSaveError");
@@ -872,22 +960,17 @@ export default function DataPage() {
       return;
     }
     try {
-      let parsedParams: Record<string, unknown> | null = null;
-      if (pretradeTemplateForm.params.trim()) {
-        try {
-          parsedParams = JSON.parse(pretradeTemplateForm.params);
-        } catch (err) {
-          setPretradeTemplatesError(t("data.pretrade.templateParseError"));
-          return;
-        }
+      if (!pretradeTemplateParamsPreview.ok) {
+        setPretradeTemplatesError(t("data.pretrade.templateParseError"));
+        return;
       }
       const payload = {
         project_id: Number(pretradeProjectId),
         name: pretradeTemplateForm.name.trim(),
-        params: parsedParams,
+        params: pretradeTemplateParamsPreview.value ?? null,
       };
       await api.post<PreTradeTemplate>("/api/pretrade/templates", payload);
-      setPretradeTemplateForm({ name: "", params: "" });
+      resetPretradeTemplateEditor();
       setPretradeTemplatesError("");
       await loadPretradeTemplates(pretradeProjectId);
     } catch (err: any) {
@@ -913,6 +996,61 @@ export default function DataPage() {
         delete next[templateId];
         return next;
       });
+    }
+  };
+
+  const deletePretradeTemplate = async (templateId: number) => {
+    const confirmed = window.confirm(t("data.pretrade.templates.deleteConfirm"));
+    if (!confirmed) {
+      return;
+    }
+    setPretradeTemplateDeleteLoading((prev) => ({ ...prev, [templateId]: true }));
+    try {
+      await api.delete(`/api/pretrade/templates/${templateId}`);
+      await loadPretradeSettings();
+      if (pretradeProjectId) {
+        await loadPretradeTemplates(pretradeProjectId);
+      }
+      if (pretradeTemplateEditingId === templateId) {
+        resetPretradeTemplateEditor();
+      }
+      if (pretradeTemplatePreviewId === templateId) {
+        setPretradeTemplatePreviewId(null);
+      }
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("data.pretrade.templates.deleteError");
+      setPretradeTemplatesError(String(detail));
+    } finally {
+      setPretradeTemplateDeleteLoading((prev) => {
+        const next = { ...prev };
+        delete next[templateId];
+        return next;
+      });
+    }
+  };
+
+  const updatePretradeTemplate = async () => {
+    if (!pretradeProjectId || !pretradeTemplateEditingId) {
+      return;
+    }
+    if (!pretradeTemplateForm.name.trim()) {
+      setPretradeTemplatesError(t("data.pretrade.templateNameRequired"));
+      return;
+    }
+    try {
+      if (!pretradeTemplateParamsPreview.ok) {
+        setPretradeTemplatesError(t("data.pretrade.templateParseError"));
+        return;
+      }
+      await api.post(`/api/pretrade/templates/${pretradeTemplateEditingId}`, {
+        name: pretradeTemplateForm.name.trim(),
+        params: pretradeTemplateParamsPreview.value ?? null,
+      });
+      await loadPretradeTemplates(pretradeProjectId);
+      resetPretradeTemplateEditor();
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("data.pretrade.templateCreateError");
+      setPretradeTemplatesError(String(detail));
     }
   };
 
@@ -1075,11 +1213,39 @@ export default function DataPage() {
         override_enabled: !!res.data.override_enabled,
       });
       setTradingCalendarError("");
+      await loadTradingCalendarPreview();
       return res.data;
     } catch (err: any) {
       const detail =
         err?.response?.data?.detail || t("data.tradingCalendar.loadError");
       setTradingCalendarError(String(detail));
+      setTradingCalendarPreview(null);
+      setTradingCalendarPreviewError(String(detail));
+      return null;
+    }
+  };
+
+  const loadTradingCalendarPreview = async (month?: string) => {
+    try {
+      const res = await api.get<TradingCalendarPreview>(
+        "/api/datasets/trading-calendar/preview",
+        month ? { params: { month } } : undefined
+      );
+      setTradingCalendarPreview(res.data);
+      const nextMonth =
+        res.data.month ||
+        month ||
+        (res.data.as_of_date ? res.data.as_of_date.slice(0, 7) : "");
+      if (nextMonth) {
+        setTradingCalendarMonth(nextMonth);
+      }
+      setTradingCalendarPreviewError("");
+      return res.data;
+    } catch (err: any) {
+      const detail =
+        err?.response?.data?.detail || t("data.tradingCalendar.previewError");
+      setTradingCalendarPreview(null);
+      setTradingCalendarPreviewError(String(detail));
       return null;
     }
   };
@@ -1095,6 +1261,7 @@ export default function DataPage() {
         min_delay_seconds: String(res.data.min_delay_seconds ?? ""),
         refresh_listing_mode: res.data.refresh_listing_mode || "stale_only",
         refresh_listing_ttl_days: String(res.data.refresh_listing_ttl_days ?? ""),
+        project_only: res.data.project_only ?? true,
       });
       setBulkAutoLoadError("");
       return res.data;
@@ -1114,6 +1281,7 @@ export default function DataPage() {
         min_delay_seconds: Number.parseFloat(bulkAutoForm.min_delay_seconds) || 0,
         refresh_listing_mode: bulkAutoForm.refresh_listing_mode,
         refresh_listing_ttl_days: Number.parseInt(bulkAutoForm.refresh_listing_ttl_days, 10) || 0,
+        project_only: !!bulkAutoForm.project_only,
       };
       const res = await api.post<BulkAutoConfig>("/api/datasets/bulk-auto-config", payload);
       setBulkAutoConfig(res.data);
@@ -1201,7 +1369,7 @@ export default function DataPage() {
 
   const updatePretradeSettingsForm = (
     key: keyof typeof pretradeSettingsForm,
-    value: string
+    value: string | boolean
   ) => {
     setPretradeSettingsForm((prev) => ({ ...prev, [key]: value }));
   };
@@ -1238,6 +1406,7 @@ export default function DataPage() {
         payload
       );
       setTradingCalendar(res.data);
+      await loadTradingCalendarPreview();
       setTradingCalendarResult(t("data.tradingCalendar.saved"));
       return true;
     } catch (err: any) {
@@ -1271,6 +1440,7 @@ export default function DataPage() {
       } else {
         await loadTradingCalendar();
       }
+      await loadTradingCalendarPreview();
       setTradingCalendarResult(t("data.tradingCalendar.refreshed"));
     } catch (err: any) {
       const detail =
@@ -1395,6 +1565,59 @@ export default function DataPage() {
     }
   };
 
+  const calendarWeekdayLabels = useMemo(
+    () => [
+      t("data.tradingCalendar.weekdayMon"),
+      t("data.tradingCalendar.weekdayTue"),
+      t("data.tradingCalendar.weekdayWed"),
+      t("data.tradingCalendar.weekdayThu"),
+      t("data.tradingCalendar.weekdayFri"),
+      t("data.tradingCalendar.weekdaySat"),
+      t("data.tradingCalendar.weekdaySun"),
+    ],
+    [t]
+  );
+  const calendarWeekTradingCount = useMemo(
+    () =>
+      tradingCalendarPreview?.week_days?.filter((day) => day.is_trading).length ?? 0,
+    [tradingCalendarPreview]
+  );
+  const calendarMonthLabel = useMemo(() => {
+    if (tradingCalendarMonth) {
+      return tradingCalendarMonth;
+    }
+    if (tradingCalendarPreview?.month) {
+      return tradingCalendarPreview.month;
+    }
+    if (tradingCalendarPreview?.as_of_date) {
+      return tradingCalendarPreview.as_of_date.slice(0, 7);
+    }
+    return "";
+  }, [tradingCalendarMonth, tradingCalendarPreview]);
+  const calendarMonthDays = useMemo(
+    () => tradingCalendarPreview?.month_days || [],
+    [tradingCalendarPreview]
+  );
+  const shiftCalendarMonth = (offset: number) => {
+    const base = calendarMonthLabel;
+    if (!base) {
+      return;
+    }
+    const parts = base.split("-");
+    if (parts.length !== 2) {
+      return;
+    }
+    const year = Number(parts[0]);
+    const month = Number(parts[1]);
+    if (!Number.isFinite(year) || !Number.isFinite(month)) {
+      return;
+    }
+    const next = new Date(Date.UTC(year, month - 1 + offset, 1));
+    const nextValue = `${next.getUTCFullYear()}-${String(next.getUTCMonth() + 1).padStart(2, "0")}`;
+    setTradingCalendarMonth(nextValue);
+    loadTradingCalendarPreview(nextValue);
+  };
+
   useEffect(() => {
     loadDatasets();
   }, [datasetPage, datasetPageSize]);
@@ -1421,8 +1644,12 @@ export default function DataPage() {
     if (!pretradeProjectId) {
       setPretradeTemplates([]);
       setPretradeRuns([]);
+      resetPretradeTemplateEditor();
+      setPretradeTemplatePreviewId(null);
       return;
     }
+    resetPretradeTemplateEditor();
+    setPretradeTemplatePreviewId(null);
     loadPretradeTemplates(pretradeProjectId);
     loadPretradeRuns(pretradeProjectId);
   }, [pretradeProjectId]);
@@ -1532,39 +1759,6 @@ export default function DataPage() {
     loadThemeCoverage(themeFilter);
   }, [themeFilter]);
 
-  const updateForm = (key: keyof typeof form, value: string) => {
-    setForm((prev) => ({ ...prev, [key]: value }));
-  };
-
-  const createDataset = async () => {
-    if (!form.name.trim()) {
-      setFormError(t("data.register.errorName"));
-      return;
-    }
-    setFormError("");
-    await api.post("/api/datasets", {
-      name: form.name.trim(),
-      vendor: form.vendor || null,
-      asset_class: form.asset_class || null,
-      region: form.region || null,
-      frequency: form.frequency || null,
-      coverage_start: form.coverage_start || null,
-      coverage_end: form.coverage_end || null,
-      source_path: form.source_path || null,
-    });
-    setForm({
-      name: "",
-      vendor: "",
-      asset_class: "",
-      region: "",
-      frequency: "",
-      coverage_start: "",
-      coverage_end: "",
-      source_path: "",
-    });
-    loadDatasets();
-  };
-
   const updateScanForm = (key: keyof typeof scanForm, value: string) => {
     setScanForm((prev) => ({ ...prev, [key]: value }));
   };
@@ -1619,38 +1813,66 @@ export default function DataPage() {
     }
   };
 
-  const createPitFundJob = async () => {
-    setPitFundActionLoading(true);
+  const buildPitFundPayload = (overrides: Record<string, unknown> = {}) => {
+    const delayDays = Math.max(Number.parseInt(pitFundForm.report_delay_days, 10) || 1, 0);
+    const missingDelayDays = Math.max(
+      Number.parseInt(pitFundForm.missing_report_delay_days, 10) || 45,
+      0
+    );
+    const sharesDelayDays = Math.max(
+      Number.parseInt(pitFundForm.shares_delay_days, 10) || 45,
+      0
+    );
+    const minDelay = Math.max(Number.parseFloat(pitFundForm.min_delay_seconds) || 0, 0);
+    const refreshDaysInput = Number.parseInt(pitFundForm.refresh_days, 10);
+    const refreshDays = Number.isFinite(refreshDaysInput)
+      ? Math.max(refreshDaysInput, 0)
+      : 30;
+    return {
+      start: pitFundForm.start || null,
+      end: pitFundForm.end || null,
+      report_delay_days: delayDays,
+      missing_report_delay_days: missingDelayDays,
+      shares_delay_days: sharesDelayDays,
+      shares_preference: pitFundForm.shares_preference || "diluted",
+      price_source: pitFundForm.price_source || "raw",
+      min_delay_seconds: minDelay,
+      refresh_days: refreshDays,
+      asset_types: pitFundForm.asset_types || "STOCK",
+      project_only: !!pitFundForm.project_only,
+      ...overrides,
+    };
+  };
+
+  const createPitFundCacheJob = async () => {
+    setPitFundCacheLoading(true);
     setPitFundActionError("");
     setPitFundActionResult("");
     try {
-      const delayDays = Math.max(Number.parseInt(pitFundForm.report_delay_days, 10) || 1, 0);
-      const missingDelayDays = Math.max(
-        Number.parseInt(pitFundForm.missing_report_delay_days, 10) || 45,
-        0
-      );
-      const sharesDelayDays = Math.max(
-        Number.parseInt(pitFundForm.shares_delay_days, 10) || 45,
-        0
-      );
-      const minDelay = Math.max(Number.parseFloat(pitFundForm.min_delay_seconds) || 0, 0);
-      const refreshDaysInput = Number.parseInt(pitFundForm.refresh_days, 10);
-      const refreshDays = Number.isFinite(refreshDaysInput)
-        ? Math.max(refreshDaysInput, 0)
-        : 30;
-      const payload = {
-        start: pitFundForm.start || null,
-        end: pitFundForm.end || null,
-        report_delay_days: delayDays,
-        missing_report_delay_days: missingDelayDays,
-        shares_delay_days: sharesDelayDays,
-        shares_preference: pitFundForm.shares_preference || "diluted",
-        price_source: pitFundForm.price_source || "raw",
-        min_delay_seconds: minDelay,
-        refresh_days: refreshDays,
-        refresh_fundamentals: pitFundForm.refresh_fundamentals,
-        asset_types: pitFundForm.asset_types || "STOCK",
-      };
+      const payload = buildPitFundPayload({
+        refresh_fundamentals: true,
+        build_pit_fundamentals: false,
+      });
+      const res = await api.post<PitFundamentalJob>("/api/pit/fundamental-jobs", payload);
+      setPitFundActionResult(t("data.pitFund.cacheCreated", { id: res.data.id }));
+      await loadPitFundJobs();
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("data.pitFund.error");
+      setPitFundActionError(String(detail));
+    } finally {
+      setPitFundCacheLoading(false);
+    }
+  };
+
+  const createPitFundSnapshotJob = async () => {
+    setPitFundSnapshotLoading(true);
+    setPitFundActionError("");
+    setPitFundActionResult("");
+    try {
+      const payload = buildPitFundPayload({
+        refresh_fundamentals: false,
+        build_pit_fundamentals: true,
+      });
       const res = await api.post<PitFundamentalJob>("/api/pit/fundamental-jobs", payload);
       setPitFundActionResult(t("data.pitFund.created", { id: res.data.id }));
       await loadPitFundJobs();
@@ -1658,7 +1880,7 @@ export default function DataPage() {
       const detail = err?.response?.data?.detail || t("data.pitFund.error");
       setPitFundActionError(String(detail));
     } finally {
-      setPitFundActionLoading(false);
+      setPitFundSnapshotLoading(false);
     }
   };
 
@@ -1950,11 +2172,138 @@ export default function DataPage() {
     return text === key ? value : text;
   };
 
+  const renderPitFundMode = (job?: PitFundamentalJob | null) => {
+    if (!job) {
+      return t("common.none");
+    }
+    const params = job.params || {};
+    const refresh = Boolean(params["refresh_fundamentals"]);
+    const buildParam = params["build_pit_fundamentals"];
+    const build = buildParam === undefined ? true : Boolean(buildParam);
+    if (refresh && build) {
+      return t("data.pitFund.mode.both");
+    }
+    if (refresh && !build) {
+      return t("data.pitFund.mode.cache");
+    }
+    if (!refresh && build) {
+      return t("data.pitFund.mode.snapshot");
+    }
+    return t("data.pitFund.mode.none");
+  };
+
   const renderPretradeStep = (stepKey: string) => {
     const key = `data.pretrade.steps.${stepKey}`;
     const text = t(key);
     return text === key ? stepKey : text;
   };
+
+  const renderPretradeStepDesc = (stepKey: string) => {
+    const key = `data.pretrade.stepsDesc.${stepKey}`;
+    const text = t(key);
+    return text === key ? "" : text;
+  };
+
+  function buildPretradeStepPlan(): PreTradeTemplateStepPlan[] {
+    return PRETRADE_STEP_KEYS.map((key) => ({ key, enabled: true }));
+  }
+
+  function normalizePretradeTemplateSteps(
+    params?: Record<string, unknown> | null
+  ): PreTradeTemplateStepPlan[] {
+    const rawSteps = Array.isArray(params?.steps) ? params?.steps : null;
+    const enabledMap = new Map<string, PreTradeTemplateStepPlan>();
+    if (rawSteps) {
+      rawSteps.forEach((item) => {
+        if (item && typeof item === "object") {
+          const key = String((item as { key?: unknown }).key || "").trim();
+          if (!key) {
+            return;
+          }
+          enabledMap.set(key, {
+            key,
+            enabled: (item as { enabled?: boolean }).enabled !== false,
+            params: (item as { params?: Record<string, unknown> }).params,
+          });
+        }
+      });
+    }
+    const plan: PreTradeTemplateStepPlan[] = PRETRADE_STEP_KEYS.map((key) => {
+      return enabledMap.get(key) ?? { key, enabled: true };
+    });
+    if (rawSteps) {
+      rawSteps.forEach((item) => {
+        const key = String((item as { key?: unknown }).key || "").trim();
+        if (!key || plan.some((step) => step.key === key)) {
+          return;
+        }
+        plan.push({
+          key,
+          enabled: (item as { enabled?: boolean }).enabled !== false,
+          params: (item as { params?: Record<string, unknown> }).params,
+        });
+      });
+    }
+    return plan;
+  }
+
+  function hasAdvancedPretradeParams(params?: Record<string, unknown> | null) {
+    if (!params || typeof params !== "object") {
+      return false;
+    }
+    const keys = Object.keys(params);
+    if (keys.some((key) => key !== "steps")) {
+      return true;
+    }
+    const steps = Array.isArray(params.steps) ? params.steps : [];
+    return steps.some((step) => {
+      if (!step || typeof step !== "object") {
+        return false;
+      }
+      return Boolean((step as { params?: Record<string, unknown> }).params);
+    });
+  }
+
+  const pretradeTemplateParamsPreview = useMemo(() => {
+    const raw = pretradeTemplateForm.params.trim();
+    if (pretradeTemplateUseAdvanced && raw) {
+      try {
+        const parsed = JSON.parse(raw);
+        return {
+          ok: true,
+          value: parsed as Record<string, unknown>,
+          text: JSON.stringify(parsed, null, 2),
+        };
+      } catch (error) {
+        return { ok: false, value: null, text: String(error) };
+      }
+    }
+    const value = {
+      steps: pretradeTemplateSteps.map((step) => ({
+        key: step.key,
+        enabled: step.enabled,
+        ...(step.params ? { params: step.params } : {}),
+      })),
+    };
+    return { ok: true, value, text: JSON.stringify(value, null, 2) };
+  }, [pretradeTemplateForm.params, pretradeTemplateSteps, pretradeTemplateUseAdvanced]);
+
+  function resetPretradeTemplateEditor() {
+    setPretradeTemplateForm({ name: "", params: "" });
+    setPretradeTemplateSteps(buildPretradeStepPlan());
+    setPretradeTemplateEditingId(null);
+    setPretradeTemplateUseAdvanced(false);
+  }
+
+  function applyTemplateToEditor(template: PreTradeTemplate) {
+    setPretradeTemplateForm({
+      name: template.name || "",
+      params: template.params ? JSON.stringify(template.params, null, 2) : "",
+    });
+    setPretradeTemplateSteps(normalizePretradeTemplateSteps(template.params));
+    setPretradeTemplateEditingId(template.id);
+    setPretradeTemplateUseAdvanced(hasAdvancedPretradeParams(template.params));
+  }
 
   const summarizePretradeSteps = (steps: PreTradeStep[]) => {
     const total = steps.length;
@@ -2023,6 +2372,7 @@ export default function DataPage() {
         alpha_compact_days:
           Number.parseInt(alphaFetchForm.alpha_compact_days, 10) || 0,
         auto_sync: true,
+        project_only: !!bulkAutoForm.project_only,
       });
       setBulkJob(res.data);
     } catch (err: any) {
@@ -2827,84 +3177,6 @@ export default function DataPage() {
                 </div>
               </div>
             </div>
-            <div className="card">
-            <div className="card-title">{t("data.register.title")}</div>
-            <div className="card-meta">{t("data.register.meta")}</div>
-            <div style={{ marginTop: "12px", display: "grid", gap: "8px" }}>
-              <input
-                value={form.name}
-                onChange={(e) => updateForm("name", e.target.value)}
-                placeholder={t("data.register.name")}
-                style={{ padding: "10px", borderRadius: "10px", border: "1px solid #e3e6ee" }}
-              />
-              <div style={{ display: "grid", gap: "8px", gridTemplateColumns: "1fr 1fr" }}>
-                <input
-                  value={form.vendor}
-                  onChange={(e) => updateForm("vendor", e.target.value)}
-                  placeholder={t("data.register.vendor")}
-                  style={{ padding: "10px", borderRadius: "10px", border: "1px solid #e3e6ee" }}
-                />
-                <input
-                  value={form.frequency}
-                  onChange={(e) => updateForm("frequency", e.target.value)}
-                  placeholder={t("data.register.frequency")}
-                  style={{ padding: "10px", borderRadius: "10px", border: "1px solid #e3e6ee" }}
-                />
-              </div>
-              <div style={{ display: "grid", gap: "8px", gridTemplateColumns: "1fr 1fr" }}>
-                <input
-                  value={form.asset_class}
-                  onChange={(e) => updateForm("asset_class", e.target.value)}
-                  placeholder={t("data.register.asset")}
-                  style={{ padding: "10px", borderRadius: "10px", border: "1px solid #e3e6ee" }}
-                />
-                <input
-                  value={form.region}
-                  onChange={(e) => updateForm("region", e.target.value)}
-                  placeholder={t("data.register.region")}
-                  style={{ padding: "10px", borderRadius: "10px", border: "1px solid #e3e6ee" }}
-                />
-              </div>
-              <div style={{ display: "grid", gap: "8px", gridTemplateColumns: "1fr 1fr" }}>
-                <input
-                  value={form.coverage_start}
-                  onChange={(e) => updateForm("coverage_start", e.target.value)}
-                  placeholder={t("data.register.start")}
-                  style={{ padding: "10px", borderRadius: "10px", border: "1px solid #e3e6ee" }}
-                />
-                <input
-                  value={form.coverage_end}
-                  onChange={(e) => updateForm("coverage_end", e.target.value)}
-                  placeholder={t("data.register.end")}
-                  style={{ padding: "10px", borderRadius: "10px", border: "1px solid #e3e6ee" }}
-                />
-              </div>
-              <input
-                value={form.source_path}
-                onChange={(e) => updateForm("source_path", e.target.value)}
-                placeholder={t("data.register.path")}
-                style={{ padding: "10px", borderRadius: "10px", border: "1px solid #e3e6ee" }}
-              />
-              {formError && (
-                <div style={{ color: "#d64545", fontSize: "13px" }}>{formError}</div>
-              )}
-              <button
-                onClick={createDataset}
-                style={{
-                  padding: "10px",
-                  borderRadius: "10px",
-                  border: "none",
-                  background: "#0f62fe",
-                  color: "#fff",
-                  fontWeight: 600,
-                  cursor: "pointer",
-                }}
-              >
-                {t("common.actions.save")}
-              </button>
-            </div>
-          </div>
-
         <div className="card">
           <div className="card-title">{t("data.scan.title")}</div>
           <div className="card-meta">{t("data.scan.meta")}</div>
@@ -3289,6 +3561,61 @@ export default function DataPage() {
                 <div className="form-hint">{t("data.pitFund.endHint")}</div>
               </div>
             </div>
+            <div className="section-divider" />
+            <div className="section-title">{t("data.pitFund.cacheSectionTitle")}</div>
+            <div className="form-hint">{t("data.pitFund.cacheSectionHint")}</div>
+            <div className="form-grid two-col">
+              <div>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.1"
+                  className="form-input"
+                  value={pitFundForm.min_delay_seconds}
+                  onChange={(e) => updatePitFundForm("min_delay_seconds", e.target.value)}
+                  placeholder={t("data.pitFund.minDelay")}
+                />
+                <div className="form-hint">{t("data.pitFund.minDelayHint")}</div>
+              </div>
+              <div>
+                <input
+                  type="number"
+                  min="0"
+                  className="form-input"
+                  value={pitFundForm.refresh_days}
+                  onChange={(e) => updatePitFundForm("refresh_days", e.target.value)}
+                  placeholder={t("data.pitFund.refreshDays")}
+                />
+                <div className="form-hint">{t("data.pitFund.refreshDaysHint")}</div>
+              </div>
+            </div>
+            <div className="form-row">
+              <label className="checkbox-row" style={{ marginTop: 0 }}>
+                <input
+                  type="checkbox"
+                  checked={pitFundForm.project_only}
+                  onChange={(e) => updatePitFundForm("project_only", e.target.checked)}
+                />
+                <span>{t("data.pitFund.projectOnly")}</span>
+              </label>
+              <div className="form-hint">{t("data.pitFund.projectOnlyHint")}</div>
+            </div>
+            <div className="form-actions">
+              <button
+                type="button"
+                className="button-secondary"
+                onClick={createPitFundCacheJob}
+                disabled={pitFundCacheLoading || pitFundSnapshotLoading}
+              >
+                {pitFundCacheLoading
+                  ? t("data.pitFund.cacheLoading")
+                  : t("data.pitFund.cacheAction")}
+              </button>
+              <span className="form-note">{t("data.pitFund.cacheNote")}</span>
+            </div>
+            <div className="section-divider" />
+            <div className="section-title">{t("data.pitFund.snapshotSectionTitle")}</div>
+            <div className="form-hint">{t("data.pitFund.snapshotSectionHint")}</div>
             <div className="form-grid two-col">
               <div>
                 <input
@@ -3305,20 +3632,6 @@ export default function DataPage() {
                 <input
                   type="number"
                   min="0"
-                  step="0.1"
-                  className="form-input"
-                  value={pitFundForm.min_delay_seconds}
-                  onChange={(e) => updatePitFundForm("min_delay_seconds", e.target.value)}
-                  placeholder={t("data.pitFund.minDelay")}
-                />
-                <div className="form-hint">{t("data.pitFund.minDelayHint")}</div>
-              </div>
-            </div>
-            <div className="form-grid two-col">
-              <div>
-                <input
-                  type="number"
-                  min="0"
                   className="form-input"
                   value={pitFundForm.missing_report_delay_days}
                   onChange={(e) =>
@@ -3327,16 +3640,6 @@ export default function DataPage() {
                   placeholder={t("data.pitFund.missingDelay")}
                 />
                 <div className="form-hint">{t("data.pitFund.missingDelayHint")}</div>
-              </div>
-              <div>
-                <input
-                  type="text"
-                  className="form-input"
-                  value={pitFundForm.asset_types}
-                  onChange={(e) => updatePitFundForm("asset_types", e.target.value)}
-                  placeholder={t("data.pitFund.assetTypes")}
-                />
-                <div className="form-hint">{t("data.pitFund.assetTypesHint")}</div>
               </div>
             </div>
             <div className="form-grid two-col">
@@ -3377,28 +3680,27 @@ export default function DataPage() {
               </div>
               <div>
                 <input
-                  type="number"
-                  min="0"
+                  type="text"
                   className="form-input"
-                  value={pitFundForm.refresh_days}
-                  onChange={(e) => updatePitFundForm("refresh_days", e.target.value)}
-                  placeholder={t("data.pitFund.refreshDays")}
+                  value={pitFundForm.asset_types}
+                  onChange={(e) => updatePitFundForm("asset_types", e.target.value)}
+                  placeholder={t("data.pitFund.assetTypes")}
                 />
-                <div className="form-hint">{t("data.pitFund.refreshDaysHint")}</div>
+                <div className="form-hint">{t("data.pitFund.assetTypesHint")}</div>
               </div>
             </div>
-            <div className="form-grid two-col">
-              <div>
-                <label className="checkbox-row" style={{ marginTop: 0 }}>
-                  <input
-                    type="checkbox"
-                    checked={pitFundForm.refresh_fundamentals}
-                    onChange={(e) => updatePitFundForm("refresh_fundamentals", e.target.checked)}
-                  />
-                  <span>{t("data.pitFund.refresh")}</span>
-                </label>
-                <div className="form-hint">{t("data.pitFund.refreshHint")}</div>
-              </div>
+            <div className="form-actions">
+              <button
+                type="button"
+                className="primary-button large"
+                onClick={createPitFundSnapshotJob}
+                disabled={pitFundSnapshotLoading || pitFundCacheLoading}
+              >
+                {pitFundSnapshotLoading
+                  ? t("data.pitFund.loading")
+                  : t("data.pitFund.action")}
+              </button>
+              <span className="form-note">{t("data.pitFund.note")}</span>
             </div>
             {pitFundActionError && <div className="form-error">{pitFundActionError}</div>}
             {pitFundActionResult && <div className="form-success">{pitFundActionResult}</div>}
@@ -3408,6 +3710,11 @@ export default function DataPage() {
                   {t("data.pitFund.latest", {
                     id: pitFundJobs[0].id,
                     status: renderStatus(pitFundJobs[0].status),
+                  })}
+                </div>
+                <div>
+                  {t("data.pitFund.latestMode", {
+                    mode: renderPitFundMode(pitFundJobs[0]),
                   })}
                 </div>
                 {pitFundProgress && (
@@ -3551,17 +3858,6 @@ export default function DataPage() {
                 )}
               </div>
             )}
-            <div className="form-actions">
-              <button
-                type="button"
-                className="primary-button large"
-                onClick={createPitFundJob}
-                disabled={pitFundActionLoading}
-              >
-                {pitFundActionLoading ? t("data.pitFund.loading") : t("data.pitFund.action")}
-              </button>
-              <span className="form-note">{t("data.pitFund.note")}</span>
-            </div>
             <div className="section-divider" />
             <div className="form-hint">{t("data.pitFund.historyTitle")}</div>
             {pitFundLoadError && <div className="form-error">{pitFundLoadError}</div>}
@@ -3573,6 +3869,7 @@ export default function DataPage() {
                   <tr>
                     <th>{t("data.pitFund.history.id")}</th>
                     <th>{t("data.pitFund.history.status")}</th>
+                    <th>{t("data.pitFund.history.mode")}</th>
                     <th>{t("data.pitFund.history.count")}</th>
                     <th>{t("data.pitFund.history.progress")}</th>
                     <th>{t("common.labels.createdAt")}</th>
@@ -3584,6 +3881,7 @@ export default function DataPage() {
                     <tr key={job.id}>
                       <td>{job.id}</td>
                       <td>{renderStatus(job.status)}</td>
+                      <td>{renderPitFundMode(job)}</td>
                       <td>{job.snapshot_count ?? t("common.none")}</td>
                       <td>
                         {(() => {
@@ -3854,15 +4152,23 @@ export default function DataPage() {
               {!pretradeRunDetail ? (
                 <div className="form-hint">{t("data.pretrade.steps.empty")}</div>
               ) : (
-                <table className="table">
+                <table className="table pretrade-steps-table">
                   <thead>
                     <tr>
                       <th>{t("data.pretrade.steps.name")}</th>
-                      <th>{t("data.pretrade.steps.status")}</th>
-                      <th>{t("data.pretrade.steps.progress")}</th>
-                      <th>{t("data.pretrade.steps.updatedAt")}</th>
+                      <th className="pretrade-steps-status">
+                        {t("data.pretrade.steps.status")}
+                      </th>
+                      <th className="pretrade-steps-progress">
+                        {t("data.pretrade.steps.progress")}
+                      </th>
+                      <th className="pretrade-steps-updated">
+                        {t("data.pretrade.steps.updatedAt")}
+                      </th>
                       <th>{t("data.pretrade.steps.message")}</th>
-                      <th>{t("data.pretrade.steps.actions")}</th>
+                      <th className="pretrade-steps-actions">
+                        {t("data.pretrade.steps.actions")}
+                      </th>
                     </tr>
                   </thead>
                   <tbody>
@@ -3874,44 +4180,51 @@ export default function DataPage() {
                       const retryable = ["failed"].includes(step.status);
                       return (
                         <tr key={step.id}>
-                          <td>{renderPretradeStep(step.step_key)}</td>
-                          <td>{renderStatus(step.status)}</td>
-                          <td>{progress}</td>
-                          <td>{formatDateTime(step.updated_at)}</td>
+                          <td>
+                            <div>{renderPretradeStep(step.step_key)}</div>
+                            {renderPretradeStepDesc(step.step_key) ? (
+                              <div className="pretrade-step-desc">
+                                {renderPretradeStepDesc(step.step_key)}
+                              </div>
+                            ) : null}
+                          </td>
+                          <td className="pretrade-steps-status">
+                            {renderStatus(step.status)}
+                          </td>
+                          <td className="pretrade-steps-progress">{progress}</td>
+                          <td className="pretrade-steps-updated">
+                            {formatDateTime(step.updated_at)}
+                          </td>
                           <td>
                             <div>{step.message || t("common.none")}</div>
                             {step.next_retry_at && (
-                              <div className="form-hint">
+                              <div className="pretrade-steps-note">
                                 {t("data.pretrade.steps.nextRetry", {
                                   at: formatDateTime(step.next_retry_at),
                                 })}
                               </div>
                             )}
                             {step.log_path && (
-                              <div className="form-hint">
+                              <div className="pretrade-steps-note">
                                 {t("data.pretrade.steps.logPath", {
                                   path: step.log_path,
                                 })}
                               </div>
                             )}
                           </td>
-                          <td>
-                            <div className="table-actions">
-                              <button
-                                type="button"
-                                className="button-secondary button-compact"
-                                disabled={
-                                  pretradeStepRetryLoading[step.id] || !retryable
-                                }
-                                onClick={() =>
-                                  retryPretradeStep(pretradeRunDetail.run.id, step.id)
-                                }
-                              >
-                                {pretradeStepRetryLoading[step.id]
-                                  ? t("data.pretrade.steps.retrying")
-                                  : t("data.pretrade.steps.retry")}
-                              </button>
-                            </div>
+                          <td className="pretrade-steps-actions">
+                            <button
+                              type="button"
+                              className="button-secondary button-compact"
+                              disabled={pretradeStepRetryLoading[step.id] || !retryable}
+                              onClick={() =>
+                                retryPretradeStep(pretradeRunDetail.run.id, step.id)
+                              }
+                            >
+                              {pretradeStepRetryLoading[step.id]
+                                ? t("data.pretrade.steps.retrying")
+                                : t("data.pretrade.steps.retry")}
+                            </button>
                           </td>
                         </tr>
                       );
@@ -3944,6 +4257,7 @@ export default function DataPage() {
                 <div>
                   <label className="form-label">{t("data.pretrade.settings.chatId")}</label>
                   <input
+                    type="password"
                     className="form-input"
                     value={pretradeSettingsForm.telegram_chat_id}
                     onChange={(e) =>
@@ -3951,6 +4265,13 @@ export default function DataPage() {
                     }
                     placeholder={t("data.pretrade.settings.chatId")}
                   />
+                  {pretradeSettings?.telegram_chat_id && (
+                    <div className="form-hint">
+                      {t("data.pretrade.settings.chatIdHint", {
+                        chatId: pretradeSettings.telegram_chat_id,
+                      })}
+                    </div>
+                  )}
                 </div>
                 <div>
                   <label className="form-label">{t("data.pretrade.settings.maxRetries")}</label>
@@ -4010,6 +4331,32 @@ export default function DataPage() {
                     placeholder="America/New_York"
                   />
                 </div>
+                <label className="checkbox-row" style={{ gridColumn: "1 / -1", marginTop: 0 }}>
+                  <input
+                    type="checkbox"
+                    checked={!!pretradeSettingsForm.update_project_only}
+                    onChange={(e) =>
+                      updatePretradeSettingsForm("update_project_only", e.target.checked)
+                    }
+                  />
+                  <span>{t("data.pretrade.settings.projectOnly")}</span>
+                </label>
+                <div className="form-hint" style={{ gridColumn: "1 / -1" }}>
+                  {t("data.pretrade.settings.projectOnlyHint")}
+                </div>
+                <label className="checkbox-row" style={{ gridColumn: "1 / -1", marginTop: 0 }}>
+                  <input
+                    type="checkbox"
+                    checked={!!pretradeSettingsForm.auto_decision_snapshot}
+                    onChange={(e) =>
+                      updatePretradeSettingsForm("auto_decision_snapshot", e.target.checked)
+                    }
+                  />
+                  <span>{t("data.pretrade.settings.autoDecision")}</span>
+                </label>
+                <div className="form-hint" style={{ gridColumn: "1 / -1" }}>
+                  {t("data.pretrade.settings.autoDecisionHint")}
+                </div>
               </div>
               {pretradeSettingsError && (
                 <div className="form-error">{pretradeSettingsError}</div>
@@ -4042,39 +4389,183 @@ export default function DataPage() {
               </div>
               <div className="section-divider" />
               <div className="section-title">{t("data.pretrade.templates.title")}</div>
-              <div className="form-grid two-col">
-                <input
-                  className="form-input"
-                  value={pretradeTemplateForm.name}
-                  onChange={(e) => updatePretradeTemplateForm("name", e.target.value)}
-                  placeholder={t("data.pretrade.templates.name")}
-                />
-                <input
-                  className="form-input"
-                  value={pretradeTemplateForm.params}
-                  onChange={(e) => updatePretradeTemplateForm("params", e.target.value)}
-                  placeholder={t("data.pretrade.templates.params")}
-                />
-              </div>
-              <div className="form-hint">{t("data.pretrade.templates.hint")}</div>
-              <div className="form-actions">
-                <button
-                  type="button"
-                  className="button-secondary"
-                  onClick={createPretradeTemplate}
-                >
-                  {t("data.pretrade.templates.create")}
-                </button>
+              <div className="pretrade-template-editor">
+                {pretradeTemplateEditingId ? (
+                  <div className="pretrade-template-editing">
+                    {t("data.pretrade.templates.editing", { id: pretradeTemplateEditingId })}
+                  </div>
+                ) : null}
+                <div className="form-grid">
+                  <input
+                    className="form-input"
+                    value={pretradeTemplateForm.name}
+                    onChange={(e) => updatePretradeTemplateForm("name", e.target.value)}
+                    placeholder={t("data.pretrade.templates.name")}
+                  />
+                </div>
+                <div className="form-hint">{t("data.pretrade.templates.hint")}</div>
+                <div className="pretrade-template-steps">
+                  <div className="form-label">{t("data.pretrade.templates.stepsTitle")}</div>
+                  {(() => {
+                    const stepMap = new Map(pretradeTemplateSteps.map((step) => [step.key, step]));
+                    const groupedKeys = new Set(
+                      PRETRADE_STEP_GROUPS.flatMap((group) => group.steps)
+                    );
+                    const extraSteps = pretradeTemplateSteps.filter(
+                      (step) => !groupedKeys.has(step.key)
+                    );
+                    const groups = [
+                      ...PRETRADE_STEP_GROUPS.map((group) => ({
+                        ...group,
+                        steps: group.steps
+                          .map((key) => stepMap.get(key))
+                          .filter(Boolean) as PreTradeTemplateStepPlan[],
+                      })),
+                      ...(extraSteps.length
+                        ? [{ key: "other", steps: extraSteps }]
+                        : []),
+                    ];
+                    return groups.map((group) => (
+                      <div key={group.key} className="pretrade-step-group">
+                        <div className="pretrade-step-group-title">
+                          {t(`data.pretrade.stepsGroup.${group.key}`)}
+                        </div>
+                        <div className="pretrade-step-group-hint">
+                          {t(`data.pretrade.stepsGroup.${group.key}Hint`)}
+                        </div>
+                        <div className="pretrade-step-grid">
+                          {group.steps.map((step) => (
+                            <label key={step.key} className="pretrade-step-item">
+                              <input
+                                type="checkbox"
+                                checked={step.enabled}
+                                onChange={(event) => {
+                                  const enabled = event.target.checked;
+                                  setPretradeTemplateSteps((prev) =>
+                                    prev.map((item) =>
+                                      item.key === step.key ? { ...item, enabled } : item
+                                    )
+                                  );
+                                }}
+                              />
+                              <div className="pretrade-step-info">
+                                <div className="pretrade-step-name">
+                                  {renderPretradeStep(step.key)}
+                                </div>
+                                {renderPretradeStepDesc(step.key) ? (
+                                  <div className="pretrade-step-desc">
+                                    {renderPretradeStepDesc(step.key)}
+                                  </div>
+                                ) : null}
+                              </div>
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                    ));
+                  })()}
+                  <div className="pretrade-template-actions">
+                    <button
+                      type="button"
+                      className="button-secondary button-compact"
+                      onClick={() =>
+                        setPretradeTemplateSteps(
+                          pretradeTemplateSteps.map((step) => ({ ...step, enabled: true }))
+                        )
+                      }
+                    >
+                      {t("data.pretrade.templates.selectAll")}
+                    </button>
+                    <button
+                      type="button"
+                      className="button-secondary button-compact"
+                      onClick={() =>
+                        setPretradeTemplateSteps(
+                          pretradeTemplateSteps.map((step) => ({ ...step, enabled: false }))
+                        )
+                      }
+                    >
+                      {t("data.pretrade.templates.clearAll")}
+                    </button>
+                    <button
+                      type="button"
+                      className="button-secondary button-compact"
+                      onClick={() => setPretradeTemplateSteps(buildPretradeStepPlan())}
+                    >
+                      {t("data.pretrade.templates.reset")}
+                    </button>
+                  </div>
+                </div>
+                <div className="pretrade-template-advanced">
+                  <label className="pretrade-template-toggle">
+                    <input
+                      type="checkbox"
+                      checked={pretradeTemplateUseAdvanced}
+                      onChange={(event) => setPretradeTemplateUseAdvanced(event.target.checked)}
+                    />
+                    {t("data.pretrade.templates.useAdvanced")}
+                  </label>
+                  <textarea
+                    className="form-textarea"
+                    rows={4}
+                    value={pretradeTemplateForm.params}
+                    onChange={(e) => updatePretradeTemplateForm("params", e.target.value)}
+                    placeholder={t("data.pretrade.templates.params")}
+                    disabled={!pretradeTemplateUseAdvanced}
+                  />
+                  <div className="form-hint">{t("data.pretrade.templates.advancedHint")}</div>
+                </div>
+                <div className="pretrade-template-preview">
+                  <div className="form-label">{t("data.pretrade.templates.preview")}</div>
+                  <textarea
+                    className="form-textarea"
+                    rows={6}
+                    readOnly
+                    value={pretradeTemplateParamsPreview.text}
+                  />
+                  {!pretradeTemplateParamsPreview.ok && (
+                    <div className="form-error">{t("data.pretrade.templateParseError")}</div>
+                  )}
+                </div>
+                <div className="form-actions">
+                  {pretradeTemplateEditingId ? (
+                    <>
+                      <button
+                        type="button"
+                        className="button-primary"
+                        onClick={updatePretradeTemplate}
+                      >
+                        {t("data.pretrade.templates.update")}
+                      </button>
+                      <button
+                        type="button"
+                        className="button-secondary"
+                        onClick={resetPretradeTemplateEditor}
+                      >
+                        {t("data.pretrade.templates.cancelEdit")}
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      className="button-secondary"
+                      onClick={createPretradeTemplate}
+                    >
+                      {t("data.pretrade.templates.create")}
+                    </button>
+                  )}
+                </div>
               </div>
               {pretradeTemplates.length === 0 ? (
                 <div className="form-hint">{t("data.pretrade.templates.empty")}</div>
               ) : (
-                <table className="table">
+                <table className="table pretrade-templates-table">
                   <thead>
                     <tr>
                       <th>{t("data.pretrade.templates.id")}</th>
                       <th>{t("data.pretrade.templates.name")}</th>
                       <th>{t("data.pretrade.templates.active")}</th>
+                      <th>{t("data.pretrade.templates.stepsSummary")}</th>
                       <th>{t("common.labels.createdAt")}</th>
                       <th>{t("data.pretrade.templates.actions")}</th>
                     </tr>
@@ -4085,9 +4576,37 @@ export default function DataPage() {
                         <td>{template.id}</td>
                         <td>{template.name}</td>
                         <td>{template.is_active ? t("common.boolean.true") : t("common.boolean.false")}</td>
+                        <td>
+                          {(() => {
+                            const steps = normalizePretradeTemplateSteps(template.params);
+                            const enabled = steps.filter((step) => step.enabled).length;
+                            return t("data.pretrade.templates.stepsCount", {
+                              enabled,
+                              total: steps.length,
+                            });
+                          })()}
+                        </td>
                         <td>{formatDateTime(template.created_at)}</td>
                         <td>
                           <div className="table-actions">
+                            <button
+                              type="button"
+                              className="button-secondary button-compact"
+                              onClick={() =>
+                                setPretradeTemplatePreviewId((prev) =>
+                                  prev === template.id ? null : template.id
+                                )
+                              }
+                            >
+                              {t("data.pretrade.templates.details")}
+                            </button>
+                            <button
+                              type="button"
+                              className="button-secondary button-compact"
+                              onClick={() => applyTemplateToEditor(template)}
+                            >
+                              {t("data.pretrade.templates.edit")}
+                            </button>
                             <button
                               type="button"
                               className="button-secondary button-compact"
@@ -4101,6 +4620,14 @@ export default function DataPage() {
                                 ? t("data.pretrade.templates.activating")
                                 : t("data.pretrade.templates.activate")}
                             </button>
+                            <button
+                              type="button"
+                              className="danger-button"
+                              disabled={pretradeTemplateDeleteLoading[template.id]}
+                              onClick={() => deletePretradeTemplate(template.id)}
+                            >
+                              {t("data.pretrade.templates.delete")}
+                            </button>
                           </div>
                         </td>
                       </tr>
@@ -4108,6 +4635,68 @@ export default function DataPage() {
                   </tbody>
                 </table>
               )}
+              {pretradeTemplatePreviewId ? (
+                <div className="pretrade-template-detail">
+                  {(() => {
+                    const selected = pretradeTemplates.find(
+                      (item) => item.id === pretradeTemplatePreviewId
+                    );
+                    if (!selected) {
+                      return null;
+                    }
+                    const steps = normalizePretradeTemplateSteps(selected.params);
+                    return (
+                      <>
+                        <div className="pretrade-template-detail-title">
+                          {t("data.pretrade.templates.detailTitle", { id: selected.id })}
+                        </div>
+                        {steps.length === 0 ? (
+                          <div className="form-hint">
+                            {t("data.pretrade.templates.noSteps")}
+                          </div>
+                        ) : (
+                          <table className="table pretrade-template-detail-table">
+                            <thead>
+                              <tr>
+                                <th>{t("data.pretrade.steps.name")}</th>
+                                <th>{t("data.pretrade.steps.status")}</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {steps.map((step) => (
+                                <tr key={step.key}>
+                                  <td>
+                                    <div>{renderPretradeStep(step.key)}</div>
+                                    {renderPretradeStepDesc(step.key) ? (
+                                      <div className="pretrade-step-desc">
+                                        {renderPretradeStepDesc(step.key)}
+                                      </div>
+                                    ) : null}
+                                  </td>
+                                  <td>
+                                    {step.enabled
+                                      ? t("common.boolean.true")
+                                      : t("common.boolean.false")}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        )}
+                        <div className="form-hint">
+                          {t("data.pretrade.templates.paramsPreview")}
+                        </div>
+                        <textarea
+                          className="form-textarea"
+                          rows={6}
+                          readOnly
+                          value={JSON.stringify(selected.params ?? {}, null, 2)}
+                        />
+                      </>
+                    );
+                  })()}
+                </div>
+              ) : null}
             </div>
             <div className="card">
           <div className="card-title">{t("data.bulk.title")}</div>
@@ -4223,6 +4812,15 @@ export default function DataPage() {
                     <span>{t("data.bulk.onlyMissing")}</span>
                   </label>
                 </div>
+                <label className="checkbox-row" style={{ marginTop: 0 }}>
+                  <input
+                    type="checkbox"
+                    checked={bulkAutoForm.project_only}
+                    onChange={(e) => updateBulkAutoForm("project_only", e.target.checked)}
+                  />
+                  <span>{t("data.bulk.projectOnly")}</span>
+                </label>
+                <div className="form-hint">{t("data.bulk.projectOnlyHint")}</div>
                 <div className="form-hint">{t("data.bulk.listing.title")}</div>
                 <div className="form-grid two-col">
                   <select
@@ -4678,6 +5276,108 @@ export default function DataPage() {
                 </strong>
               </div>
             </div>
+          )}
+          {tradingCalendarPreview && (
+            <div className="trading-calendar-preview">
+              <div className="section-title">
+                {t("data.tradingCalendar.previewTitle")}
+              </div>
+              <div className="meta-list">
+                <div className="meta-row">
+                  <span>{t("data.tradingCalendar.previewAsOf")}</span>
+                  <strong>{tradingCalendarPreview.as_of_date || "-"}</strong>
+                </div>
+                <div className="meta-row">
+                  <span>{t("data.tradingCalendar.previewTimezone")}</span>
+                  <strong>{tradingCalendarPreview.timezone || "-"}</strong>
+                </div>
+                <div className="meta-row">
+                  <span>{t("data.tradingCalendar.latestDay")}</span>
+                  <strong>{tradingCalendarPreview.latest_trading_day || "-"}</strong>
+                </div>
+                <div className="meta-row">
+                  <span>{t("data.tradingCalendar.nextDay")}</span>
+                  <strong>{tradingCalendarPreview.next_trading_day || "-"}</strong>
+                </div>
+                {Number.isFinite(tradingCalendarPreview.calendar_sessions) && (
+                  <div className="meta-row">
+                    <span>{t("data.tradingCalendar.sessions")}</span>
+                    <strong>{tradingCalendarPreview.calendar_sessions}</strong>
+                  </div>
+                )}
+                {Number.isFinite(tradingCalendarPreview.overrides_applied) && (
+                  <div className="meta-row">
+                    <span>{t("data.tradingCalendar.overridesApplied")}</span>
+                    <strong>{tradingCalendarPreview.overrides_applied}</strong>
+                  </div>
+                )}
+              </div>
+              <div className="calendar-view">
+                <div className="calendar-view-header">
+                  <div>
+                    <div className="calendar-view-title">
+                      {t("data.tradingCalendar.calendarViewTitle")}
+                    </div>
+                    <div className="calendar-view-meta">
+                      {t("data.tradingCalendar.weekDays", {
+                        count: calendarWeekTradingCount,
+                      })}
+                    </div>
+                  </div>
+                  <div className="calendar-view-actions">
+                    <button
+                      type="button"
+                      className="button-secondary"
+                      onClick={() => shiftCalendarMonth(-1)}
+                    >
+                      {t("data.tradingCalendar.prevMonth")}
+                    </button>
+                    <div className="calendar-view-month">{calendarMonthLabel || "-"}</div>
+                    <button
+                      type="button"
+                      className="button-secondary"
+                      onClick={() => shiftCalendarMonth(1)}
+                    >
+                      {t("data.tradingCalendar.nextMonth")}
+                    </button>
+                  </div>
+                </div>
+                <div className="calendar-grid">
+                  {calendarWeekdayLabels.map((label, index) => (
+                    <div className="calendar-weekday" key={`${label}-${index}`}>
+                      {label}
+                    </div>
+                  ))}
+                  {calendarMonthDays.length ? (
+                    calendarMonthDays.map((day) => {
+                      const isToday = day.date === tradingCalendarPreview.as_of_date;
+                      const inMonth =
+                        day.in_month ?? (calendarMonthLabel && day.date.startsWith(calendarMonthLabel));
+                      return (
+                        <div
+                          key={day.date}
+                          className={`calendar-day${day.is_trading ? " trading" : " closed"}${
+                            inMonth ? "" : " outside"
+                          }${isToday ? " today" : ""}`}
+                        >
+                          <div className="calendar-day-number">{day.date.slice(-2)}</div>
+                          <div
+                            className={`calendar-day-dot${
+                              day.is_trading ? " trading" : " closed"
+                            }`}
+                          />
+                        </div>
+                      );
+                    })
+                  ) : (
+                    <div className="calendar-empty">{t("data.tradingCalendar.previewEmpty")}</div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+          {tradingCalendarPreviewError && (
+            <div className="form-error">{tradingCalendarPreviewError}</div>
           )}
           <div className="trading-calendar-section">
             <div className="section-title">{t("data.tradingCalendar.configTitle")}</div>

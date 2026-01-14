@@ -27,6 +27,9 @@ class Project(Base):
     )
     ml_train_jobs: Mapped[list["MLTrainJob"]] = relationship(back_populates="project")
     ml_pipelines: Mapped[list["MLPipelineRun"]] = relationship(back_populates="project")
+    decision_snapshots: Mapped[list["DecisionSnapshot"]] = relationship(
+        back_populates="project"
+    )
     factor_score_jobs: Mapped[list["FactorScoreJob"]] = relationship(
         back_populates="project"
     )
@@ -106,6 +109,30 @@ class MLPipelineRun(Base):
     project: Mapped[Project] = relationship(back_populates="ml_pipelines")
     train_jobs: Mapped[list["MLTrainJob"]] = relationship(back_populates="pipeline")
     backtests: Mapped[list["BacktestRun"]] = relationship(back_populates="pipeline")
+
+
+class DecisionSnapshot(Base):
+    __tablename__ = "decision_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False)
+    pipeline_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    train_job_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="queued")
+    snapshot_date: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    params: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    summary: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    artifact_dir: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    summary_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    items_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    filters_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    log_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    project: Mapped[Project] = relationship(back_populates="decision_snapshots")
 
 
 class FactorScoreJob(Base):
@@ -460,6 +487,8 @@ class PreTradeSettings(Base):
     retry_max_delay_seconds: Mapped[int] = mapped_column(Integer, default=1800)
     deadline_time: Mapped[str | None] = mapped_column(String(16), nullable=True)
     deadline_timezone: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    update_project_only: Mapped[bool] = mapped_column(Boolean, default=True)
+    auto_decision_snapshot: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow

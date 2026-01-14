@@ -143,6 +143,16 @@ def _split_symbols(value: str) -> list[str]:
     return [symbol for symbol in symbols if symbol]
 
 
+def _parse_symbol_list(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip().upper() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        return _split_symbols(value)
+    return []
+
+
 def _flatten_columns(columns) -> list[str]:
     flattened: list[str] = []
     for col in columns:
@@ -1358,6 +1368,21 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
         risk_cfg.get("market_ma_window", weights_cfg.get("market_ma_window", 200)), 200
     )
     risk_off_mode = str(risk_cfg.get("risk_off_mode") or weights_cfg.get("risk_off_mode") or "cash").strip().lower()
+    risk_off_symbol = str(
+        risk_cfg.get("risk_off_symbol") or weights_cfg.get("risk_off_symbol") or ""
+    ).strip().upper()
+    risk_off_symbols = _parse_symbol_list(
+        risk_cfg.get("risk_off_symbols") or weights_cfg.get("risk_off_symbols") or ""
+    )
+    if risk_off_symbol and risk_off_symbol not in risk_off_symbols:
+        risk_off_symbols = [risk_off_symbol, *risk_off_symbols]
+    risk_off_pick = str(
+        risk_cfg.get("risk_off_pick") or weights_cfg.get("risk_off_pick") or "best_momentum"
+    ).strip().lower()
+    risk_off_lookback_days = _coerce_int(
+        risk_cfg.get("risk_off_lookback_days", weights_cfg.get("risk_off_lookback_days", 20)),
+        20,
+    )
     max_exposure = _coerce_float(risk_cfg.get("max_exposure", weights_cfg.get("max_exposure", 1.0)), 1.0)
     if max_exposure <= 0:
         max_exposure = 0.0
@@ -1650,6 +1675,72 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
     )
     returns = trade_prices.shift(-1) / trade_prices - 1
     returns = returns.fillna(0.0)
+
+    def _pick_risk_off_symbol(snapshot_pos: int) -> str | None:
+        if risk_off_symbol and risk_off_symbol in trade_prices.columns:
+            return risk_off_symbol
+        candidates = [symbol for symbol in risk_off_symbols if symbol in trade_prices.columns]
+        if not candidates:
+            return None
+        if len(candidates) == 1:
+            return candidates[0]
+        window_start = max(0, snapshot_pos - risk_off_lookback_days + 1)
+        best_symbol = None
+        best_score = None
+        for symbol in candidates:
+            series = trade_prices.iloc[window_start : snapshot_pos + 1][symbol].dropna()
+            if len(series) < 2:
+                continue
+            series_returns = series.pct_change().dropna()
+            if series_returns.empty:
+                continue
+            if risk_off_pick == "lowest_vol":
+                score = float(series_returns.std())
+                if best_score is None or score < best_score:
+                    best_score = score
+                    best_symbol = symbol
+            else:
+                score = float(series.iloc[-1] / series.iloc[0] - 1.0)
+                if best_score is None or score > best_score:
+                    best_score = score
+                    best_symbol = symbol
+        if best_symbol:
+            return best_symbol
+        return candidates[0]
+
+    def _append_snapshot_row(
+        *,
+        snapshot_date: date,
+        rebalance: date,
+        signal_mode: str,
+        score_date: date | None,
+        active_count: int,
+        selected_count: int,
+        risk_off: bool,
+        risk_off_reason: str,
+        risk_off_symbol_used: str,
+        cash_weight: float | None,
+        weights_sum: float | None,
+        turnover_scale: float | None,
+    ) -> None:
+        snapshot_rows.append(
+            {
+                "snapshot_date": snapshot_date.isoformat(),
+                "rebalance_date": rebalance.isoformat(),
+                "signal_mode": signal_mode,
+                "score_date": score_date.isoformat() if score_date else "",
+                "active_count": str(active_count),
+                "selected_count": str(selected_count),
+                "risk_off": "1" if risk_off else "0",
+                "risk_off_reason": risk_off_reason,
+                "risk_off_mode": risk_off_mode if risk_off else "",
+                "risk_off_symbol": risk_off_symbol_used,
+                "cash_weight": f"{cash_weight:.8f}" if cash_weight is not None else "",
+                "weights_sum": f"{weights_sum:.8f}" if weights_sum is not None else "",
+                "turnover_scale": f"{turnover_scale:.6f}" if turnover_scale is not None else "",
+                "max_exposure": f"{max_exposure:.6f}",
+            }
+        )
     min_history_days = int(weights_cfg.get("min_history_days") or 0)
     min_price = float(weights_cfg.get("min_price") or 0.0)
     valid_counts = prices.notna().cumsum()
@@ -1963,6 +2054,7 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
         ensure_dir(universe_dir)
 
     filter_counts: dict[str, int] = {}
+    snapshot_rows: list[dict[str, str]] = []
     prev_weights_row = pd.Series(0.0, index=prices.columns)
     smoothed_scores: dict[str, float] = {}
     max_holdings_trimmed = 0
@@ -2111,6 +2203,7 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
         selected_symbols: list[str] = []
         selected_scores: dict[str, float] = {}
         risk_off = False
+        risk_off_symbol_used = ""
         if market_filter and benchmark_sma is not None and benchmark_series is not None:
             try:
                 bench_price = float(benchmark_series.iloc[snapshot_pos])
@@ -2127,6 +2220,14 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
             signal_mode_used = "risk_off"
             if risk_off_mode == "benchmark" and benchmark_symbol in prices.columns:
                 weights_for_symbols = {benchmark_symbol: 1.0}
+                risk_off_symbol_used = benchmark_symbol
+            elif risk_off_mode in {"defensive", "bond", "safe"}:
+                picked = _pick_risk_off_symbol(snapshot_pos)
+                if picked:
+                    weights_for_symbols = {picked: 1.0}
+                    risk_off_symbol_used = picked
+                else:
+                    weights_for_symbols = {}
             else:
                 weights_for_symbols = {}
 
@@ -2257,6 +2358,20 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
             weights.iloc[start_idx:end_idx] = weight_series
             prev_weights_row = weight_series
             cash_weight_sum += 1.0
+            _append_snapshot_row(
+                snapshot_date=snapshot_date,
+                rebalance=rebalance,
+                signal_mode=signal_mode_used,
+                score_date=score_date,
+                active_count=len(active_symbols),
+                selected_count=0,
+                risk_off=True,
+                risk_off_reason="market_filter" if market_filter else "",
+                risk_off_symbol_used=risk_off_symbol_used,
+                cash_weight=1.0,
+                weights_sum=0.0,
+                turnover_scale=None,
+            )
             continue
         if not weights_for_symbols:
             continue
@@ -2309,6 +2424,7 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
             total_weight = float(weight_series.sum())
             if total_weight > 0:
                 weight_series = weight_series / total_weight
+        turnover_scale = None
         if turnover_limit and turnover_limit > 0:
             weight_series, planned_turnover, scale = _apply_turnover_limit(
                 weight_series, prev_weights_row, turnover_limit
@@ -2316,6 +2432,7 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
             if scale < 1.0:
                 turnover_limited += 1
                 turnover_scale_sum += scale
+            turnover_scale = scale
             cash_weight_sum += max(0.0, 1.0 - float(weight_series.sum()))
         for symbol, weight in weight_series.items():
             if weight <= 0:
@@ -2345,6 +2462,20 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
         )
         weights.iloc[start_idx:end_idx] = weight_series
         prev_weights_row = weight_series
+        _append_snapshot_row(
+            snapshot_date=snapshot_date,
+            rebalance=rebalance,
+            signal_mode=signal_mode_used,
+            score_date=score_date,
+            active_count=len(active_symbols),
+            selected_count=len(weights_for_symbols),
+            risk_off=risk_off,
+            risk_off_reason="market_filter" if risk_off else "",
+            risk_off_symbol_used=risk_off_symbol_used,
+            cash_weight=max(0.0, 1.0 - float(weight_series.sum())),
+            weights_sum=float(weight_series.sum()),
+            turnover_scale=turnover_scale,
+        )
 
     portfolio_returns = (weights * returns).sum(axis=1)
     turnover_by_date: dict[str, float] = {}
@@ -2464,6 +2595,10 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
         "market_filter": market_filter,
         "market_ma_window": market_ma_window,
         "risk_off_mode": risk_off_mode,
+        "risk_off_symbol": risk_off_symbol,
+        "risk_off_symbols": risk_off_symbols,
+        "risk_off_pick": risk_off_pick,
+        "risk_off_lookback_days": risk_off_lookback_days,
         "max_exposure": max_exposure,
         "risk_off_count": risk_off_count,
         "fee_bps": fee_bps,
@@ -2530,6 +2665,30 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
         )
         summary["weights_path"] = str(weights_path)
         summary["weights_count"] = len(weight_rows)
+    if snapshot_rows:
+        snapshot_path = out_dir / "snapshot_summary.csv"
+        write_csv(
+            snapshot_path,
+            snapshot_rows,
+            [
+                "snapshot_date",
+                "rebalance_date",
+                "signal_mode",
+                "score_date",
+                "active_count",
+                "selected_count",
+                "risk_off",
+                "risk_off_reason",
+                "risk_off_mode",
+                "risk_off_symbol",
+                "cash_weight",
+                "weights_sum",
+                "turnover_scale",
+                "max_exposure",
+            ],
+        )
+        summary["snapshot_summary_path"] = str(snapshot_path)
+        summary["snapshot_summary_count"] = len(snapshot_rows)
     summary_path = out_dir / "summary.json"
     summary_path.write_text(
         json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"

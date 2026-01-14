@@ -47,6 +47,11 @@ interface AlgorithmVersion {
   created_at: string;
 }
 
+interface AlgorithmVersionDetail extends AlgorithmVersion {
+  content_hash?: string | null;
+  params?: Record<string, any> | null;
+}
+
 interface MLTrainJob {
   id: number;
   project_id: number;
@@ -65,6 +70,38 @@ interface MLTrainJob {
   created_at: string;
   started_at?: string | null;
   ended_at?: string | null;
+}
+
+interface DecisionSnapshotItem {
+  symbol: string;
+  snapshot_date: string;
+  rebalance_date: string;
+  company_name?: string | null;
+  weight?: number | null;
+  score?: number | null;
+  rank?: number | null;
+  theme?: string | null;
+  reason?: string | null;
+  snapshot_price?: number | null;
+}
+
+interface DecisionSnapshotDetail {
+  id?: number | null;
+  project_id: number;
+  pipeline_id?: number | null;
+  train_job_id?: number | null;
+  status?: string | null;
+  snapshot_date?: string | null;
+  summary?: Record<string, any> | null;
+  params?: Record<string, any> | null;
+  artifact_dir?: string | null;
+  summary_path?: string | null;
+  items_path?: string | null;
+  filters_path?: string | null;
+  message?: string | null;
+  items?: DecisionSnapshotItem[];
+  filters?: DecisionSnapshotItem[];
+  created_at?: string | null;
 }
 
 interface ThemeSystemMeta {
@@ -549,6 +586,10 @@ export default function ProjectsPage() {
   const [autoWeeklyLoading, setAutoWeeklyLoading] = useState(false);
   const [algorithms, setAlgorithms] = useState<Algorithm[]>([]);
   const [algorithmVersions, setAlgorithmVersions] = useState<AlgorithmVersion[]>([]);
+  const [algorithmVersionDetail, setAlgorithmVersionDetail] =
+    useState<AlgorithmVersionDetail | null>(null);
+  const [algorithmVersionDetailMessage, setAlgorithmVersionDetailMessage] =
+    useState("");
   const [binding, setBinding] = useState<ProjectAlgorithmBinding | null>(null);
   const [bindingForm, setBindingForm] = useState({
     algorithmId: "",
@@ -558,6 +599,8 @@ export default function ProjectsPage() {
   const [bindingMessage, setBindingMessage] = useState("");
   const [benchmarkMessage, setBenchmarkMessage] = useState("");
   const [mlJobs, setMlJobs] = useState<MLTrainJob[]>([]);
+  const [mlJobPage, setMlJobPage] = useState(1);
+  const [mlJobPageSize, setMlJobPageSize] = useState(10);
   const [mlMessage, setMlMessage] = useState("");
   const [mlLoading, setMlLoading] = useState(false);
   const [mlActionLoadingId, setMlActionLoadingId] = useState<number | null>(null);
@@ -618,6 +661,13 @@ export default function ProjectsPage() {
   const [pipelineBacktestRunning, setPipelineBacktestRunning] = useState(false);
   const [pipelineBacktestRunMessage, setPipelineBacktestRunMessage] = useState("");
   const [activePipelineId, setActivePipelineId] = useState<number | null>(null);
+  const [decisionLatest, setDecisionLatest] = useState<DecisionSnapshotDetail | null>(null);
+  const [decisionPreview, setDecisionPreview] = useState<DecisionSnapshotDetail | null>(null);
+  const [decisionLoading, setDecisionLoading] = useState(false);
+  const [decisionMode, setDecisionMode] = useState<"selected" | "filtered">("selected");
+  const [decisionTrainJobId, setDecisionTrainJobId] = useState<string>("");
+  const [decisionSnapshotDate, setDecisionSnapshotDate] = useState("");
+  const [decisionMessage, setDecisionMessage] = useState("");
   const [factorJobs, setFactorJobs] = useState<FactorScoreJob[]>([]);
   const [factorLoadError, setFactorLoadError] = useState("");
   const [factorActionMessage, setFactorActionMessage] = useState("");
@@ -851,6 +901,19 @@ export default function ProjectsPage() {
     }
   };
 
+  const loadAlgorithmVersionDetail = async (algorithmId: number, versionId: number) => {
+    try {
+      setAlgorithmVersionDetailMessage("");
+      const res = await api.get<AlgorithmVersionDetail>(
+        `/api/algorithms/${algorithmId}/versions/${versionId}`
+      );
+      setAlgorithmVersionDetail(res.data);
+    } catch (err) {
+      setAlgorithmVersionDetail(null);
+      setAlgorithmVersionDetailMessage(t("projects.algorithm.summaryError"));
+    }
+  };
+
   const loadProjectBinding = async (projectId: number) => {
     try {
       const res = await api.get<ProjectAlgorithmBinding>(
@@ -877,9 +940,11 @@ export default function ProjectsPage() {
         params: { project_id: projectId },
       });
       setMlJobs(res.data || []);
+      setMlJobPage(1);
       setMlMessage("");
     } catch (err) {
       setMlJobs([]);
+      setMlJobPage(1);
       setMlMessage(t("projects.ml.error"));
     }
   };
@@ -907,6 +972,82 @@ export default function ProjectsPage() {
     } catch (err) {
       setPipelines([]);
       setPipelineMessage(t("projects.pipeline.error"));
+    }
+  };
+
+  const loadDecisionLatest = async (projectId: number) => {
+    try {
+      const res = await api.get<DecisionSnapshotDetail>("/api/decisions/latest", {
+        params: { project_id: projectId },
+      });
+      setDecisionLatest(res.data);
+      setDecisionMessage("");
+    } catch (err: any) {
+      if (err?.response?.status === 404) {
+        setDecisionLatest(null);
+        return;
+      }
+      setDecisionLatest(null);
+      setDecisionMessage(t("projects.decision.loadError"));
+    }
+  };
+
+  const buildDecisionPayload = () => {
+    const trainJobId = decisionTrainJobId
+      ? Number(decisionTrainJobId)
+      : mlActiveJob?.id;
+    const payload: Record<string, any> = {
+      project_id: selectedProjectId,
+      pipeline_id: activePipelineId ?? undefined,
+      algorithm_parameters: buildPipelineBacktestAlgorithmParams(),
+    };
+    if (trainJobId) {
+      payload.train_job_id = trainJobId;
+    }
+    if (decisionSnapshotDate) {
+      payload.snapshot_date = decisionSnapshotDate;
+    }
+    return payload;
+  };
+
+  const previewDecisionSnapshot = async () => {
+    if (!selectedProjectId) {
+      return;
+    }
+    setDecisionLoading(true);
+    setDecisionMessage("");
+    try {
+      const payload = buildDecisionPayload();
+      const res = await api.post<DecisionSnapshotDetail>(
+        "/api/decisions/preview",
+        payload,
+        { timeout: 120000 }
+      );
+      setDecisionPreview(res.data);
+      setDecisionMessage(t("projects.decision.previewReady"));
+    } catch (err) {
+      setDecisionMessage(t("projects.decision.previewError"));
+    } finally {
+      setDecisionLoading(false);
+    }
+  };
+
+  const runDecisionSnapshot = async () => {
+    if (!selectedProjectId) {
+      return;
+    }
+    setDecisionLoading(true);
+    setDecisionMessage("");
+    try {
+      const payload = buildDecisionPayload();
+      await api.post("/api/decisions/run", payload);
+      setDecisionMessage(t("projects.decision.runQueued"));
+      setDecisionPreview(null);
+      await loadDecisionLatest(selectedProjectId);
+    } catch (err) {
+      setDecisionMessage(t("projects.decision.runError"));
+    } finally {
+      setDecisionLoading(false);
     }
   };
 
@@ -1464,6 +1605,7 @@ export default function ProjectsPage() {
       loadMlJobs(selectedProjectId);
       loadFactorJobs(selectedProjectId);
       loadPipelines(selectedProjectId);
+      loadDecisionLatest(selectedProjectId);
       setConfigMessage("");
       setDataMessage("");
       setBacktestMessage("");
@@ -1474,6 +1616,10 @@ export default function ProjectsPage() {
       setNewThemeSymbol("");
       setNewThemeSymbolType("STOCK");
       setThemeSymbolMessage("");
+      setDecisionPreview(null);
+      setDecisionMessage("");
+      setDecisionSnapshotDate("");
+      setDecisionMode("selected");
       setProjectTab("overview");
     } else {
       setVersions([]);
@@ -1513,6 +1659,12 @@ export default function ProjectsPage() {
       setNewThemeSymbolType("STOCK");
       setThemeSymbolMessage("");
       setBenchmarkMessage("");
+      setDecisionLatest(null);
+      setDecisionPreview(null);
+      setDecisionMessage("");
+      setDecisionSnapshotDate("");
+      setDecisionTrainJobId("");
+      setDecisionMode("selected");
     }
   }, [selectedProjectId]);
 
@@ -1564,6 +1716,22 @@ export default function ProjectsPage() {
       setAlgorithmVersions([]);
     }
   }, [bindingForm.algorithmId]);
+
+  useEffect(() => {
+    const algoId = Number(bindingForm.algorithmId || binding?.algorithm_id || 0);
+    const versionId = Number(bindingForm.versionId || binding?.algorithm_version_id || 0);
+    if (algoId && versionId) {
+      loadAlgorithmVersionDetail(algoId, versionId);
+    } else {
+      setAlgorithmVersionDetail(null);
+      setAlgorithmVersionDetailMessage("");
+    }
+  }, [
+    bindingForm.algorithmId,
+    bindingForm.versionId,
+    binding?.algorithm_id,
+    binding?.algorithm_version_id,
+  ]);
 
   useEffect(() => {
     if (selectedProjectId) {
@@ -2245,6 +2413,22 @@ export default function ProjectsPage() {
     () => mlJobs.find((job) => job.id === mlDetailId) || mlActiveJob,
     [mlJobs, mlDetailId, mlActiveJob]
   );
+  const mlJobTotal = mlJobs.length;
+  const mlJobsPaged = useMemo(() => {
+    const start = (mlJobPage - 1) * mlJobPageSize;
+    return mlJobs.slice(start, start + mlJobPageSize);
+  }, [mlJobs, mlJobPage, mlJobPageSize]);
+  useEffect(() => {
+    const maxPage = Math.max(1, Math.ceil(mlJobTotal / mlJobPageSize));
+    if (mlJobPage > maxPage) {
+      setMlJobPage(maxPage);
+    }
+  }, [mlJobPage, mlJobPageSize, mlJobTotal]);
+  useEffect(() => {
+    if (!decisionTrainJobId && mlActiveJob?.id) {
+      setDecisionTrainJobId(String(mlActiveJob.id));
+    }
+  }, [decisionTrainJobId, mlActiveJob]);
   const mlDetailMetrics = useMemo(
     () => (mlDetailJob?.metrics as Record<string, any> | null) || null,
     [mlDetailJob]
@@ -2406,6 +2590,36 @@ export default function ProjectsPage() {
     ];
     return entries.filter((item) => item.value !== undefined && item.value !== null && item.value !== "");
   }, [pipelineDetail, t]);
+
+  const decisionData = decisionPreview || decisionLatest;
+  const decisionSummary = useMemo(
+    () => (decisionData?.summary as Record<string, any> | null) || null,
+    [decisionData]
+  );
+  const decisionItems = useMemo(() => {
+    if (!decisionData) {
+      return [];
+    }
+    return decisionMode === "filtered"
+      ? decisionData.filters || []
+      : decisionData.items || [];
+  }, [decisionData, decisionMode]);
+  const toYahooSymbol = (symbol: string) => {
+    const trimmed = symbol.trim().toUpperCase();
+    const parts = trimmed.split(".");
+    if (parts.length === 2 && parts[1].length === 1) {
+      return `${parts[0]}-${parts[1]}`;
+    }
+    return trimmed;
+  };
+  const buildYahooUrl = (symbol: string) =>
+    `https://finance.yahoo.com/quote/${encodeURIComponent(toYahooSymbol(symbol))}`;
+  const decisionFilterCounts = useMemo(() => {
+    const raw = (decisionSummary?.filter_counts as Record<string, number> | null) || {};
+    return Object.entries(raw)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 6);
+  }, [decisionSummary]);
 
   const backtestTrainJobIdRaw = configDraft?.backtest_train_job_id;
   const backtestTrainJobId =
@@ -4228,6 +4442,38 @@ export default function ProjectsPage() {
     () => themeDrafts.filter((item) => (Number(item.weight) || 0) > 0).length,
     [themeDrafts]
   );
+  const algorithmSummaryName = useMemo(() => {
+    const targetId = Number(bindingForm.algorithmId || binding?.algorithm_id || 0);
+    if (targetId) {
+      const match = algorithms.find((algo) => algo.id === targetId);
+      if (match?.name) {
+        return match.name;
+      }
+    }
+    return binding?.algorithm_name || "";
+  }, [algorithms, bindingForm.algorithmId, binding?.algorithm_id, binding?.algorithm_name]);
+  const algorithmSummaryParamCount = useMemo(() => {
+    const params = algorithmVersionDetail?.params;
+    if (!params || typeof params !== "object") {
+      return 0;
+    }
+    return Object.keys(params).length;
+  }, [algorithmVersionDetail]);
+  const algorithmSummaryVersionLabel = useMemo(() => {
+    if (!algorithmVersionDetail) {
+      return "";
+    }
+    return algorithmVersionDetail.version || `#${algorithmVersionDetail.id}`;
+  }, [algorithmVersionDetail]);
+  const algorithmSummaryDisplay = useMemo(() => {
+    if (!algorithmSummaryVersionLabel) {
+      return "";
+    }
+    if (algorithmSummaryName) {
+      return `${algorithmSummaryName} ${algorithmSummaryVersionLabel}`.trim();
+    }
+    return algorithmSummaryVersionLabel;
+  }, [algorithmSummaryName, algorithmSummaryVersionLabel]);
   const metricRows = [
     { key: "Compounding Annual Return", label: t("metrics.cagr") },
     { key: "Drawdown", label: t("metrics.drawdown") },
@@ -4583,14 +4829,14 @@ export default function ProjectsPage() {
                       </div>
                       <div className="overview-card">
                         <div className="overview-label">
-                          {t("projects.dataStatus.membership")}
+                          {t("projects.detail.symbolsTotalLabel")}
                         </div>
                         <div className="overview-value">
-                          {dataStatus?.membership.symbols ?? 0}
+                          {themeSummary?.total_symbols ?? 0}
                         </div>
                         <div className="overview-sub">
-                          {dataStatus?.membership.start || t("common.none")} ~{" "}
-                          {dataStatus?.membership.end || t("common.none")}
+                          {t("common.labels.updatedAt")}{" "}
+                          {formatDateTime(themeSummary?.updated_at)}
                         </div>
                       </div>
                       <div className="overview-card">
@@ -5712,6 +5958,52 @@ export default function ProjectsPage() {
               </button>
             </div>
             </div>
+            <div className="card">
+              <div className="card-title">{t("projects.algorithm.summaryTitle")}</div>
+              <div className="card-meta">{t("projects.algorithm.summaryMeta")}</div>
+              {algorithmVersionDetail ? (
+                <div className="meta-list">
+                  <div className="meta-row">
+                    <span>{t("projects.algorithm.summaryCurrent")}</span>
+                    <strong>{algorithmSummaryDisplay || "-"}</strong>
+                  </div>
+                  <div className="meta-row">
+                    <span>{t("projects.algorithm.summaryVersionId")}</span>
+                    <strong>#{algorithmVersionDetail.id}</strong>
+                  </div>
+                  <div className="meta-row">
+                    <span>{t("projects.algorithm.summaryType")}</span>
+                    <strong>{algorithmVersionDetail.type_name || "-"}</strong>
+                  </div>
+                  <div className="meta-row">
+                    <span>{t("projects.algorithm.summaryLanguage")}</span>
+                    <strong>{algorithmVersionDetail.language || "-"}</strong>
+                  </div>
+                  <div className="meta-row">
+                    <span>{t("projects.algorithm.summaryPath")}</span>
+                    <strong>{algorithmVersionDetail.file_path || "-"}</strong>
+                  </div>
+                  <div className="meta-row">
+                    <span>{t("projects.algorithm.summaryParams")}</span>
+                    <strong>{algorithmSummaryParamCount}</strong>
+                  </div>
+                  <div className="meta-row">
+                    <span>{t("common.labels.updatedAt")}</span>
+                    <strong>{formatDateTime(algorithmVersionDetail.created_at)}</strong>
+                  </div>
+                </div>
+              ) : (
+                <div className="empty-state">{t("projects.algorithm.summaryEmpty")}</div>
+              )}
+              {algorithmVersionDetailMessage && (
+                <div className="form-hint">{algorithmVersionDetailMessage}</div>
+              )}
+              <div className="form-actions">
+                <a className="button-secondary" href="/algorithms">
+                  {t("projects.algorithm.openLibrary")}
+                </a>
+              </div>
+            </div>
               {renderBenchmarkEditor()}
               <div className="card">
                 <div className="card-title">{t("projects.strategy.title")}</div>
@@ -5967,7 +6259,7 @@ export default function ProjectsPage() {
                     : t("projects.factorScores.action")}
                 </button>
               </div>
-              <div className="card">
+              <div className="card algorithm-top-ml">
                 <div className="card-title">{t("projects.ml.title")}</div>
                 <div className="card-meta">{t("projects.ml.meta")}</div>
                 <div className="meta-list" style={{ marginBottom: "12px" }}>
@@ -6460,6 +6752,7 @@ export default function ProjectsPage() {
                       }
                       placeholder={t("projects.ml.sweep.paramKeyPlaceholder")}
                     />
+                    <div className="form-hint">{t("projects.ml.sweep.paramHint")}</div>
                   </div>
                   <div className="form-row">
                     <label className="form-label">{t("projects.ml.sweep.start")}</label>
@@ -6541,136 +6834,148 @@ export default function ProjectsPage() {
                 </div>
                 <div className="section-divider" />
                 {mlJobs.length ? (
-                  <div className="table-scroll">
-                    <table className="table ml-train-table">
-                      <thead>
-                        <tr>
-                          <th>{t("projects.ml.table.id")}</th>
-                          <th>{t("projects.ml.table.status")}</th>
-                          <th>{t("projects.ml.table.progress")}</th>
-                          <th>{t("projects.ml.table.window")}</th>
-                          <th>{t("projects.ml.table.range")}</th>
-                          <th>{t("projects.ml.table.model")}</th>
-                          <th>{t("projects.ml.table.horizon")}</th>
-                          <th>{t("projects.ml.table.symbols")}</th>
-                          <th>{t("projects.ml.table.createdAt")}</th>
-                          <th>{t("projects.ml.table.actions")}</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {mlJobs.map((job) => {
-                          const cfg = job.config || {};
-                          const walk = (cfg.walk_forward || {}) as Record<string, any>;
-                          const modelType = cfg.model_type || cfg.model?.type || "torch_mlp";
-                          const symbolCount =
-                            cfg.meta?.symbol_count ?? (cfg.symbols?.length ?? 0);
-                          const symbolSource = cfg.meta?.symbol_source || "project";
-                          const symbolSourceKey = cfg.meta?.symbol_source_key;
-                          const symbolSourceLabel =
-                            symbolSource === "system_theme"
-                              ? `${t("projects.ml.symbolSourceSystemShort")}:${
-                                  symbolSourceKey || "-"
-                                }`
-                              : t("projects.ml.symbolSourceProjectShort");
-                          const symbolSourceTitle =
-                            symbolSource === "system_theme"
-                              ? `${t("projects.ml.symbolSourceSystem")}: ${
-                                  symbolSourceKey || "-"
-                                }`
-                              : t("projects.ml.symbolSourceProject");
-                          const ranges = mlTrainRangeDetail(job);
-                          const trainLabel = t("projects.ml.table.trainRangeShort");
-                          const validLabel = t("projects.ml.table.validRangeShort");
-                          const testLabel = t("projects.ml.table.testRangeShort");
-                          const trainDisplay = formatYearRangeCompact(ranges.train);
-                          const validDisplay = formatYearRangeCompact(ranges.valid);
-                          const testDisplay = formatYearRangeCompact(ranges.test);
-                          return (
-                            <tr key={job.id}>
-                              <td>{`#${job.id}`}</td>
-                              <td>
-                                <div className="ml-status-cell">
-                                  <span className={`pill ${mlStatusClass(job.status)}`.trim()}>
-                                    {mlStatusLabel(job.status)}
-                                  </span>
-                                  {job.is_active && (
-                                    <span className="badge">{t("projects.ml.active")}</span>
-                                  )}
-                                </div>
-                              </td>
-                              <td>{mlProgressLabel(job)}</td>
-                              <td>
-                                {walk.train_years ? `${walk.train_years}Y` : "-"}
-                                {"/"}
-                                {walk.valid_months ? `${walk.valid_months}M` : "-"}
-                                {"/"}
-                                {walk.test_months ? `${walk.test_months}M` : "-"}
-                              </td>
-                              <td className="ml-range-cell">
-                                <div className="ml-range-inline">
-                                  <span title={`${t("projects.ml.table.trainRange")}: ${ranges.train}`}>
-                                    {trainLabel}
-                                    {trainDisplay}
-                                  </span>
-                                  <span title={`${t("projects.ml.table.validRange")}: ${ranges.valid}`}>
-                                    {validLabel}
-                                    {validDisplay}
-                                  </span>
-                                  <span title={`${t("projects.ml.table.testRange")}: ${ranges.test}`}>
-                                    {testLabel}
-                                    {testDisplay}
-                                  </span>
-                                </div>
-                              </td>
-                              <td>{String(modelType)}</td>
-                              <td>{cfg.label_horizon_days ?? "-"}</td>
-                              <td className="ml-symbol-cell">
-                                <div className="ml-symbol-wrap">
-                                  <div>{symbolCount || "-"}</div>
-                                  <div className="ml-symbol-source" title={symbolSourceTitle}>
-                                    {symbolSourceLabel}
+                  <>
+                    <div className="table-scroll">
+                      <table className="table ml-train-table">
+                        <thead>
+                          <tr>
+                            <th>{t("projects.ml.table.id")}</th>
+                            <th>{t("projects.ml.table.status")}</th>
+                            <th>{t("projects.ml.table.progress")}</th>
+                            <th>{t("projects.ml.table.window")}</th>
+                            <th>{t("projects.ml.table.range")}</th>
+                            <th>{t("projects.ml.table.model")}</th>
+                            <th>{t("projects.ml.table.horizon")}</th>
+                            <th>{t("projects.ml.table.symbols")}</th>
+                            <th>{t("projects.ml.table.createdAt")}</th>
+                            <th>{t("projects.ml.table.actions")}</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {mlJobsPaged.map((job) => {
+                            const cfg = job.config || {};
+                            const walk = (cfg.walk_forward || {}) as Record<string, any>;
+                            const modelType = cfg.model_type || cfg.model?.type || "torch_mlp";
+                            const symbolCount =
+                              cfg.meta?.symbol_count ?? (cfg.symbols?.length ?? 0);
+                            const symbolSource = cfg.meta?.symbol_source || "project";
+                            const symbolSourceKey = cfg.meta?.symbol_source_key;
+                            const symbolSourceLabel =
+                              symbolSource === "system_theme"
+                                ? `${t("projects.ml.symbolSourceSystemShort")}:${
+                                    symbolSourceKey || "-"
+                                  }`
+                                : t("projects.ml.symbolSourceProjectShort");
+                            const symbolSourceTitle =
+                              symbolSource === "system_theme"
+                                ? `${t("projects.ml.symbolSourceSystem")}: ${
+                                    symbolSourceKey || "-"
+                                  }`
+                                : t("projects.ml.symbolSourceProject");
+                            const ranges = mlTrainRangeDetail(job);
+                            const trainLabel = t("projects.ml.table.trainRangeShort");
+                            const validLabel = t("projects.ml.table.validRangeShort");
+                            const testLabel = t("projects.ml.table.testRangeShort");
+                            const trainDisplay = formatYearRangeCompact(ranges.train);
+                            const validDisplay = formatYearRangeCompact(ranges.valid);
+                            const testDisplay = formatYearRangeCompact(ranges.test);
+                            return (
+                              <tr key={job.id}>
+                                <td>{`#${job.id}`}</td>
+                                <td>
+                                  <div className="ml-status-cell">
+                                    <span className={`pill ${mlStatusClass(job.status)}`.trim()}>
+                                      {mlStatusLabel(job.status)}
+                                    </span>
+                                    {job.is_active && (
+                                      <span className="badge">{t("projects.ml.active")}</span>
+                                    )}
                                   </div>
-                                </div>
-                              </td>
-                              <td>{formatDateTime(job.created_at)}</td>
-                              <td className="ml-actions-cell">
-                                <div className="table-actions">
-                                  <button
-                                    className="link-button"
-                                    type="button"
-                                    onClick={() => setMlDetailId(job.id)}
-                                  >
-                                    {t("projects.ml.detail")}
-                                  </button>
-                                  {(job.status === "running" || job.status === "queued") && (
+                                </td>
+                                <td>{mlProgressLabel(job)}</td>
+                                <td>
+                                  {walk.train_years ? `${walk.train_years}Y` : "-"}
+                                  {"/"}
+                                  {walk.valid_months ? `${walk.valid_months}M` : "-"}
+                                  {"/"}
+                                  {walk.test_months ? `${walk.test_months}M` : "-"}
+                                </td>
+                                <td className="ml-range-cell">
+                                  <div className="ml-range-inline">
+                                    <span title={`${t("projects.ml.table.trainRange")}: ${ranges.train}`}>
+                                      {trainLabel}
+                                      {trainDisplay}
+                                    </span>
+                                    <span title={`${t("projects.ml.table.validRange")}: ${ranges.valid}`}>
+                                      {validLabel}
+                                      {validDisplay}
+                                    </span>
+                                    <span title={`${t("projects.ml.table.testRange")}: ${ranges.test}`}>
+                                      {testLabel}
+                                      {testDisplay}
+                                    </span>
+                                  </div>
+                                </td>
+                                <td>{String(modelType)}</td>
+                                <td>{cfg.label_horizon_days ?? "-"}</td>
+                                <td className="ml-symbol-cell">
+                                  <div className="ml-symbol-wrap">
+                                    <div>{symbolCount || "-"}</div>
+                                    <div className="ml-symbol-source" title={symbolSourceTitle}>
+                                      {symbolSourceLabel}
+                                    </div>
+                                  </div>
+                                </td>
+                                <td>{formatDateTime(job.created_at)}</td>
+                                <td className="ml-actions-cell">
+                                  <div className="table-actions">
                                     <button
                                       className="link-button"
                                       type="button"
-                                      onClick={() => cancelMlJob(job.id)}
-                                      disabled={mlActionLoadingId === job.id}
+                                      onClick={() => setMlDetailId(job.id)}
                                     >
-                                      {mlActionLoadingId === job.id
-                                        ? t("projects.ml.canceling")
-                                        : t("projects.ml.cancel")}
+                                      {t("projects.ml.detail")}
                                     </button>
-                                  )}
-                                  {job.status === "success" && !job.is_active && (
-                                    <button
-                                      className="link-button"
-                                      type="button"
-                                      onClick={() => activateMlJob(job.id)}
-                                    >
-                                      {t("projects.ml.activate")}
-                                    </button>
-                                  )}
-                                </div>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
+                                    {(job.status === "running" || job.status === "queued") && (
+                                      <button
+                                        className="link-button"
+                                        type="button"
+                                        onClick={() => cancelMlJob(job.id)}
+                                        disabled={mlActionLoadingId === job.id}
+                                      >
+                                        {mlActionLoadingId === job.id
+                                          ? t("projects.ml.canceling")
+                                          : t("projects.ml.cancel")}
+                                      </button>
+                                    )}
+                                    {job.status === "success" && !job.is_active && (
+                                      <button
+                                        className="link-button"
+                                        type="button"
+                                        onClick={() => activateMlJob(job.id)}
+                                      >
+                                        {t("projects.ml.activate")}
+                                      </button>
+                                    )}
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                    <PaginationBar
+                      page={mlJobPage}
+                      pageSize={mlJobPageSize}
+                      total={mlJobTotal}
+                      onPageChange={setMlJobPage}
+                      onPageSizeChange={(size) => {
+                        setMlJobPage(1);
+                        setMlJobPageSize(size);
+                      }}
+                    />
+                  </>
                 ) : (
                   <div className="empty-state">{t("projects.ml.empty")}</div>
                 )}
@@ -6832,7 +7137,217 @@ export default function ProjectsPage() {
                   </div>
                 )}
               </div>
-              <div className="card">
+              <div className="card algorithm-top-decision">
+                <div className="card-title">{t("projects.decision.title")}</div>
+                <div className="card-meta">{t("projects.decision.meta")}</div>
+                <div className="form-grid">
+                  <div className="form-row">
+                    <label className="form-label">{t("projects.decision.trainJob")}</label>
+                    <select
+                      className="form-select"
+                      value={decisionTrainJobId}
+                      onChange={(e) => setDecisionTrainJobId(e.target.value)}
+                    >
+                      <option value="">{t("projects.decision.trainJobAuto")}</option>
+                      {mlJobs.map((job) => (
+                        <option key={job.id} value={job.id}>
+                          #{job.id} · {mlStatusLabel(job.status)}
+                        </option>
+                      ))}
+                    </select>
+                    <div className="form-hint">
+                      {t("projects.decision.trainJobHint", {
+                        id: decisionTrainJobId || mlActiveJob?.id || "-",
+                      })}
+                    </div>
+                  </div>
+                  <div className="form-row">
+                    <label className="form-label">{t("projects.decision.snapshotDate")}</label>
+                    <input
+                      type="date"
+                      className="form-input"
+                      value={decisionSnapshotDate}
+                      onChange={(e) => setDecisionSnapshotDate(e.target.value)}
+                    />
+                    <div className="form-hint">{t("projects.decision.snapshotHint")}</div>
+                  </div>
+                </div>
+                <div className="form-actions">
+                  <button
+                    type="button"
+                    className="button-secondary"
+                    onClick={previewDecisionSnapshot}
+                    disabled={!selectedProjectId || decisionLoading}
+                  >
+                    {decisionLoading
+                      ? t("common.actions.loading")
+                      : t("projects.decision.preview")}
+                  </button>
+                  <button
+                    type="button"
+                    className="button-primary"
+                    onClick={runDecisionSnapshot}
+                    disabled={!selectedProjectId || decisionLoading}
+                  >
+                    {decisionLoading
+                      ? t("common.actions.loading")
+                      : t("projects.decision.run")}
+                  </button>
+                </div>
+                {decisionMessage && <div className="form-hint">{decisionMessage}</div>}
+                {decisionData ? (
+                  <>
+                    <div className="section-divider" />
+                    <div className="meta-list">
+                      <div className="meta-row">
+                        <span>{t("projects.decision.source")}</span>
+                        <strong>
+                          {decisionPreview
+                            ? t("projects.decision.sourcePreview")
+                            : t("projects.decision.sourceLatest")}
+                        </strong>
+                      </div>
+                      <div className="meta-row">
+                        <span>{t("projects.decision.status")}</span>
+                        <strong>{decisionData.status || "-"}</strong>
+                      </div>
+                      <div className="meta-row">
+                        <span>{t("projects.decision.snapshotDate")}</span>
+                        <strong>{decisionSummary?.snapshot_date || "-"}</strong>
+                      </div>
+                      <div className="meta-row">
+                        <span>{t("projects.decision.asOf")}</span>
+                        <strong>{decisionSummary?.as_of_time || "-"}</strong>
+                      </div>
+                      <div className="meta-row">
+                        <span>{t("projects.decision.scoreDate")}</span>
+                        <strong>{decisionSummary?.score_date || "-"}</strong>
+                      </div>
+                      <div className="meta-row">
+                        <span>{t("projects.decision.activeCount")}</span>
+                        <strong>{decisionSummary?.active_count ?? 0}</strong>
+                      </div>
+                      <div className="meta-row">
+                        <span>{t("projects.decision.selectedCount")}</span>
+                        <strong>{decisionSummary?.selected_count ?? 0}</strong>
+                      </div>
+                      <div className="meta-row">
+                        <span>{t("projects.decision.filteredCount")}</span>
+                        <strong>{decisionSummary?.filtered_count ?? 0}</strong>
+                      </div>
+                      <div className="meta-row">
+                        <span>{t("projects.decision.riskOff")}</span>
+                        <strong>
+                          {decisionSummary?.risk_off
+                            ? t("common.boolean.true")
+                            : t("common.boolean.false")}
+                        </strong>
+                      </div>
+                      <div className="meta-row">
+                        <span>{t("projects.decision.riskOffReason")}</span>
+                        <strong>{decisionSummary?.risk_off_reason || "-"}</strong>
+                      </div>
+                      <div className="meta-row">
+                        <span>{t("projects.decision.cashWeight")}</span>
+                        <strong>{decisionSummary?.cash_weight ?? "-"}</strong>
+                      </div>
+                      <div className="meta-row">
+                        <span>{t("projects.decision.maxExposure")}</span>
+                        <strong>{decisionSummary?.max_exposure ?? "-"}</strong>
+                      </div>
+                      <div className="meta-row">
+                        <span>{t("projects.decision.scorePath")}</span>
+                        <strong>{decisionSummary?.score_csv_path || "-"}</strong>
+                      </div>
+                    </div>
+                    {decisionFilterCounts.length ? (
+                      <>
+                        <div className="section-divider" />
+                        <div className="card-title">{t("projects.decision.filterStats")}</div>
+                        <div className="meta-list decision-filter-list">
+                          {decisionFilterCounts.map(([key, value]) => (
+                            <div className="meta-row" key={key}>
+                              <span>{key}</span>
+                              <strong>{value}</strong>
+                            </div>
+                          ))}
+                        </div>
+                      </>
+                    ) : null}
+                    <div className="section-divider" />
+                    <div className="decision-toolbar">
+                      <div className="segmented">
+                        <button
+                          type="button"
+                          className={decisionMode === "selected" ? "active" : ""}
+                          onClick={() => setDecisionMode("selected")}
+                        >
+                          {t("projects.decision.tabSelected")}
+                        </button>
+                        <button
+                          type="button"
+                          className={decisionMode === "filtered" ? "active" : ""}
+                          onClick={() => setDecisionMode("filtered")}
+                        >
+                          {t("projects.decision.tabFiltered")}
+                        </button>
+                      </div>
+                    </div>
+                    <div className="table-scroll decision-table-scroll">
+                      <table className="table decision-table">
+                        <thead>
+                          <tr>
+                            <th>{t("projects.decision.table.rank")}</th>
+                            <th>{t("projects.decision.table.symbol")}</th>
+                            <th>{t("projects.decision.table.score")}</th>
+                            <th>{t("projects.decision.table.weight")}</th>
+                            <th>{t("projects.decision.table.theme")}</th>
+                            <th>{t("projects.decision.table.reason")}</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {decisionItems.length ? (
+                            decisionItems.map((item, index) => (
+                              <tr key={`${item.symbol}-${index}`}>
+                                <td>{item.rank ?? "-"}</td>
+                                <td>
+                                  <a
+                                    className="decision-symbol"
+                                    href={buildYahooUrl(item.symbol)}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                  >
+                                    {item.symbol}
+                                  </a>
+                                  {item.company_name ? (
+                                    <span
+                                      className="decision-company"
+                                      title={item.company_name}
+                                    >
+                                      {item.company_name}
+                                    </span>
+                                  ) : null}
+                                </td>
+                                <td>{formatNumber(item.score ?? null)}</td>
+                                <td>{formatNumber(item.weight ?? null)}</td>
+                                <td>{item.theme || "-"}</td>
+                                <td>{item.reason || "-"}</td>
+                              </tr>
+                            ))
+                          ) : (
+                            <tr>
+                              <td colSpan={6}>{t("projects.decision.table.empty")}</td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                ) : (
+                  <div className="empty-state">{t("projects.decision.empty")}</div>
+                )}
+              </div>
+              <div className="card algorithm-top-pipeline">
                 <div className="card-title">{t("projects.pipeline.title")}</div>
                 <div className="card-meta">{t("projects.pipeline.meta")}</div>
                 <div className="form-grid">

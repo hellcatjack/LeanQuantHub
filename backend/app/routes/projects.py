@@ -549,7 +549,11 @@ def _collect_data_status(project_id: int) -> dict[str, Any]:
     backtest_summary = data_root / "backtest" / "thematic" / "summary.json"
 
     membership_rows = _safe_read_csv(membership_path)
-    membership_symbols = {row.get("symbol", "").strip() for row in membership_rows if row.get("symbol")}
+    membership_symbols = {
+        row.get("symbol", "").strip()
+        for row in membership_rows
+        if row.get("symbol")
+    }
     membership_start = None
     membership_end = None
     for row in membership_rows:
@@ -559,9 +563,28 @@ def _collect_data_status(project_id: int) -> dict[str, Any]:
             membership_start = start
         if end and (membership_end is None or end > membership_end):
             membership_end = end
+    membership_records = len(membership_rows)
+    membership_symbol_count = len(membership_symbols)
 
     universe_rows = _safe_read_csv(universe_path)
-    sp500_count = sum(1 for row in universe_rows if row.get("in_sp500_history") == "1")
+    sp500_history_rows = [
+        row for row in universe_rows if row.get("in_sp500_history") == "1"
+    ]
+    sp500_history_symbols = {
+        row.get("symbol", "").strip()
+        for row in sp500_history_rows
+        if row.get("symbol")
+    }
+    sp500_count = len(sp500_history_symbols)
+    universe_start = None
+    universe_end = None
+    for row in sp500_history_rows:
+        start = _parse_date(row.get("start_date"))
+        end = _parse_date(row.get("end_date"))
+        if start and (universe_start is None or start < universe_start):
+            universe_start = start
+        if end and (universe_end is None or end > universe_end):
+            universe_end = end
     theme_count = sum(1 for row in universe_rows if row.get("category", "").startswith("AI") or row.get("category") == "ENERGY_FUSION")
 
     theme_rows = _safe_read_csv(themes_path)
@@ -587,12 +610,22 @@ def _collect_data_status(project_id: int) -> dict[str, Any]:
         except json.JSONDecodeError:
             backtest_payload = None
 
+    if sp500_count and (
+        membership_symbol_count == 0
+        or membership_symbol_count < sp500_count
+        or (membership_start is None and membership_end is None)
+    ):
+        membership_records = sp500_count
+        membership_symbol_count = sp500_count
+        membership_start = universe_start or membership_start
+        membership_end = universe_end or membership_end
+
     return {
         "project_id": project_id,
         "data_root": str(data_root),
         "membership": {
-            "records": len(membership_rows),
-            "symbols": len(membership_symbols),
+            "records": membership_records,
+            "symbols": membership_symbol_count,
             "start": membership_start.date().isoformat() if membership_start else None,
             "end": membership_end.date().isoformat() if membership_end else None,
             "updated_at": _format_mtime(membership_path),

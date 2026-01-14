@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import csv
+from bisect import bisect_right
 import threading
 import json
 import math
@@ -16,6 +17,7 @@ import zipfile
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from sqlalchemy import func, or_
@@ -38,6 +40,12 @@ from app.schemas import (
     DataSyncSpeedOut,
     AlphaCoverageAuditOut,
     AlphaCoverageAuditRequest,
+    AlphaDuplicateCleanupItem,
+    AlphaDuplicateCleanupOut,
+    AlphaDuplicateCleanupRequest,
+    AlphaNameRepairOut,
+    AlphaNameRepairRequest,
+    AlphaNameRepairItem,
     TradeCoverageAuditOut,
     TradeCoverageAuditRequest,
     AlphaFetchConfigOut,
@@ -48,6 +56,8 @@ from app.schemas import (
     TradingCalendarConfigOut,
     TradingCalendarConfigUpdate,
     TradingCalendarRefreshOut,
+    TradingCalendarPreviewOut,
+    TradingCalendarPreviewDay,
     BulkAutoConfigOut,
     BulkAutoConfigUpdate,
     DatasetCreate,
@@ -82,6 +92,7 @@ from app.services.alpha_fetch import (
     write_alpha_fetch_config,
 )
 from app.services.bulk_auto import load_bulk_auto_config, write_bulk_auto_config
+from app.services.project_symbols import collect_active_project_symbols, write_symbol_list
 from app.services.trading_calendar import (
     load_trading_calendar_config,
     load_trading_calendar_meta,
@@ -464,6 +475,90 @@ def _load_bulk_symbols(
     return symbols
 
 
+def _load_symbol_whitelist(params: dict[str, Any]) -> set[str]:
+    symbols: set[str] = set()
+    raw = params.get("symbol_whitelist")
+    if isinstance(raw, (list, tuple, set)):
+        symbols.update({str(item).strip().upper() for item in raw if str(item).strip()})
+    elif isinstance(raw, str) and raw.strip():
+        parts = [item.strip() for item in raw.replace("\n", ",").split(",")]
+        symbols.update({item.upper() for item in parts if item})
+
+    path_value = params.get("symbol_whitelist_path")
+    if isinstance(path_value, str) and path_value.strip():
+        path = Path(path_value).expanduser()
+        try:
+            with path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
+                reader = csv.DictReader(handle)
+                if reader.fieldnames and "symbol" in reader.fieldnames:
+                    for row in reader:
+                        symbol = (row.get("symbol") or "").strip().upper()
+                        if symbol:
+                            symbols.add(symbol)
+                else:
+                    handle.seek(0)
+                    for line in handle:
+                        symbol = line.strip().upper()
+                        if symbol and symbol != "SYMBOL":
+                            symbols.add(symbol)
+        except OSError:
+            return symbols
+    return symbols
+
+
+def _alpha_exclude_symbols_path(data_root: Path) -> Path:
+    return data_root / "universe" / "alpha_exclude_symbols.csv"
+
+
+def _load_alpha_exclude_symbols(data_root: Path) -> dict[str, str]:
+    path = _alpha_exclude_symbols_path(data_root)
+    if not path.exists():
+        return {}
+    excluded: dict[str, str] = {}
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
+            reader = csv.DictReader(handle)
+            if reader.fieldnames and "symbol" in reader.fieldnames:
+                for row in reader:
+                    symbol = (row.get("symbol") or "").strip().upper()
+                    if not symbol:
+                        continue
+                    reason = (row.get("reason") or "").strip()
+                    excluded[symbol] = reason
+            else:
+                handle.seek(0)
+                for line in handle:
+                    symbol = line.strip().upper()
+                    if symbol and symbol != "SYMBOL":
+                        excluded[symbol] = ""
+    except OSError:
+        return {}
+    return excluded
+
+
+def _append_alpha_exclude_symbol(data_root: Path, symbol: str, reason: str) -> None:
+    cleaned = _normalize_symbol(symbol).upper()
+    if not cleaned or cleaned == "UNKNOWN":
+        return
+    lock = JobLock("alpha_exclude_symbols", data_root)
+    if not lock.acquire():
+        return
+    try:
+        existing = _load_alpha_exclude_symbols(data_root)
+        if cleaned in existing:
+            return
+        path = _alpha_exclude_symbols_path(data_root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_header = not path.exists()
+        with path.open("a", encoding="utf-8", newline="") as handle:
+            writer = csv.writer(handle)
+            if write_header:
+                writer.writerow(["symbol", "reason", "updated_at"])
+            writer.writerow([cleaned, reason, datetime.utcnow().isoformat()])
+    finally:
+        lock.release()
+
+
 def _run_bulk_sync_job(job_id: int) -> None:
     session = SessionLocal()
     bulk_lock: JobLock | None = None
@@ -572,8 +667,15 @@ def _run_bulk_sync_job(job_id: int) -> None:
                 job.enqueued_start_at = datetime.utcnow()
             session.commit()
 
+            data_root = _get_data_root()
             asset_types = {"STOCK", "ETF"}
             symbols = _load_bulk_symbols(status_filter, asset_types)
+            whitelist = _load_symbol_whitelist(params)
+            if whitelist:
+                symbols = [item for item in symbols if item["symbol"] in whitelist]
+            exclude_map = _load_alpha_exclude_symbols(data_root)
+            if exclude_map:
+                symbols = [item for item in symbols if item["symbol"] not in exclude_map]
             if not symbols:
                 errors = _bulk_append_error(errors, "enqueue", "listing_empty")
                 job.errors = errors
@@ -984,6 +1086,92 @@ def refresh_trading_calendar():
     )
 
 
+@router.get("/trading-calendar/preview", response_model=TradingCalendarPreviewOut)
+def get_trading_calendar_preview(
+    recent: int = Query(10, ge=1, le=60),
+    upcoming: int = Query(10, ge=1, le=60),
+    month: str | None = None,
+):
+    data_root = _get_data_root()
+    adjusted_dir = data_root / "curated_adjusted"
+    vendor_preference = ["Alpha"] if ALPHA_ONLY_PRICES else ["Lean", "Alpha"]
+    days, info = load_trading_days(data_root, adjusted_dir, "SPY", vendor_preference)
+    if not days:
+        raise HTTPException(status_code=500, detail="交易日历为空")
+    timezone_name = "America/New_York"
+    tz = ZoneInfo(timezone_name)
+    today = datetime.now(tz).date()
+    idx = bisect_right(days, today) - 1
+    latest_day = days[idx] if idx >= 0 else None
+    next_index = idx + 1
+    next_day = days[next_index] if 0 <= next_index < len(days) else None
+    recent_start = max(0, idx - recent + 1)
+    recent_days = days[recent_start : idx + 1] if idx >= 0 else []
+    upcoming_start = bisect_right(days, today)
+    upcoming_days = days[upcoming_start : upcoming_start + upcoming]
+    if month:
+        parts = month.split("-")
+        if len(parts) != 2:
+            raise HTTPException(status_code=400, detail="invalid month format")
+        try:
+            year = int(parts[0])
+            month_num = int(parts[1])
+            month_start = date(year, month_num, 1)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="invalid month value") from exc
+    else:
+        month_start = date(today.year, today.month, 1)
+    month_label = f"{month_start.year:04d}-{month_start.month:02d}"
+    next_month = (
+        date(month_start.year + 1, 1, 1)
+        if month_start.month == 12
+        else date(month_start.year, month_start.month + 1, 1)
+    )
+    month_end = next_month - timedelta(days=1)
+    grid_start = month_start - timedelta(days=month_start.weekday())
+    grid_end = month_end + timedelta(days=(6 - month_end.weekday()))
+    day_set = set(days)
+    month_days: list[TradingCalendarPreviewDay] = []
+    cursor = grid_start
+    while cursor <= grid_end:
+        month_days.append(
+            TradingCalendarPreviewDay(
+                date=cursor.isoformat(),
+                weekday=cursor.weekday(),
+                is_trading=cursor in day_set,
+                in_month=cursor.month == month_start.month,
+            )
+        )
+        cursor += timedelta(days=1)
+    week_start = today - timedelta(days=today.weekday())
+    week_days: list[TradingCalendarPreviewDay] = []
+    for offset in range(7):
+        day = week_start + timedelta(days=offset)
+        week_days.append(
+            TradingCalendarPreviewDay(
+                date=day.isoformat(),
+                weekday=day.weekday(),
+                is_trading=day in day_set,
+            )
+        )
+    return TradingCalendarPreviewOut(
+        timezone=timezone_name,
+        as_of_date=today.isoformat(),
+        month=month_label,
+        latest_trading_day=latest_day.isoformat() if latest_day else None,
+        next_trading_day=next_day.isoformat() if next_day else None,
+        recent_trading_days=[day.isoformat() for day in recent_days],
+        upcoming_trading_days=[day.isoformat() for day in upcoming_days],
+        week_days=week_days,
+        month_days=month_days,
+        calendar_source=info.get("calendar_source"),
+        overrides_applied=info.get("overrides_applied"),
+        calendar_sessions=info.get("calendar_sessions"),
+        calendar_start=info.get("calendar_start"),
+        calendar_end=info.get("calendar_end"),
+    )
+
+
 @router.get("/alpha-gap-summary", response_model=AlphaGapSummaryOut)
 def get_alpha_gap_summary():
     with get_session() as session:
@@ -1057,6 +1245,213 @@ def audit_trade_coverage(
         )
         session.commit()
     return TradeCoverageAuditOut(**result)
+
+
+@router.post("/actions/repair-alpha-names", response_model=AlphaNameRepairOut)
+def repair_alpha_names(payload: AlphaNameRepairRequest):
+    limit = payload.limit
+    dry_run = bool(payload.dry_run)
+    sample_size = max(int(payload.sample_size or 0), 0)
+    allow_conflicts = bool(payload.allow_conflicts)
+
+    total_candidates = 0
+    renamed = 0
+    skipped_same = 0
+    skipped_conflict = 0
+    errors: list[str] = []
+    items: list[AlphaNameRepairItem] = []
+
+    with get_session() as session:
+        datasets = session.query(Dataset).order_by(Dataset.id.asc()).all()
+        for dataset in datasets:
+            if not _should_use_alpha_name(dataset, dataset.source_path):
+                continue
+            canonical_name = _canonical_alpha_dataset_name(dataset, dataset.source_path)
+            if dataset.name == canonical_name:
+                skipped_same += 1
+                continue
+            total_candidates += 1
+            if limit and total_candidates > limit:
+                break
+            conflict = (
+                session.query(Dataset)
+                .filter(Dataset.name == canonical_name, Dataset.id != dataset.id)
+                .first()
+            )
+            if conflict and not allow_conflicts:
+                skipped_conflict += 1
+                if len(items) < sample_size:
+                    items.append(
+                        AlphaNameRepairItem(
+                            dataset_id=dataset.id,
+                            old_name=dataset.name,
+                            new_name=canonical_name,
+                            status="conflict",
+                            message=f"conflict_with={conflict.id}",
+                        )
+                    )
+                continue
+            if dry_run:
+                if len(items) < sample_size:
+                    items.append(
+                        AlphaNameRepairItem(
+                            dataset_id=dataset.id,
+                            old_name=dataset.name,
+                            new_name=canonical_name,
+                            status="dry_run",
+                            message=f"conflict_with={conflict.id}" if conflict else None,
+                        )
+                    )
+                continue
+            try:
+                storage = _rename_dataset_storage_files(
+                    _get_data_root(), dataset.id, dataset.name, canonical_name
+                )
+                old_name = dataset.name
+                dataset.name = canonical_name
+                dataset.updated_at = datetime.utcnow()
+                session.commit()
+                record_audit(
+                    session,
+                    action="dataset.rename",
+                    resource_type="dataset",
+                    resource_id=dataset.id,
+                    detail={
+                        "old_name": old_name,
+                        "new_name": canonical_name,
+                        "storage": storage,
+                    },
+                )
+                session.commit()
+                renamed += 1
+                if len(items) < sample_size:
+                    items.append(
+                        AlphaNameRepairItem(
+                            dataset_id=dataset.id,
+                            old_name=old_name,
+                            new_name=canonical_name,
+                            status="renamed",
+                            moved_paths=storage.get("moved", []),
+                            skipped_paths=storage.get("skipped", []),
+                            message=f"conflict_with={conflict.id}" if conflict else None,
+                        )
+                    )
+            except Exception as exc:
+                errors.append(f"{dataset.id}:{exc}")
+                if len(items) < sample_size:
+                    items.append(
+                        AlphaNameRepairItem(
+                            dataset_id=dataset.id,
+                            old_name=dataset.name,
+                            new_name=canonical_name,
+                            status="error",
+                            message=str(exc),
+                        )
+                    )
+
+    return AlphaNameRepairOut(
+        total_candidates=total_candidates,
+        renamed=renamed,
+        skipped_same=skipped_same,
+        skipped_conflict=skipped_conflict,
+        errors=errors,
+        items=items,
+    )
+
+
+@router.post("/actions/cleanup-alpha-duplicates", response_model=AlphaDuplicateCleanupOut)
+def cleanup_alpha_duplicates(payload: AlphaDuplicateCleanupRequest):
+    dry_run = bool(payload.dry_run)
+    limit = payload.limit
+    sample_size = max(int(payload.sample_size or 0), 0)
+
+    total_groups = 0
+    duplicate_groups = 0
+    planned_delete = 0
+    delete_ids: list[int] = []
+    items: list[AlphaDuplicateCleanupItem] = []
+    errors: list[str] = []
+
+    with get_session() as session:
+        datasets = session.query(Dataset).order_by(Dataset.id.asc()).all()
+        groups: dict[str, list[Dataset]] = {}
+        for dataset in datasets:
+            if not _should_use_alpha_name(dataset, dataset.source_path):
+                continue
+            key = _canonical_alpha_dataset_name(dataset, dataset.source_path)
+            groups.setdefault(key, []).append(dataset)
+
+        total_groups = len(groups)
+        for key, group in groups.items():
+            if len(group) <= 1:
+                continue
+            duplicate_groups += 1
+            if limit and duplicate_groups > limit:
+                break
+            best = None
+            best_score = None
+            summaries: dict[int, dict[str, Any]] = {}
+            for dataset in group:
+                summary = _dataset_series_summary(dataset)
+                meta_start = _parse_date(dataset.coverage_start)
+                meta_end = _parse_date(dataset.coverage_end)
+                effective_start = summary.get("min_date") or meta_start
+                effective_end = summary.get("max_date") or meta_end
+                effective_days = summary.get("coverage_days") or (
+                    (effective_end - effective_start).days
+                    if effective_start and effective_end
+                    else 0
+                )
+                summaries[dataset.id] = summary
+                score = (
+                    1 if summary.get("has_adjusted") else 0,
+                    summary.get("rows") or 0,
+                    effective_days,
+                    (effective_end or date.min).toordinal(),
+                    -(effective_start or date.max).toordinal(),
+                    dataset.id,
+                )
+                if best_score is None or score > best_score:
+                    best_score = score
+                    best = dataset
+            if not best:
+                errors.append(f"{key}:no_candidate")
+                continue
+            drop_ids = [dataset.id for dataset in group if dataset.id != best.id]
+            delete_ids.extend(drop_ids)
+            planned_delete += len(drop_ids)
+            if len(items) < sample_size:
+                summary = summaries.get(best.id, {})
+                items.append(
+                    AlphaDuplicateCleanupItem(
+                        key=key,
+                        keep_id=best.id,
+                        drop_ids=drop_ids,
+                        keep_rows=int(summary.get("rows") or 0),
+                        keep_start=summary.get("min_date").isoformat()
+                        if summary.get("min_date")
+                        else None,
+                        keep_end=summary.get("max_date").isoformat()
+                        if summary.get("max_date")
+                        else None,
+                        keep_has_adjusted=bool(summary.get("has_adjusted")),
+                        message=f"candidates={len(group)}",
+                    )
+                )
+
+    deleted_ids: list[int] = []
+    if not dry_run and delete_ids:
+        result = delete_datasets(DatasetDeleteRequest(dataset_ids=delete_ids))
+        deleted_ids = result.deleted_ids
+
+    return AlphaDuplicateCleanupOut(
+        total_groups=total_groups,
+        duplicate_groups=duplicate_groups,
+        planned_delete=planned_delete,
+        deleted_ids=deleted_ids,
+        errors=errors,
+        items=items,
+    )
 
 
 @router.get("/{dataset_id}/sync-jobs", response_model=list[DataSyncOut])
@@ -1290,6 +1685,7 @@ def create_bulk_sync_job(payload: BulkSyncCreate):
         raise HTTPException(status_code=400, detail="刷新策略参数无效")
     refresh_listing_ttl_days = max(int(payload.refresh_listing_ttl_days or 0), 1)
     alpha_compact_days = max(int(payload.alpha_compact_days or 0), 1)
+    project_only = bool(payload.project_only)
     params = {
         "status": status_filter,
         "batch_size": batch_size,
@@ -1301,8 +1697,17 @@ def create_bulk_sync_job(payload: BulkSyncCreate):
         "alpha_incremental_enabled": bool(payload.alpha_incremental_enabled),
         "alpha_compact_days": alpha_compact_days,
         "min_delay_seconds": min_delay_seconds,
+        "project_only": project_only,
     }
     with get_session() as session:
+        project_symbols: list[str] | None = None
+        project_benchmarks: list[str] | None = None
+        if project_only:
+            symbols, benchmarks = collect_active_project_symbols(session)
+            project_symbols = symbols
+            project_benchmarks = benchmarks
+            if not project_symbols:
+                raise HTTPException(status_code=400, detail="项目标的为空")
         active = (
             session.query(BulkSyncJob)
             .filter(BulkSyncJob.status.in_(("queued", "running", "paused")))
@@ -1319,6 +1724,15 @@ def create_bulk_sync_job(payload: BulkSyncCreate):
         session.add(job)
         session.commit()
         session.refresh(job)
+        if project_only and project_symbols:
+            log_dir = Path(settings.artifact_root) / f"bulk_sync_job_{job.id}"
+            symbol_path = log_dir / "project_symbols.csv"
+            write_symbol_list(symbol_path, project_symbols)
+            params["symbol_whitelist_path"] = str(symbol_path)
+            params["symbol_whitelist_count"] = len(project_symbols)
+            params["symbol_whitelist_benchmarks"] = project_benchmarks or []
+            job.params = params
+            session.commit()
         out = _bulk_job_to_out(session, job)
     _start_bulk_sync_worker(job.id)
     return out
@@ -1642,8 +2056,25 @@ def _extract_symbol_from_filename(path: Path) -> str:
     return symbol_part.strip().upper()
 
 
-def _load_available_symbols(adjusted_dir: Path) -> set[str]:
-    symbols = set()
+def _load_available_symbols(adjusted_dir: Path, session: SessionLocal | None = None) -> set[str]:
+    symbols: set[str] = set()
+    if ALPHA_ONLY_PRICES and session is not None:
+        datasets = session.query(Dataset).all()
+        for dataset in datasets:
+            vendor = (dataset.vendor or "").strip().lower()
+            if vendor != "alpha":
+                continue
+            freq = (dataset.frequency or "").strip().lower()
+            if freq and freq not in {"d", "day", "daily"}:
+                continue
+            adjusted_path = _series_path(dataset, adjusted=True)
+            if not adjusted_path.exists():
+                continue
+            symbol = _dataset_symbol(dataset)
+            if symbol:
+                symbols.add(symbol.upper())
+        return symbols
+
     for path in adjusted_dir.glob("*.csv"):
         if ALPHA_ONLY_PRICES:
             parts = path.stem.split("_", 2)
@@ -1831,7 +2262,14 @@ def _audit_trade_coverage(
     symbols = sorted(symbol_meta.keys())
 
     adjusted_dir = data_root / "curated_adjusted"
-    available_symbols = _load_available_symbols(adjusted_dir) if adjusted_dir.exists() else set()
+    if adjusted_dir.exists() and ALPHA_ONLY_PRICES:
+        session = SessionLocal()
+        try:
+            available_symbols = _load_available_symbols(adjusted_dir, session)
+        finally:
+            session.close()
+    else:
+        available_symbols = _load_available_symbols(adjusted_dir) if adjusted_dir.exists() else set()
     symbol_map_path = data_root / "universe" / "symbol_map.csv"
     symbol_alias_map = _load_symbol_alias_map(symbol_map_path)
     missing_price: list[str] = []
@@ -2803,6 +3241,107 @@ def _safe_name(value: str) -> str:
     return name or "dataset"
 
 
+def _frequency_label(value: str | None) -> str:
+    if not value:
+        return "Daily"
+    normalized = value.strip().lower()
+    if normalized in {"d", "day", "daily"}:
+        return "Daily"
+    if normalized in {"m", "min", "minute", "1min"}:
+        return "Minute"
+    return normalized.title()
+
+
+def _should_use_alpha_name(dataset: Dataset | None, source_path: str | None = None) -> bool:
+    if not dataset:
+        return False
+    if source_path and _is_alpha_source(source_path):
+        return True
+    vendor = (dataset.vendor or "").strip().lower()
+    return vendor == "alpha"
+
+
+def _canonical_alpha_dataset_name(dataset: Dataset, source_path: str | None = None) -> str:
+    if source_path and _is_alpha_source(source_path):
+        symbol = _alpha_source_symbol(source_path, dataset)
+    else:
+        symbol = _alpha_symbol(_dataset_symbol(dataset), dataset)
+    return f"Alpha_{symbol}_{_frequency_label(dataset.frequency)}"
+
+
+def _rename_dataset_storage_files(
+    data_root: Path, dataset_id: int, old_name: str, new_name: str
+) -> dict[str, list[str]]:
+    moved: list[str] = []
+    skipped: list[str] = []
+    missing: list[str] = []
+    old_safe = _safe_name(old_name)
+    new_safe = _safe_name(new_name)
+    for folder in ("normalized", "curated", "curated_adjusted"):
+        old_path = data_root / folder / f"{dataset_id}_{old_safe}.csv"
+        new_path = data_root / folder / f"{dataset_id}_{new_safe}.csv"
+        if old_path.exists():
+            if new_path.exists():
+                skipped.append(str(new_path))
+                continue
+            old_path.rename(new_path)
+            moved.append(str(new_path))
+        else:
+            missing.append(str(old_path))
+    old_versions = data_root / "curated_versions" / f"{dataset_id}_{old_safe}"
+    new_versions = data_root / "curated_versions" / f"{dataset_id}_{new_safe}"
+    if old_versions.exists():
+        if new_versions.exists():
+            skipped.append(str(new_versions))
+        else:
+            old_versions.rename(new_versions)
+            moved.append(str(new_versions))
+    else:
+        missing.append(str(old_versions))
+    return {"moved": moved, "skipped": skipped, "missing": missing}
+
+
+def _scan_series_summary(path: Path) -> tuple[int, date | None, date | None]:
+    if not path.exists():
+        return 0, None, None
+    rows = 0
+    min_dt: date | None = None
+    max_dt: date | None = None
+    with path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if not reader.fieldnames or "date" not in reader.fieldnames:
+            for _ in reader:
+                rows += 1
+            return rows, None, None
+        for row in reader:
+            rows += 1
+            parsed = _parse_datetime(row.get("date", ""))
+            if not parsed:
+                continue
+            day = parsed.date()
+            if min_dt is None or day < min_dt:
+                min_dt = day
+            if max_dt is None or day > max_dt:
+                max_dt = day
+    return rows, min_dt, max_dt
+
+
+def _dataset_series_summary(dataset: Dataset) -> dict[str, Any]:
+    adjusted_path = _series_path(dataset, adjusted=True)
+    curated_path = _series_path(dataset, adjusted=False)
+    has_adjusted = adjusted_path.exists()
+    target_path = adjusted_path if has_adjusted else curated_path
+    rows, min_dt, max_dt = _scan_series_summary(target_path) if target_path.exists() else (0, None, None)
+    coverage_days = (max_dt - min_dt).days if min_dt and max_dt else 0
+    return {
+        "rows": rows,
+        "min_date": min_dt,
+        "max_date": max_dt,
+        "coverage_days": coverage_days,
+        "has_adjusted": has_adjusted,
+    }
+
+
 def _series_path(dataset: Dataset, adjusted: bool = False) -> Path:
     folder = "curated_adjusted" if adjusted else "curated"
     filename = f"{dataset.id}_{_safe_name(dataset.name)}.csv"
@@ -3381,15 +3920,41 @@ def run_data_sync(job_id: int, spawn_retry_thread: bool = True) -> None:
         _set_job_stage(session, job, "fetch", 0.2)
 
         dataset = session.get(Dataset, job.dataset_id)
+        source_path = job.source_path
+        source_label = source_path
+        issues: list[str] = []
         dataset_name = dataset.name if dataset else f"dataset_{job.dataset_id}"
+        if dataset and _should_use_alpha_name(dataset, source_path):
+            canonical_name = _canonical_alpha_dataset_name(dataset, source_path)
+            if dataset_name != canonical_name:
+                try:
+                    rename_report = _rename_dataset_storage_files(
+                        _get_data_root(), dataset.id, dataset_name, canonical_name
+                    )
+                    dataset.name = canonical_name
+                    dataset.updated_at = datetime.utcnow()
+                    session.commit()
+                    record_audit(
+                        session,
+                        action="dataset.rename",
+                        resource_type="dataset",
+                        resource_id=dataset.id,
+                        detail={
+                            "old_name": dataset_name,
+                            "new_name": canonical_name,
+                            "source": source_path,
+                            "storage": rename_report,
+                        },
+                    )
+                    session.commit()
+                    dataset_name = canonical_name
+                except Exception as exc:
+                    issues.append(f"rename_failed:{exc}")
+
         output_name = f"{job.dataset_id}_{_safe_name(dataset_name)}.csv"
         normalized_path = _get_data_root() / "normalized" / output_name
         curated_path = _get_data_root() / "curated" / output_name
         adjusted_path = _get_data_root() / "curated_adjusted" / output_name
-
-        source_path = job.source_path
-        source_label = source_path
-        issues: list[str] = []
         symbol_override: str | None = None
         reset_history = bool(job.reset_history)
         factor_source: str | None = None
@@ -3664,6 +4229,25 @@ def run_data_sync(job_id: int, spawn_retry_thread: bool = True) -> None:
         elif _is_alpha_source(source_path):
             alpha_symbol = _alpha_source_symbol(source_path, dataset)
             base_symbol = alpha_symbol.split(".", 1)[0] if alpha_symbol.endswith(".HK") else alpha_symbol
+            exclude_map = _load_alpha_exclude_symbols(_get_data_root())
+            exclude_reason = exclude_map.get(alpha_symbol.upper()) if exclude_map else None
+            if exclude_reason is not None:
+                job.status = "skipped"
+                job.message = f"skip=alpha_exclude; reason={exclude_reason or 'alpha_exclude'}"
+                job.ended_at = datetime.utcnow()
+                record_audit(
+                    session,
+                    action="data.sync.skip",
+                    resource_type="data_sync_job",
+                    resource_id=job.id,
+                    detail={
+                        "dataset_id": job.dataset_id,
+                        "symbol": alpha_symbol,
+                        "reason": exclude_reason or "alpha_exclude",
+                    },
+                )
+                session.commit()
+                return
             alpha_fetch_cfg = load_alpha_fetch_config(_get_data_root())
             alpha_incremental_enabled = bool(
                 alpha_fetch_cfg.get(
@@ -3726,6 +4310,9 @@ def run_data_sync(job_id: int, spawn_retry_thread: bool = True) -> None:
                     )
                     return
                 elif code == "ALPHA_NOT_FOUND":
+                    _append_alpha_exclude_symbol(
+                        _get_data_root(), alpha_symbol, "alpha_not_covered"
+                    )
                     job.status = "not_found"
                     job.message = "Alpha Vantage 未覆盖该代码"
                 elif code == "ALPHA_KEY_MISSING":

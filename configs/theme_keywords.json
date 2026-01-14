@@ -46,6 +46,66 @@
       ]
     },
     {
+      "key": "POWER_EQUIPMENT",
+      "label": "大型变压设备",
+      "keywords": [
+        "transformer",
+        "switchgear",
+        "high voltage",
+        "power distribution",
+        "electrical equipment"
+      ],
+      "manual": [
+        "GEV",
+        "ETN",
+        "HUBB",
+        "POWL",
+        "SPXC",
+        "WCC",
+        "AMSC"
+      ]
+    },
+    {
+      "key": "POWER_TRANSMISSION",
+      "label": "能源传输与电网工程",
+      "keywords": [
+        "power transmission",
+        "grid engineering",
+        "utility services",
+        "EPC",
+        "infrastructure construction"
+      ],
+      "manual": [
+        "PWR",
+        "MYRG",
+        "EME",
+        "MTZ",
+        "PRIM",
+        "ACM",
+        "J",
+        "FLR",
+        "KBR"
+      ]
+    },
+    {
+      "key": "IDC_INFRA",
+      "label": "IDC机房建设与管理",
+      "keywords": [
+        "data center",
+        "colocation",
+        "interconnection",
+        "cooling",
+        "power management"
+      ],
+      "manual": [
+        "EQIX",
+        "DLR",
+        "IRM",
+        "VRT",
+        "DBRG"
+      ]
+    },
+    {
       "key": "ENERGY_FUSION",
       "label": "核聚变与能源",
       "keywords": [
@@ -68,6 +128,59 @@
         "UEC",
         "UROY",
         "UTG"
+      ]
+    },
+    {
+      "key": "SOLAR_ENERGY",
+      "label": "太阳能产业链",
+      "keywords": [
+        "solar",
+        "photovoltaic",
+        "pv",
+        "solar module",
+        "solar inverter",
+        "utility scale solar"
+      ],
+      "manual": [
+        "FSLR",
+        "ENPH",
+        "SEDG",
+        "RUN",
+        "NOVA",
+        "ARRY",
+        "NXT",
+        "SHLS",
+        "SPWR",
+        "STEM"
+      ]
+    },
+    {
+      "key": "SPACE_SOLAR",
+      "label": "太空太阳能与空间电力",
+      "keywords": [
+        "space solar",
+        "space power",
+        "satellite power",
+        "spacecraft",
+        "orbital energy"
+      ],
+      "manual": [
+        "LMT",
+        "NOC",
+        "RTX",
+        "LHX",
+        "BA",
+        "RKLB",
+        "RDW",
+        "PL",
+        "ASTS",
+        "BKSY",
+        "IRDM",
+        "VSAT",
+        "GSAT",
+        "SPCE",
+        "SPIR",
+        "SATS"
       ]
     }
   ],

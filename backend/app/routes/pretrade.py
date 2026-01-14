@@ -53,6 +53,7 @@ def get_pretrade_settings():
         settings = _get_or_create_settings(session)
         out = PreTradeSettingsOut.model_validate(settings, from_attributes=True)
         out.telegram_bot_token = _mask_token(out.telegram_bot_token)
+        out.telegram_chat_id = _mask_token(out.telegram_chat_id)
         return out
 
 
@@ -71,6 +72,7 @@ def update_pretrade_settings(payload: PreTradeSettingsUpdate):
         session.refresh(settings)
         out = PreTradeSettingsOut.model_validate(settings, from_attributes=True)
         out.telegram_bot_token = _mask_token(out.telegram_bot_token)
+        out.telegram_chat_id = _mask_token(out.telegram_chat_id)
         return out
 
 
@@ -137,6 +139,30 @@ def update_pretrade_template(template_id: int, payload: PreTradeTemplateUpdate):
         )
         session.commit()
         return template
+
+
+@router.delete("/templates/{template_id}", response_model=PreTradeTemplateOut)
+def delete_pretrade_template(template_id: int):
+    with get_session() as session:
+        template = session.get(PreTradeTemplate, template_id)
+        if not template:
+            raise HTTPException(status_code=404, detail="template not found")
+        if template.is_active:
+            template.is_active = False
+        settings = session.query(PreTradeSettings).first()
+        if settings and settings.current_template_id == template_id:
+            settings.current_template_id = None
+        template_out = PreTradeTemplateOut.model_validate(template, from_attributes=True)
+        session.delete(template)
+        record_audit(
+            session,
+            action="pretrade.template.delete",
+            resource_type="pretrade_template",
+            resource_id=template_id,
+            detail={"name": template_out.name},
+        )
+        session.commit()
+        return template_out
 
 
 @router.post("/templates/{template_id}/activate", response_model=PreTradeTemplateOut)

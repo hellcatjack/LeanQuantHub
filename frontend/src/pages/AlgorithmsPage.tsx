@@ -1768,7 +1768,7 @@ export default function AlgorithmsPage() {
                   {selfTestRunId && (
                     <div className="form-hint">
                       {t("algorithms.selftest.lastRun", { id: selfTestRunId })} ·{" "}
-                      <a href="/reports" target="_blank" rel="noreferrer">
+                      <a href="/backtests?tab=reports" target="_blank" rel="noreferrer">
                         {t("algorithms.selftest.viewReports")}
                       </a>
                     </div>

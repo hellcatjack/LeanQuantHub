@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import { api } from "../api";
 import BacktestInlinePreview from "../components/BacktestInlinePreview";
 import PaginationBar from "../components/PaginationBar";
@@ -29,6 +30,8 @@ const apiBase = import.meta.env.VITE_API_BASE_URL || "http://localhost:8021";
 
 export default function BacktestsPage() {
   const { t, formatDateTime } = useI18n();
+  const location = useLocation();
+  const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState<"runs" | "reports">("runs");
   const [runs, setRuns] = useState<Backtest[]>([]);
   const [runTotal, setRunTotal] = useState(0);
@@ -41,6 +44,35 @@ export default function BacktestsPage() {
   const [previewRunId, setPreviewRunId] = useState<number | null>(null);
   const [previewTab, setPreviewTab] = useState<"charts" | "trades">("charts");
   const previewRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const tab = new URLSearchParams(location.search).get("tab");
+    if (tab === "reports") {
+      setActiveTab("reports");
+      return;
+    }
+    if (tab === "runs") {
+      setActiveTab("runs");
+    }
+  }, [location.search]);
+
+  const setBacktestTab = (tab: "runs" | "reports") => {
+    setActiveTab(tab);
+    const params = new URLSearchParams(location.search);
+    if (tab === "reports") {
+      params.set("tab", "reports");
+    } else {
+      params.delete("tab");
+    }
+    const nextSearch = params.toString();
+    navigate(
+      {
+        pathname: "/backtests",
+        search: nextSearch ? `?${nextSearch}` : "",
+      },
+      { replace: true }
+    );
+  };
 
   const metricItems = useMemo(
     () => [
@@ -159,7 +191,7 @@ export default function BacktestsPage() {
             <button
               key={tab.key}
               className={activeTab === tab.key ? "tab-button active" : "tab-button"}
-              onClick={() => setActiveTab(tab.key as "runs" | "reports")}
+              onClick={() => setBacktestTab(tab.key as "runs" | "reports")}
             >
               {tab.label}
             </button>

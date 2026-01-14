@@ -239,7 +239,16 @@ def _build_fundamental_fetch_command(
     skip_lock: bool = False,
 ) -> list[str]:
     script_path = _project_root() / "scripts" / "fetch_alpha_fundamentals.py"
-    cmd = [sys.executable, str(script_path), "--from-pit"]
+    cmd = [sys.executable, str(script_path)]
+
+    symbols = str(params.get("symbols") or "").strip()
+    symbol_file = str(params.get("symbol_file") or "").strip()
+    if symbols:
+        cmd.extend(["--symbols", symbols])
+    elif symbol_file:
+        cmd.extend(["--symbol-file", symbol_file])
+    else:
+        cmd.append("--from-pit")
 
     data_root = str(params.get("data_root") or settings.data_root or "").strip()
     if data_root:
@@ -679,6 +688,10 @@ def run_pit_fundamental_job(job_id: int) -> None:
             return
 
         params = dict(job.params or {})
+        build_pit_fundamentals = params.get("build_pit_fundamentals")
+        if build_pit_fundamentals is None:
+            build_pit_fundamentals = True
+        refresh_fundamentals = bool(params.get("refresh_fundamentals"))
         output_dir = _resolve_fundamental_output_dir(params)
         log_dir = Path(settings.artifact_root) / f"pit_fundamental_job_{job_id}"
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -688,6 +701,28 @@ def run_pit_fundamental_job(job_id: int) -> None:
         data_root = str(params.get("data_root") or settings.data_root or "").strip()
         data_root_path = _resolve_data_root(params)
         lock_root = data_root_path if data_root_path else None
+        if not build_pit_fundamentals and not refresh_fundamentals:
+            job.status = "failed"
+            job.message = "no_task_selected"
+            job.ended_at = datetime.utcnow()
+            _write_progress(
+                progress_path,
+                {
+                    "stage": "failed",
+                    "status": "failed",
+                    "message": job.message,
+                    "updated_at": datetime.utcnow().isoformat(),
+                },
+            )
+            record_audit(
+                session,
+                action="pit_fundamental_job.failed",
+                resource_type="pit_fundamental_job",
+                resource_id=job_id,
+                detail={"error": job.message},
+            )
+            session.commit()
+            return
         pit_lock = JobLock("pit_fundamental", lock_root)
         if not pit_lock.acquire():
             job.status = "blocked"
@@ -736,7 +771,7 @@ def run_pit_fundamental_job(job_id: int) -> None:
         try:
             with log_path.open("w", encoding="utf-8") as handle:
                 check_canceled()
-                if params.get("refresh_fundamentals"):
+                if refresh_fundamentals:
                     alpha_lock = JobLock("alpha_fetch", lock_root)
                     if not alpha_lock.acquire():
                         job = session.get(PitFundamentalJob, job_id)
@@ -792,7 +827,7 @@ def run_pit_fundamental_job(job_id: int) -> None:
                     handle.flush()
                     fetch_proc = subprocess.run(
                         fetch_cmd, stdout=handle, stderr=subprocess.STDOUT, check=False
-                    )
+                        )
                     if fetch_proc.returncode == FUNDAMENTAL_CANCEL_EXIT_CODE:
                         raise _PitFundamentalCanceled("fetch_canceled")
                     if fetch_proc.returncode != 0:
@@ -801,6 +836,29 @@ def run_pit_fundamental_job(job_id: int) -> None:
                         )
 
                 check_canceled()
+                if not build_pit_fundamentals:
+                    job = session.get(PitFundamentalJob, job_id)
+                    if job:
+                        job.status = "success"
+                        job.message = "fundamentals_cache_only"
+                        job.ended_at = datetime.utcnow()
+                        _write_progress(
+                            progress_path,
+                            {
+                                "stage": "fetch_only",
+                                "status": "success",
+                                "updated_at": datetime.utcnow().isoformat(),
+                            },
+                        )
+                        record_audit(
+                            session,
+                            action="pit_fundamental_job.success",
+                            resource_type="pit_fundamental_job",
+                            resource_id=job_id,
+                            detail={"mode": "cache_only"},
+                        )
+                        session.commit()
+                    return
                 _write_progress(
                     progress_path,
                     {

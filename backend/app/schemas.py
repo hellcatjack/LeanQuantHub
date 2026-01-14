@@ -294,6 +294,70 @@ class MLPipelineDetailOut(MLPipelineOut):
     backtest_score_summary: dict[str, Any] | None = None
 
 
+class DecisionSnapshotRequest(BaseModel):
+    project_id: int
+    train_job_id: int | None = None
+    pipeline_id: int | None = None
+    snapshot_date: str | None = None
+    algorithm_parameters: dict[str, Any] | None = None
+
+
+class DecisionSnapshotItem(BaseModel):
+    symbol: str
+    snapshot_date: str
+    rebalance_date: str
+    company_name: str | None = None
+    weight: float | None = None
+    score: float | None = None
+    rank: int | None = None
+    theme: str | None = None
+    reason: str | None = None
+    snapshot_price: float | None = None
+
+
+class DecisionSnapshotOut(BaseModel):
+    id: int
+    project_id: int
+    pipeline_id: int | None = None
+    train_job_id: int | None = None
+    status: str
+    snapshot_date: str | None = None
+    params: dict[str, Any] | None = None
+    summary: dict[str, Any] | None = None
+    artifact_dir: str | None = None
+    summary_path: str | None = None
+    items_path: str | None = None
+    filters_path: str | None = None
+    message: str | None = None
+    created_at: datetime
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+
+    class Config:
+        from_attributes = True
+
+
+class DecisionSnapshotDetailOut(DecisionSnapshotOut):
+    items: list[DecisionSnapshotItem] = []
+    filters: list[DecisionSnapshotItem] = []
+
+
+class DecisionSnapshotPreviewOut(BaseModel):
+    id: int | None = None
+    project_id: int
+    pipeline_id: int | None = None
+    train_job_id: int | None = None
+    status: str
+    snapshot_date: str | None = None
+    params: dict[str, Any] | None = None
+    summary: dict[str, Any] | None = None
+    artifact_dir: str | None = None
+    summary_path: str | None = None
+    items_path: str | None = None
+    filters_path: str | None = None
+    message: str | None = None
+    items: list[DecisionSnapshotItem] = []
+    filters: list[DecisionSnapshotItem] = []
 class BacktestListOut(BacktestOut):
     report_id: int | None = None
 
@@ -742,6 +806,7 @@ class BulkAutoConfigOut(BaseModel):
     min_delay_seconds: float
     refresh_listing_mode: str
     refresh_listing_ttl_days: int
+    project_only: bool
     updated_at: str | None = None
     source: str
     path: str
@@ -754,6 +819,7 @@ class BulkAutoConfigUpdate(BaseModel):
     min_delay_seconds: float | None = None
     refresh_listing_mode: str | None = None
     refresh_listing_ttl_days: int | None = None
+    project_only: bool | None = None
 
 
 class AlphaGapSummaryOut(BaseModel):
@@ -860,6 +926,30 @@ class TradingCalendarRefreshOut(BaseModel):
     calendar: TradingCalendarConfigOut | None = None
 
 
+class TradingCalendarPreviewDay(BaseModel):
+    date: str
+    weekday: int
+    is_trading: bool
+    in_month: bool | None = None
+
+
+class TradingCalendarPreviewOut(BaseModel):
+    timezone: str
+    as_of_date: str | None = None
+    month: str | None = None
+    latest_trading_day: str | None = None
+    next_trading_day: str | None = None
+    recent_trading_days: list[str]
+    upcoming_trading_days: list[str]
+    week_days: list[TradingCalendarPreviewDay]
+    month_days: list[TradingCalendarPreviewDay]
+    calendar_source: str | None = None
+    overrides_applied: int | None = None
+    calendar_sessions: int | None = None
+    calendar_start: str | None = None
+    calendar_end: str | None = None
+
+
 class AlphaCoverageAuditRequest(BaseModel):
     asset_types: list[str] | None = None
     enqueue_missing: bool = True
@@ -910,6 +1000,58 @@ class TradeCoverageAuditOut(BaseModel):
     pit_fundamentals_extra_path: str | None
 
 
+class AlphaNameRepairRequest(BaseModel):
+    dry_run: bool = True
+    limit: int | None = None
+    sample_size: int = 50
+    allow_conflicts: bool = False
+
+
+class AlphaNameRepairItem(BaseModel):
+    dataset_id: int
+    old_name: str
+    new_name: str
+    status: str
+    moved_paths: list[str] = []
+    skipped_paths: list[str] = []
+    message: str | None = None
+
+
+class AlphaNameRepairOut(BaseModel):
+    total_candidates: int
+    renamed: int
+    skipped_same: int
+    skipped_conflict: int
+    errors: list[str]
+    items: list[AlphaNameRepairItem]
+
+
+class AlphaDuplicateCleanupRequest(BaseModel):
+    dry_run: bool = True
+    limit: int | None = None
+    sample_size: int = 50
+
+
+class AlphaDuplicateCleanupItem(BaseModel):
+    key: str
+    keep_id: int
+    drop_ids: list[int]
+    keep_rows: int
+    keep_start: str | None
+    keep_end: str | None
+    keep_has_adjusted: bool
+    message: str | None = None
+
+
+class AlphaDuplicateCleanupOut(BaseModel):
+    total_groups: int
+    duplicate_groups: int
+    planned_delete: int
+    deleted_ids: list[int]
+    errors: list[str]
+    items: list[AlphaDuplicateCleanupItem]
+
+
 class BulkSyncCreate(BaseModel):
     status: str = "all"
     batch_size: int = 200
@@ -921,6 +1063,7 @@ class BulkSyncCreate(BaseModel):
     alpha_incremental_enabled: bool = True
     alpha_compact_days: int = 120
     min_delay_seconds: float = 0.1
+    project_only: bool = True
 
 
 class BulkSyncOut(BaseModel):
@@ -1011,6 +1154,7 @@ class PitFundamentalJobCreate(BaseModel):
     fundamentals_dir: str | None = None
     data_root: str | None = None
     refresh_fundamentals: bool = False
+    build_pit_fundamentals: bool = True
     resume_fundamentals: bool = False
     resume_from_job_id: int | None = None
     refresh_days: int = 0
@@ -1018,6 +1162,7 @@ class PitFundamentalJobCreate(BaseModel):
     max_retries: int = 3
     rate_limit_sleep: float = 10.0
     rate_limit_retries: int = 3
+    project_only: bool = True
 
 
 class PitFundamentalJobOut(BaseModel):
@@ -1141,6 +1286,8 @@ class PreTradeSettingsUpdate(BaseModel):
     retry_max_delay_seconds: int | None = None
     deadline_time: str | None = None
     deadline_timezone: str | None = None
+    update_project_only: bool | None = None
+    auto_decision_snapshot: bool | None = None
 
 
 class PreTradeSettingsOut(BaseModel):
@@ -1153,6 +1300,8 @@ class PreTradeSettingsOut(BaseModel):
     retry_max_delay_seconds: int
     deadline_time: str | None
     deadline_timezone: str | None
+    update_project_only: bool
+    auto_decision_snapshot: bool
     created_at: datetime
     updated_at: datetime
 

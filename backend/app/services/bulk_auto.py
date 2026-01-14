@@ -16,6 +16,7 @@ DEFAULT_BULK_AUTO = {
     "min_delay_seconds": 0.1,
     "refresh_listing_mode": "stale_only",
     "refresh_listing_ttl_days": 7,
+    "project_only": True,
 }
 
 _ALLOWED_REFRESH_MODES = {"always", "stale_only", "never"}
@@ -117,6 +118,9 @@ def load_bulk_auto_config(data_root: Path | None = None) -> dict[str, Any]:
                     config["refresh_listing_ttl_days"],
                     min_value=1,
                 )
+                config["project_only"] = _coerce_bool(
+                    payload.get("project_only"), config["project_only"]
+                )
                 updated_at = payload.get("updated_at")
                 source = "file"
         except (OSError, json.JSONDecodeError):
@@ -135,6 +139,9 @@ def load_bulk_auto_config(data_root: Path | None = None) -> dict[str, Any]:
     config["status"] = _coerce_status(config.get("status"), DEFAULT_BULK_AUTO["status"])
     config["only_missing"] = _coerce_bool(
         config.get("only_missing"), DEFAULT_BULK_AUTO["only_missing"]
+    )
+    config["project_only"] = _coerce_bool(
+        config.get("project_only"), DEFAULT_BULK_AUTO["project_only"]
     )
     config["updated_at"] = updated_at
     config["source"] = source
@@ -155,6 +162,7 @@ def write_bulk_auto_config(
         "min_delay_seconds": current["min_delay_seconds"],
         "refresh_listing_mode": current["refresh_listing_mode"],
         "refresh_listing_ttl_days": current["refresh_listing_ttl_days"],
+        "project_only": current["project_only"],
     }
     if "status" in updates and updates["status"] is not None:
         payload["status"] = _coerce_status(updates["status"], payload["status"])
@@ -173,6 +181,10 @@ def write_bulk_auto_config(
     if "refresh_listing_ttl_days" in updates and updates["refresh_listing_ttl_days"] is not None:
         payload["refresh_listing_ttl_days"] = _coerce_int(
             updates["refresh_listing_ttl_days"], payload["refresh_listing_ttl_days"], 1
+        )
+    if "project_only" in updates and updates["project_only"] is not None:
+        payload["project_only"] = _coerce_bool(
+            updates["project_only"], payload["project_only"]
         )
     payload["updated_at"] = datetime.utcnow().isoformat()
     path.parent.mkdir(parents=True, exist_ok=True)
