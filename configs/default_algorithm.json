@@ -1,0 +1,43 @@
+{
+  "algorithm": {
+    "name": "MLOverlayScores",
+    "description": "PyTorch scores overlay (project18 baseline)",
+    "language": "Python",
+    "file_path": "algorithms/ml_overlay_scores.py",
+    "type_name": null,
+    "version": "v1.0"
+  },
+  "version": {
+    "version": "v1.0",
+    "description": "Default ML overlay parameters aligned with project18",
+    "language": "Python",
+    "file_path": "algorithms/ml_overlay_scores.py",
+    "type_name": null,
+    "params": {
+      "top_n": 36,
+      "weighting": "score",
+      "max_weight": 0.025,
+      "min_score": 0,
+      "max_exposure": 0.45,
+      "score_smoothing_alpha": 0.15,
+      "retain_top_n": 10,
+      "market_filter": true,
+      "market_ma_window": 200,
+      "risk_off_mode": "defensive",
+      "risk_off_pick": "lowest_vol",
+      "risk_off_symbols": "SHY,IEF,GLD,TLT",
+      "max_drawdown": 0.15,
+      "max_drawdown_52w": 0.15,
+      "drawdown_exposure_floor": 0,
+      "drawdown_tiers": "0.08,0.12,0.15",
+      "drawdown_exposures": "0.80,0.60,0.40",
+      "max_turnover_week": 0.08,
+      "vol_target": 0.055,
+      "idle_allocation": "defensive",
+      "dynamic_exposure": true,
+      "rebalance_frequency": "Weekly",
+      "rebalance_day": "Monday",
+      "rebalance_time_minutes": 30
+    }
+  }
+}

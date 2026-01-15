@@ -139,6 +139,125 @@ def _format_mtime(path: Path) -> str | None:
         return None
     return datetime.fromtimestamp(path.stat().st_mtime).isoformat()
 
+def _resolve_algorithm_path(base_dir: Path, raw_path: str | None) -> str | None:
+    if not raw_path:
+        return None
+    path = Path(str(raw_path).strip())
+    if not path.is_absolute():
+        path = base_dir / path
+    return str(path.resolve())
+
+
+def _load_default_algorithm_config() -> dict[str, Any]:
+    base_dir = Path(__file__).resolve().parents[3]
+    config_path = base_dir / "configs" / "default_algorithm.json"
+    if not config_path.exists():
+        return {}
+    try:
+        return json.loads(config_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+
+def _ensure_default_algorithm(session) -> AlgorithmVersion | None:
+    config = _load_default_algorithm_config()
+    if not config:
+        return None
+    base_dir = Path(__file__).resolve().parents[3]
+    algo_cfg = config.get("algorithm") if isinstance(config.get("algorithm"), dict) else {}
+    ver_cfg = config.get("version") if isinstance(config.get("version"), dict) else {}
+    name = str(algo_cfg.get("name") or "").strip()
+    if not name:
+        return None
+
+    algo_path = _resolve_algorithm_path(base_dir, algo_cfg.get("file_path"))
+    algo = session.query(Algorithm).filter(Algorithm.name == name).first()
+    if not algo:
+        algo = Algorithm(
+            name=name,
+            description=algo_cfg.get("description"),
+            language=str(algo_cfg.get("language") or "Python"),
+            file_path=algo_path,
+            type_name=algo_cfg.get("type_name"),
+            version=algo_cfg.get("version"),
+        )
+        session.add(algo)
+        session.commit()
+        session.refresh(algo)
+    else:
+        updated = False
+        for field, value in {
+            "description": algo_cfg.get("description"),
+            "language": str(algo_cfg.get("language") or algo.language or "Python"),
+            "file_path": algo_path,
+            "type_name": algo_cfg.get("type_name"),
+            "version": algo_cfg.get("version"),
+        }.items():
+            if value is not None and getattr(algo, field) != value:
+                setattr(algo, field, value)
+                updated = True
+        if updated:
+            session.commit()
+
+    version_name = str(ver_cfg.get("version") or algo.version or "v1.0").strip()
+    version = (
+        session.query(AlgorithmVersion)
+        .filter(
+            AlgorithmVersion.algorithm_id == algo.id,
+            AlgorithmVersion.version == version_name,
+        )
+        .first()
+    )
+    version_path = _resolve_algorithm_path(
+        base_dir, ver_cfg.get("file_path") or algo.file_path
+    )
+    content = None
+    content_hash = None
+    if version_path and Path(version_path).exists():
+        content = Path(version_path).read_text(encoding="utf-8")
+        content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    version_params = (
+        ver_cfg.get("params") if isinstance(ver_cfg.get("params"), dict) else None
+    )
+    if not version:
+        version = AlgorithmVersion(
+            algorithm_id=algo.id,
+            version=version_name,
+            description=ver_cfg.get("description"),
+            language=str(ver_cfg.get("language") or algo.language or "Python"),
+            file_path=version_path,
+            type_name=ver_cfg.get("type_name"),
+            content=content,
+            content_hash=content_hash,
+            params=version_params,
+        )
+        session.add(version)
+        session.commit()
+        session.refresh(version)
+        return version
+
+    updated = False
+    for field, value in {
+        "description": ver_cfg.get("description"),
+        "language": str(ver_cfg.get("language") or version.language or algo.language or "Python"),
+        "file_path": version_path,
+        "type_name": ver_cfg.get("type_name"),
+    }.items():
+        if value is not None and getattr(version, field) != value:
+            setattr(version, field, value)
+            updated = True
+    if version_params is not None and version.params != version_params:
+        version.params = version_params
+        updated = True
+    if content is not None and version.content != content:
+        version.content = content
+        version.content_hash = content_hash
+        updated = True
+    if updated:
+        session.commit()
+        session.refresh(version)
+    return version
+
 
 def _load_default_config(session=None) -> dict[str, Any]:
     base_dir = Path(__file__).resolve().parents[3]
@@ -223,6 +342,32 @@ def _load_default_config(session=None) -> dict[str, Any]:
     for item in theme_items:
         key = str(item.get("key", "")).strip()
         item["weight"] = float(weights.get(key, 0.0)) if key else 0.0
+    backtest_params = {
+        "top_n": 36,
+        "weighting": "score",
+        "max_weight": 0.025,
+        "min_score": 0,
+        "max_exposure": 0.45,
+        "score_smoothing_alpha": 0.15,
+        "retain_top_n": 10,
+        "market_filter": True,
+        "market_ma_window": 200,
+        "risk_off_mode": "defensive",
+        "risk_off_pick": "lowest_vol",
+        "risk_off_symbols": "SHY,IEF,GLD,TLT",
+        "max_drawdown": 0.15,
+        "max_drawdown_52w": 0.15,
+        "drawdown_exposure_floor": 0.0,
+        "drawdown_tiers": "0.08,0.12,0.15",
+        "drawdown_exposures": "0.80,0.60,0.40",
+        "max_turnover_week": 0.08,
+        "vol_target": 0.055,
+        "idle_allocation": "defensive",
+        "dynamic_exposure": True,
+        "rebalance_frequency": "Weekly",
+        "rebalance_day": "Monday",
+        "rebalance_time_minutes": 30,
+    }
     return {
         "template": "sp500_current",
         "universe": {
@@ -240,6 +385,7 @@ def _load_default_config(session=None) -> dict[str, Any]:
         "backtest_end": "",
         "categories": categories,
         "themes": theme_items,
+        "backtest_params": backtest_params,
     }
 
 
@@ -1162,6 +1308,29 @@ def create_project(payload: ProjectCreate):
         session.add(project)
         session.commit()
         session.refresh(project)
+        default_version = _ensure_default_algorithm(session)
+        if not default_version:
+            raise HTTPException(status_code=500, detail="默认算法配置缺失")
+        binding = ProjectAlgorithmBinding(
+            project_id=project.id,
+            algorithm_id=default_version.algorithm_id,
+            algorithm_version_id=default_version.id,
+            is_locked=True,
+        )
+        session.add(binding)
+        session.commit()
+        session.refresh(binding)
+        record_audit(
+            session,
+            action="project.algorithm.bind",
+            resource_type="project",
+            resource_id=project.id,
+            detail={
+                "algorithm_id": binding.algorithm_id,
+                "algorithm_version_id": binding.algorithm_version_id,
+            },
+        )
+        session.commit()
         record_audit(
             session,
             action="project.create",

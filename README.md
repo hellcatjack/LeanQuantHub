@@ -78,6 +78,7 @@ systemctl --user restart stocklean-backend stocklean-frontend
 - 统一目录：`docs/todolists/`
 - 文件命名：`<主题>TODO.md` / `<主题>TestTODO.md`
 - 项目根目录不再存放 TODO 文件
+- 索引总览：`docs/todolists/README.md`
 
 ## 报告归档
 - 回测报告：`docs/reports/backtests/`
