@@ -52,6 +52,9 @@
 - 禁止提交 `.env`、API Key、数据库口令与数据文件；配置示例写入 `.env.example`。
 - 禁止无意义地使用完全相同参数并发回测或训练；并发仅用于探索不同参数或不同模型的对比。
 - 禁止重新引入 Stooq/Yahoo 作为数据源或价格回退。
+- 数据库变更必须通过脚本执行，脚本统一放在 `deploy/mysql/patches/`，命名规则：`YYYYMMDD_<short_desc>.sql`。
+- 数据库更新脚本必须包含：变更说明、影响范围、回滚指引，并尽量保证幂等（`IF NOT EXISTS` 或 `information_schema` 检查）。
+- 数据库更新脚本建议记录到 `schema_migrations`（如已建立），禁止手工直接改库不留痕。
 
 
 # 通用编程与执行规则（Agent Engineering Rules）
