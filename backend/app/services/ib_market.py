@@ -658,6 +658,7 @@ def fetch_market_snapshots(
     history_use_rth: bool = True,
 ) -> list[dict[str, Any]]:
     settings_row = get_or_create_ib_settings(session)
+    api_mode = resolve_ib_api_mode(settings_row)
     market_data_type = _market_data_type_id(settings_row.market_data_type)
     use_regulatory_snapshot = bool(getattr(settings_row, "use_regulatory_snapshot", False))
     symbols = [_normalize_symbol(item) for item in symbols if _normalize_symbol(item)]
@@ -693,6 +694,8 @@ def fetch_market_snapshots(
                 payload = None
                 if snapshot:
                     snapshot["timestamp"] = datetime.utcnow().isoformat(timespec="seconds")
+                    if not snapshot.get("source"):
+                        snapshot["source"] = "mock" if api_mode == "mock" else "ib_snapshot"
                     payload = snapshot
                     if store:
                         path = data_root / f"{symbol}.json"
