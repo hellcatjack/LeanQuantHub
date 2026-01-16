@@ -47,6 +47,13 @@ def _limit_allows_fill(side: str, price: float, limit_price: float) -> bool:
     return False
 
 
+def _estimate_order_notional(order: TradeOrder) -> float | None:
+    order_type = (order.order_type or "").strip().upper()
+    if order_type == "LMT" and order.limit_price is not None:
+        return float(order.limit_price) * float(order.quantity or 0)
+    return None
+
+
 def execute_trade_run(
     run_id: int,
     *,
@@ -78,6 +85,41 @@ def execute_trade_run(
             run.status = "failed"
             run.message = "orders_empty"
             run.ended_at = datetime.utcnow()
+            session.commit()
+            return TradeExecutionResult(
+                run_id=run.id,
+                status=run.status,
+                filled=0,
+                cancelled=0,
+                rejected=0,
+                skipped=0,
+                message=run.message,
+                dry_run=dry_run,
+            )
+
+        risk = (run.params or {}).get("risk") or {}
+        max_order_notional = risk.get("max_order_notional")
+        max_position_ratio = risk.get("max_position_ratio")
+        portfolio_value = risk.get("portfolio_value")
+        block_reason = None
+        if max_order_notional is not None or (max_position_ratio is not None and portfolio_value):
+            for order in orders:
+                notional = _estimate_order_notional(order)
+                if notional is None:
+                    continue
+                if max_order_notional is not None and notional > float(max_order_notional):
+                    block_reason = f"risk_max_order_notional:{order.symbol}"
+                    break
+                if max_position_ratio is not None and portfolio_value:
+                    ratio = notional / float(portfolio_value)
+                    if ratio > float(max_position_ratio):
+                        block_reason = f"risk_max_position_ratio:{order.symbol}"
+                        break
+        if block_reason:
+            run.status = "blocked"
+            run.message = block_reason
+            run.ended_at = datetime.utcnow()
+            run.updated_at = datetime.utcnow()
             session.commit()
             return TradeExecutionResult(
                 run_id=run.id,
