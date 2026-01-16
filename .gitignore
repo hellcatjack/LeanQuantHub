@@ -51,3 +51,4 @@ Thumbs.db
 # Script pid/lock files
 scripts/.restart-local.pids.json
 scripts/.restart-local.lock
+.worktrees/
