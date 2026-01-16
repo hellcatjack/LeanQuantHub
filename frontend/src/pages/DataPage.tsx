@@ -5482,13 +5482,22 @@ export default function DataPage() {
               })}
             </div>
           )}
-          {tradingCalendar?.overrides_path && (
-            <div className="form-note">
-              {t("data.tradingCalendar.overridesPath", {
-                path: tradingCalendar.overrides_path,
-              })}
-            </div>
-          )}
+        {tradingCalendar?.overrides_path && (
+          <div className="form-note">
+            {t("data.tradingCalendar.overridesPath", {
+              path: tradingCalendar.overrides_path,
+            })}
+          </div>
+        )}
+      </div>
+
+        <div className="card">
+          <div className="card-title">{t("data.liveTrade.title")}</div>
+          <div className="card-meta">{t("data.liveTrade.meta")}</div>
+          <div className="form-hint">{t("data.liveTrade.hint")}</div>
+          <a className="button-secondary" href="/live-trade">
+            {t("data.liveTrade.open")}
+          </a>
         </div>
 
         <div className="card">

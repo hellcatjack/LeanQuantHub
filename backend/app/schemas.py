@@ -1384,6 +1384,251 @@ class PreTradeTelegramTest(BaseModel):
 class PreTradeTelegramTestOut(BaseModel):
     ok: bool
 
+class IBSettingsUpdate(BaseModel):
+    host: str | None = None
+    port: int | None = None
+    client_id: int | None = None
+    account_id: str | None = None
+    mode: str | None = None
+    market_data_type: str | None = None
+    api_mode: str | None = None
+    use_regulatory_snapshot: bool | None = None
+
+
+class IBSettingsOut(BaseModel):
+    id: int
+    host: str
+    port: int
+    client_id: int
+    account_id: str | None
+    mode: str
+    market_data_type: str
+    api_mode: str
+    use_regulatory_snapshot: bool
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class IBContractRefreshRequest(BaseModel):
+    symbols: list[str] | None = None
+    sec_type: str | None = None
+    exchange: str | None = None
+    currency: str | None = None
+    use_project_symbols: bool = True
+
+
+class IBContractCacheOut(BaseModel):
+    id: int
+    symbol: str
+    sec_type: str
+    exchange: str
+    primary_exchange: str | None
+    currency: str
+    con_id: int
+    local_symbol: str | None
+    multiplier: str | None
+    detail: dict | None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class IBContractRefreshOut(BaseModel):
+    total: int
+    updated: int
+    skipped: int
+    errors: list[str]
+    duration_sec: float
+
+
+class IBMarketSnapshotRequest(BaseModel):
+    symbols: list[str]
+    store: bool = True
+    fallback_history: bool = False
+    history_duration: str = "5 D"
+    history_bar_size: str = "1 day"
+    history_use_rth: bool = True
+
+
+class IBMarketSnapshotItem(BaseModel):
+    symbol: str
+    data: dict | None
+    error: str | None = None
+
+
+class IBMarketSnapshotOut(BaseModel):
+    total: int
+    success: int
+    items: list[IBMarketSnapshotItem]
+
+
+class IBMarketHealthRequest(BaseModel):
+    symbols: list[str] | None = None
+    use_project_symbols: bool = False
+    min_success_ratio: float = 1.0
+    fallback_history: bool = True
+    history_duration: str = "5 D"
+    history_bar_size: str = "1 day"
+    history_use_rth: bool = True
+
+
+class IBMarketHealthOut(BaseModel):
+    status: str
+    total: int
+    success: int
+    missing_symbols: list[str]
+    errors: list[str]
+
+
+class IBHistoryJobCreate(BaseModel):
+    symbols: list[str] | None = None
+    use_project_symbols: bool = False
+    duration: str = "30 D"
+    bar_size: str = "1 day"
+    use_rth: bool = True
+    store: bool = True
+    min_delay_seconds: float = 0.2
+
+
+class IBHistoryJobOut(BaseModel):
+    id: int
+    status: str
+    params: dict | None
+    total_symbols: int | None
+    processed_symbols: int | None
+    success_symbols: int | None
+    failed_symbols: int | None
+    log_path: str | None
+    message: str | None
+    created_at: datetime
+    started_at: datetime | None
+    ended_at: datetime | None
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class IBHistoricalRequest(BaseModel):
+    symbol: str
+    duration: str = "30 D"
+    bar_size: str = "1 day"
+    end_datetime: str | None = None
+    use_rth: bool = True
+    store: bool = True
+
+
+class IBHistoricalOut(BaseModel):
+    symbol: str
+    bars: int
+    path: str | None = None
+    error: str | None = None
+
+
+class IBConnectionHeartbeat(BaseModel):
+    status: str | None = None
+    message: str | None = None
+
+
+class IBConnectionStateOut(BaseModel):
+    id: int
+    status: str
+    message: str | None
+    last_heartbeat: datetime | None
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class TradeOrderCreate(BaseModel):
+    client_order_id: str
+    symbol: str
+    side: str
+    quantity: float
+    order_type: str = "MKT"
+    limit_price: float | None = None
+    params: dict | None = None
+
+
+class TradeOrderStatusUpdate(BaseModel):
+    status: str
+    filled_quantity: float | None = None
+    avg_fill_price: float | None = None
+    params: dict | None = None
+
+
+class TradeRunCreate(BaseModel):
+    project_id: int
+    decision_snapshot_id: int | None = None
+    mode: str = "paper"
+    orders: list[TradeOrderCreate] = []
+    require_market_health: bool = True
+    health_min_success_ratio: float = 1.0
+    health_fallback_history: bool = True
+    health_history_duration: str = "5 D"
+    health_history_bar_size: str = "1 day"
+    health_history_use_rth: bool = True
+
+
+class TradeRunOut(BaseModel):
+    id: int
+    project_id: int
+    decision_snapshot_id: int | None
+    mode: str
+    status: str
+    params: dict | None
+    message: str | None
+    orders_created: int | None = None
+    created_at: datetime
+    started_at: datetime | None
+    ended_at: datetime | None
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class TradeRunExecuteRequest(BaseModel):
+    dry_run: bool = False
+    force: bool = False
+
+
+class TradeRunExecuteOut(BaseModel):
+    run_id: int
+    status: str
+    filled: int
+    cancelled: int
+    rejected: int
+    skipped: int
+    message: str | None
+    dry_run: bool
+
+
+class TradeOrderOut(BaseModel):
+    id: int
+    run_id: int | None
+    client_order_id: str
+    symbol: str
+    side: str
+    quantity: float
+    order_type: str
+    limit_price: float | None
+    status: str
+    filled_quantity: float
+    avg_fill_price: float | None
+    params: dict | None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
 class AuditLogOut(BaseModel):
     id: int
     actor: str

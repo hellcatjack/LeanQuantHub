@@ -5,9 +5,10 @@ export default function Sidebar() {
   const { t } = useI18n();
   const links = [
     { to: "/projects", label: t("nav.projects") },
-    { to: "/themes", label: t("nav.themes") },
-    { to: "/backtests", label: t("nav.backtests") },
     { to: "/data", label: t("nav.data") },
+    { to: "/backtests", label: t("nav.backtests") },
+    { to: "/live-trade", label: t("nav.liveTrade") },
+    { to: "/themes", label: t("nav.themes") },
     { to: "/audit-logs", label: t("nav.audit") },
   ];
 

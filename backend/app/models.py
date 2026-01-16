@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, JSON, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Float, JSON, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -538,6 +538,140 @@ class PreTradeStep(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
     )
+
+
+class IBSettings(Base):
+    __tablename__ = "ib_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    host: Mapped[str] = mapped_column(String(128), default="127.0.0.1")
+    port: Mapped[int] = mapped_column(Integer, default=7497)
+    client_id: Mapped[int] = mapped_column(Integer, default=1)
+    account_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    mode: Mapped[str] = mapped_column(String(16), default="paper")
+    market_data_type: Mapped[str] = mapped_column(String(16), default="realtime")
+    api_mode: Mapped[str] = mapped_column(String(16), default="ib")
+    use_regulatory_snapshot: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class IBConnectionState(Base):
+    __tablename__ = "ib_connection_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    status: Mapped[str] = mapped_column(String(32), default="unknown")
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_heartbeat: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class IBContractCache(Base):
+    __tablename__ = "ib_contract_cache"
+    __table_args__ = (
+        UniqueConstraint(
+            "symbol",
+            "sec_type",
+            "exchange",
+            "currency",
+            name="uq_ib_contract_cache",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    sec_type: Mapped[str] = mapped_column(String(16), default="STK")
+    exchange: Mapped[str] = mapped_column(String(32), default="SMART")
+    primary_exchange: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    currency: Mapped[str] = mapped_column(String(8), default="USD")
+    con_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    local_symbol: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    multiplier: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    detail: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class IBHistoryJob(Base):
+    __tablename__ = "ib_history_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    status: Mapped[str] = mapped_column(String(32), default="queued")
+    params: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    total_symbols: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    processed_symbols: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    success_symbols: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    failed_symbols: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    log_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class TradeRun(Base):
+    __tablename__ = "trade_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False)
+    decision_snapshot_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    mode: Mapped[str] = mapped_column(String(16), default="paper")
+    status: Mapped[str] = mapped_column(String(32), default="queued")
+    params: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class TradeOrder(Base):
+    __tablename__ = "trade_orders"
+    __table_args__ = (
+        UniqueConstraint("client_order_id", name="uq_trade_order_client_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[int | None] = mapped_column(ForeignKey("trade_runs.id"), nullable=True)
+    client_order_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    side: Mapped[str] = mapped_column(String(8), nullable=False)
+    quantity: Mapped[float] = mapped_column(Float, nullable=False)
+    order_type: Mapped[str] = mapped_column(String(16), default="MKT")
+    limit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="NEW")
+    filled_quantity: Mapped[float] = mapped_column(Float, default=0.0)
+    avg_fill_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    params: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class TradeFill(Base):
+    __tablename__ = "trade_fills"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("trade_orders.id"), nullable=False)
+    fill_quantity: Mapped[float] = mapped_column(Float, nullable=False)
+    fill_price: Mapped[float] = mapped_column(Float, nullable=False)
+    commission: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fill_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    params: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"

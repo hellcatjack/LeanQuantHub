@@ -4731,6 +4731,9 @@ export default function ProjectsPage() {
                 <a className="button-secondary" href="/themes">
                   {t("projects.detail.openThemes")}
                 </a>
+                <a className="button-secondary" href="/algorithms">
+                  {t("projects.algorithm.openLibrarySummary")}
+                </a>
                 <button className="button-secondary" onClick={refreshProjectData}>
                   {t("projects.dataStatus.action")}
                 </button>

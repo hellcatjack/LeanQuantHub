@@ -7,6 +7,7 @@ import ProjectsPage from "./pages/ProjectsPage";
 import ThemesPage from "./pages/ThemesPage";
 import AuditLogsPage from "./pages/AuditLogsPage";
 import DatasetChartPage from "./pages/DatasetChartPage";
+import LiveTradePage from "./pages/LiveTradePage";
 
 export default function App() {
   return (
@@ -19,6 +20,7 @@ export default function App() {
         <Route path="/algorithms" element={<AlgorithmsPage />} />
         <Route path="/backtests" element={<BacktestsPage />} />
         <Route path="/reports" element={<Navigate to="/backtests?tab=reports" replace />} />
+        <Route path="/live-trade" element={<LiveTradePage />} />
         <Route path="/data" element={<DataPage />} />
         <Route path="/data/charts/:datasetId" element={<DatasetChartPage />} />
         <Route path="/audit-logs" element={<AuditLogsPage />} />

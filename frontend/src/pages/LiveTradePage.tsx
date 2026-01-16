@@ -1,0 +1,1114 @@
+import { useEffect, useMemo, useState } from "react";
+import TopBar from "../components/TopBar";
+import { api } from "../api";
+import { useI18n } from "../i18n";
+
+interface IBSettings {
+  id: number;
+  host: string;
+  port: number;
+  client_id: number;
+  account_id?: string | null;
+  mode: string;
+  market_data_type: string;
+  api_mode: string;
+  use_regulatory_snapshot: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+interface IBConnectionState {
+  id: number;
+  status: string;
+  message?: string | null;
+  last_heartbeat?: string | null;
+  updated_at: string;
+}
+
+interface IBContractRefreshResult {
+  total: number;
+  updated: number;
+  skipped: number;
+  errors: string[];
+  duration_sec: number;
+}
+
+interface IBMarketHealthResult {
+  status: string;
+  total: number;
+  success: number;
+  missing_symbols: string[];
+  errors: string[];
+}
+
+interface IBHistoryJob {
+  id: number;
+  status: string;
+  total_symbols?: number | null;
+  processed_symbols?: number | null;
+  success_symbols?: number | null;
+  failed_symbols?: number | null;
+  message?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface TradeRun {
+  id: number;
+  project_id: number;
+  decision_snapshot_id?: number | null;
+  mode: string;
+  status: string;
+  message?: string | null;
+  created_at: string;
+  ended_at?: string | null;
+}
+
+interface TradeOrder {
+  id: number;
+  run_id?: number | null;
+  symbol: string;
+  side: string;
+  quantity: number;
+  status: string;
+  created_at: string;
+}
+
+const maskAccount = (value?: string | null) => {
+  if (!value) {
+    return "";
+  }
+  if (value.length <= 4) {
+    return `${value[0] ?? ""}***`;
+  }
+  return `${value.slice(0, 2)}****${value.slice(-2)}`;
+};
+
+const normalizeSymbols = (raw: string) =>
+  raw
+    .split(/[,\\s]+/)
+    .map((item) => item.trim().toUpperCase())
+    .filter((item) => item.length > 0);
+
+export default function LiveTradePage() {
+  const { t, formatDateTime } = useI18n();
+  const [ibSettings, setIbSettings] = useState<IBSettings | null>(null);
+  const [ibSettingsForm, setIbSettingsForm] = useState({
+    host: "127.0.0.1",
+    port: "7497",
+    client_id: "1",
+    account_id: "",
+    mode: "paper",
+    market_data_type: "realtime",
+    api_mode: "ib",
+    use_regulatory_snapshot: false,
+  });
+  const [ibSettingsSaving, setIbSettingsSaving] = useState(false);
+  const [ibSettingsResult, setIbSettingsResult] = useState("");
+  const [ibSettingsError, setIbSettingsError] = useState("");
+  const [ibState, setIbState] = useState<IBConnectionState | null>(null);
+  const [ibStateLoading, setIbStateLoading] = useState(false);
+  const [ibStateResult, setIbStateResult] = useState("");
+  const [ibStateError, setIbStateError] = useState("");
+  const [ibContractForm, setIbContractForm] = useState({
+    symbols: "SPY",
+    use_project_symbols: false,
+  });
+  const [ibContractLoading, setIbContractLoading] = useState(false);
+  const [ibContractResult, setIbContractResult] =
+    useState<IBContractRefreshResult | null>(null);
+  const [ibContractError, setIbContractError] = useState("");
+  const [ibMarketHealthForm, setIbMarketHealthForm] = useState({
+    symbols: "SPY",
+    use_project_symbols: false,
+    min_success_ratio: "1.0",
+    fallback_history: true,
+    history_duration: "5 D",
+    history_bar_size: "1 day",
+    history_use_rth: true,
+  });
+  const [ibMarketHealthLoading, setIbMarketHealthLoading] = useState(false);
+  const [ibMarketHealthResult, setIbMarketHealthResult] =
+    useState<IBMarketHealthResult | null>(null);
+  const [ibMarketHealthError, setIbMarketHealthError] = useState("");
+  const [ibHistoryForm, setIbHistoryForm] = useState({
+    symbols: "SPY",
+    use_project_symbols: false,
+    duration: "30 D",
+    bar_size: "1 day",
+    use_rth: true,
+    store: true,
+    min_delay_seconds: "0.2",
+  });
+  const [ibHistoryJobs, setIbHistoryJobs] = useState<IBHistoryJob[]>([]);
+  const [ibHistoryLoading, setIbHistoryLoading] = useState(false);
+  const [ibHistoryError, setIbHistoryError] = useState("");
+  const [ibHistoryActionLoading, setIbHistoryActionLoading] = useState(false);
+  const [tradeRuns, setTradeRuns] = useState<TradeRun[]>([]);
+  const [tradeOrders, setTradeOrders] = useState<TradeOrder[]>([]);
+  const [tradeError, setTradeError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const updateIbSettingsForm = (key: keyof typeof ibSettingsForm, value: string | boolean) => {
+    setIbSettingsForm((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const updateIbContractForm = (key: keyof typeof ibContractForm, value: any) => {
+    setIbContractForm((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const updateIbMarketHealthForm = (key: keyof typeof ibMarketHealthForm, value: any) => {
+    setIbMarketHealthForm((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const updateIbHistoryForm = (key: keyof typeof ibHistoryForm, value: any) => {
+    setIbHistoryForm((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const loadIbSettings = async () => {
+    try {
+      const res = await api.get<IBSettings>("/api/ib/settings");
+      setIbSettings(res.data);
+      setIbSettingsForm({
+        host: res.data.host || "127.0.0.1",
+        port: String(res.data.port ?? 7497),
+        client_id: String(res.data.client_id ?? 1),
+        account_id: "",
+        mode: res.data.mode || "paper",
+        market_data_type: res.data.market_data_type || "realtime",
+        api_mode: res.data.api_mode || "ib",
+        use_regulatory_snapshot: !!res.data.use_regulatory_snapshot,
+      });
+      setIbSettingsError("");
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("data.ib.loadError");
+      setIbSettingsError(String(detail));
+      setIbSettings(null);
+    }
+  };
+
+  const loadIbState = async (silent = false) => {
+    if (!silent) {
+      setIbStateLoading(true);
+      setIbStateError("");
+    }
+    try {
+      const res = await api.get<IBConnectionState>("/api/ib/state");
+      setIbState(res.data);
+      if (!silent) {
+        setIbStateResult("");
+      }
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("data.ib.stateLoadError");
+      if (!silent) {
+        setIbStateError(String(detail));
+      }
+    } finally {
+      if (!silent) {
+        setIbStateLoading(false);
+      }
+    }
+  };
+
+  const probeIbState = async () => {
+    setIbStateLoading(true);
+    setIbStateError("");
+    setIbStateResult("");
+    try {
+      const res = await api.post<IBConnectionState>("/api/ib/state/probe");
+      setIbState(res.data);
+      setIbStateResult(t("data.ib.probeOk"));
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("data.ib.probeError");
+      setIbStateError(String(detail));
+    } finally {
+      setIbStateLoading(false);
+    }
+  };
+
+  const saveIbSettings = async () => {
+    setIbSettingsSaving(true);
+    setIbSettingsResult("");
+    setIbSettingsError("");
+    try {
+      const payload = {
+        host: ibSettingsForm.host,
+        port: Number.parseInt(ibSettingsForm.port, 10) || 0,
+        client_id: Number.parseInt(ibSettingsForm.client_id, 10) || 0,
+        account_id: ibSettingsForm.account_id || undefined,
+        mode: ibSettingsForm.mode,
+        market_data_type: ibSettingsForm.market_data_type,
+        api_mode: ibSettingsForm.api_mode,
+        use_regulatory_snapshot: ibSettingsForm.use_regulatory_snapshot,
+      };
+      const res = await api.post<IBSettings>("/api/ib/settings", payload);
+      setIbSettings(res.data);
+      setIbSettingsResult(t("data.ib.saved"));
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("data.ib.saveError");
+      setIbSettingsError(String(detail));
+    } finally {
+      setIbSettingsSaving(false);
+    }
+  };
+
+  const refreshIbContracts = async () => {
+    setIbContractLoading(true);
+    setIbContractError("");
+    setIbContractResult(null);
+    try {
+      const symbols = normalizeSymbols(ibContractForm.symbols);
+      const payload = {
+        symbols: symbols.length ? symbols : undefined,
+        use_project_symbols: ibContractForm.use_project_symbols,
+      };
+      const res = await api.post<IBContractRefreshResult>("/api/ib/contracts/refresh", payload);
+      setIbContractResult(res.data);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("data.ib.contractsError");
+      setIbContractError(String(detail));
+    } finally {
+      setIbContractLoading(false);
+    }
+  };
+
+  const checkIbMarketHealth = async () => {
+    setIbMarketHealthLoading(true);
+    setIbMarketHealthError("");
+    setIbMarketHealthResult(null);
+    try {
+      const symbols = normalizeSymbols(ibMarketHealthForm.symbols);
+      const payload = {
+        symbols: symbols.length ? symbols : undefined,
+        use_project_symbols: ibMarketHealthForm.use_project_symbols,
+        min_success_ratio: Number(ibMarketHealthForm.min_success_ratio) || 1.0,
+        fallback_history: ibMarketHealthForm.fallback_history,
+        history_duration: ibMarketHealthForm.history_duration,
+        history_bar_size: ibMarketHealthForm.history_bar_size,
+        history_use_rth: ibMarketHealthForm.history_use_rth,
+      };
+      const res = await api.post<IBMarketHealthResult>("/api/ib/market/health", payload);
+      setIbMarketHealthResult(res.data);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("data.ib.healthError");
+      setIbMarketHealthError(String(detail));
+    } finally {
+      setIbMarketHealthLoading(false);
+    }
+  };
+
+  const loadIbHistoryJobs = async () => {
+    setIbHistoryLoading(true);
+    try {
+      const res = await api.get<IBHistoryJob[]>("/api/ib/history-jobs", {
+        params: { limit: 10, offset: 0 },
+      });
+      setIbHistoryJobs(res.data || []);
+      setIbHistoryError("");
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("data.ib.historyLoadError");
+      setIbHistoryError(String(detail));
+    } finally {
+      setIbHistoryLoading(false);
+    }
+  };
+
+  const createIbHistoryJob = async () => {
+    setIbHistoryActionLoading(true);
+    setIbHistoryError("");
+    try {
+      const symbols = normalizeSymbols(ibHistoryForm.symbols);
+      const payload = {
+        symbols: symbols.length ? symbols : undefined,
+        use_project_symbols: ibHistoryForm.use_project_symbols,
+        duration: ibHistoryForm.duration,
+        bar_size: ibHistoryForm.bar_size,
+        use_rth: ibHistoryForm.use_rth,
+        store: ibHistoryForm.store,
+        min_delay_seconds: Number(ibHistoryForm.min_delay_seconds) || 0,
+      };
+      await api.post("/api/ib/history-jobs", payload);
+      await loadIbHistoryJobs();
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("data.ib.historyStartError");
+      setIbHistoryError(String(detail));
+    } finally {
+      setIbHistoryActionLoading(false);
+    }
+  };
+
+  const cancelIbHistoryJob = async (jobId: number) => {
+    setIbHistoryActionLoading(true);
+    setIbHistoryError("");
+    try {
+      await api.post(`/api/ib/history-jobs/${jobId}/cancel`);
+      await loadIbHistoryJobs();
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("data.ib.historyCancelError");
+      setIbHistoryError(String(detail));
+    } finally {
+      setIbHistoryActionLoading(false);
+    }
+  };
+
+  const loadTradeActivity = async () => {
+    setTradeError("");
+    try {
+      const [runsRes, ordersRes] = await Promise.all([
+        api.get<TradeRun[]>("/api/trade/runs", { params: { limit: 5, offset: 0 } }),
+        api.get<TradeOrder[]>("/api/trade/orders", { params: { limit: 5, offset: 0 } }),
+      ]);
+      setTradeRuns(runsRes.data || []);
+      setTradeOrders(ordersRes.data || []);
+    } catch (error) {
+      setTradeError(t("trade.tradeError"));
+      setTradeRuns([]);
+      setTradeOrders([]);
+    }
+  };
+
+  const refreshAll = async () => {
+    setLoading(true);
+    await Promise.all([loadIbSettings(), loadIbState(true), loadIbHistoryJobs(), loadTradeActivity()]);
+    setLoading(false);
+  };
+
+  useEffect(() => {
+    refreshAll();
+  }, []);
+
+  useEffect(() => {
+    const refresh = async () => {
+      await loadIbState(true);
+    };
+    const timer = window.setInterval(refresh, 10000);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  const isConfigured = useMemo(() => {
+    if (!ibSettings) {
+      return false;
+    }
+    return Boolean(ibSettings.host && ibSettings.port);
+  }, [ibSettings]);
+
+  const statusLabel = useMemo(() => {
+    if (!isConfigured) {
+      return t("trade.status.unconfigured");
+    }
+    if (!ibState?.status) {
+      return t("trade.status.unknown");
+    }
+    if (ibState.status === "connected") {
+      return t("trade.status.connected");
+    }
+    if (ibState.status === "disconnected") {
+      return t("trade.status.disconnected");
+    }
+    return ibState.status;
+  }, [ibState?.status, isConfigured, t]);
+
+  const modeLabel = useMemo(() => {
+    const mode = ibSettings?.mode?.toLowerCase();
+    if (mode === "live") {
+      return t("trade.mode.live");
+    }
+    if (mode === "paper") {
+      return t("trade.mode.paper");
+    }
+    return ibSettings?.mode || t("common.none");
+  }, [ibSettings?.mode, t]);
+
+  const formatStatus = (value?: string | null) => {
+    if (!value) {
+      return t("common.none");
+    }
+    const key = `common.status.${String(value)}`;
+    const translated = t(key);
+    return translated === key ? String(value) : translated;
+  };
+
+  const formatRunMode = (value?: string | null) => {
+    if (!value) {
+      return t("common.none");
+    }
+    const normalized = String(value).toLowerCase();
+    if (normalized === "paper") {
+      return t("trade.mode.paper");
+    }
+    if (normalized === "live") {
+      return t("trade.mode.live");
+    }
+    return String(value);
+  };
+
+  const formatSide = (value?: string | null) => {
+    if (!value) {
+      return t("common.none");
+    }
+    return String(value).toUpperCase();
+  };
+
+  const latestTradeRun = tradeRuns[0];
+
+  return (
+    <div className="main">
+      <TopBar title={t("trade.title")} />
+      <div className="content">
+        <div className="grid-2">
+          <div className="card">
+            <div className="card-title">{t("trade.statusTitle")}</div>
+            <div className="card-meta">{t("trade.statusMeta")}</div>
+            <div className="overview-grid" style={{ marginTop: "12px" }}>
+              <div className="overview-card">
+                <div className="overview-label">{t("trade.statusLabel")}</div>
+                <div className="overview-value">{statusLabel}</div>
+                <div className="overview-sub">
+                  {t("trade.connectionUpdatedAt")} {formatDateTime(ibState?.updated_at)}
+                </div>
+              </div>
+              <div className="overview-card">
+                <div className="overview-label">{t("trade.modeLabel")}</div>
+                <div className="overview-value">{modeLabel}</div>
+                <div className="overview-sub">
+                  {t("trade.marketDataType")}: {ibSettings?.market_data_type || t("common.none")}
+                </div>
+              </div>
+            </div>
+            {ibState && (
+              <div className="meta-list" style={{ marginTop: "12px" }}>
+                <div className="meta-row">
+                  <span>{t("data.ib.status")}</span>
+                  <strong>{formatStatus(ibState.status || "unknown")}</strong>
+                </div>
+                {ibSettings?.api_mode && (
+                  <div className="meta-row">
+                    <span>{t("data.ib.apiMode")}</span>
+                    <strong>
+                      {ibSettings.api_mode === "mock"
+                        ? t("data.ib.apiModeMock")
+                        : t("data.ib.apiModeIb")}
+                    </strong>
+                  </div>
+                )}
+                <div className="meta-row">
+                  <span>{t("data.ib.lastHeartbeat")}</span>
+                  <strong>
+                    {ibState.last_heartbeat ? formatDateTime(ibState.last_heartbeat) : "-"}
+                  </strong>
+                </div>
+                <div className="meta-row">
+                  <span>{t("data.ib.stateUpdated")}</span>
+                  <strong>{ibState.updated_at ? formatDateTime(ibState.updated_at) : "-"}</strong>
+                </div>
+                {ibState.message && (
+                  <div className="meta-row">
+                    <span>{t("data.ib.message")}</span>
+                    <strong>{ibState.message}</strong>
+                  </div>
+                )}
+              </div>
+            )}
+            {ibStateResult && <div className="form-success">{ibStateResult}</div>}
+            {ibStateError && <div className="form-error">{ibStateError}</div>}
+            <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+              <button
+                className="button-secondary"
+                onClick={() => loadIbState(false)}
+                disabled={ibStateLoading}
+              >
+                {ibStateLoading ? t("common.actions.loading") : t("common.actions.refresh")}
+              </button>
+              <button
+                className="button-secondary"
+                onClick={probeIbState}
+                disabled={ibStateLoading}
+              >
+                {ibStateLoading ? t("common.actions.loading") : t("data.ib.probe")}
+              </button>
+              <button className="button-secondary" onClick={refreshAll} disabled={loading}>
+                {loading ? t("common.actions.loading") : t("trade.refresh")}
+              </button>
+              <a className="button-secondary" href="/data">
+                {t("trade.openData")}
+              </a>
+            </div>
+          </div>
+
+          <div className="card">
+            <div className="card-title">{t("trade.configTitle")}</div>
+            <div className="card-meta">{t("trade.configMeta")}</div>
+            <div className="overview-grid" style={{ marginTop: "12px" }}>
+              <div className="overview-card">
+                <div className="overview-label">{t("trade.host")}</div>
+                <div className="overview-value">{ibSettings?.host || t("common.none")}</div>
+                <div className="overview-sub">
+                  {t("trade.port")}: {ibSettings?.port ?? t("common.none")}
+                </div>
+              </div>
+              <div className="overview-card">
+                <div className="overview-label">{t("trade.account")}</div>
+                <div className="overview-value">
+                  {maskAccount(ibSettings?.account_id) || t("common.none")}
+                </div>
+                <div className="overview-sub">
+                  {t("trade.apiMode")}: {ibSettings?.api_mode || t("common.none")}
+                </div>
+              </div>
+              <div className="overview-card">
+                <div className="overview-label">{t("trade.regulatorySnapshot")}</div>
+                <div className="overview-value">
+                  {ibSettings?.use_regulatory_snapshot
+                    ? t("common.boolean.true")
+                    : t("common.boolean.false")}
+                </div>
+                <div className="overview-sub">
+                  {t("common.labels.updatedAt")} {formatDateTime(ibSettings?.updated_at)}
+                </div>
+              </div>
+            </div>
+            {!isConfigured && (
+              <div className="form-hint" style={{ marginTop: "8px" }}>
+                {t("trade.statusHint")}
+              </div>
+            )}
+            <div className="section-title">{t("data.ib.settingsTitle")}</div>
+            <div className="form-grid">
+              <div className="form-row">
+                <label className="form-label">{t("data.ib.host")}</label>
+                <input
+                  type="text"
+                  className="form-input"
+                  value={ibSettingsForm.host}
+                  onChange={(e) => updateIbSettingsForm("host", e.target.value)}
+                />
+                <div className="form-hint">{t("data.ib.hostHint")}</div>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("data.ib.port")}</label>
+                <input
+                  type="number"
+                  className="form-input"
+                  value={ibSettingsForm.port}
+                  onChange={(e) => updateIbSettingsForm("port", e.target.value)}
+                />
+                <div className="form-hint">{t("data.ib.portHint")}</div>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("data.ib.clientId")}</label>
+                <input
+                  type="number"
+                  className="form-input"
+                  value={ibSettingsForm.client_id}
+                  onChange={(e) => updateIbSettingsForm("client_id", e.target.value)}
+                />
+                <div className="form-hint">{t("data.ib.clientIdHint")}</div>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("data.ib.accountId")}</label>
+                <input
+                  type="text"
+                  className="form-input"
+                  value={ibSettingsForm.account_id}
+                  onChange={(e) => updateIbSettingsForm("account_id", e.target.value)}
+                  placeholder={t("data.ib.accountIdPlaceholder")}
+                />
+                {ibSettings?.account_id && (
+                  <div className="form-hint">
+                    {t("data.ib.accountIdHint", { account: ibSettings.account_id })}
+                  </div>
+                )}
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("data.ib.apiMode")}</label>
+                <select
+                  className="form-select"
+                  value={ibSettingsForm.api_mode}
+                  onChange={(e) => updateIbSettingsForm("api_mode", e.target.value)}
+                >
+                  <option value="ib">{t("data.ib.apiModeIb")}</option>
+                  <option value="mock">{t("data.ib.apiModeMock")}</option>
+                </select>
+                <div className="form-hint">{t("data.ib.apiModeHint")}</div>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("data.ib.mode")}</label>
+                <select
+                  className="form-select"
+                  value={ibSettingsForm.mode}
+                  onChange={(e) => updateIbSettingsForm("mode", e.target.value)}
+                >
+                  <option value="paper">{t("data.ib.modePaper")}</option>
+                  <option value="live">{t("data.ib.modeLive")}</option>
+                </select>
+                <div className="form-hint">{t("data.ib.modeHint")}</div>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("data.ib.marketDataType")}</label>
+                <select
+                  className="form-select"
+                  value={ibSettingsForm.market_data_type}
+                  onChange={(e) => updateIbSettingsForm("market_data_type", e.target.value)}
+                >
+                  <option value="realtime">{t("data.ib.marketDataRealtime")}</option>
+                  <option value="frozen">{t("data.ib.marketDataFrozen")}</option>
+                  <option value="delayed">{t("data.ib.marketDataDelayed")}</option>
+                </select>
+                <div className="form-hint">{t("data.ib.marketDataTypeHint")}</div>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("data.ib.regulatorySnapshot")}</label>
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    checked={ibSettingsForm.use_regulatory_snapshot}
+                    onChange={(e) =>
+                      updateIbSettingsForm("use_regulatory_snapshot", e.target.checked)
+                    }
+                  />
+                  <span className="slider" />
+                </label>
+                <div className="form-hint">{t("data.ib.regulatorySnapshotHint")}</div>
+              </div>
+            </div>
+            {ibSettingsResult && <div className="form-success">{ibSettingsResult}</div>}
+            {ibSettingsError && <div className="form-error">{ibSettingsError}</div>}
+            <button
+              className="button-secondary"
+              onClick={saveIbSettings}
+              disabled={ibSettingsSaving}
+            >
+              {ibSettingsSaving ? t("common.actions.loading") : t("common.actions.save")}
+            </button>
+          </div>
+        </div>
+
+        <div className="grid-2" style={{ marginTop: "16px" }}>
+          <div className="card">
+            <div className="card-title">{t("data.ib.contractsTitle")}</div>
+            <div className="form-grid">
+              <div className="form-row full">
+                <label className="form-label">{t("data.ib.contractsSymbols")}</label>
+                <input
+                  type="text"
+                  className="form-input"
+                  value={ibContractForm.symbols}
+                  onChange={(e) => updateIbContractForm("symbols", e.target.value)}
+                  placeholder={t("data.ib.contractsSymbolsPlaceholder")}
+                />
+                <div className="form-hint">{t("data.ib.contractsSymbolsHint")}</div>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("data.ib.contractsProjectOnly")}</label>
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    checked={ibContractForm.use_project_symbols}
+                    onChange={(e) => updateIbContractForm("use_project_symbols", e.target.checked)}
+                  />
+                  <span className="slider" />
+                </label>
+                <div className="form-hint">{t("data.ib.contractsProjectOnlyHint")}</div>
+              </div>
+            </div>
+            {ibContractResult && (
+              <div className="form-success">
+                {t("data.ib.contractsResult", {
+                  total: ibContractResult.total,
+                  updated: ibContractResult.updated,
+                  skipped: ibContractResult.skipped,
+                  duration: ibContractResult.duration_sec.toFixed(2),
+                })}
+              </div>
+            )}
+            {ibContractError && <div className="form-error">{ibContractError}</div>}
+            <button
+              className="button-secondary"
+              onClick={refreshIbContracts}
+              disabled={ibContractLoading}
+            >
+              {ibContractLoading ? t("common.actions.loading") : t("data.ib.contractsRefresh")}
+            </button>
+          </div>
+
+          <div className="card">
+            <div className="card-title">{t("data.ib.healthTitle")}</div>
+            <div className="form-grid">
+              <div className="form-row full">
+                <label className="form-label">{t("data.ib.healthSymbols")}</label>
+                <input
+                  type="text"
+                  className="form-input"
+                  value={ibMarketHealthForm.symbols}
+                  onChange={(e) => updateIbMarketHealthForm("symbols", e.target.value)}
+                  placeholder={t("data.ib.healthSymbolsPlaceholder")}
+                />
+                <div className="form-hint">{t("data.ib.healthSymbolsHint")}</div>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("data.ib.healthProjectOnly")}</label>
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    checked={ibMarketHealthForm.use_project_symbols}
+                    onChange={(e) =>
+                      updateIbMarketHealthForm("use_project_symbols", e.target.checked)
+                    }
+                  />
+                  <span className="slider" />
+                </label>
+                <div className="form-hint">{t("data.ib.healthProjectOnlyHint")}</div>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("data.ib.healthMinRatio")}</label>
+                <input
+                  type="number"
+                  step="0.05"
+                  min="0"
+                  max="1"
+                  className="form-input"
+                  value={ibMarketHealthForm.min_success_ratio}
+                  onChange={(e) => updateIbMarketHealthForm("min_success_ratio", e.target.value)}
+                />
+                <div className="form-hint">{t("data.ib.healthMinRatioHint")}</div>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("data.ib.healthFallback")}</label>
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    checked={ibMarketHealthForm.fallback_history}
+                    onChange={(e) =>
+                      updateIbMarketHealthForm("fallback_history", e.target.checked)
+                    }
+                  />
+                  <span className="slider" />
+                </label>
+                <div className="form-hint">{t("data.ib.healthFallbackHint")}</div>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("data.ib.healthDuration")}</label>
+                <select
+                  className="form-select"
+                  value={ibMarketHealthForm.history_duration}
+                  onChange={(e) => updateIbMarketHealthForm("history_duration", e.target.value)}
+                >
+                  <option value="5 D">{t("data.ib.healthDuration5d")}</option>
+                  <option value="30 D">{t("data.ib.healthDuration30d")}</option>
+                  <option value="90 D">{t("data.ib.healthDuration90d")}</option>
+                </select>
+                <div className="form-hint">{t("data.ib.healthDurationHint")}</div>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("data.ib.healthBarSize")}</label>
+                <select
+                  className="form-select"
+                  value={ibMarketHealthForm.history_bar_size}
+                  onChange={(e) => updateIbMarketHealthForm("history_bar_size", e.target.value)}
+                >
+                  <option value="1 day">{t("data.ib.healthBarDay")}</option>
+                  <option value="1 hour">{t("data.ib.healthBarHour")}</option>
+                </select>
+                <div className="form-hint">{t("data.ib.healthBarSizeHint")}</div>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("data.ib.healthUseRth")}</label>
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    checked={ibMarketHealthForm.history_use_rth}
+                    onChange={(e) =>
+                      updateIbMarketHealthForm("history_use_rth", e.target.checked)
+                    }
+                  />
+                  <span className="slider" />
+                </label>
+                <div className="form-hint">{t("data.ib.healthUseRthHint")}</div>
+              </div>
+            </div>
+            {ibMarketHealthResult && (
+              <div className="form-success">
+                {t("data.ib.healthResult", {
+                  status: ibMarketHealthResult.status,
+                  success: ibMarketHealthResult.success,
+                  total: ibMarketHealthResult.total,
+                })}
+                {ibMarketHealthResult.errors.length > 0 && (
+                  <div className="form-note">
+                    {ibMarketHealthResult.errors.slice(0, 5).join(" | ")}
+                  </div>
+                )}
+              </div>
+            )}
+            {ibMarketHealthError && <div className="form-error">{ibMarketHealthError}</div>}
+            <button
+              className="button-secondary"
+              onClick={checkIbMarketHealth}
+              disabled={ibMarketHealthLoading}
+            >
+              {ibMarketHealthLoading ? t("common.actions.loading") : t("data.ib.healthCheck")}
+            </button>
+          </div>
+        </div>
+
+        <div className="card" style={{ marginTop: "16px" }}>
+          <div className="card-title">{t("data.ib.historyTitle")}</div>
+          <div className="form-grid">
+            <div className="form-row full">
+              <label className="form-label">{t("data.ib.historySymbols")}</label>
+              <input
+                type="text"
+                className="form-input"
+                value={ibHistoryForm.symbols}
+                onChange={(e) => updateIbHistoryForm("symbols", e.target.value)}
+                placeholder={t("data.ib.historySymbolsPlaceholder")}
+              />
+              <div className="form-hint">{t("data.ib.historySymbolsHint")}</div>
+            </div>
+            <div className="form-row">
+              <label className="form-label">{t("data.ib.historyProjectOnly")}</label>
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={ibHistoryForm.use_project_symbols}
+                  onChange={(e) => updateIbHistoryForm("use_project_symbols", e.target.checked)}
+                />
+                <span className="slider" />
+              </label>
+              <div className="form-hint">{t("data.ib.historyProjectOnlyHint")}</div>
+            </div>
+            <div className="form-row">
+              <label className="form-label">{t("data.ib.historyDuration")}</label>
+              <select
+                className="form-select"
+                value={ibHistoryForm.duration}
+                onChange={(e) => updateIbHistoryForm("duration", e.target.value)}
+              >
+                <option value="5 D">{t("data.ib.historyDuration5d")}</option>
+                <option value="30 D">{t("data.ib.historyDuration30d")}</option>
+                <option value="90 D">{t("data.ib.historyDuration90d")}</option>
+                <option value="1 Y">{t("data.ib.historyDuration1y")}</option>
+              </select>
+              <div className="form-hint">{t("data.ib.historyDurationHint")}</div>
+            </div>
+            <div className="form-row">
+              <label className="form-label">{t("data.ib.historyBarSize")}</label>
+              <select
+                className="form-select"
+                value={ibHistoryForm.bar_size}
+                onChange={(e) => updateIbHistoryForm("bar_size", e.target.value)}
+              >
+                <option value="1 day">{t("data.ib.historyBarDay")}</option>
+                <option value="1 hour">{t("data.ib.historyBarHour")}</option>
+              </select>
+              <div className="form-hint">{t("data.ib.historyBarSizeHint")}</div>
+            </div>
+            <div className="form-row">
+              <label className="form-label">{t("data.ib.historyUseRth")}</label>
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={ibHistoryForm.use_rth}
+                  onChange={(e) => updateIbHistoryForm("use_rth", e.target.checked)}
+                />
+                <span className="slider" />
+              </label>
+              <div className="form-hint">{t("data.ib.historyUseRthHint")}</div>
+            </div>
+            <div className="form-row">
+              <label className="form-label">{t("data.ib.historyStore")}</label>
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={ibHistoryForm.store}
+                  onChange={(e) => updateIbHistoryForm("store", e.target.checked)}
+                />
+                <span className="slider" />
+              </label>
+              <div className="form-hint">{t("data.ib.historyStoreHint")}</div>
+            </div>
+            <div className="form-row">
+              <label className="form-label">{t("data.ib.historyDelay")}</label>
+              <input
+                type="number"
+                min="0"
+                step="0.05"
+                className="form-input"
+                value={ibHistoryForm.min_delay_seconds}
+                onChange={(e) => updateIbHistoryForm("min_delay_seconds", e.target.value)}
+              />
+              <div className="form-hint">{t("data.ib.historyDelayHint")}</div>
+            </div>
+          </div>
+          {ibHistoryError && <div className="form-error">{ibHistoryError}</div>}
+          <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+            <button
+              className="button-secondary"
+              onClick={createIbHistoryJob}
+              disabled={ibHistoryActionLoading}
+            >
+              {ibHistoryActionLoading ? t("common.actions.loading") : t("data.ib.historyStart")}
+            </button>
+            <button
+              className="button-secondary"
+              onClick={loadIbHistoryJobs}
+              disabled={ibHistoryLoading}
+            >
+              {ibHistoryLoading ? t("common.actions.loading") : t("common.actions.refresh")}
+            </button>
+          </div>
+          {ibHistoryJobs.length > 0 ? (
+            <table className="table" style={{ marginTop: "12px" }}>
+              <thead>
+                <tr>
+                  <th>{t("common.labels.id")}</th>
+                  <th>{t("common.labels.status")}</th>
+                  <th>{t("data.ib.historyProgress")}</th>
+                  <th>{t("data.ib.historySuccess")}</th>
+                  <th>{t("common.labels.createdAt")}</th>
+                  <th>{t("common.labels.actions")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {ibHistoryJobs.map((job) => {
+                  const total = job.total_symbols ?? 0;
+                  const processed = job.processed_symbols ?? 0;
+                  const success = job.success_symbols ?? 0;
+                  const failed = job.failed_symbols ?? 0;
+                  const canCancel = ["queued", "running"].includes(job.status);
+                  return (
+                    <tr key={job.id}>
+                      <td>{job.id}</td>
+                      <td>{formatStatus(job.status)}</td>
+                      <td>
+                        {processed}/{total}
+                      </td>
+                      <td>
+                        {success}/{failed}
+                      </td>
+                      <td>{formatDateTime(job.created_at)}</td>
+                      <td>
+                        <div className="table-actions">
+                          <button
+                            className="button-link"
+                            disabled={!canCancel || ibHistoryActionLoading}
+                            onClick={() => cancelIbHistoryJob(job.id)}
+                          >
+                            {t("data.ib.historyCancel")}
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          ) : (
+            <div className="empty-state">{t("data.ib.historyEmpty")}</div>
+          )}
+        </div>
+
+        <div className="grid-2" style={{ marginTop: "16px" }}>
+          <div className="card">
+            <div className="card-title">{t("trade.executionTitle")}</div>
+            <div className="card-meta">{t("trade.executionMeta")}</div>
+            <div className="overview-grid" style={{ marginTop: "12px" }}>
+              <div className="overview-card">
+                <div className="overview-label">{t("trade.latestRun")}</div>
+                <div className="overview-value">
+                  {latestTradeRun ? `#${latestTradeRun.id}` : t("common.none")}
+                </div>
+                <div className="overview-sub">
+                  {latestTradeRun
+                    ? `${formatStatus(latestTradeRun.status)} · ${formatDateTime(
+                        latestTradeRun.created_at
+                      )}`
+                    : t("trade.runEmpty")}
+                </div>
+              </div>
+              <div className="overview-card">
+                <div className="overview-label">{t("trade.runMode")}</div>
+                <div className="overview-value">
+                  {latestTradeRun ? formatRunMode(latestTradeRun.mode) : t("common.none")}
+                </div>
+                <div className="overview-sub">
+                  {t("trade.runProject")}
+                  {latestTradeRun ? ` #${latestTradeRun.project_id}` : ` ${t("common.none")}`}
+                </div>
+              </div>
+            </div>
+            {tradeError && <div className="form-hint">{tradeError}</div>}
+            <table className="table" style={{ marginTop: "12px" }}>
+              <thead>
+                <tr>
+                  <th>{t("trade.runTable.id")}</th>
+                  <th>{t("trade.runTable.status")}</th>
+                  <th>{t("trade.runTable.mode")}</th>
+                  <th>{t("trade.runTable.createdAt")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {tradeRuns.length ? (
+                  tradeRuns.map((run) => (
+                    <tr key={run.id}>
+                      <td>#{run.id}</td>
+                      <td>{formatStatus(run.status)}</td>
+                      <td>{formatRunMode(run.mode)}</td>
+                      <td>{formatDateTime(run.created_at)}</td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={4} className="empty-state">
+                      {t("trade.runEmpty")}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div className="card" style={{ marginTop: "16px" }}>
+          <div className="card-title">{t("trade.monitorTitle")}</div>
+          <div className="card-meta">{t("trade.monitorMeta")}</div>
+          {tradeError && <div className="form-hint">{tradeError}</div>}
+          <table className="table" style={{ marginTop: "12px" }}>
+            <thead>
+              <tr>
+                <th>{t("trade.orderTable.id")}</th>
+                <th>{t("trade.orderTable.symbol")}</th>
+                <th>{t("trade.orderTable.side")}</th>
+                <th>{t("trade.orderTable.qty")}</th>
+                <th>{t("trade.orderTable.status")}</th>
+                <th>{t("trade.orderTable.createdAt")}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {tradeOrders.length ? (
+                tradeOrders.map((order) => (
+                  <tr key={order.id}>
+                    <td>#{order.id}</td>
+                    <td>{order.symbol || t("common.none")}</td>
+                    <td>{formatSide(order.side)}</td>
+                    <td>{order.quantity ?? t("common.none")}</td>
+                    <td>{formatStatus(order.status)}</td>
+                    <td>{formatDateTime(order.created_at)}</td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td colSpan={6} className="empty-state">
+                    {t("trade.orderEmpty")}
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
