@@ -3,15 +3,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+import csv
 
 from app.core.config import settings
 from app.db import SessionLocal
-from app.models import TradeFill, TradeOrder, TradeRun
+from app.models import DecisionSnapshot, TradeFill, TradeOrder, TradeRun
 from pathlib import Path
 
 from app.services.ib_market import fetch_market_snapshots
 from app.services.job_lock import JobLock
-from app.services.trade_orders import update_trade_order_status
+from app.services.trade_order_builder import build_orders
+from app.services.trade_orders import create_trade_order, update_trade_order_status
+from app.services.trade_risk_engine import evaluate_orders
 
 
 @dataclass
@@ -47,11 +50,35 @@ def _limit_allows_fill(side: str, price: float, limit_price: float) -> bool:
     return False
 
 
-def _estimate_order_notional(order: TradeOrder) -> float | None:
-    order_type = (order.order_type or "").strip().upper()
-    if order_type == "LMT" and order.limit_price is not None:
-        return float(order.limit_price) * float(order.quantity or 0)
-    return None
+def _read_decision_items(path: str | None) -> list[dict[str, Any]]:
+    if not path:
+        return []
+    file_path = Path(path)
+    if not file_path.exists():
+        return []
+    try:
+        with file_path.open("r", encoding="utf-8-sig", newline="") as handle:
+            rows: list[dict[str, Any]] = []
+            for row in csv.DictReader(handle):
+                symbol = (row.get("symbol") or "").strip().upper()
+                if not symbol:
+                    continue
+                rows.append(
+                    {
+                        "symbol": symbol,
+                        "weight": row.get("weight"),
+                    }
+                )
+            return rows
+    except OSError:
+        return []
+
+
+def _build_client_order_id(run_id: int, snapshot_id: int | None, symbol: str, side: str) -> str:
+    base = f"{run_id}:{symbol}:{side}"
+    if snapshot_id:
+        return f"{base}:{snapshot_id}"
+    return base
 
 
 def execute_trade_run(
@@ -97,43 +124,184 @@ def execute_trade_run(
                 message=run.message,
                 dry_run=dry_run,
             )
+        snapshot_map: dict[str, dict[str, Any]] = {}
+        price_map: dict[str, float] = {}
+        params = dict(run.params or {})
         if not orders:
-            run.status = "failed"
-            run.message = "orders_empty"
-            run.ended_at = datetime.utcnow()
-            session.commit()
-            return TradeExecutionResult(
-                run_id=run.id,
-                status=run.status,
-                filled=0,
-                cancelled=0,
-                rejected=0,
-                skipped=0,
-                message=run.message,
-                dry_run=dry_run,
-            )
+            snapshot = session.get(DecisionSnapshot, run.decision_snapshot_id)
+            if snapshot is None or not snapshot.items_path:
+                run.status = "failed"
+                run.message = "decision_snapshot_items_missing"
+                run.ended_at = datetime.utcnow()
+                session.commit()
+                return TradeExecutionResult(
+                    run_id=run.id,
+                    status=run.status,
+                    filled=0,
+                    cancelled=0,
+                    rejected=0,
+                    skipped=0,
+                    message=run.message,
+                    dry_run=dry_run,
+                )
+            items = _read_decision_items(snapshot.items_path)
+            if not items:
+                run.status = "failed"
+                run.message = "decision_snapshot_items_empty"
+                run.ended_at = datetime.utcnow()
+                session.commit()
+                return TradeExecutionResult(
+                    run_id=run.id,
+                    status=run.status,
+                    filled=0,
+                    cancelled=0,
+                    rejected=0,
+                    skipped=0,
+                    message=run.message,
+                    dry_run=dry_run,
+                )
 
-        risk = (run.params or {}).get("risk") or {}
-        max_order_notional = risk.get("max_order_notional")
-        max_position_ratio = risk.get("max_position_ratio")
-        portfolio_value = risk.get("portfolio_value")
-        block_reason = None
-        if max_order_notional is not None or (max_position_ratio is not None and portfolio_value):
-            for order in orders:
-                notional = _estimate_order_notional(order)
-                if notional is None:
-                    continue
-                if max_order_notional is not None and notional > float(max_order_notional):
-                    block_reason = f"risk_max_order_notional:{order.symbol}"
-                    break
-                if max_position_ratio is not None and portfolio_value:
-                    ratio = notional / float(portfolio_value)
-                    if ratio > float(max_position_ratio):
-                        block_reason = f"risk_max_position_ratio:{order.symbol}"
-                        break
-        if block_reason:
+            symbols = sorted({item.get("symbol") for item in items if item.get("symbol")})
+            snapshots = fetch_market_snapshots(
+                session,
+                symbols=symbols,
+                store=False,
+                fallback_history=True,
+                history_duration="5 D",
+                history_bar_size="1 day",
+                history_use_rth=True,
+            )
+            snapshot_map = {item.get("symbol"): item for item in snapshots}
+            for symbol in symbols:
+                price = _pick_price((snapshot_map.get(symbol) or {}).get("data"))
+                if price is not None:
+                    price_map[symbol] = price
+
+            portfolio_value = float(params.get("portfolio_value") or 0.0)
+            if portfolio_value <= 0:
+                run.status = "failed"
+                run.message = "portfolio_value_required"
+                run.ended_at = datetime.utcnow()
+                session.commit()
+                return TradeExecutionResult(
+                    run_id=run.id,
+                    status=run.status,
+                    filled=0,
+                    cancelled=0,
+                    rejected=0,
+                    skipped=0,
+                    message=run.message,
+                    dry_run=dry_run,
+                )
+            cash_buffer_ratio = float(params.get("cash_buffer_ratio") or 0.0)
+            lot_size = int(params.get("lot_size") or 1)
+            order_type = str(params.get("order_type") or "MKT")
+            limit_price = params.get("limit_price")
+
+            draft_orders = build_orders(
+                items,
+                price_map=price_map,
+                portfolio_value=portfolio_value,
+                cash_buffer_ratio=cash_buffer_ratio,
+                lot_size=lot_size,
+                order_type=order_type,
+                limit_price=limit_price,
+            )
+            if not draft_orders:
+                run.status = "failed"
+                run.message = "orders_empty"
+                run.ended_at = datetime.utcnow()
+                session.commit()
+                return TradeExecutionResult(
+                    run_id=run.id,
+                    status=run.status,
+                    filled=0,
+                    cancelled=0,
+                    rejected=0,
+                    skipped=0,
+                    message=run.message,
+                    dry_run=dry_run,
+                )
+
+            created = 0
+            for draft in draft_orders:
+                client_order_id = _build_client_order_id(
+                    run.id,
+                    run.decision_snapshot_id,
+                    str(draft.get("symbol")),
+                    str(draft.get("side")),
+                )
+                payload = dict(draft)
+                payload["client_order_id"] = client_order_id
+                payload["params"] = {
+                    "source": "decision_snapshot",
+                    "decision_snapshot_id": run.decision_snapshot_id,
+                }
+                result = create_trade_order(session, payload, run_id=run.id)
+                if result.created:
+                    created += 1
+            session.commit()
+            orders = (
+                session.query(TradeOrder)
+                .filter(TradeOrder.run_id == run.id)
+                .order_by(TradeOrder.id.asc())
+                .all()
+            )
+            params["builder"] = {
+                "portfolio_value": portfolio_value,
+                "cash_buffer_ratio": cash_buffer_ratio,
+                "lot_size": lot_size,
+                "order_type": order_type,
+                "limit_price": limit_price,
+                "created_orders": created,
+            }
+            params["price_map"] = price_map
+            run.params = params
+            run.updated_at = datetime.utcnow()
+            session.commit()
+
+        if not snapshot_map:
+            symbols = sorted({order.symbol for order in orders})
+            snapshots = fetch_market_snapshots(
+                session,
+                symbols=symbols,
+                store=False,
+                fallback_history=True,
+                history_duration="5 D",
+                history_bar_size="1 day",
+                history_use_rth=True,
+            )
+            snapshot_map = {item.get("symbol"): item for item in snapshots}
+
+        risk_params = params.get("risk") if isinstance(params.get("risk"), dict) else {}
+        if risk_params is None:
+            risk_params = {}
+        max_order_notional = risk_params.get("max_order_notional")
+        max_position_ratio = risk_params.get("max_position_ratio")
+        portfolio_value = risk_params.get("portfolio_value") or params.get("portfolio_value")
+
+        risk_orders = []
+        for order in orders:
+            price = _pick_price((snapshot_map.get(order.symbol) or {}).get("data"))
+            risk_orders.append(
+                {
+                    "symbol": order.symbol,
+                    "side": order.side,
+                    "quantity": order.quantity,
+                    "price": price or 0.0,
+                }
+            )
+        ok, blocked_orders, reasons = evaluate_orders(
+            risk_orders,
+            max_order_notional=max_order_notional,
+            max_position_ratio=max_position_ratio,
+            portfolio_value=portfolio_value,
+        )
+        if not ok:
             run.status = "blocked"
-            run.message = block_reason
+            run.message = reasons[0] if reasons else "risk_blocked"
+            params["risk_blocked"] = {"reasons": reasons, "count": len(blocked_orders)}
+            run.params = params
             run.ended_at = datetime.utcnow()
             run.updated_at = datetime.utcnow()
             session.commit()
