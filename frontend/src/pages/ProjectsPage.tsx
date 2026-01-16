@@ -4,7 +4,13 @@ import PaginationBar from "../components/PaginationBar";
 import TopBar from "../components/TopBar";
 import { useI18n } from "../i18n";
 import { Paginated } from "../types";
-import { computePaddedRange, formatAxisValue } from "../utils/mlCurve";
+import {
+  buildMinorTickIndices,
+  buildMinorTickValues,
+  buildTickIndices,
+  computePaddedRange,
+  formatAxisValue,
+} from "../utils/mlCurve";
 
 interface Project {
   id: number;
@@ -3787,15 +3793,24 @@ export default function ProjectsPage() {
       value: minValue + (span * idx) / Math.max(yTickCount - 1, 1),
       y: toY(minValue + (span * idx) / Math.max(yTickCount - 1, 1)),
     }));
+    const yMinorValues = buildMinorTickValues(yTicks.map((tick) => tick.value));
+    const yMinorTicks = yMinorValues.map((value) => ({
+      value,
+      y: toY(value),
+    }));
     const yValidTicks = Array.from({ length: yTickCount }, (_, idx) => ({
       value: validMin + (validSpan * idx) / Math.max(yTickCount - 1, 1),
       y: toYValid(validMin + (validSpan * idx) / Math.max(yTickCount - 1, 1)),
     }));
-    const xTickIndices =
-      seriesLength > 1 ? [0, Math.floor((seriesLength - 1) / 2), seriesLength - 1] : [0];
+    const majorTickCount = Math.min(5, Math.max(seriesLength, 1));
+    const xTickIndices = buildTickIndices(seriesLength, majorTickCount);
+    const xMinorTickIndices = buildMinorTickIndices(seriesLength, xTickIndices);
     const xTicks = xTickIndices.map((idx) => ({
       x: toX(idx, seriesLength),
       label: String(iterations[idx] ?? idx + 1),
+    }));
+    const xMinorTicks = xMinorTickIndices.map((idx) => ({
+      x: toX(idx, seriesLength),
     }));
     const metricName = String(curve.metric || "").toLowerCase();
     const lowerIsBetter = /loss|error|rmse|mse|mae|logloss/.test(metricName);
@@ -3865,6 +3880,16 @@ export default function ProjectsPage() {
             height={height}
             className="ml-curve-bg"
           />
+          {yMinorTicks.map((tick, idx) => (
+            <line
+              key={`y-minor-${idx}`}
+              x1={padding}
+              y1={tick.y}
+              x2={width - padding}
+              y2={tick.y}
+              className="ml-curve-grid-line minor"
+            />
+          ))}
           {yTicks.map((tick, idx) => (
             <g key={`y-${idx}`}>
               <line
@@ -3896,6 +3921,16 @@ export default function ProjectsPage() {
                 </text>
               </g>
             ))}
+          {xMinorTicks.map((tick, idx) => (
+            <line
+              key={`x-minor-${idx}`}
+              x1={tick.x}
+              y1={padding}
+              x2={tick.x}
+              y2={height - padding}
+              className="ml-curve-grid-line vertical minor"
+            />
+          ))}
           {xTicks.map((tick, idx) => (
             <g key={`x-${idx}`}>
               <line
