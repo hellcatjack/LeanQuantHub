@@ -12,6 +12,12 @@ LeanQuantHub 是一套本地化多用户量化平台：前端参考 QuantConnect
 - `configs/`：Lean 配置模板与主题权重
 - `deploy/`：systemd 与部署脚本
 
+## 文档导航
+- 文档总览：`docs/README.md`
+- 数据源索引：`docs/data_sources/README.md`
+- 报告索引：`docs/reports/README.md`
+- TODO 索引：`docs/todolists/README.md`
+
 ## 本地开发
 
 ### 后端

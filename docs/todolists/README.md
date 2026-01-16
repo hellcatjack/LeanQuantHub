@@ -2,6 +2,8 @@
 
 统一维护于 `docs/todolists/`。新增/调整任务时，请同步更新本索引。
 
+> 文档总览入口：`docs/README.md`
+
 - `AlphaIncrementalSyncTODO.md`：Alpha 历史行情增量同步与控速
 - `AlphaOnlyPriceTODO.md`：价格数据全量切换至 Alpha
 - `Backtest340RiskFixTODO.md`：回测 340 风控修正方案
