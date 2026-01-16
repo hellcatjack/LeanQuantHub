@@ -542,6 +542,7 @@ const messages: Record<Locale, MessageTree> = {
         metricCurveMetric: "指标：{metric}",
         metricCurveTrain: "训练",
         metricCurveValid: "验证",
+        metricCurveValidScaled: "验证（放大）",
         metricCurveBest: "验证最佳 {value} · 第{iteration}轮",
         metricCurveEmpty: "暂无训练曲线",
         sweep: {
@@ -2755,6 +2756,7 @@ const messages: Record<Locale, MessageTree> = {
         metricCurveMetric: "Metric: {metric}",
         metricCurveTrain: "Train",
         metricCurveValid: "Valid",
+        metricCurveValidScaled: "Valid (scaled)",
         metricCurveBest: "Best (valid) {value} @ {iteration}",
         metricCurveEmpty: "No training curve",
         sweep: {

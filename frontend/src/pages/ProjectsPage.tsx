@@ -4,6 +4,7 @@ import PaginationBar from "../components/PaginationBar";
 import TopBar from "../components/TopBar";
 import { useI18n } from "../i18n";
 import { Paginated } from "../types";
+import { computePaddedRange, formatAxisValue } from "../utils/mlCurve";
 
 interface Project {
   id: number;
@@ -3765,8 +3766,15 @@ export default function ProjectsPage() {
     const minValue = Math.min(...allValues);
     const maxValue = Math.max(...allValues);
     const span = maxValue - minValue || 1;
+    const validRange = computePaddedRange(curve.valid);
+    const validMin = validRange ? validRange.min : minValue;
+    const validMax = validRange ? validRange.max : maxValue;
+    const validSpan = validRange ? validRange.span : span;
+    const hasValidAxis = Boolean(validRange);
     const toY = (value: number) =>
       padding + (maxValue - value) / span * (height - padding * 2);
+    const toYValid = (value: number) =>
+      padding + (validMax - value) / validSpan * (height - padding * 2);
     const toX = (index: number, total: number) =>
       padding + (total <= 1 ? 0 : (index / (total - 1)) * (width - padding * 2));
     const seriesLength = curve.valid.length || curve.train.length;
@@ -3778,6 +3786,10 @@ export default function ProjectsPage() {
     const yTicks = Array.from({ length: yTickCount }, (_, idx) => ({
       value: minValue + (span * idx) / Math.max(yTickCount - 1, 1),
       y: toY(minValue + (span * idx) / Math.max(yTickCount - 1, 1)),
+    }));
+    const yValidTicks = Array.from({ length: yTickCount }, (_, idx) => ({
+      value: validMin + (validSpan * idx) / Math.max(yTickCount - 1, 1),
+      y: toYValid(validMin + (validSpan * idx) / Math.max(yTickCount - 1, 1)),
     }));
     const xTickIndices =
       seriesLength > 1 ? [0, Math.floor((seriesLength - 1) / 2), seriesLength - 1] : [0];
@@ -3810,7 +3822,7 @@ export default function ProjectsPage() {
       bestIndex >= 0 && bestValue !== null
         ? {
             x: toX(bestIndex, curve.valid.length || 1),
-            y: toY(bestValue),
+            y: toYValid(bestValue),
             value: bestValue,
             iteration: bestIteration,
           }
@@ -3828,8 +3840,8 @@ export default function ProjectsPage() {
       width,
       height,
       padding,
-      minValue,
-      maxValue
+      validMin,
+      validMax
     );
     return (
       <div className="ml-curve-chart">
@@ -3867,10 +3879,23 @@ export default function ProjectsPage() {
                 y={tick.y + 3}
                 className="ml-curve-axis-label"
               >
-                {tick.value.toFixed(3)}
+                {formatAxisValue(tick.value, span)}
               </text>
             </g>
           ))}
+          {hasValidAxis &&
+            yValidTicks.map((tick, idx) => (
+              <g key={`y-valid-${idx}`}>
+                <text
+                  x={width - 6}
+                  y={tick.y + 3}
+                  textAnchor="end"
+                  className="ml-curve-axis-label valid"
+                >
+                  {formatAxisValue(tick.value, validSpan)}
+                </text>
+              </g>
+            ))}
           {xTicks.map((tick, idx) => (
             <g key={`x-${idx}`}>
               <line
@@ -3929,7 +3954,7 @@ export default function ProjectsPage() {
           )}
           {curve.valid.length > 0 && (
             <span className="ml-curve-legend-item valid">
-              {t("projects.ml.metricCurveValid")}
+              {t("projects.ml.metricCurveValidScaled")}
             </span>
           )}
         </div>

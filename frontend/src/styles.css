@@ -2054,8 +2054,13 @@ a {
 
 .ml-curve-axis-label {
   fill: #94a3b8;
-  font-size: 12px;
+  font-size: 10px;
   font-family: "IBM Plex Sans", "Noto Sans SC", "Segoe UI", sans-serif;
+}
+
+.ml-curve-axis-label.valid {
+  fill: #f97316;
+  opacity: 0.75;
 }
 
 .ml-curve-line {
@@ -2069,6 +2074,8 @@ a {
 
 .ml-curve-line.valid {
   stroke: #f97316;
+  stroke-width: 1.6;
+  stroke-dasharray: 4 3;
 }
 
 .ml-curve-best-dot {
@@ -2085,7 +2092,7 @@ a {
 
 .ml-curve-best-label {
   fill: #f97316;
-  font-size: 12px;
+  font-size: 10px;
   font-weight: 600;
   font-family: "IBM Plex Sans", "Noto Sans SC", "Segoe UI", sans-serif;
 }
@@ -2094,7 +2101,7 @@ a {
   margin-top: 8px;
   display: flex;
   gap: 14px;
-  font-size: 12px;
+  font-size: 11px;
   color: #6b7280;
 }
 
