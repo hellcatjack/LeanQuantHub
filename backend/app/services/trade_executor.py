@@ -81,6 +81,22 @@ def execute_trade_run(
             .order_by(TradeOrder.id.asc())
             .all()
         )
+        if run.decision_snapshot_id is None:
+            run.status = "blocked"
+            run.message = "decision_snapshot_required"
+            run.ended_at = datetime.utcnow()
+            run.updated_at = datetime.utcnow()
+            session.commit()
+            return TradeExecutionResult(
+                run_id=run.id,
+                status=run.status,
+                filled=0,
+                cancelled=0,
+                rejected=0,
+                skipped=0,
+                message=run.message,
+                dry_run=dry_run,
+            )
         if not orders:
             run.status = "failed"
             run.message = "orders_empty"
