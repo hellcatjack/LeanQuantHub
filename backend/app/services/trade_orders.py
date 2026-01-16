@@ -73,6 +73,18 @@ def create_trade_order(session, payload: dict[str, Any], run_id: int | None = No
     order_type = _normalize_order_type(payload.get("order_type") or "MKT")
     limit_price = payload.get("limit_price")
     quantity = float(payload["quantity"])
+    for pending in session.new:
+        if isinstance(pending, TradeOrder) and pending.client_order_id == client_order_id:
+            mismatch = (
+                pending.symbol != symbol
+                or pending.side != side
+                or pending.quantity != quantity
+                or pending.order_type != order_type
+                or (pending.limit_price or None) != (limit_price or None)
+            )
+            if mismatch:
+                raise ValueError("client_order_id_conflict")
+            return OrderCreateResult(order=pending, created=False)
     existing = (
         session.query(TradeOrder)
         .filter(TradeOrder.client_order_id == client_order_id)
