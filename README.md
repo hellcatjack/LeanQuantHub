@@ -20,6 +20,8 @@ LeanQuantHub 是一套本地化多用户量化平台：前端参考 QuantConnect
 
 ## 本地开发
 
+> 所有构建/运行命令请在 `backend/` 或 `frontend/` 目录执行，不在项目根目录运行 `npm`。
+
 ### 后端
 ```bash
 cd /app/stocklean

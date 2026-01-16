@@ -8,7 +8,7 @@
 ## 范围与约束
 - 仅调整前端主菜单顺序与文案
 - 不删除页面路由，只调整入口层级
-- UI 变更后必须 `npm run build` 并重启 `stocklean-frontend`
+- UI 变更后必须在 `frontend/` 目录执行 `npm run build` 并重启 `stocklean-frontend`
 
 ## 现状（基准）
 - 侧边栏顺序：项目 / 主题 / 回测 / 数据 / 审计
@@ -37,7 +37,7 @@
 
 ### Phase 3：验证与发布
 - [ ] Playwright 自测：侧边栏顺序、文案、路由可达性
-- [ ] 前端构建与重启：`npm run build` + `systemctl --user restart stocklean-frontend`
+- [ ] 前端构建与重启：`cd frontend && npm run build` + `systemctl --user restart stocklean-frontend`
 - [ ] 记录变更（更新文档或 UI 提示，说明主菜单调整）
 
 ## 验收标准
@@ -50,4 +50,3 @@
 - `frontend/src/components/Sidebar.tsx`
 - `frontend/src/i18n.tsx`
 - `frontend/src/pages/ProjectsPage.tsx`
-

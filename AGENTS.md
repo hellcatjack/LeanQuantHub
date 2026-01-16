@@ -32,10 +32,10 @@
 - `assets/`、`docs/`、`scripts/`、`logs/`：资源、文档、脚本与日志。
 
 ## 运行与构建
-- 后端：`uvicorn app.main:app --host 0.0.0.0 --port 8021`
-- 前端：`npm run dev` / `npm run build`
+- 后端（在 `backend/` 目录执行）：`cd backend && uvicorn app.main:app --host 0.0.0.0 --port 8021`
+- 前端（在 `frontend/` 目录执行）：`cd frontend && npm run dev` / `cd frontend && npm run build`
 - 服务器（systemd 用户服务）：`systemctl --user restart stocklean-backend stocklean-frontend`
-- 只要修改了前端 UI，请及时执行 `npm run build` 并重启 `stocklean-frontend`，确保页面与代码一致。
+- 只要修改了前端 UI，请在 `frontend/` 目录执行 `npm run build` 并重启 `stocklean-frontend`，确保页面与代码一致。
 
 ## 模型训练
 - 入口：项目页 → 算法 → 模型训练。

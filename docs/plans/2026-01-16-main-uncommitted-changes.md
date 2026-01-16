@@ -58,7 +58,7 @@ Expected: No secrets; routes/services wired; SQL patches contain required header
 
 **Step 1: Frontend build**
 
-Run: `npm run build`
+Run: `cd frontend && npm run build`
 Expected: Build succeeds without errors.
 
 **Step 2: Backend tests (if present)**
