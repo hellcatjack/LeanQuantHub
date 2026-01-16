@@ -27,6 +27,8 @@ from app.models import (
     PreTradeStep,
     PreTradeTemplate,
     Project,
+    DecisionSnapshot,
+    TradeRun,
 )
 from app.routes.datasets import (
     _alpha_listing_age,
@@ -654,6 +656,11 @@ def step_decision_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResu
     settings_row = _get_or_create_settings(ctx.session)
     if not settings_row.auto_decision_snapshot:
         raise StepSkip("decision_snapshot_disabled")
+    existing_snapshot_id = None
+    existing_trade_run_id = None
+    if isinstance(ctx.step.artifacts, dict):
+        existing_snapshot_id = ctx.step.artifacts.get("decision_snapshot_id")
+        existing_trade_run_id = ctx.step.artifacts.get("trade_run_id")
     algo_params = params.get("algorithm_parameters")
     if not isinstance(algo_params, dict):
         algo_params = {}
@@ -666,10 +673,70 @@ def step_decision_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResu
         algorithm_parameters=algo_params,
         preview=False,
     )
+    summary = result.get("summary") or {}
+    snapshot: DecisionSnapshot | None = None
+    if existing_snapshot_id:
+        try:
+            snapshot = ctx.session.get(DecisionSnapshot, int(existing_snapshot_id))
+        except Exception:
+            snapshot = None
+    if snapshot is None:
+        snapshot = DecisionSnapshot(
+            project_id=ctx.run.project_id,
+            pipeline_id=params.get("pipeline_id"),
+            train_job_id=params.get("train_job_id"),
+            status="success",
+            snapshot_date=summary.get("snapshot_date"),
+            params={
+                "project_id": ctx.run.project_id,
+                "pipeline_id": params.get("pipeline_id"),
+                "train_job_id": params.get("train_job_id"),
+                "snapshot_date": summary.get("snapshot_date"),
+                "algorithm_parameters": algo_params,
+                "pretrade_run_id": ctx.run.id,
+            },
+            summary=summary,
+            artifact_dir=result.get("artifact_dir"),
+            summary_path=result.get("summary_path"),
+            items_path=result.get("items_path"),
+            filters_path=result.get("filters_path"),
+            log_path=result.get("log_path"),
+            started_at=datetime.utcnow(),
+            ended_at=datetime.utcnow(),
+        )
+        ctx.session.add(snapshot)
+        ctx.session.commit()
+        ctx.session.refresh(snapshot)
+    trade_run: TradeRun | None = None
+    if existing_trade_run_id:
+        trade_run = ctx.session.get(TradeRun, int(existing_trade_run_id))
+    if trade_run is None:
+        trade_run = (
+            ctx.session.query(TradeRun)
+            .filter(
+                TradeRun.project_id == ctx.run.project_id,
+                TradeRun.decision_snapshot_id == snapshot.id,
+            )
+            .order_by(TradeRun.created_at.desc())
+            .first()
+        )
+    if trade_run is None:
+        trade_run = TradeRun(
+            project_id=ctx.run.project_id,
+            decision_snapshot_id=snapshot.id,
+            mode="paper",
+            status="queued",
+            params={"pretrade_run_id": ctx.run.id},
+        )
+        ctx.session.add(trade_run)
+        ctx.session.commit()
+        ctx.session.refresh(trade_run)
     return StepResult(
         artifacts={
             "decision_snapshot": result.get("summary"),
             "decision_snapshot_path": result.get("summary_path"),
+            "decision_snapshot_id": snapshot.id if snapshot else None,
+            "trade_run_id": trade_run.id if trade_run else None,
         },
         log_path=result.get("log_path"),
     )
