@@ -1046,6 +1046,7 @@ export default function LiveTradePage() {
                   <th>{t("trade.runTable.id")}</th>
                   <th>{t("trade.runTable.status")}</th>
                   <th>{t("trade.runTable.mode")}</th>
+                  <th>{t("trade.runTable.snapshot")}</th>
                   <th>{t("trade.runTable.createdAt")}</th>
                 </tr>
               </thead>
@@ -1056,12 +1057,17 @@ export default function LiveTradePage() {
                       <td>#{run.id}</td>
                       <td>{formatStatus(run.status)}</td>
                       <td>{formatRunMode(run.mode)}</td>
+                      <td>
+                        {run.decision_snapshot_id
+                          ? `#${run.decision_snapshot_id}`
+                          : t("common.none")}
+                      </td>
                       <td>{formatDateTime(run.created_at)}</td>
                     </tr>
                   ))
                 ) : (
                   <tr>
-                    <td colSpan={4} className="empty-state">
+                    <td colSpan={5} className="empty-state">
                       {t("trade.runEmpty")}
                     </td>
                   </tr>
