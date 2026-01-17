@@ -154,6 +154,9 @@ def _resolve_prices(
     source = "ib"
     now = datetime.utcnow()
 
+    if not symbols:
+        return resolved, "none", errors
+
     if price_map:
         for symbol, price in price_map.items():
             try:

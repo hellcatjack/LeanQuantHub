@@ -10,6 +10,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from app.models import Base, TradeGuardState, TradeOrder, TradeRun, TradeFill, TradeSettings
+import app.services.trade_guard as trade_guard
 from app.services.trade_guard import evaluate_intraday_guard
 
 
@@ -66,5 +67,24 @@ def test_guard_triggers_daily_loss():
             price_map={"SPY": 90.0},
         )
         assert result["status"] == "halted"
+    finally:
+        session.close()
+
+
+def test_guard_skips_market_fetch_without_positions(monkeypatch):
+    session = _make_session()
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("market fetch called")
+
+    monkeypatch.setattr(trade_guard, "fetch_market_snapshots", _boom)
+    try:
+        result = evaluate_intraday_guard(
+            session,
+            project_id=1,
+            mode="paper",
+            risk_params={"cash_available": 1000},
+        )
+        assert result["status"] == "active"
     finally:
         session.close()
