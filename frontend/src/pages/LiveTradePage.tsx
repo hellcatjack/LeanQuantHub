@@ -74,6 +74,26 @@ interface TradeOrder {
   created_at: string;
 }
 
+interface TradeGuardState {
+  id: number;
+  project_id: number;
+  trade_date: string;
+  mode: string;
+  status: string;
+  halt_reason?: Record<string, any> | null;
+  risk_triggers: number;
+  order_failures: number;
+  market_data_errors: number;
+  day_start_equity?: number | null;
+  equity_peak?: number | null;
+  last_equity?: number | null;
+  last_valuation_ts?: string | null;
+  valuation_source?: string | null;
+  cooldown_until?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 const maskAccount = (value?: string | null) => {
   if (!value) {
     return "";
@@ -146,6 +166,9 @@ export default function LiveTradePage() {
   const [ibHistoryActionLoading, setIbHistoryActionLoading] = useState(false);
   const [tradeRuns, setTradeRuns] = useState<TradeRun[]>([]);
   const [tradeOrders, setTradeOrders] = useState<TradeOrder[]>([]);
+  const [guardState, setGuardState] = useState<TradeGuardState | null>(null);
+  const [guardLoading, setGuardLoading] = useState(false);
+  const [guardError, setGuardError] = useState("");
   const [tradeError, setTradeError] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -351,19 +374,45 @@ export default function LiveTradePage() {
     }
   };
 
+  const loadTradeGuard = async (projectId: number, mode: string) => {
+    setGuardLoading(true);
+    setGuardError("");
+    try {
+      const res = await api.get<TradeGuardState>("/api/trade/guard", {
+        params: { project_id: projectId, mode },
+      });
+      setGuardState(res.data);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("trade.guardError");
+      setGuardError(String(detail));
+      setGuardState(null);
+    } finally {
+      setGuardLoading(false);
+    }
+  };
+
   const loadTradeActivity = async () => {
     setTradeError("");
+    setGuardError("");
     try {
       const [runsRes, ordersRes] = await Promise.all([
         api.get<TradeRun[]>("/api/trade/runs", { params: { limit: 5, offset: 0 } }),
         api.get<TradeOrder[]>("/api/trade/orders", { params: { limit: 5, offset: 0 } }),
       ]);
-      setTradeRuns(runsRes.data || []);
+      const runs = runsRes.data || [];
+      setTradeRuns(runs);
       setTradeOrders(ordersRes.data || []);
+      const latestRun = runs[0];
+      if (latestRun?.project_id) {
+        await loadTradeGuard(latestRun.project_id, latestRun.mode || "paper");
+      } else {
+        setGuardState(null);
+      }
     } catch (error) {
       setTradeError(t("trade.tradeError"));
       setTradeRuns([]);
       setTradeOrders([]);
+      setGuardState(null);
     }
   };
 
@@ -450,6 +499,53 @@ export default function LiveTradePage() {
     }
     return String(value).toUpperCase();
   };
+
+  const formatNumber = (value?: number | null, digits = 2) => {
+    if (value === null || value === undefined) {
+      return t("common.none");
+    }
+    if (Number.isNaN(Number(value))) {
+      return t("common.none");
+    }
+    return Number(value).toFixed(digits);
+  };
+
+  const guardEquity = useMemo(() => {
+    if (!guardState) {
+      return null;
+    }
+    if (guardState.last_equity !== null && guardState.last_equity !== undefined) {
+      return guardState.last_equity;
+    }
+    if (guardState.day_start_equity !== null && guardState.day_start_equity !== undefined) {
+      return guardState.day_start_equity;
+    }
+    return null;
+  }, [guardState]);
+
+  const guardDrawdown = useMemo(() => {
+    if (!guardState || guardState.equity_peak === null || guardState.equity_peak === undefined) {
+      return null;
+    }
+    if (guardState.last_equity === null || guardState.last_equity === undefined) {
+      return null;
+    }
+    if (!guardState.equity_peak) {
+      return null;
+    }
+    return (guardState.last_equity - guardState.equity_peak) / guardState.equity_peak;
+  }, [guardState]);
+
+  const guardReason = useMemo(() => {
+    if (!guardState?.halt_reason) {
+      return t("common.none");
+    }
+    try {
+      return JSON.stringify(guardState.halt_reason);
+    } catch (err) {
+      return t("common.none");
+    }
+  }, [guardState, t]);
 
   const latestTradeRun = tradeRuns[0];
 
@@ -1011,6 +1107,73 @@ export default function LiveTradePage() {
         </div>
 
         <div className="grid-2" style={{ marginTop: "16px" }}>
+          <div className="card">
+            <div className="card-title">{t("trade.guardTitle")}</div>
+            <div className="card-meta">{t("trade.guardMeta")}</div>
+            {guardError && <div className="form-error">{guardError}</div>}
+            <div className="overview-grid" style={{ marginTop: "12px" }}>
+              <div className="overview-card">
+                <div className="overview-label">{t("trade.guardStatus")}</div>
+                <div className="overview-value">
+                  {guardLoading
+                    ? t("common.actions.loading")
+                    : guardState
+                      ? formatStatus(guardState.status)
+                      : t("trade.guardEmpty")}
+                </div>
+                <div className="overview-sub">
+                  {guardState
+                    ? `${t("trade.guardValuationSource")}: ${
+                        guardState.valuation_source || t("common.none")
+                      } · ${t("trade.guardValuationTime")}: ${
+                        guardState.last_valuation_ts
+                          ? formatDateTime(guardState.last_valuation_ts)
+                          : t("common.none")
+                      }`
+                    : t("common.none")}
+                </div>
+              </div>
+              <div className="overview-card">
+                <div className="overview-label">{t("trade.guardEquity")}</div>
+                <div className="overview-value">
+                  {guardEquity !== null ? formatNumber(guardEquity) : t("common.none")}
+                </div>
+                <div className="overview-sub">
+                  {t("trade.guardDrawdown")}:{" "}
+                  {guardDrawdown !== null
+                    ? `${(guardDrawdown * 100).toFixed(2)}%`
+                    : t("common.none")}
+                </div>
+              </div>
+              <div className="overview-card">
+                <div className="overview-label">{t("trade.guardOrderFailures")}</div>
+                <div className="overview-value">
+                  {guardState ? guardState.order_failures : t("common.none")}
+                </div>
+                <div className="overview-sub">
+                  {t("trade.guardMarketErrors")}:{" "}
+                  {guardState ? guardState.market_data_errors : t("common.none")}
+                </div>
+              </div>
+              <div className="overview-card">
+                <div className="overview-label">{t("trade.guardRiskTriggers")}</div>
+                <div className="overview-value">
+                  {guardState ? guardState.risk_triggers : t("common.none")}
+                </div>
+                <div className="overview-sub">
+                  {t("trade.guardCooldown")}:{" "}
+                  {guardState?.cooldown_until
+                    ? formatDateTime(guardState.cooldown_until)
+                    : t("common.none")}
+                </div>
+              </div>
+            </div>
+            {guardState?.halt_reason ? (
+              <div className="form-hint" style={{ marginTop: "8px" }}>
+                {t("trade.guardReason")}: {guardReason}
+              </div>
+            ) : null}
+          </div>
           <div className="card">
             <div className="card-title">{t("trade.executionTitle")}</div>
             <div className="card-meta">{t("trade.executionMeta")}</div>
