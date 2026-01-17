@@ -1,6 +1,6 @@
 ﻿from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from pydantic import BaseModel
@@ -1424,6 +1424,40 @@ class TradeSettingsOut(BaseModel):
 
 class TradeSettingsUpdate(BaseModel):
     risk_defaults: dict | None = None
+
+
+class TradeGuardStateOut(BaseModel):
+    id: int
+    project_id: int
+    trade_date: date
+    mode: str
+    status: str
+    halt_reason: dict | None
+    risk_triggers: int
+    order_failures: int
+    market_data_errors: int
+    day_start_equity: float | None
+    equity_peak: float | None
+    last_equity: float | None
+    last_valuation_ts: datetime | None
+    valuation_source: str | None
+    cooldown_until: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class TradeGuardEvaluateRequest(BaseModel):
+    project_id: int
+    mode: str = "paper"
+    risk_params: dict | None = None
+
+
+class TradeGuardEvaluateOut(BaseModel):
+    state: TradeGuardStateOut
+    result: dict
 
 
 class IBContractRefreshRequest(BaseModel):

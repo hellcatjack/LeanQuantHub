@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy.exc import IntegrityError
 
 from app.db import get_session
-from app.models import TradeOrder, TradeRun, TradeSettings
+from app.models import TradeGuardState, TradeOrder, TradeRun, TradeSettings
 from app.schemas import (
     TradeOrderCreate,
     TradeOrderOut,
@@ -17,9 +17,13 @@ from app.schemas import (
     TradeRunOut,
     TradeSettingsOut,
     TradeSettingsUpdate,
+    TradeGuardEvaluateOut,
+    TradeGuardEvaluateRequest,
+    TradeGuardStateOut,
 )
 from app.services.audit_log import record_audit
 from app.services.ib_market import check_market_health
+from app.services.trade_guard import evaluate_intraday_guard, get_or_create_guard_state
 from app.services.trade_executor import execute_trade_run
 from app.services.trade_orders import create_trade_order, update_trade_order_status
 
@@ -50,6 +54,39 @@ def update_trade_settings(payload: TradeSettingsUpdate):
         session.commit()
         session.refresh(settings_row)
         return TradeSettingsOut.model_validate(settings_row, from_attributes=True)
+
+
+@router.get("/guard", response_model=TradeGuardStateOut)
+def get_trade_guard_state(project_id: int, mode: str = "paper"):
+    with get_session() as session:
+        state = get_or_create_guard_state(session, project_id=project_id, mode=mode)
+        return TradeGuardStateOut.model_validate(state, from_attributes=True)
+
+
+@router.post("/guard/evaluate", response_model=TradeGuardEvaluateOut)
+def evaluate_trade_guard(payload: TradeGuardEvaluateRequest):
+    with get_session() as session:
+        result = evaluate_intraday_guard(
+            session,
+            project_id=payload.project_id,
+            mode=payload.mode,
+            risk_params=payload.risk_params,
+        )
+        state = (
+            session.query(TradeGuardState)
+            .filter(
+                TradeGuardState.project_id == payload.project_id,
+                TradeGuardState.mode == payload.mode,
+            )
+            .order_by(TradeGuardState.id.desc())
+            .first()
+        )
+        if state is None:
+            raise HTTPException(status_code=404, detail="guard state not found")
+        return TradeGuardEvaluateOut(
+            state=TradeGuardStateOut.model_validate(state, from_attributes=True),
+            result=result,
+        )
 
 
 def _build_market_symbols(orders: list[TradeOrderCreate]) -> list[str]:
