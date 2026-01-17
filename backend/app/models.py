@@ -1,8 +1,8 @@
 ﻿from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import Boolean, Float, JSON, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Float, JSON, Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -563,6 +563,33 @@ class TradeSettings(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     risk_defaults: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class TradeGuardState(Base):
+    __tablename__ = "trade_guard_state"
+    __table_args__ = (
+        UniqueConstraint("project_id", "trade_date", "mode", name="uq_trade_guard_state"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False)
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False)
+    mode: Mapped[str] = mapped_column(String(16), default="paper")
+    status: Mapped[str] = mapped_column(String(16), default="active")
+    halt_reason: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    risk_triggers: Mapped[int] = mapped_column(Integer, default=0)
+    order_failures: Mapped[int] = mapped_column(Integer, default=0)
+    market_data_errors: Mapped[int] = mapped_column(Integer, default=0)
+    day_start_equity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    equity_peak: Mapped[float | None] = mapped_column(Float, nullable=True)
+    last_equity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    last_valuation_ts: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    valuation_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    cooldown_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
