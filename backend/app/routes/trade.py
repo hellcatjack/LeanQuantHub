@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy.exc import IntegrityError
 
 from app.db import get_session
-from app.models import TradeOrder, TradeRun
+from app.models import TradeOrder, TradeRun, TradeSettings
 from app.schemas import (
     TradeOrderCreate,
     TradeOrderOut,
@@ -15,6 +15,8 @@ from app.schemas import (
     TradeRunExecuteOut,
     TradeRunExecuteRequest,
     TradeRunOut,
+    TradeSettingsOut,
+    TradeSettingsUpdate,
 )
 from app.services.audit_log import record_audit
 from app.services.ib_market import check_market_health
@@ -22,6 +24,32 @@ from app.services.trade_executor import execute_trade_run
 from app.services.trade_orders import create_trade_order, update_trade_order_status
 
 router = APIRouter(prefix="/api/trade", tags=["trade"])
+
+
+@router.get("/settings", response_model=TradeSettingsOut)
+def get_trade_settings():
+    with get_session() as session:
+        settings_row = session.query(TradeSettings).order_by(TradeSettings.id.desc()).first()
+        if settings_row is None:
+            settings_row = TradeSettings(risk_defaults={})
+            session.add(settings_row)
+            session.commit()
+            session.refresh(settings_row)
+        return TradeSettingsOut.model_validate(settings_row, from_attributes=True)
+
+
+@router.post("/settings", response_model=TradeSettingsOut)
+def update_trade_settings(payload: TradeSettingsUpdate):
+    with get_session() as session:
+        settings_row = session.query(TradeSettings).order_by(TradeSettings.id.desc()).first()
+        if settings_row is None:
+            settings_row = TradeSettings(risk_defaults=payload.risk_defaults or {})
+            session.add(settings_row)
+        else:
+            settings_row.risk_defaults = payload.risk_defaults
+        session.commit()
+        session.refresh(settings_row)
+        return TradeSettingsOut.model_validate(settings_row, from_attributes=True)
 
 
 def _build_market_symbols(orders: list[TradeOrderCreate]) -> list[str]:

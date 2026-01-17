@@ -558,6 +558,17 @@ class IBSettings(Base):
     )
 
 
+class TradeSettings(Base):
+    __tablename__ = "trade_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    risk_defaults: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
 class IBConnectionState(Base):
     __tablename__ = "ib_connection_state"
 

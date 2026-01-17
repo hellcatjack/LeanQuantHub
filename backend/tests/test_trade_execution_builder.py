@@ -80,3 +80,11 @@ def test_execute_builds_orders_from_snapshot(tmp_path, monkeypatch):
         assert len(orders) == 2
     finally:
         session.close()
+
+
+def test_merge_risk_params_override():
+    defaults = {"max_order_notional": 1000, "max_symbols": 5}
+    overrides = {"max_order_notional": 500}
+    merged = trade_executor._merge_risk_params(defaults, overrides)
+    assert merged["max_order_notional"] == 500
+    assert merged["max_symbols"] == 5

@@ -7,7 +7,7 @@ import csv
 
 from app.core.config import settings
 from app.db import SessionLocal
-from app.models import DecisionSnapshot, TradeFill, TradeOrder, TradeRun
+from app.models import DecisionSnapshot, TradeFill, TradeOrder, TradeRun, TradeSettings
 from pathlib import Path
 
 from app.services.ib_market import fetch_market_snapshots
@@ -79,6 +79,15 @@ def _build_client_order_id(run_id: int, snapshot_id: int | None, symbol: str, si
     if snapshot_id:
         return f"{base}:{snapshot_id}"
     return base
+
+
+def _merge_risk_params(defaults: dict[str, Any] | None, overrides: dict[str, Any] | None) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    if isinstance(defaults, dict):
+        merged.update(defaults)
+    if isinstance(overrides, dict):
+        merged.update(overrides)
+    return merged
 
 
 def execute_trade_run(
@@ -273,11 +282,17 @@ def execute_trade_run(
             )
             snapshot_map = {item.get("symbol"): item for item in snapshots}
 
-        risk_params = params.get("risk") if isinstance(params.get("risk"), dict) else {}
-        if risk_params is None:
-            risk_params = {}
+        settings_row = session.query(TradeSettings).order_by(TradeSettings.id.desc()).first()
+        defaults = settings_row.risk_defaults if settings_row else {}
+        risk_overrides = params.get("risk_overrides") if isinstance(params.get("risk_overrides"), dict) else {}
+        risk_params = _merge_risk_params(defaults, risk_overrides)
+        params["risk_effective"] = risk_params
         max_order_notional = risk_params.get("max_order_notional")
         max_position_ratio = risk_params.get("max_position_ratio")
+        max_total_notional = risk_params.get("max_total_notional")
+        max_symbols = risk_params.get("max_symbols")
+        min_cash_buffer_ratio = risk_params.get("min_cash_buffer_ratio")
+        cash_available = risk_params.get("cash_available") or params.get("cash_available")
         portfolio_value = risk_params.get("portfolio_value") or params.get("portfolio_value")
 
         risk_orders = []
@@ -296,11 +311,19 @@ def execute_trade_run(
             max_order_notional=max_order_notional,
             max_position_ratio=max_position_ratio,
             portfolio_value=portfolio_value,
+            max_total_notional=max_total_notional,
+            max_symbols=max_symbols,
+            cash_available=cash_available,
+            min_cash_buffer_ratio=min_cash_buffer_ratio,
         )
         if not ok:
             run.status = "blocked"
             run.message = reasons[0] if reasons else "risk_blocked"
-            params["risk_blocked"] = {"reasons": reasons, "count": len(blocked_orders)}
+            params["risk_blocked"] = {
+                "reasons": reasons,
+                "count": len(blocked_orders),
+                "risk_effective": risk_params,
+            }
             run.params = params
             run.ended_at = datetime.utcnow()
             run.updated_at = datetime.utcnow()

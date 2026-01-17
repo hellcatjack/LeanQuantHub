@@ -1412,6 +1412,20 @@ class IBSettingsOut(BaseModel):
         from_attributes = True
 
 
+class TradeSettingsOut(BaseModel):
+    id: int
+    risk_defaults: dict | None = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class TradeSettingsUpdate(BaseModel):
+    risk_defaults: dict | None = None
+
+
 class IBContractRefreshRequest(BaseModel):
     symbols: list[str] | None = None
     sec_type: str | None = None
