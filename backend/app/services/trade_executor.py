@@ -12,6 +12,7 @@ from pathlib import Path
 
 from app.services.ib_market import fetch_market_snapshots
 from app.services.job_lock import JobLock
+from app.services.trade_guard import get_or_create_guard_state, record_guard_event
 from app.services.trade_order_builder import build_orders
 from app.services.trade_orders import create_trade_order, update_trade_order_status
 from app.services.trade_risk_engine import evaluate_orders
@@ -110,6 +111,28 @@ def execute_trade_run(
             raise RuntimeError("trade_run_status_invalid")
         if run.status != "queued" and not force:
             raise RuntimeError("trade_run_not_queued")
+
+        guard_state = get_or_create_guard_state(
+            session,
+            project_id=run.project_id,
+            mode=run.mode,
+        )
+        if guard_state.status == "halted" and not force:
+            run.status = "blocked"
+            run.message = "guard_halted"
+            run.ended_at = datetime.utcnow()
+            run.updated_at = datetime.utcnow()
+            session.commit()
+            return TradeExecutionResult(
+                run_id=run.id,
+                status=run.status,
+                filled=0,
+                cancelled=0,
+                rejected=0,
+                skipped=0,
+                message=run.message,
+                dry_run=dry_run,
+            )
 
         orders = (
             session.query(TradeOrder)
@@ -370,6 +393,12 @@ def execute_trade_run(
             price = _pick_price(snapshot)
             if price is None:
                 rejected += 1
+                record_guard_event(
+                    session,
+                    project_id=run.project_id,
+                    mode=run.mode,
+                    event="market_data_error",
+                )
                 if not dry_run:
                     update_trade_order_status(
                         session,
