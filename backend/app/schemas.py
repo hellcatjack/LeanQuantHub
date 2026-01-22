@@ -1432,6 +1432,7 @@ class IBStreamStatusOut(BaseModel):
 class TradeSettingsOut(BaseModel):
     id: int
     risk_defaults: dict | None = None
+    execution_data_source: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -1441,6 +1442,7 @@ class TradeSettingsOut(BaseModel):
 
 class TradeSettingsUpdate(BaseModel):
     risk_defaults: dict | None = None
+    execution_data_source: str | None = None
 
 
 class TradeGuardStateOut(BaseModel):
@@ -1558,6 +1560,7 @@ class IBHistoryJobCreate(BaseModel):
     use_rth: bool = True
     store: bool = True
     min_delay_seconds: float = 0.2
+    resume: bool = True
 
 
 class IBHistoryJobOut(BaseModel):

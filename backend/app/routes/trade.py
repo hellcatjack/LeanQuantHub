@@ -35,7 +35,7 @@ def get_trade_settings():
     with get_session() as session:
         settings_row = session.query(TradeSettings).order_by(TradeSettings.id.desc()).first()
         if settings_row is None:
-            settings_row = TradeSettings(risk_defaults={})
+            settings_row = TradeSettings(risk_defaults={}, execution_data_source="ib")
             session.add(settings_row)
             session.commit()
             session.refresh(settings_row)
@@ -47,10 +47,14 @@ def update_trade_settings(payload: TradeSettingsUpdate):
     with get_session() as session:
         settings_row = session.query(TradeSettings).order_by(TradeSettings.id.desc()).first()
         if settings_row is None:
-            settings_row = TradeSettings(risk_defaults=payload.risk_defaults or {})
+            settings_row = TradeSettings(
+                risk_defaults=payload.risk_defaults or {},
+                execution_data_source="ib",
+            )
             session.add(settings_row)
         else:
             settings_row.risk_defaults = payload.risk_defaults
+            settings_row.execution_data_source = "ib"
         session.commit()
         session.refresh(settings_row)
         return TradeSettingsOut.model_validate(settings_row, from_attributes=True)

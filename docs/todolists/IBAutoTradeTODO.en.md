@@ -5,3 +5,4 @@
 ## Summary
 - This TODO list tracks tasks, sequencing, and validation for **IBAuto Trade TODO**.
 - Use it to plan implementation order, testing, and operational checks.
+- Status: Phase 1.4 (execution data source policy locked to IB) completed.

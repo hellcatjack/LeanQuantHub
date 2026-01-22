@@ -10,7 +10,7 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from app.models import Base, Project, TradeRun, DecisionSnapshot, TradeOrder
+from app.models import Base, Project, TradeRun, DecisionSnapshot, TradeOrder, TradeSettings
 import app.services.trade_executor as trade_executor
 
 
@@ -88,3 +88,51 @@ def test_merge_risk_params_override():
     merged = trade_executor._merge_risk_params(defaults, overrides)
     assert merged["max_order_notional"] == 500
     assert merged["max_symbols"] == 5
+
+
+def test_execute_blocks_when_execution_source_not_ib(tmp_path, monkeypatch):
+    Session = _make_session_factory()
+    monkeypatch.setattr(trade_executor, "SessionLocal", Session)
+    monkeypatch.setattr(
+        trade_executor,
+        "fetch_market_snapshots",
+        lambda *a, **k: [{"symbol": "AAA", "data": {"last": 50}}],
+    )
+    session = Session()
+    try:
+        settings = TradeSettings(risk_defaults={}, execution_data_source="alpha")
+        session.add(settings)
+        session.commit()
+
+        project = Project(name="p", description="")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        items_path = tmp_path / "decision_items.csv"
+        _write_items(items_path)
+        snapshot = DecisionSnapshot(
+            project_id=project.id,
+            status="success",
+            items_path=str(items_path),
+        )
+        session.add(snapshot)
+        session.commit()
+        session.refresh(snapshot)
+
+        run = TradeRun(
+            project_id=project.id,
+            decision_snapshot_id=snapshot.id,
+            status="queued",
+            mode="paper",
+            params={"portfolio_value": 10000},
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        result = trade_executor.execute_trade_run(run.id, dry_run=True)
+        assert result.status == "blocked"
+        assert result.message == "execution_data_source_mismatch"
+    finally:
+        session.close()

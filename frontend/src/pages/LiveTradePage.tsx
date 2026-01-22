@@ -103,6 +103,14 @@ interface TradeGuardState {
   updated_at: string;
 }
 
+interface TradeSettings {
+  id: number;
+  risk_defaults?: Record<string, any> | null;
+  execution_data_source?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 const maskAccount = (value?: string | null) => {
   if (!value) {
     return "";
@@ -186,6 +194,8 @@ export default function LiveTradePage() {
   const [tradeRuns, setTradeRuns] = useState<TradeRun[]>([]);
   const [tradeOrders, setTradeOrders] = useState<TradeOrder[]>([]);
   const [guardState, setGuardState] = useState<TradeGuardState | null>(null);
+  const [tradeSettings, setTradeSettings] = useState<TradeSettings | null>(null);
+  const [tradeSettingsError, setTradeSettingsError] = useState("");
   const [guardLoading, setGuardLoading] = useState(false);
   const [guardError, setGuardError] = useState("");
   const [tradeError, setTradeError] = useState("");
@@ -500,6 +510,18 @@ export default function LiveTradePage() {
     }
   };
 
+  const loadTradeSettings = async () => {
+    try {
+      const res = await api.get<TradeSettings>("/api/trade/settings");
+      setTradeSettings(res.data);
+      setTradeSettingsError("");
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("trade.tradeSettingsError");
+      setTradeSettingsError(String(detail));
+      setTradeSettings(null);
+    }
+  };
+
   const refreshAll = async () => {
     setLoading(true);
     await Promise.all([
@@ -507,6 +529,7 @@ export default function LiveTradePage() {
       loadIbState(true),
       loadIbStreamStatus(true),
       loadIbHistoryJobs(),
+      loadTradeSettings(),
       loadTradeActivity(),
     ]);
     setLoading(false);
@@ -1432,7 +1455,19 @@ export default function LiveTradePage() {
                   {latestTradeRun ? ` #${latestTradeRun.project_id}` : ` ${t("common.none")}`}
                 </div>
               </div>
+              <div className="overview-card">
+                <div className="overview-label">{t("trade.executionDataSource")}</div>
+                <div className="overview-value">
+                  {tradeSettings?.execution_data_source
+                    ? tradeSettings.execution_data_source.toUpperCase()
+                    : t("common.none")}
+                </div>
+                <div className="overview-sub">
+                  {t("trade.signalDataSource")}: {t("trade.signalDataSourceValue")}
+                </div>
+              </div>
             </div>
+            {tradeSettingsError && <div className="form-hint">{tradeSettingsError}</div>}
             {tradeError && <div className="form-hint">{tradeError}</div>}
             <table className="table" style={{ marginTop: "12px" }}>
               <thead>

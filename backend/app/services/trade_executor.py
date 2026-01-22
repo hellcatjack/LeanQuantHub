@@ -156,6 +156,29 @@ def execute_trade_run(
                 dry_run=dry_run,
             )
 
+        settings_row = session.query(TradeSettings).order_by(TradeSettings.id.desc()).first()
+        execution_source = (settings_row.execution_data_source if settings_row else "ib") or "ib"
+        if execution_source.lower() != "ib":
+            params = dict(run.params or {})
+            params["execution_data_source"] = execution_source
+            params["expected_execution_data_source"] = "ib"
+            run.status = "blocked"
+            run.message = "execution_data_source_mismatch"
+            run.params = params
+            run.ended_at = datetime.utcnow()
+            run.updated_at = datetime.utcnow()
+            session.commit()
+            return TradeExecutionResult(
+                run_id=run.id,
+                status=run.status,
+                filled=0,
+                cancelled=0,
+                rejected=0,
+                skipped=0,
+                message=run.message,
+                dry_run=dry_run,
+            )
+
         orders = (
             session.query(TradeOrder)
             .filter(TradeOrder.run_id == run.id)
@@ -327,7 +350,6 @@ def execute_trade_run(
             )
             snapshot_map = {item.get("symbol"): item for item in snapshots}
 
-        settings_row = session.query(TradeSettings).order_by(TradeSettings.id.desc()).first()
         defaults = settings_row.risk_defaults if settings_row else {}
         risk_overrides = params.get("risk_overrides") if isinstance(params.get("risk_overrides"), dict) else {}
         risk_params = _merge_risk_params(defaults, risk_overrides)

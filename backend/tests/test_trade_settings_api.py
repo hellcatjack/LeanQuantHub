@@ -34,10 +34,35 @@ def test_trade_settings_defaults_roundtrip(monkeypatch):
     monkeypatch.setattr(trade_routes, "get_session", _get_session)
 
     resp = trade_routes.get_trade_settings()
-    assert "risk_defaults" in resp.model_dump()
+    dumped = resp.model_dump()
+    assert "risk_defaults" in dumped
+    assert "execution_data_source" in dumped
 
     updated = TradeSettingsUpdate(risk_defaults={"max_order_notional": 1000})
     resp2 = trade_routes.update_trade_settings(updated)
     assert resp2.risk_defaults["max_order_notional"] == 1000
+
+    session.close()
+
+
+def test_trade_settings_execution_data_source_locked(monkeypatch):
+    session = _make_session()
+
+    @contextmanager
+    def _get_session():
+        try:
+            yield session
+        finally:
+            pass
+
+    monkeypatch.setattr(trade_routes, "get_session", _get_session)
+
+    updated = TradeSettingsUpdate(
+        risk_defaults={"max_order_notional": 2000},
+        execution_data_source="alpha",
+    )
+    resp = trade_routes.update_trade_settings(updated)
+    dumped = resp.model_dump()
+    assert dumped.get("execution_data_source") == "ib"
 
     session.close()

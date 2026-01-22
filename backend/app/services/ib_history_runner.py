@@ -41,6 +41,19 @@ def _write_progress(job_id: int, payload: dict) -> None:
     tmp_path.replace(path)
 
 
+def _load_progress(job_id: int) -> dict:
+    path = _progress_path(job_id)
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+    except json.JSONDecodeError:
+        return {}
+    if isinstance(payload, dict):
+        return payload
+    return {}
+
+
 def _append_log(log_path: Path, line: str) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as handle:
@@ -92,11 +105,33 @@ def run_ib_history_job(job_id: int) -> None:
             use_rth = bool(params.get("use_rth", True))
             store = bool(params.get("store", True))
             min_delay_seconds = float(params.get("min_delay_seconds") or 0.0)
+            resume = bool(params.get("resume", True))
+
+            if not resume:
+                progress_file = _progress_path(job_id)
+                if progress_file.exists():
+                    progress_file.unlink()
+            progress_payload = _load_progress(job_id) if resume else {}
+            completed = progress_payload.get("completed") or {}
+            completed_success = {
+                _normalize_symbol(item)
+                for item in (completed.get("success") or [])
+                if _normalize_symbol(item)
+            }
+            completed_failed = {
+                _normalize_symbol(item)
+                for item in (completed.get("failed") or [])
+                if _normalize_symbol(item)
+            }
+            if not resume:
+                completed_success = set()
+                completed_failed = set()
+            skipped_initial = len(completed_success) + len(completed_failed)
 
             total = len(symbols)
-            processed = 0
-            success = 0
-            failed = 0
+            processed = len(completed_success) + len(completed_failed)
+            success = len(completed_success)
+            failed = len(completed_failed)
             job.total_symbols = total
             job.processed_symbols = processed
             job.success_symbols = success
@@ -109,6 +144,29 @@ def run_ib_history_job(job_id: int) -> None:
             with ib_request_lock():
                 with ib_adapter(settings_row, timeout=10.0) as api:
                     for symbol in symbols:
+                        if resume and (
+                            symbol in completed_success or symbol in completed_failed
+                        ):
+                            now = time.monotonic()
+                            if now - progress_last >= 1.0:
+                                _write_progress(
+                                    job_id,
+                                    {
+                                        "status": job.status,
+                                        "total": total,
+                                        "processed": processed,
+                                        "success": success,
+                                        "failed": failed,
+                                        "skipped": skipped_initial,
+                                        "last_symbol": symbol,
+                                        "completed": {
+                                            "success": sorted(completed_success),
+                                            "failed": sorted(completed_failed),
+                                        },
+                                    },
+                                )
+                                progress_last = now
+                            continue
                         if _cancel_flag_path(job_id).exists():
                             job.status = "cancelled"
                             job.message = "cancelled"
@@ -144,10 +202,12 @@ def run_ib_history_job(job_id: int) -> None:
                         processed += 1
                         if error or not bars:
                             failed += 1
+                            completed_failed.add(symbol)
                             job.message = error or "no_history_data"
                             _append_log(log_path, f"{symbol}\tERROR\t{job.message}")
                         else:
                             success += 1
+                            completed_success.add(symbol)
                             if store:
                                 data_root = _ib_data_root() / "bars"
                                 path = data_root / f"{symbol}.csv"
@@ -168,7 +228,12 @@ def run_ib_history_job(job_id: int) -> None:
                                     "processed": processed,
                                     "success": success,
                                     "failed": failed,
+                                    "skipped": skipped_initial,
                                     "last_symbol": symbol,
+                                    "completed": {
+                                        "success": sorted(completed_success),
+                                        "failed": sorted(completed_failed),
+                                    },
                                 },
                             )
                             progress_last = now
@@ -193,6 +258,11 @@ def run_ib_history_job(job_id: int) -> None:
                     "processed": processed,
                     "success": success,
                     "failed": failed,
+                    "skipped": skipped_initial,
+                    "completed": {
+                        "success": sorted(completed_success),
+                        "failed": sorted(completed_failed),
+                    },
                     "ended_at": job.ended_at.isoformat(timespec="seconds"),
                 },
             )
