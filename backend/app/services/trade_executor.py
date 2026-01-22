@@ -61,6 +61,18 @@ def _execute_orders_with_ib(session, run, orders, *, price_map):
     return result
 
 
+def _finalize_run_status(session, run, *, filled: int, rejected: int, cancelled: int):
+    if filled == 0:
+        run.status = "failed"
+    elif rejected or cancelled:
+        run.status = "partial"
+    else:
+        run.status = "done"
+    run.ended_at = datetime.utcnow()
+    run.updated_at = datetime.utcnow()
+    session.commit()
+
+
 def _read_decision_items(path: str | None) -> list[dict[str, Any]]:
     if not path:
         return []
