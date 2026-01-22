@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import csv
+import json
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
@@ -47,6 +49,31 @@ def _collect_project_symbols(session, project_id: int) -> list[str]:
         return []
     config = _resolve_project_config(session, project_id)
     return collect_project_symbols(config)
+
+
+def _utc_now() -> str:
+    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+
+def write_stream_status(
+    stream_root: Path,
+    *,
+    status: str,
+    symbols: Iterable[str],
+    error: str | None = None,
+    market_data_type: str = "delayed",
+) -> dict[str, object]:
+    stream_root.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "status": status,
+        "last_heartbeat": _utc_now(),
+        "subscribed_symbols": sorted({_normalize_symbol(sym) for sym in symbols if _normalize_symbol(sym)}),
+        "ib_error_count": 0 if not error else 1,
+        "last_error": error,
+        "market_data_type": market_data_type,
+    }
+    (stream_root / "_status.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return payload
 
 
 def build_stream_symbols(
