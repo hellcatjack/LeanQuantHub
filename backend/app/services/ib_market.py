@@ -116,12 +116,16 @@ class IBRequestSession(EWrapper, EClient):
         self._ready = threading.Event()
         self._req_lock = threading.Lock()
         self._req_id = 1
+        self._next_order_id: int | None = None
         self._pending: dict[int, threading.Event] = {}
         self._contract_details: dict[int, list[Any]] = {}
         self._market_data: dict[int, dict[str, Any]] = {}
         self._historical_bars: dict[int, list[dict[str, Any]]] = {}
         self._errors: dict[int, str] = {}
         self._connection_error: str | None = None
+        self._order_events: dict[int, dict[str, Any]] = {}
+        self._order_done: dict[int, threading.Event] = {}
+        self._exec_order_map: dict[str, int] = {}
 
     def __enter__(self) -> "IBRequestSession":
         self.connect(self._host, self._port, self._client_id)
@@ -146,6 +150,8 @@ class IBRequestSession(EWrapper, EClient):
             return req_id
 
     def nextValidId(self, orderId: int) -> None:  # noqa: N802
+        if self._next_order_id is None:
+            self._next_order_id = int(orderId)
         self._ready.set()
 
     def error(  # noqa: N802
@@ -163,6 +169,36 @@ class IBRequestSession(EWrapper, EClient):
         if reqId in self._pending:
             self._errors[reqId] = message
             self._pending[reqId].set()
+        if reqId in self._order_done:
+            self._errors[reqId] = message
+            self._order_done[reqId].set()
+
+    def orderStatus(  # noqa: N802
+        self,
+        orderId: int,
+        status: str,
+        filled: float,
+        remaining: float,
+        avgFillPrice: float,
+        permId: int,
+        parentId: int,
+        lastFillPrice: float,
+        clientId: int,
+        whyHeld: str,
+        mktCapPrice: float,
+    ) -> None:
+        payload = self._order_events.setdefault(orderId, {"fills": []})
+        payload.update(
+            {
+                "status": status,
+                "filled": float(filled or 0),
+                "remaining": float(remaining or 0),
+                "avg_fill_price": float(avgFillPrice or 0),
+                "last_fill_price": float(lastFillPrice or 0),
+            }
+        )
+        if status in {"Filled", "Cancelled", "ApiCancelled", "Inactive", "Rejected"}:
+            self._order_done.setdefault(orderId, threading.Event()).set()
 
     def contractDetails(self, reqId: int, contractDetails) -> None:  # noqa: N802
         self._contract_details.setdefault(reqId, []).append(contractDetails)
@@ -186,6 +222,31 @@ class IBRequestSession(EWrapper, EClient):
     def tickSnapshotEnd(self, reqId: int) -> None:  # noqa: N802
         if reqId in self._pending:
             self._pending[reqId].set()
+
+    def execDetails(self, reqId: int, contract, execution) -> None:  # noqa: N802
+        order_id = int(getattr(execution, "orderId", reqId) or reqId)
+        payload = self._order_events.setdefault(order_id, {"fills": []})
+        exec_id = getattr(execution, "execId", None)
+        payload["fills"].append(
+            {
+                "quantity": float(getattr(execution, "shares", 0) or 0),
+                "price": float(getattr(execution, "price", 0) or 0),
+                "time": getattr(execution, "time", None),
+                "exec_id": exec_id,
+            }
+        )
+        if exec_id:
+            self._exec_order_map[str(exec_id)] = order_id
+
+    def commissionReport(self, commissionReport) -> None:  # noqa: N802
+        exec_id = getattr(commissionReport, "execId", None)
+        if not exec_id:
+            return
+        order_id = self._exec_order_map.get(str(exec_id))
+        if order_id is None:
+            return
+        payload = self._order_events.setdefault(order_id, {"fills": []})
+        payload["commission"] = float(getattr(commissionReport, "commission", 0) or 0)
 
     def historicalData(self, reqId: int, bar) -> None:  # noqa: N802
         self._historical_bars.setdefault(reqId, []).append(
