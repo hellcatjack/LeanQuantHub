@@ -149,6 +149,14 @@ class IBRequestSession(EWrapper, EClient):
             self._req_id += 1
             return req_id
 
+    def _next_order_id(self) -> int:
+        with self._req_lock:
+            if self._next_order_id is None:
+                raise RuntimeError("ib_order_id_unavailable")
+            order_id = int(self._next_order_id)
+            self._next_order_id += 1
+            return order_id
+
     def nextValidId(self, orderId: int) -> None:  # noqa: N802
         if self._next_order_id is None:
             self._next_order_id = int(orderId)
@@ -197,8 +205,8 @@ class IBRequestSession(EWrapper, EClient):
                 "last_fill_price": float(lastFillPrice or 0),
             }
         )
-        if status in {"Filled", "Cancelled", "ApiCancelled", "Inactive", "Rejected"}:
-            self._order_done.setdefault(orderId, threading.Event()).set()
+        if orderId in self._order_done:
+            self._order_done[orderId].set()
 
     def contractDetails(self, reqId: int, contractDetails) -> None:  # noqa: N802
         self._contract_details.setdefault(reqId, []).append(contractDetails)
@@ -247,6 +255,21 @@ class IBRequestSession(EWrapper, EClient):
             return
         payload = self._order_events.setdefault(order_id, {"fills": []})
         payload["commission"] = float(getattr(commissionReport, "commission", 0) or 0)
+
+    def place_order(self, contract: Contract, order, *, timeout: float | None = None) -> tuple[dict[str, Any] | None, str | None]:
+        order_id = self._next_order_id()
+        payload = self._order_events.setdefault(order_id, {"fills": []})
+        done = self._order_done.setdefault(order_id, threading.Event())
+        self.placeOrder(order_id, contract, order)
+        wait_seconds = timeout or self._timeout
+        if not done.wait(wait_seconds):
+            return None, "order_timeout"
+        error = self._errors.pop(order_id, None)
+        if error:
+            return None, error
+        payload = dict(payload)
+        payload["order_id"] = order_id
+        return payload, None
 
     def historicalData(self, reqId: int, bar) -> None:  # noqa: N802
         self._historical_bars.setdefault(reqId, []).append(
@@ -404,6 +427,9 @@ class IBMockAdapter:
         bars = _mock_bars(bar_size)
         return bars, None
 
+    def place_order(self, contract: Contract, order, *, timeout: float | None = None) -> tuple[dict[str, Any] | None, str | None]:
+        return None, "mock_order_not_supported"
+
 
 class IBLiveAdapter:
     def __init__(self, host: str, port: int, client_id: int, timeout: float = 5.0) -> None:
@@ -505,6 +531,11 @@ class IBLiveAdapter:
         if error:
             return [], error
         return bars, None
+
+    def place_order(self, contract: Contract, order, *, timeout: float | None = None) -> tuple[dict[str, Any] | None, str | None]:
+        if not self._api:
+            return None, "ib_client_not_ready"
+        return self._api.place_order(contract, order, timeout=timeout or self._timeout)
 
 
 def _load_mock_json(path: Path) -> dict[str, Any]:
