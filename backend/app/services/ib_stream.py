@@ -85,6 +85,27 @@ def stream_lock(data_root: Path | str | None = None) -> Any:
     finally:
         lock.release()
 
+CONFIG_FILE = "_config.json"
+
+
+def write_stream_config(stream_root: Path, payload: dict) -> None:
+    stream_root.mkdir(parents=True, exist_ok=True)
+    (stream_root / CONFIG_FILE).write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def read_stream_config(stream_root: Path) -> dict:
+    path = stream_root / CONFIG_FILE
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
 
 def write_stream_status(
     stream_root: Path,

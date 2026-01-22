@@ -22,3 +22,17 @@ def test_stream_status_written(tmp_path):
     assert payload["status"] == "connected"
     assert payload["subscribed_symbols"] == ["SPY"]
     assert payload["market_data_type"] == "delayed"
+
+
+def test_stream_config_roundtrip(tmp_path):
+    config = {
+        "project_id": 1,
+        "decision_snapshot_id": 10,
+        "max_symbols": 50,
+        "market_data_type": "delayed",
+        "refresh_interval_seconds": 30,
+    }
+    ib_stream.write_stream_config(tmp_path, config)
+    loaded = ib_stream.read_stream_config(tmp_path)
+    assert loaded["project_id"] == 1
+    assert loaded["market_data_type"] == "delayed"
