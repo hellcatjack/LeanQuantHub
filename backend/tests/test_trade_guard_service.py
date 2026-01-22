@@ -65,6 +65,7 @@ def test_guard_triggers_daily_loss():
             mode="paper",
             risk_params={"max_daily_loss": -0.05},
             price_map={"SPY": 90.0},
+            trade_date=date(2026, 1, 17),
         )
         assert result["status"] == "halted"
     finally:

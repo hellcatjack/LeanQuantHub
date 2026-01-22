@@ -203,8 +203,9 @@ def evaluate_intraday_guard(
     mode: str,
     risk_params: dict[str, Any] | None = None,
     price_map: dict[str, float] | None = None,
+    trade_date: date | None = None,
 ) -> dict[str, Any]:
-    state = get_or_create_guard_state(session, project_id=project_id, mode=mode)
+    state = get_or_create_guard_state(session, project_id=project_id, mode=mode, trade_date=trade_date)
     settings_row = session.query(TradeSettings).order_by(TradeSettings.id.desc()).first()
     defaults = settings_row.risk_defaults if settings_row else {}
     risk_params = _merge_risk_params(defaults, risk_params)
