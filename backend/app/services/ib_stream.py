@@ -5,13 +5,19 @@ import json
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, Any
+from typing import Iterable, Any, Callable
+import threading
+import time
 
+from app.db import get_session
 from app.models import DecisionSnapshot, Project
 from app.routes.projects import _resolve_project_config
 from app.services.project_symbols import collect_project_symbols
-from app.services.ib_market import _ib_data_root
+from app.services.ib_market import _ib_data_root, fetch_market_snapshots
 from app.services.job_lock import JobLock
+
+_STREAM_THREAD: threading.Thread | None = None
+_STREAM_LOCK = threading.Lock()
 
 
 def _normalize_symbol(symbol: str | None) -> str:
@@ -189,3 +195,144 @@ class IBStreamRunner:
             encoding="utf-8",
         )
         return payload
+
+
+def run_stream_once(
+    *,
+    project_id: int,
+    decision_snapshot_id: int | None,
+    symbols: list[str] | None,
+    max_symbols: int | None,
+    data_root: Path | str | None,
+    api_mode: str,
+    market_data_type: str,
+    fetcher: Callable[..., list[dict[str, Any]]] | None = None,
+    session_factory: Callable[[], Any] = get_session,
+) -> dict[str, Any]:
+    fetch_fn = fetcher or fetch_market_snapshots
+    with session_factory() as session:
+        if not symbols:
+            symbols = build_stream_symbols(
+                session,
+                project_id=project_id,
+                decision_snapshot_id=decision_snapshot_id,
+                max_symbols=max_symbols,
+            )
+        symbols = [_normalize_symbol(sym) for sym in (symbols or []) if _normalize_symbol(sym)]
+        if not symbols:
+            return {"symbols": [], "errors": ["symbols_empty"], "count": 0}
+        results = fetch_fn(
+            session,
+            symbols=symbols,
+            store=False,
+            fallback_history=True,
+            history_duration="5 D",
+            history_bar_size="1 day",
+            history_use_rth=True,
+        )
+    runner = IBStreamRunner(
+        project_id=project_id,
+        decision_snapshot_id=decision_snapshot_id,
+        max_symbols=max_symbols,
+        data_root=data_root,
+        api_mode=api_mode,
+    )
+    errors: list[str] = []
+    for item in results:
+        symbol = _normalize_symbol(item.get("symbol") or "")
+        if not symbol:
+            continue
+        payload = item.get("data") or {}
+        error = item.get("error")
+        if payload:
+            runner._write_tick(symbol, payload, source=payload.get("source"))  # noqa: SLF001
+        if error:
+            errors.append(f"{symbol}:{error}")
+    return {"symbols": symbols, "errors": errors, "count": len(results), "market_data_type": market_data_type}
+
+
+def run_stream_loop(
+    *,
+    project_id: int,
+    decision_snapshot_id: int | None,
+    symbols: list[str] | None,
+    max_symbols: int | None,
+    refresh_interval_seconds: int,
+    data_root: Path | str | None,
+    api_mode: str,
+    market_data_type: str,
+) -> None:
+    stream_root = _resolve_stream_root(data_root)
+    try:
+        with stream_lock(data_root):
+            status = write_stream_status(
+                stream_root,
+                status="running",
+                symbols=symbols or [],
+                market_data_type=market_data_type,
+            )
+            while True:
+                current = get_stream_status(data_root)
+                if current.get("status") in {"stopped", "error"}:
+                    break
+                result = run_stream_once(
+                    project_id=project_id,
+                    decision_snapshot_id=decision_snapshot_id,
+                    symbols=symbols,
+                    max_symbols=max_symbols,
+                    data_root=data_root,
+                    api_mode=api_mode,
+                    market_data_type=market_data_type,
+                )
+                errors = result.get("errors") or []
+                status = write_stream_status(
+                    stream_root,
+                    status="running",
+                    symbols=result.get("symbols") or [],
+                    error=errors[-1] if errors else None,
+                    market_data_type=market_data_type,
+                )
+                time.sleep(max(1, int(refresh_interval_seconds)))
+    except Exception as exc:
+        write_stream_status(
+            stream_root,
+            status="error",
+            symbols=symbols or [],
+            error=str(exc),
+            market_data_type=market_data_type,
+        )
+        raise
+
+
+def start_stream(
+    *,
+    project_id: int,
+    decision_snapshot_id: int | None,
+    symbols: list[str] | None,
+    max_symbols: int | None,
+    refresh_interval_seconds: int = 60,
+    data_root: Path | str | None = None,
+    api_mode: str = "ib",
+    market_data_type: str = "delayed",
+) -> threading.Thread | None:
+    global _STREAM_THREAD
+    with _STREAM_LOCK:
+        if _STREAM_THREAD and _STREAM_THREAD.is_alive():
+            return None
+        thread = threading.Thread(
+            target=run_stream_loop,
+            kwargs={
+                "project_id": project_id,
+                "decision_snapshot_id": decision_snapshot_id,
+                "symbols": symbols,
+                "max_symbols": max_symbols,
+                "refresh_interval_seconds": refresh_interval_seconds,
+                "data_root": data_root,
+                "api_mode": api_mode,
+                "market_data_type": market_data_type,
+            },
+            daemon=True,
+        )
+        _STREAM_THREAD = thread
+        thread.start()
+        return thread

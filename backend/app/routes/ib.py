@@ -153,6 +153,18 @@ def start_ib_stream(payload: IBStreamStartRequest):
             symbols=symbols,
             market_data_type=market_data_type,
         )
+        settings_row = get_or_create_ib_settings(session)
+        api_mode = settings_row.api_mode or "ib"
+        ib_stream.start_stream(
+            project_id=payload.project_id,
+            decision_snapshot_id=payload.decision_snapshot_id,
+            symbols=symbols,
+            max_symbols=payload.max_symbols,
+            refresh_interval_seconds=60,
+            data_root=None,
+            api_mode=api_mode,
+            market_data_type=market_data_type,
+        )
         return IBStreamStatusOut(**status)
 
 

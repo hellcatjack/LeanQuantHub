@@ -73,9 +73,9 @@
 - 验收：项目主题标的全部可解析 conId。
 
 ### 1.2 实时行情订阅
-- [ ] IB L1 订阅（bid/ask/last/volume）。
-- [ ] 行情缓存落地到 `data/ib/stream/`（或统一 data_root/ib）。
-- [ ] 订阅速率与连接状态监控。
+- [x] IB L1 订阅（bid/ask/last/volume）。
+- [x] 行情缓存落地到 `data/ib/stream/`（或统一 data_root/ib）。
+- [x] 订阅速率与连接状态监控（基础版本：心跳/错误计数）。
 - 验收：UI/日志可查看实时行情刷新。
 
 ### 1.3 历史数据补齐（最小化）

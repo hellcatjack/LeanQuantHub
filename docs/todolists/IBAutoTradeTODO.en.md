@@ -8,4 +8,5 @@
 
 ## Current Progress (MVP)
 - ✅ Completed: order event capture (IBRequestSession), live order submission MVP (submit_orders_live), trade executor routes to live branch.
+- ✅ Completed: basic L1 market stream (snapshot polling), stream cache under `data/ib/stream/`, heartbeat/error counters.
 - ⏳ Remaining: full risk controls, alerts, scheduling, reconciliation, and production runbooks.
