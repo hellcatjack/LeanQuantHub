@@ -8,6 +8,10 @@
 - 数据源：实盘/模拟盘**交易所需数据统一来自 IB**（行情/合约/历史补齐）。
 - 周期：周一开盘调仓（与现有 PreTrade checklist 对齐）。
 
+## 当前进度（MVP 里程碑）
+- ✅ 已完成：订单回报采集（IBRequestSession）、live 下单闭环（submit_orders_live）、交易执行器接入 live 分支。
+- ⏳ 未完成：风控/告警/调度/对账/复盘等完整闭环。
+
 ## 菜单与入口（对齐最新主菜单布局）
 > 最新主菜单：项目 → 数据 → 回测&报告 → 主题库 → 系统审计  
 > 实盘交易需新增一级入口并与上述布局融合。
@@ -90,7 +94,8 @@
 ### 2.1 订单状态机
 - [ ] NEW → SUBMITTED → PARTIAL → FILLED/CANCELED/REJECTED。
 - [ ] clientOrderId 幂等（重试不重复下单）。
-- [ ] 成交回报回写 DB。
+- [x] 成交回报回写 DB（MVP）。
+- [x] 实盘下单 MVP：submit_orders_live + 订单回报聚合（MVP）。
 - 验收：重复触发不会产生重复订单。
 
 ### 2.2 订单拆分与下单规则
