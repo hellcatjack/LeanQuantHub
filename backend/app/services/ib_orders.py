@@ -40,3 +40,18 @@ def apply_fill_to_order(
     session.commit()
     session.refresh(order)
     return fill
+
+
+def submit_orders_mock(session, orders, *, price_map: dict[str, float]):
+    filled = 0
+    rejected = 0
+    for order in orders:
+        price = price_map.get(order.symbol)
+        if price is None:
+            rejected += 1
+            update_trade_order_status(session, order, {"status": "REJECTED", "params": {"reason": "price_unavailable"}})
+            continue
+        update_trade_order_status(session, order, {"status": "SUBMITTED"})
+        apply_fill_to_order(session, order, fill_qty=order.quantity, fill_price=price, fill_time=datetime.utcnow())
+        filled += 1
+    return {"filled": filled, "rejected": rejected}
