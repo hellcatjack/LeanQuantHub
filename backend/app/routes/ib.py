@@ -24,6 +24,8 @@ from app.schemas import (
     IBMarketSnapshotRequest,
     IBSettingsOut,
     IBSettingsUpdate,
+    IBStreamStartRequest,
+    IBStreamStatusOut,
 )
 from app.services.audit_log import record_audit
 from app.services.ib_settings import (
@@ -39,6 +41,7 @@ from app.services.ib_market import (
 )
 from app.services.ib_history_runner import cancel_ib_history_job, run_ib_history_job
 from app.services.project_symbols import collect_active_project_symbols
+from app.services import ib_stream
 from app.models import IBContractCache, IBHistoryJob
 
 router = APIRouter(prefix="/api/ib", tags=["ib"])
@@ -123,6 +126,48 @@ def probe_ib_state():
     with get_session() as session:
         state = probe_ib_connection(session)
         return IBConnectionStateOut.model_validate(state, from_attributes=True)
+
+
+@router.get("/stream/status", response_model=IBStreamStatusOut)
+def get_ib_stream_status():
+    status = ib_stream.get_stream_status()
+    return IBStreamStatusOut(**status)
+
+
+@router.post("/stream/start", response_model=IBStreamStatusOut)
+def start_ib_stream(payload: IBStreamStartRequest):
+    with get_session() as session:
+        symbols = payload.symbols or []
+        if not symbols:
+            symbols = ib_stream.build_stream_symbols(
+                session,
+                project_id=payload.project_id,
+                decision_snapshot_id=payload.decision_snapshot_id,
+                max_symbols=payload.max_symbols,
+            )
+        market_data_type = payload.market_data_type or "delayed"
+        stream_root = ib_stream._resolve_stream_root(None)
+        status = ib_stream.write_stream_status(
+            stream_root,
+            status="starting",
+            symbols=symbols,
+            market_data_type=market_data_type,
+        )
+        return IBStreamStatusOut(**status)
+
+
+@router.post("/stream/stop", response_model=IBStreamStatusOut)
+def stop_ib_stream():
+    current = ib_stream.get_stream_status()
+    market_data_type = current.get("market_data_type") or "delayed"
+    stream_root = ib_stream._resolve_stream_root(None)
+    status = ib_stream.write_stream_status(
+        stream_root,
+        status="stopped",
+        symbols=[],
+        market_data_type=market_data_type,
+    )
+    return IBStreamStatusOut(**status)
 
 
 @router.get("/contracts", response_model=list[IBContractCacheOut])

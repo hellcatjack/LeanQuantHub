@@ -1412,6 +1412,23 @@ class IBSettingsOut(BaseModel):
         from_attributes = True
 
 
+class IBStreamStartRequest(BaseModel):
+    project_id: int
+    decision_snapshot_id: int | None = None
+    symbols: list[str] | None = None
+    max_symbols: int | None = None
+    market_data_type: str | None = None
+
+
+class IBStreamStatusOut(BaseModel):
+    status: str
+    last_heartbeat: str | None
+    subscribed_symbols: list[str]
+    ib_error_count: int
+    last_error: str | None
+    market_data_type: str | None
+
+
 class TradeSettingsOut(BaseModel):
     id: int
     risk_defaults: dict | None = None

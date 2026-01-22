@@ -88,6 +88,39 @@ def write_stream_status(
     return payload
 
 
+def get_stream_status(data_root: Path | str | None = None) -> dict[str, object]:
+    stream_root = _resolve_stream_root(data_root)
+    status_path = stream_root / "_status.json"
+    if not status_path.exists():
+        return {
+            "status": "disconnected",
+            "last_heartbeat": None,
+            "subscribed_symbols": [],
+            "ib_error_count": 0,
+            "last_error": None,
+            "market_data_type": "delayed",
+        }
+    try:
+        payload = json.loads(status_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {
+            "status": "degraded",
+            "last_heartbeat": None,
+            "subscribed_symbols": [],
+            "ib_error_count": 1,
+            "last_error": "invalid_status_json",
+            "market_data_type": "delayed",
+        }
+    return {
+        "status": payload.get("status") or "unknown",
+        "last_heartbeat": payload.get("last_heartbeat"),
+        "subscribed_symbols": payload.get("subscribed_symbols") or [],
+        "ib_error_count": int(payload.get("ib_error_count") or 0),
+        "last_error": payload.get("last_error"),
+        "market_data_type": payload.get("market_data_type") or "delayed",
+    }
+
+
 def build_stream_symbols(
     session,
     *,
