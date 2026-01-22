@@ -53,6 +53,15 @@ interface IBHistoryJob {
   updated_at: string;
 }
 
+interface IBStreamStatus {
+  status: string;
+  last_heartbeat?: string | null;
+  subscribed_symbols: string[];
+  ib_error_count: number;
+  last_error?: string | null;
+  market_data_type?: string | null;
+}
+
 interface TradeRun {
   id: number;
   project_id: number;
@@ -164,6 +173,16 @@ export default function LiveTradePage() {
   const [ibHistoryLoading, setIbHistoryLoading] = useState(false);
   const [ibHistoryError, setIbHistoryError] = useState("");
   const [ibHistoryActionLoading, setIbHistoryActionLoading] = useState(false);
+  const [ibStreamStatus, setIbStreamStatus] = useState<IBStreamStatus | null>(null);
+  const [ibStreamForm, setIbStreamForm] = useState({
+    project_id: "",
+    decision_snapshot_id: "",
+    max_symbols: "",
+    market_data_type: "delayed",
+  });
+  const [ibStreamLoading, setIbStreamLoading] = useState(false);
+  const [ibStreamActionLoading, setIbStreamActionLoading] = useState(false);
+  const [ibStreamError, setIbStreamError] = useState("");
   const [tradeRuns, setTradeRuns] = useState<TradeRun[]>([]);
   const [tradeOrders, setTradeOrders] = useState<TradeOrder[]>([]);
   const [guardState, setGuardState] = useState<TradeGuardState | null>(null);
@@ -186,6 +205,10 @@ export default function LiveTradePage() {
 
   const updateIbHistoryForm = (key: keyof typeof ibHistoryForm, value: any) => {
     setIbHistoryForm((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const updateIbStreamForm = (key: keyof typeof ibStreamForm, value: any) => {
+    setIbStreamForm((prev) => ({ ...prev, [key]: value }));
   };
 
   const loadIbSettings = async () => {
@@ -374,6 +397,67 @@ export default function LiveTradePage() {
     }
   };
 
+  const loadIbStreamStatus = async (silent = false) => {
+    if (!silent) {
+      setIbStreamLoading(true);
+      setIbStreamError("");
+    }
+    try {
+      const res = await api.get<IBStreamStatus>("/api/ib/stream/status");
+      setIbStreamStatus(res.data);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("data.ib.streamLoadError");
+      setIbStreamError(String(detail));
+      setIbStreamStatus(null);
+    } finally {
+      if (!silent) {
+        setIbStreamLoading(false);
+      }
+    }
+  };
+
+  const startIbStream = async () => {
+    setIbStreamActionLoading(true);
+    setIbStreamError("");
+    const projectId = Number(ibStreamForm.project_id);
+    if (!projectId) {
+      setIbStreamError(t("data.ib.streamProjectRequired"));
+      setIbStreamActionLoading(false);
+      return;
+    }
+    const decisionSnapshotId = Number(ibStreamForm.decision_snapshot_id);
+    const maxSymbols = Number(ibStreamForm.max_symbols);
+    const payload = {
+      project_id: projectId,
+      decision_snapshot_id: Number.isNaN(decisionSnapshotId) ? undefined : decisionSnapshotId,
+      max_symbols: Number.isNaN(maxSymbols) ? undefined : maxSymbols,
+      market_data_type: ibStreamForm.market_data_type || undefined,
+    };
+    try {
+      const res = await api.post<IBStreamStatus>("/api/ib/stream/start", payload);
+      setIbStreamStatus(res.data);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("data.ib.streamStartError");
+      setIbStreamError(String(detail));
+    } finally {
+      setIbStreamActionLoading(false);
+    }
+  };
+
+  const stopIbStream = async () => {
+    setIbStreamActionLoading(true);
+    setIbStreamError("");
+    try {
+      const res = await api.post<IBStreamStatus>("/api/ib/stream/stop");
+      setIbStreamStatus(res.data);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("data.ib.streamStopError");
+      setIbStreamError(String(detail));
+    } finally {
+      setIbStreamActionLoading(false);
+    }
+  };
+
   const loadTradeGuard = async (projectId: number, mode: string) => {
     setGuardLoading(true);
     setGuardError("");
@@ -418,7 +502,13 @@ export default function LiveTradePage() {
 
   const refreshAll = async () => {
     setLoading(true);
-    await Promise.all([loadIbSettings(), loadIbState(true), loadIbHistoryJobs(), loadTradeActivity()]);
+    await Promise.all([
+      loadIbSettings(),
+      loadIbState(true),
+      loadIbStreamStatus(true),
+      loadIbHistoryJobs(),
+      loadTradeActivity(),
+    ]);
     setLoading(false);
   };
 
@@ -429,12 +519,30 @@ export default function LiveTradePage() {
   useEffect(() => {
     const refresh = async () => {
       await loadIbState(true);
+      await loadIbStreamStatus(true);
     };
     const timer = window.setInterval(refresh, 10000);
     return () => {
       window.clearInterval(timer);
     };
   }, []);
+
+  const latestTradeRun = tradeRuns[0];
+
+  useEffect(() => {
+    if (latestTradeRun?.project_id && !ibStreamForm.project_id) {
+      setIbStreamForm((prev) => ({ ...prev, project_id: String(latestTradeRun.project_id) }));
+    }
+  }, [latestTradeRun?.project_id, ibStreamForm.project_id]);
+
+  useEffect(() => {
+    if (ibSettings?.market_data_type) {
+      setIbStreamForm((prev) => ({
+        ...prev,
+        market_data_type: ibSettings.market_data_type,
+      }));
+    }
+  }, [ibSettings?.market_data_type]);
 
   const isConfigured = useMemo(() => {
     if (!ibSettings) {
@@ -547,7 +655,23 @@ export default function LiveTradePage() {
     }
   }, [guardState, t]);
 
-  const latestTradeRun = tradeRuns[0];
+  const streamStatusLabel = useMemo(() => {
+    if (!ibStreamStatus?.status) {
+      return t("common.none");
+    }
+    return formatStatus(ibStreamStatus.status);
+  }, [ibStreamStatus?.status, t]);
+
+  const streamSymbolCount = useMemo(() => {
+    if (!ibStreamStatus?.subscribed_symbols) {
+      return 0;
+    }
+    return ibStreamStatus.subscribed_symbols.length;
+  }, [ibStreamStatus?.subscribed_symbols]);
+
+  const streamMarketDataType = useMemo(() => {
+    return ibStreamStatus?.market_data_type || ibSettings?.market_data_type || t("common.none");
+  }, [ibSettings?.market_data_type, ibStreamStatus?.market_data_type, t]);
 
   return (
     <div className="main">
@@ -782,8 +906,115 @@ export default function LiveTradePage() {
         </div>
 
         <div className="grid-2" style={{ marginTop: "16px" }}>
-          <div className="card">
-            <div className="card-title">{t("data.ib.contractsTitle")}</div>
+        <div className="card" style={{ marginTop: "16px" }}>
+          <div className="card-title">{t("data.ib.streamTitle")}</div>
+          <div className="card-meta">{t("data.ib.streamMeta")}</div>
+          <div className="overview-grid" style={{ marginTop: "12px" }}>
+            <div className="overview-card">
+              <div className="overview-label">{t("data.ib.streamStatus")}</div>
+              <div className="overview-value">{streamStatusLabel}</div>
+              <div className="overview-sub">
+                {t("data.ib.streamLastHeartbeat")}{" "}
+                {ibStreamStatus?.last_heartbeat
+                  ? formatDateTime(ibStreamStatus.last_heartbeat)
+                  : "-"}
+              </div>
+            </div>
+            <div className="overview-card">
+              <div className="overview-label">{t("data.ib.streamSubscribed")}</div>
+              <div className="overview-value">{streamSymbolCount}</div>
+              <div className="overview-sub">
+                {(ibStreamStatus?.subscribed_symbols || []).slice(0, 6).join(", ") ||
+                  t("common.none")}
+              </div>
+            </div>
+            <div className="overview-card">
+              <div className="overview-label">{t("data.ib.streamMarketDataType")}</div>
+              <div className="overview-value">{streamMarketDataType}</div>
+              <div className="overview-sub">
+                {t("data.ib.streamErrorCount")}: {ibStreamStatus?.ib_error_count ?? 0}
+              </div>
+            </div>
+          </div>
+          <div className="meta-list" style={{ marginTop: "12px" }}>
+            <div className="meta-row">
+              <span>{t("data.ib.streamLastError")}</span>
+              <strong>{ibStreamStatus?.last_error || "-"}</strong>
+            </div>
+          </div>
+          <div className="form-grid" style={{ marginTop: "12px" }}>
+            <div className="form-row">
+              <label className="form-label">{t("data.ib.streamProjectId")}</label>
+              <input
+                type="number"
+                className="form-input"
+                value={ibStreamForm.project_id}
+                onChange={(e) => updateIbStreamForm("project_id", e.target.value)}
+              />
+              <div className="form-hint">{t("data.ib.streamProjectIdHint")}</div>
+            </div>
+            <div className="form-row">
+              <label className="form-label">{t("data.ib.streamDecisionSnapshotId")}</label>
+              <input
+                type="number"
+                className="form-input"
+                value={ibStreamForm.decision_snapshot_id}
+                onChange={(e) => updateIbStreamForm("decision_snapshot_id", e.target.value)}
+              />
+              <div className="form-hint">{t("data.ib.streamDecisionSnapshotIdHint")}</div>
+            </div>
+            <div className="form-row">
+              <label className="form-label">{t("data.ib.streamMaxSymbols")}</label>
+              <input
+                type="number"
+                className="form-input"
+                value={ibStreamForm.max_symbols}
+                onChange={(e) => updateIbStreamForm("max_symbols", e.target.value)}
+              />
+              <div className="form-hint">{t("data.ib.streamMaxSymbolsHint")}</div>
+            </div>
+            <div className="form-row">
+              <label className="form-label">{t("data.ib.streamMarketDataType")}</label>
+              <select
+                className="form-select"
+                value={ibStreamForm.market_data_type}
+                onChange={(e) => updateIbStreamForm("market_data_type", e.target.value)}
+              >
+                <option value="realtime">{t("data.ib.marketDataRealtime")}</option>
+                <option value="frozen">{t("data.ib.marketDataFrozen")}</option>
+                <option value="delayed">{t("data.ib.marketDataDelayed")}</option>
+              </select>
+              <div className="form-hint">{t("data.ib.streamMarketDataTypeHint")}</div>
+            </div>
+          </div>
+          {ibStreamError && <div className="form-error">{ibStreamError}</div>}
+          <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+            <button
+              className="button-primary"
+              onClick={startIbStream}
+              disabled={ibStreamActionLoading}
+            >
+              {ibStreamActionLoading ? t("common.actions.loading") : t("data.ib.streamStart")}
+            </button>
+            <button
+              className="button-secondary"
+              onClick={stopIbStream}
+              disabled={ibStreamActionLoading}
+            >
+              {ibStreamActionLoading ? t("common.actions.loading") : t("data.ib.streamStop")}
+            </button>
+            <button
+              className="button-secondary"
+              onClick={() => loadIbStreamStatus(false)}
+              disabled={ibStreamLoading}
+            >
+              {ibStreamLoading ? t("common.actions.loading") : t("data.ib.streamRefresh")}
+            </button>
+          </div>
+        </div>
+
+        <div className="card">
+          <div className="card-title">{t("data.ib.contractsTitle")}</div>
             <div className="form-grid">
               <div className="form-row full">
                 <label className="form-label">{t("data.ib.contractsSymbols")}</label>

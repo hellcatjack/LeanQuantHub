@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Any
@@ -10,6 +11,7 @@ from app.models import DecisionSnapshot, Project
 from app.routes.projects import _resolve_project_config
 from app.services.project_symbols import collect_project_symbols
 from app.services.ib_market import _ib_data_root
+from app.services.job_lock import JobLock
 
 
 def _normalize_symbol(symbol: str | None) -> str:
@@ -65,6 +67,23 @@ def _resolve_stream_root(data_root: Path | str | None) -> Path:
 
 def _default_source(api_mode: str) -> str:
     return "mock" if api_mode == "mock" else "ib_stream"
+
+
+def acquire_stream_lock(data_root: Path | str | None = None) -> JobLock:
+    lock_root = Path(data_root) if data_root is not None else None
+    lock = JobLock("ib_stream", lock_root)
+    if not lock.acquire():
+        raise RuntimeError("ib_stream_lock_busy")
+    return lock
+
+
+@contextmanager
+def stream_lock(data_root: Path | str | None = None) -> Any:
+    lock = acquire_stream_lock(data_root)
+    try:
+        yield lock
+    finally:
+        lock.release()
 
 
 def write_stream_status(
