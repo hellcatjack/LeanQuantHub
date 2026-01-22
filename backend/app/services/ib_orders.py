@@ -1,0 +1,42 @@
+from __future__ import annotations
+
+from datetime import datetime
+
+from app.models import TradeFill, TradeOrder
+from app.services.trade_orders import update_trade_order_status
+
+
+def apply_fill_to_order(
+    session,
+    order: TradeOrder,
+    *,
+    fill_qty: float,
+    fill_price: float,
+    fill_time: datetime,
+) -> TradeFill:
+    current_status = str(order.status or "").strip().upper()
+    total_prev = float(order.filled_quantity or 0.0)
+    total_new = total_prev + float(fill_qty)
+    avg_prev = float(order.avg_fill_price or 0.0)
+    avg_new = (avg_prev * total_prev + float(fill_price) * float(fill_qty)) / total_new
+
+    target_status = "PARTIAL" if total_new < float(order.quantity) else "FILLED"
+    if current_status == "NEW":
+        update_trade_order_status(session, order, {"status": "SUBMITTED"})
+    update_trade_order_status(
+        session,
+        order,
+        {"status": target_status, "filled_quantity": total_new, "avg_fill_price": avg_new},
+    )
+    fill = TradeFill(
+        order_id=order.id,
+        fill_quantity=float(fill_qty),
+        fill_price=float(fill_price),
+        commission=None,
+        fill_time=fill_time,
+        params={"source": "ib"},
+    )
+    session.add(fill)
+    session.commit()
+    session.refresh(order)
+    return fill
