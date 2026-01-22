@@ -11,6 +11,7 @@ from app.models import DecisionSnapshot, TradeFill, TradeOrder, TradeRun, TradeS
 from pathlib import Path
 
 from app.services.ib_market import fetch_market_snapshots
+from app.services.ib_orders import submit_orders_mock
 from app.services.job_lock import JobLock
 from app.services.trade_guard import get_or_create_guard_state, record_guard_event
 from app.services.trade_order_builder import build_orders
@@ -49,6 +50,15 @@ def _limit_allows_fill(side: str, price: float, limit_price: float) -> bool:
     if side == "SELL":
         return price >= limit_price
     return False
+
+
+def _submit_ib_orders(session, orders, *, price_map):
+    return submit_orders_mock(session, orders, price_map=price_map)
+
+
+def _execute_orders_with_ib(session, run, orders, *, price_map):
+    result = _submit_ib_orders(session, orders, price_map=price_map)
+    return result
 
 
 def _read_decision_items(path: str | None) -> list[dict[str, Any]]:
