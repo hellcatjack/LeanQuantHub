@@ -24,6 +24,7 @@ from app.schemas import (
 from app.services.audit_log import record_audit
 from app.services.ib_market import check_market_health
 from app.services.trade_guard import evaluate_intraday_guard, get_or_create_guard_state
+from app.services.trade_monitor import build_trade_overview
 from app.services.trade_executor import execute_trade_run
 from app.services.trade_orders import create_trade_order, update_trade_order_status
 
@@ -40,6 +41,12 @@ def get_trade_settings():
             session.commit()
             session.refresh(settings_row)
         return TradeSettingsOut.model_validate(settings_row, from_attributes=True)
+
+
+@router.get("/overview")
+def get_trade_overview(project_id: int, mode: str = "paper"):
+    with get_session() as session:
+        return build_trade_overview(session, project_id=project_id, mode=mode)
 
 
 @router.post("/settings", response_model=TradeSettingsOut)
