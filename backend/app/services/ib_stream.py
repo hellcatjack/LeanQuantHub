@@ -3,14 +3,15 @@ from __future__ import annotations
 import csv
 import json
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterable, Any
 
 from app.models import DecisionSnapshot, Project
 from app.routes.projects import _resolve_project_config
 from app.services.project_symbols import collect_project_symbols
-from app.services.ib_market import _ib_data_root
+from app.services.ib_market import _ib_data_root, fetch_market_snapshots
+from app.db import SessionLocal
 from app.services.job_lock import JobLock
 
 
@@ -205,6 +206,7 @@ class IBStreamRunner:
         project_id: int,
         decision_snapshot_id: int | None = None,
         refresh_interval_seconds: int = 60,
+        stale_seconds: int = 15,
         max_symbols: int | None = None,
         data_root: Path | str | None = None,
         api_mode: str = "ib",
@@ -212,9 +214,13 @@ class IBStreamRunner:
         self.project_id = project_id
         self.decision_snapshot_id = decision_snapshot_id
         self.refresh_interval_seconds = refresh_interval_seconds
+        self.stale_seconds = stale_seconds
         self.max_symbols = max_symbols
         self.api_mode = api_mode
         self._stream_root = _resolve_stream_root(data_root)
+        self._last_tick_ts: dict[str, datetime] = {}
+        self._degraded_since: str | None = None
+        self._last_snapshot_refresh: str | None = None
 
     def _write_tick(self, symbol: str, tick: dict[str, Any], source: str | None = None) -> dict[str, Any]:
         symbol = _normalize_symbol(symbol)
@@ -231,6 +237,35 @@ class IBStreamRunner:
             encoding="utf-8",
         )
         return payload
+
+    def _handle_tick(self, symbol: str, tick: dict[str, Any], *, source: str = "ib_stream") -> None:
+        symbol = _normalize_symbol(symbol)
+        self._last_tick_ts[symbol] = datetime.utcnow()
+        self._write_tick(symbol, tick, source=source)
+
+    def _refresh_snapshot_if_stale(self, symbols: list[str]) -> None:
+        now = datetime.utcnow()
+        stale: list[str] = []
+        for symbol in symbols:
+            norm = _normalize_symbol(symbol)
+            last = self._last_tick_ts.get(norm)
+            if last is None or (now - last) > timedelta(seconds=int(self.stale_seconds or 0)):
+                stale.append(norm)
+        if not stale:
+            return
+        session = SessionLocal()
+        try:
+            snapshots = fetch_market_snapshots(session, symbols=stale, store=False)
+        finally:
+            session.close()
+        for item in snapshots:
+            symbol = item.get("symbol")
+            payload = item.get("data") or {}
+            if symbol:
+                self._handle_tick(symbol, payload, source="ib_snapshot")
+        if self._degraded_since is None:
+            self._degraded_since = _utc_now()
+        self._last_snapshot_refresh = _utc_now()
 
     def write_status(self, status: str, symbols: list[str], market_data_type: str) -> dict[str, object]:
         return write_stream_status(
