@@ -57,6 +57,7 @@ from app.services.trading_calendar import (
     trading_calendar_csv_path,
 )
 from app.services.project_symbols import collect_active_project_symbols, write_symbol_list
+from app.services.trade_executor import execute_trade_run
 
 PRETRADE_ACTIVE_STATUSES = {"queued", "running"}
 
@@ -742,6 +743,25 @@ def step_decision_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResu
     )
 
 
+def step_trade_execute(ctx: StepContext, params: dict[str, Any]) -> StepResult:
+    trade_run_id = None
+    if isinstance(ctx.step.artifacts, dict):
+        trade_run_id = ctx.step.artifacts.get("trade_run_id")
+    if trade_run_id is None:
+        raise StepSkip("trade_run_missing")
+    dry_run = bool(params.get("dry_run", False))
+    force = bool(params.get("force", False))
+    result = execute_trade_run(int(trade_run_id), dry_run=dry_run, force=force)
+    return StepResult(
+        artifacts={
+            "trade_execute": {
+                "run_id": result.run_id,
+                "status": result.status,
+            }
+        }
+    )
+
+
 STEP_DEFS = [
     ("calendar_refresh", step_calendar_refresh),
     ("trading_day_check", step_trading_day_check),
@@ -752,6 +772,7 @@ STEP_DEFS = [
     ("pit_fundamentals", step_pit_fundamentals),
     ("training_scoring", step_training_scoring),
     ("decision_snapshot", step_decision_snapshot),
+    ("trade_execute", step_trade_execute),
     ("audit", step_audit),
 ]
 
