@@ -18,6 +18,7 @@ from app.services.trade_guard import get_or_create_guard_state, record_guard_eve
 from app.services.trade_order_builder import build_orders
 from app.services.trade_orders import create_trade_order, update_trade_order_status
 from app.services.trade_risk_engine import evaluate_orders
+from app.services.trade_alerts import notify_trade_alert
 
 
 @dataclass
@@ -153,6 +154,7 @@ def execute_trade_run(
             run.ended_at = datetime.utcnow()
             run.updated_at = datetime.utcnow()
             session.commit()
+            notify_trade_alert(session, f"Trade run blocked: guard halted (run={run.id})")
             return TradeExecutionResult(
                 run_id=run.id,
                 status=run.status,
@@ -170,6 +172,7 @@ def execute_trade_run(
             run.ended_at = datetime.utcnow()
             run.updated_at = datetime.utcnow()
             session.commit()
+            notify_trade_alert(session, f\"Trade run blocked: IB connection unavailable (run={run.id})\")
             return TradeExecutionResult(
                 run_id=run.id,
                 status=run.status,
