@@ -210,3 +210,14 @@ class IBStreamRunner:
             encoding="utf-8",
         )
         return payload
+
+    def write_status(self, status: str, symbols: list[str], market_data_type: str) -> dict[str, object]:
+        return write_stream_status(
+            self._stream_root,
+            status=status,
+            symbols=symbols,
+            market_data_type=market_data_type,
+        )
+
+    def read_status(self) -> dict[str, object]:
+        return get_stream_status(self._stream_root.parent)

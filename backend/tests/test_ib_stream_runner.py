@@ -18,3 +18,10 @@ def test_stream_runner_mock_writes_files(tmp_path):
     assert payload["symbol"] == "SPY"
     assert payload["source"] == "mock"
     assert payload["last"] == 480.0
+
+
+def test_stream_runner_writes_status(tmp_path):
+    runner = ib_stream.IBStreamRunner(project_id=1, data_root=tmp_path, api_mode="mock")
+    runner.write_status("connected", ["SPY"], market_data_type="delayed")
+    status = runner.read_status()
+    assert status["status"] == "connected"
