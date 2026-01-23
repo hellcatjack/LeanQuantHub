@@ -11,8 +11,21 @@ SET @patch_user = CURRENT_USER();
 
 START TRANSACTION;
 
-ALTER TABLE ib_connection_state
-  ADD COLUMN IF NOT EXISTS degraded_since DATETIME NULL;
+SET @col_exists = (
+  SELECT COUNT(*)
+  FROM information_schema.columns
+  WHERE table_schema = DATABASE()
+    AND table_name = 'ib_connection_state'
+    AND column_name = 'degraded_since'
+);
+SET @ddl = IF(
+  @col_exists = 0,
+  'ALTER TABLE ib_connection_state ADD COLUMN degraded_since DATETIME NULL',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
 
 INSERT IGNORE INTO schema_migrations (version, description, checksum, applied_by)
 VALUES (@patch_version, @patch_desc, @patch_checksum, @patch_user);
