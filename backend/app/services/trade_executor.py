@@ -11,7 +11,8 @@ from app.models import DecisionSnapshot, TradeFill, TradeOrder, TradeRun, TradeS
 from pathlib import Path
 
 from app.services.ib_market import fetch_market_snapshots
-from app.services.ib_orders import submit_orders_mock
+from app.services.ib_order_executor import IBOrderExecutor
+from app.services.ib_settings import get_or_create_ib_settings
 from app.services.job_lock import JobLock
 from app.services.trade_guard import get_or_create_guard_state, record_guard_event
 from app.services.trade_order_builder import build_orders
@@ -53,7 +54,9 @@ def _limit_allows_fill(side: str, price: float, limit_price: float) -> bool:
 
 
 def _submit_ib_orders(session, orders, *, price_map):
-    return submit_orders_mock(session, orders, price_map=price_map)
+    settings_row = get_or_create_ib_settings(session)
+    executor = IBOrderExecutor(settings_row)
+    return executor.submit_orders(session, orders, price_map=price_map)
 
 
 def _execute_orders_with_ib(session, run, orders, *, price_map):
