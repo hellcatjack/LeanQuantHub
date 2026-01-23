@@ -1614,6 +1614,12 @@ class IBConnectionStateOut(BaseModel):
         from_attributes = True
 
 
+class IBHealthOut(BaseModel):
+    connection_status: str
+    stream_status: str
+    stream_last_heartbeat: str | None = None
+
+
 class TradeOrderCreate(BaseModel):
     client_order_id: str
     symbol: str

@@ -11,6 +11,7 @@ from app.db import get_session
 from app.schemas import (
     IBConnectionHeartbeat,
     IBConnectionStateOut,
+    IBHealthOut,
     IBContractCacheOut,
     IBContractRefreshOut,
     IBContractRefreshRequest,
@@ -33,6 +34,7 @@ from app.services.ib_settings import (
     probe_ib_connection,
     update_ib_state,
 )
+from app.services.ib_health import build_ib_health
 from app.services.ib_market import (
     check_market_health,
     fetch_historical_bars,
@@ -107,6 +109,13 @@ def get_ib_state():
     with get_session() as session:
         state = update_ib_state(session, heartbeat=False)
         return IBConnectionStateOut.model_validate(state, from_attributes=True)
+
+
+@router.get("/health", response_model=IBHealthOut)
+def get_ib_health():
+    with get_session() as session:
+        payload = build_ib_health(session)
+        return IBHealthOut(**payload)
 
 
 @router.post("/state/heartbeat", response_model=IBConnectionStateOut)
