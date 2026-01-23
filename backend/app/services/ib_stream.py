@@ -133,6 +133,7 @@ def write_stream_status(
     degraded_since: str | None = None,
     last_snapshot_refresh: str | None = None,
     source: str | None = None,
+    phase: str | None = None,
 ) -> dict[str, object]:
     stream_root.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -145,6 +146,7 @@ def write_stream_status(
         "degraded_since": degraded_since,
         "last_snapshot_refresh": last_snapshot_refresh,
         "source": source,
+        "phase": phase,
     }
     (stream_root / "_status.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return payload
@@ -170,6 +172,7 @@ def get_stream_status(data_root: Path | str | None = None) -> dict[str, object]:
             "degraded_since": None,
             "last_snapshot_refresh": None,
             "source": None,
+            "phase": None,
         }
     try:
         payload = json.loads(status_path.read_text(encoding="utf-8"))
@@ -195,6 +198,7 @@ def get_stream_status(data_root: Path | str | None = None) -> dict[str, object]:
         "degraded_since": payload.get("degraded_since"),
         "last_snapshot_refresh": payload.get("last_snapshot_refresh"),
         "source": payload.get("source"),
+        "phase": payload.get("phase"),
     }
 
 
@@ -336,6 +340,7 @@ class IBStreamRunner:
         market_data_type: str,
         status: str = "connected",
         error: str | None = None,
+        phase: str | None = None,
     ) -> dict[str, object]:
         return write_stream_status(
             self._stream_root,
@@ -346,6 +351,7 @@ class IBStreamRunner:
             degraded_since=self._degraded_since,
             last_snapshot_refresh=self._last_snapshot_refresh,
             source="ib_stream",
+            phase=phase,
         )
 
     def _ensure_symbols(self, symbols: list[str]) -> list[str]:
@@ -399,9 +405,21 @@ class IBStreamRunner:
                 settings = get_or_create_ib_settings(session)
                 self.api_mode = getattr(settings, "api_mode", self.api_mode) or self.api_mode
                 self._ensure_client(settings, symbols)
+                pre_status = "degraded" if self._degraded_since else "connected"
+                self._write_status_update(
+                    symbols,
+                    market_data_type=market_data_type,
+                    status=pre_status,
+                    phase="pre_snapshot",
+                )
                 self._refresh_snapshot_if_stale(symbols)
                 status = "degraded" if self._degraded_since else "connected"
-                self._write_status_update(symbols, market_data_type=market_data_type, status=status)
+                self._write_status_update(
+                    symbols,
+                    market_data_type=market_data_type,
+                    status=status,
+                    phase="post_snapshot",
+                )
             finally:
                 session.close()
 

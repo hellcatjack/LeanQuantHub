@@ -66,3 +66,45 @@ def test_stream_runner_loop_writes_status(tmp_path):
     runner._write_status_update(["SPY"], market_data_type="delayed")
     status = ib_stream.get_stream_status(tmp_path)
     assert status["status"] in {"connected", "degraded"}
+
+
+def test_stream_runner_writes_status_before_snapshot(tmp_path, monkeypatch):
+    stream_root = tmp_path / "stream"
+    stream_root.mkdir(parents=True, exist_ok=True)
+    (stream_root / "_config.json").write_text(
+        json.dumps(
+            {
+                "enabled": True,
+                "project_id": 1,
+                "symbols": ["AAPL"],
+                "market_data_type": "delayed",
+                "refresh_interval_seconds": 5,
+                "stale_seconds": 15,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    runner = ib_stream.IBStreamRunner(project_id=1, data_root=tmp_path, api_mode="mock")
+
+    class DummySettings:
+        api_mode = "mock"
+        host = "127.0.0.1"
+        port = 4001
+        client_id = 1
+
+    monkeypatch.setattr(ib_stream, "get_or_create_ib_settings", lambda session: DummySettings())
+    monkeypatch.setattr(ib_stream, "SessionLocal", lambda: type("S", (), {"close": lambda self: None})())
+
+    def _fake_refresh(symbols):
+        status = ib_stream.get_stream_status(tmp_path)
+        assert status["phase"] == "pre_snapshot"
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(runner, "_refresh_snapshot_if_stale", _fake_refresh)
+
+    try:
+        runner.run_forever()
+    except RuntimeError as exc:
+        assert str(exc) == "stop"

@@ -1432,6 +1432,7 @@ class IBStreamStatusOut(BaseModel):
     degraded_since: str | None = None
     last_snapshot_refresh: str | None = None
     source: str | None = None
+    phase: str | None = None
 
 
 class TradeSettingsOut(BaseModel):

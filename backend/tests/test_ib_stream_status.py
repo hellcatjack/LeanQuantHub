@@ -53,3 +53,16 @@ def test_stream_status_exposes_degraded_fields(tmp_path):
     assert loaded["degraded_since"] == "2026-01-23T00:00:00Z"
     assert loaded["last_snapshot_refresh"] == "2026-01-23T00:00:10Z"
     assert loaded["source"] == "ib_snapshot"
+
+
+def test_stream_status_exposes_phase(tmp_path):
+    status = ib_stream.write_stream_status(
+        tmp_path,
+        status="connected",
+        symbols=["SPY"],
+        market_data_type="delayed",
+        phase="pre_snapshot",
+    )
+    assert status["phase"] == "pre_snapshot"
+    loaded = ib_stream.get_stream_status(tmp_path)
+    assert loaded["phase"] == "pre_snapshot"
