@@ -59,3 +59,10 @@ def test_ib_stream_client_emits_ticks():
 
     assert any(evt[0] == "SPY" and evt[1].get("last") == 123.0 for evt in events)
     assert any(evt[1].get("last_size") == 12 for evt in events)
+
+
+def test_stream_runner_loop_writes_status(tmp_path):
+    runner = ib_stream.IBStreamRunner(project_id=1, data_root=tmp_path, api_mode="mock")
+    runner._write_status_update(["SPY"], market_data_type="delayed")
+    status = ib_stream.get_stream_status(tmp_path)
+    assert status["status"] in {"connected", "degraded"}

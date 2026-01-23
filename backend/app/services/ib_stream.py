@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -22,6 +23,7 @@ from app.routes.projects import _resolve_project_config
 from app.services.project_symbols import collect_project_symbols
 from app.services.ib_market import _ib_data_root, fetch_market_snapshots
 from app.db import SessionLocal
+from app.services.ib_settings import get_or_create_ib_settings
 from app.services.job_lock import JobLock
 
 
@@ -279,6 +281,8 @@ class IBStreamRunner:
         self._last_tick_ts: dict[str, datetime] = {}
         self._degraded_since: str | None = None
         self._last_snapshot_refresh: str | None = None
+        self._client: IBStreamClient | None = None
+        self._subscribed_symbols: list[str] = []
 
     def _write_tick(self, symbol: str, tick: dict[str, Any], source: str | None = None) -> dict[str, Any]:
         symbol = _normalize_symbol(symbol)
@@ -324,6 +328,84 @@ class IBStreamRunner:
         if self._degraded_since is None:
             self._degraded_since = _utc_now()
         self._last_snapshot_refresh = _utc_now()
+
+    def _write_status_update(
+        self,
+        symbols: list[str],
+        *,
+        market_data_type: str,
+        status: str = "connected",
+        error: str | None = None,
+    ) -> dict[str, object]:
+        return write_stream_status(
+            self._stream_root,
+            status=status,
+            symbols=symbols,
+            market_data_type=market_data_type,
+            error=error,
+            degraded_since=self._degraded_since,
+            last_snapshot_refresh=self._last_snapshot_refresh,
+            source="ib_stream",
+        )
+
+    def _ensure_symbols(self, symbols: list[str]) -> list[str]:
+        if symbols:
+            return symbols
+        if not self.project_id:
+            return []
+        session = SessionLocal()
+        try:
+            return build_stream_symbols(
+                session,
+                project_id=self.project_id,
+                decision_snapshot_id=self.decision_snapshot_id,
+                max_symbols=self.max_symbols,
+            )
+        finally:
+            session.close()
+
+    def _ensure_client(self, settings, symbols: list[str]) -> None:
+        if self.api_mode == "mock":
+            return
+        if self._client is None:
+            self._client = IBStreamClient(settings.host, settings.port, settings.client_id, self._handle_tick)
+            self._client.start()
+        if symbols and set(symbols) != set(self._subscribed_symbols):
+            self._client.subscribe(symbols)
+            self._subscribed_symbols = list(symbols)
+
+    def run_forever(self) -> None:
+        while True:
+            config = read_stream_config(self._stream_root)
+            if not config:
+                self._write_status_update([], market_data_type="delayed", status="disconnected")
+                time.sleep(10)
+                continue
+            if config.get("enabled") is False:
+                self._write_status_update([], market_data_type="delayed", status="stopped")
+                time.sleep(10)
+                continue
+
+            self.project_id = config.get("project_id") or self.project_id
+            self.decision_snapshot_id = config.get("decision_snapshot_id") or self.decision_snapshot_id
+            self.max_symbols = config.get("max_symbols") or self.max_symbols
+            self.refresh_interval_seconds = config.get("refresh_interval_seconds") or self.refresh_interval_seconds
+            self.stale_seconds = config.get("stale_seconds") or self.stale_seconds
+            market_data_type = config.get("market_data_type") or "delayed"
+
+            symbols = self._ensure_symbols(config.get("symbols") or [])
+            session = SessionLocal()
+            try:
+                settings = get_or_create_ib_settings(session)
+                self.api_mode = getattr(settings, "api_mode", self.api_mode) or self.api_mode
+                self._ensure_client(settings, symbols)
+                self._refresh_snapshot_if_stale(symbols)
+                status = "degraded" if self._degraded_since else "connected"
+                self._write_status_update(symbols, market_data_type=market_data_type, status=status)
+            finally:
+                session.close()
+
+            time.sleep(max(1, int(self.refresh_interval_seconds or 5)))
 
     def write_status(self, status: str, symbols: list[str], market_data_type: str) -> dict[str, object]:
         return write_stream_status(
