@@ -6,11 +6,12 @@ from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy.exc import IntegrityError
 
 from app.db import get_session
-from app.models import TradeGuardState, TradeOrder, TradeRun, TradeSettings
+from app.models import TradeFill, TradeGuardState, TradeOrder, TradeRun, TradeSettings
 from app.schemas import (
     TradeOrderCreate,
     TradeOrderOut,
     TradeOrderStatusUpdate,
+    TradeFillOut,
     TradeRunCreate,
     TradeRunExecuteOut,
     TradeRunExecuteRequest,
@@ -122,6 +123,41 @@ def get_trade_run(run_id: int):
         if not run:
             raise HTTPException(status_code=404, detail="run not found")
         return TradeRunOut.model_validate(run, from_attributes=True)
+
+
+@router.get("/runs/{run_id}/orders", response_model=list[TradeOrderOut])
+def get_trade_run_orders(run_id: int):
+    with get_session() as session:
+        orders = (
+            session.query(TradeOrder)
+            .filter(TradeOrder.run_id == run_id)
+            .order_by(TradeOrder.id.asc())
+            .all()
+        )
+        if not orders:
+            run = session.get(TradeRun, run_id)
+            if not run:
+                raise HTTPException(status_code=404, detail="run not found")
+            return []
+        order_ids = [order.id for order in orders]
+        fills = (
+            session.query(TradeFill)
+            .filter(TradeFill.order_id.in_(order_ids))
+            .order_by(TradeFill.id.asc())
+            .all()
+        )
+        fills_map: dict[int, list[TradeFill]] = {}
+        for fill in fills:
+            fills_map.setdefault(fill.order_id, []).append(fill)
+        payloads: list[TradeOrderOut] = []
+        for order in orders:
+            out = TradeOrderOut.model_validate(order, from_attributes=True)
+            out.fills = [
+                TradeFillOut.model_validate(fill, from_attributes=True)
+                for fill in fills_map.get(order.id, [])
+            ]
+            payloads.append(out)
+        return payloads
 
 
 @router.post("/runs", response_model=TradeRunOut)
