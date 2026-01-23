@@ -448,14 +448,26 @@ class IBStreamRunner:
                     status=pre_status,
                     phase="pre_snapshot",
                 )
-                self._refresh_snapshot_if_stale(symbols)
-                status = "degraded" if self._degraded_since else "connected"
-                self._write_status_update(
-                    symbols,
-                    market_data_type=market_data_type,
-                    status=status,
-                    phase="post_snapshot",
-                )
+                try:
+                    self._refresh_snapshot_if_stale(symbols)
+                except Exception as exc:  # pragma: no cover - exercised via test monkeypatch
+                    if self._degraded_since is None:
+                        self._degraded_since = _utc_now()
+                    self._write_status_update(
+                        symbols,
+                        market_data_type=market_data_type,
+                        status="degraded",
+                        error=f"snapshot_error:{exc}",
+                        phase="snapshot_error",
+                    )
+                else:
+                    status = "degraded" if self._degraded_since else "connected"
+                    self._write_status_update(
+                        symbols,
+                        market_data_type=market_data_type,
+                        status=status,
+                        phase="post_snapshot",
+                    )
             finally:
                 session.close()
 
