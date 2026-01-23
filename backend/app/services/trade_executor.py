@@ -166,24 +166,6 @@ def execute_trade_run(
                 dry_run=dry_run,
             )
 
-        if not _ib_connection_ok(session):
-            run.status = "blocked"
-            run.message = "connection_unavailable"
-            run.ended_at = datetime.utcnow()
-            run.updated_at = datetime.utcnow()
-            session.commit()
-            notify_trade_alert(session, f\"Trade run blocked: IB connection unavailable (run={run.id})\")
-            return TradeExecutionResult(
-                run_id=run.id,
-                status=run.status,
-                filled=0,
-                cancelled=0,
-                rejected=0,
-                skipped=0,
-                message=run.message,
-                dry_run=dry_run,
-            )
-
         settings_row = session.query(TradeSettings).order_by(TradeSettings.id.desc()).first()
         execution_source = (settings_row.execution_data_source if settings_row else "ib") or "ib"
         if execution_source.lower() != "ib":
@@ -196,6 +178,24 @@ def execute_trade_run(
             run.ended_at = datetime.utcnow()
             run.updated_at = datetime.utcnow()
             session.commit()
+            return TradeExecutionResult(
+                run_id=run.id,
+                status=run.status,
+                filled=0,
+                cancelled=0,
+                rejected=0,
+                skipped=0,
+                message=run.message,
+                dry_run=dry_run,
+            )
+
+        if not _ib_connection_ok(session):
+            run.status = "blocked"
+            run.message = "connection_unavailable"
+            run.ended_at = datetime.utcnow()
+            run.updated_at = datetime.utcnow()
+            session.commit()
+            notify_trade_alert(session, f"Trade run blocked: IB connection unavailable (run={run.id})")
             return TradeExecutionResult(
                 run_id=run.id,
                 status=run.status,
