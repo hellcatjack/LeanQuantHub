@@ -566,13 +566,20 @@ def ib_adapter(settings_row, *, timeout: float = 5.0) -> Any:
         with IBMockAdapter() as adapter:
             yield adapter
         return
-    with IBLiveAdapter(
-        settings_row.host,
-        settings_row.port,
-        settings_row.client_id,
-        timeout=timeout,
-    ) as adapter:
-        yield adapter
+    for attempt in range(2):
+        try:
+            with IBLiveAdapter(
+                settings_row.host,
+                settings_row.port,
+                settings_row.client_id,
+                timeout=timeout,
+            ) as adapter:
+                yield adapter
+            return
+        except RuntimeError as exc:
+            if str(exc) != "ib_connect_timeout" or attempt >= 1:
+                raise
+            time.sleep(2)
 
 
 def refresh_contract_cache(
