@@ -65,3 +65,9 @@ def test_probe_updates_client_id_on_conflict(monkeypatch):
         assert row.client_id == 102
     finally:
         session.close()
+
+
+def test_default_client_id_is_101(monkeypatch):
+    monkeypatch.delenv("IB_CLIENT_ID", raising=False)
+    defaults = ib_settings._resolve_default_settings()
+    assert defaults["client_id"] == 101

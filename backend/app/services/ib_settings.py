@@ -12,7 +12,7 @@ from app.models import IBConnectionState, IBSettings
 def _resolve_default_settings() -> dict[str, object]:
     host = (os.getenv("IB_HOST") or "127.0.0.1").strip() or "127.0.0.1"
     port = int((os.getenv("IB_PORT") or "7497").strip() or 7497)
-    client_id = int((os.getenv("IB_CLIENT_ID") or "1").strip() or 1)
+    client_id = int((os.getenv("IB_CLIENT_ID") or "101").strip() or 101)
     account_id = (os.getenv("IB_ACCOUNT") or "").strip() or None
     mode = (os.getenv("IB_MODE") or "paper").strip() or "paper"
     market_data_type = (os.getenv("IB_MARKET_DATA_TYPE") or "realtime").strip() or "realtime"
