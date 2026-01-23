@@ -132,7 +132,7 @@ def _read_section(name: str, fn, errors: list[str], partial: dict[str, bool]) ->
         return fn()
     except Exception as exc:
         partial["value"] = True
-        errors.append(f"{name}:{type(exc).__name__}")
+        errors.append(name)
         return {}
 
 

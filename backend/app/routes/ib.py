@@ -27,6 +27,7 @@ from app.schemas import (
     IBSettingsUpdate,
     IBStreamStartRequest,
     IBStreamStatusOut,
+    IBStatusOverviewOut,
 )
 from app.services.audit_log import record_audit
 from app.services.ib_settings import (
@@ -35,6 +36,7 @@ from app.services.ib_settings import (
     update_ib_state,
 )
 from app.services.ib_health import build_ib_health
+from app.services.ib_status_overview import build_ib_status_overview
 from app.services.ib_market import (
     check_market_health,
     fetch_historical_bars,
@@ -116,6 +118,13 @@ def get_ib_health():
     with get_session() as session:
         payload = build_ib_health(session)
         return IBHealthOut(**payload)
+
+
+@router.get("/status/overview", response_model=IBStatusOverviewOut)
+def get_ib_status_overview():
+    with get_session() as session:
+        payload = build_ib_status_overview(session)
+        return IBStatusOverviewOut(**payload)
 
 
 @router.post("/state/heartbeat", response_model=IBConnectionStateOut)

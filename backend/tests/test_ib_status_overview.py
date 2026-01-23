@@ -22,3 +22,17 @@ def test_ib_status_overview_shape():
     assert "orders" in data
     assert "alerts" in data
     assert "refreshed_at" in data
+
+
+def test_ib_status_overview_partial(monkeypatch):
+    def broken_stream():
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(ib_status_overview, "_read_stream_status", broken_stream)
+    session = SessionLocal()
+    try:
+        data = ib_status_overview.build_ib_status_overview(session)
+    finally:
+        session.close()
+    assert data["partial"] is True
+    assert "stream" in data["errors"]
