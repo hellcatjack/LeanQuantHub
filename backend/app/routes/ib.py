@@ -147,6 +147,17 @@ def start_ib_stream(payload: IBStreamStartRequest):
             )
         market_data_type = payload.market_data_type or "delayed"
         stream_root = ib_stream._resolve_stream_root(None)
+        ib_stream.write_stream_config(
+            stream_root,
+            {
+                "enabled": True,
+                "project_id": payload.project_id,
+                "decision_snapshot_id": payload.decision_snapshot_id,
+                "max_symbols": payload.max_symbols,
+                "market_data_type": market_data_type,
+                "symbols": symbols,
+            },
+        )
         status = ib_stream.write_stream_status(
             stream_root,
             status="starting",
@@ -161,6 +172,9 @@ def stop_ib_stream():
     current = ib_stream.get_stream_status()
     market_data_type = current.get("market_data_type") or "delayed"
     stream_root = ib_stream._resolve_stream_root(None)
+    config = ib_stream.read_stream_config(stream_root)
+    config["enabled"] = False
+    ib_stream.write_stream_config(stream_root, config)
     status = ib_stream.write_stream_status(
         stream_root,
         status="stopped",

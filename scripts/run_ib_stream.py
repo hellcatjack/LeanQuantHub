@@ -34,6 +34,15 @@ if __name__ == "__main__":
                     )
                     time.sleep(10)
                     continue
+                if config.get("enabled") is False:
+                    ib_stream.write_stream_status(
+                        stream_root,
+                        status="stopped",
+                        symbols=[],
+                        market_data_type="delayed",
+                    )
+                    time.sleep(10)
+                    continue
                 market_data_type = config.get("market_data_type") or "delayed"
                 symbols = config.get("symbols") or []
                 ib_stream.write_stream_status(
