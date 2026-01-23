@@ -1621,6 +1621,18 @@ class IBHealthOut(BaseModel):
     stream_last_heartbeat: str | None = None
 
 
+class IBStatusOverviewOut(BaseModel):
+    connection: dict
+    config: dict
+    stream: dict
+    snapshot_cache: dict
+    orders: dict
+    alerts: dict
+    partial: bool = False
+    errors: list[str] = []
+    refreshed_at: datetime
+
+
 class TradeOrderCreate(BaseModel):
     client_order_id: str
     symbol: str
