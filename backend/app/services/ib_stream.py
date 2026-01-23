@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 import json
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterable, Any
 
@@ -159,6 +159,36 @@ def get_stream_status(data_root: Path | str | None = None) -> dict[str, object]:
         "last_error": payload.get("last_error"),
         "market_data_type": payload.get("market_data_type") or "delayed",
     }
+
+
+def is_snapshot_fresh(
+    stream_root: Path,
+    symbols: Iterable[str],
+    ttl_seconds: int | None,
+) -> bool:
+    if ttl_seconds is None:
+        return False
+    status = get_stream_status(stream_root.parent)
+    last_heartbeat = status.get("last_heartbeat")
+    if not last_heartbeat:
+        return False
+    try:
+        ts = datetime.fromisoformat(str(last_heartbeat).replace("Z", "+00:00")).replace(tzinfo=None)
+    except Exception:
+        return False
+    try:
+        ttl = int(ttl_seconds)
+    except (TypeError, ValueError):
+        return False
+    if ttl <= 0:
+        return False
+    if datetime.utcnow() - ts > timedelta(seconds=ttl):
+        return False
+    current = sorted(
+        {_normalize_symbol(sym) for sym in status.get("subscribed_symbols") or [] if _normalize_symbol(sym)}
+    )
+    expected = sorted({_normalize_symbol(sym) for sym in symbols if _normalize_symbol(sym)})
+    return bool(expected) and current == expected
 
 
 def build_stream_symbols(
