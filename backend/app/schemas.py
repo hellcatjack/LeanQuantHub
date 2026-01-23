@@ -1418,6 +1418,8 @@ class IBStreamStartRequest(BaseModel):
     symbols: list[str] | None = None
     max_symbols: int | None = None
     market_data_type: str | None = None
+    refresh_interval_seconds: int | None = None
+    stale_seconds: int | None = None
 
 
 class IBStreamStatusOut(BaseModel):

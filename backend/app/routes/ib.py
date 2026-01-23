@@ -156,6 +156,8 @@ def start_ib_stream(payload: IBStreamStartRequest):
                 "max_symbols": payload.max_symbols,
                 "market_data_type": market_data_type,
                 "symbols": symbols,
+                "refresh_interval_seconds": payload.refresh_interval_seconds,
+                "stale_seconds": payload.stale_seconds,
             },
         )
         status = ib_stream.write_stream_status(

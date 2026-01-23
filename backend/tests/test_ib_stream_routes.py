@@ -44,3 +44,23 @@ def test_stream_start_writes_config(monkeypatch, tmp_path):
     config = ib_routes.ib_stream.read_stream_config(tmp_path)
     assert config["project_id"] == 1
     assert config["symbols"] == ["SPY"]
+
+
+def test_stream_start_writes_refresh_params(monkeypatch, tmp_path):
+    @contextmanager
+    def _get_session():
+        yield None
+
+    monkeypatch.setattr(ib_routes, "get_session", _get_session)
+    monkeypatch.setattr(ib_routes.ib_stream, "_resolve_stream_root", lambda _: tmp_path)
+    payload = ib_routes.IBStreamStartRequest(
+        project_id=1,
+        symbols=["SPY"],
+        market_data_type="delayed",
+        refresh_interval_seconds=5,
+        stale_seconds=15,
+    )
+    ib_routes.start_ib_stream(payload)
+    config = ib_routes.ib_stream.read_stream_config(tmp_path)
+    assert config["refresh_interval_seconds"] == 5
+    assert config["stale_seconds"] == 15
