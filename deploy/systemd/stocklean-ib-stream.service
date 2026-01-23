@@ -1,0 +1,13 @@
+[Unit]
+Description=StockLean IB Stream Runner
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/app/stocklean
+ExecStart=/app/stocklean/.venv/bin/python scripts/run_ib_stream.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
