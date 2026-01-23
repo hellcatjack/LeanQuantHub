@@ -40,3 +40,28 @@ def test_ensure_ib_client_id_auto_increments(monkeypatch):
         assert updated.client_id == 102
     finally:
         session.close()
+
+
+def test_probe_updates_client_id_on_conflict(monkeypatch):
+    session = _make_session()
+    try:
+        row = IBSettings(client_id=101, host="127.0.0.1", port=7497, api_mode="ib")
+        session.add(row)
+        session.commit()
+
+        calls = {"n": 0}
+
+        def _fake_probe(host, port, client_id, timeout):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return ("disconnected", "ibapi error 326 clientId in use")
+            return ("connected", "ibapi ok")
+
+        monkeypatch.setattr(ib_settings, "_probe_ib_api", _fake_probe)
+
+        state = ib_settings.probe_ib_connection(session, timeout_seconds=0.1)
+        assert state.status in {"connected", "mock"}
+        session.refresh(row)
+        assert row.client_id == 102
+    finally:
+        session.close()

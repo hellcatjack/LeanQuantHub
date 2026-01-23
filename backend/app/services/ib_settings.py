@@ -183,7 +183,7 @@ def ensure_ib_client_id(
 
 
 def probe_ib_connection(session, *, timeout_seconds: float = 2.0) -> IBConnectionState:
-    settings = get_or_create_ib_settings(session)
+    settings = ensure_ib_client_id(session, timeout_seconds=timeout_seconds)
     if resolve_ib_api_mode(settings) == "mock":
         return update_ib_state(
             session,
