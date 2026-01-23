@@ -66,3 +66,39 @@ def test_stream_status_exposes_phase(tmp_path):
     assert status["phase"] == "pre_snapshot"
     loaded = ib_stream.get_stream_status(tmp_path)
     assert loaded["phase"] == "pre_snapshot"
+
+
+def test_handle_stream_lock_error_includes_lock_meta(tmp_path):
+    stream_root = tmp_path / "stream"
+    stream_root.mkdir(parents=True, exist_ok=True)
+    lock_path = tmp_path / "locks" / "ib_stream.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text(
+        "\n".join(
+            [
+                "version=2",
+                "key=ib_stream",
+                "owner=testhost:1234",
+                "host=testhost",
+                "pid=1234",
+                "heartbeat_at=100.0",
+                "ttl_seconds=900",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    status = ib_stream.handle_stream_lock_error(stream_root, RuntimeError("ib_stream_lock_busy"))
+    assert "ib_stream_lock_busy" in status["last_error"]
+    assert "owner=testhost:1234" in status["last_error"]
+
+
+def test_handle_stream_lock_error_reraises_non_lock_busy(tmp_path):
+    stream_root = tmp_path / "stream"
+    stream_root.mkdir(parents=True, exist_ok=True)
+    try:
+        ib_stream.handle_stream_lock_error(stream_root, RuntimeError("other"))
+    except RuntimeError as exc:
+        assert str(exc) == "other"
+    else:
+        raise AssertionError("expected RuntimeError to be re-raised")

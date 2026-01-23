@@ -74,6 +74,42 @@ def _utc_now() -> str:
     return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
 
+def _format_stream_lock_error(stream_root: Path) -> str:
+    lock_path = stream_root.parent / "locks" / "ib_stream.lock"
+    if not lock_path.exists():
+        return "ib_stream_lock_busy"
+    try:
+        raw = lock_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return "ib_stream_lock_busy"
+    meta: dict[str, str] = {}
+    for line in raw.splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        meta[key.strip()] = value.strip()
+    parts: list[str] = []
+    for key in ("owner", "host", "pid", "heartbeat_at"):
+        value = meta.get(key)
+        if value:
+            parts.append(f"{key}={value}")
+    if not parts:
+        return "ib_stream_lock_busy"
+    return "ib_stream_lock_busy " + " ".join(parts)
+
+
+def handle_stream_lock_error(stream_root: Path, error: RuntimeError) -> dict[str, object]:
+    if str(error) != "ib_stream_lock_busy":
+        raise error
+    return write_stream_status(
+        stream_root,
+        status="disconnected",
+        symbols=[],
+        market_data_type="delayed",
+        error=_format_stream_lock_error(stream_root),
+    )
+
+
 def _resolve_stream_root(data_root: Path | str | None) -> Path:
     root = Path(data_root) if data_root is not None else _ib_data_root()
     stream_root = root / "stream"

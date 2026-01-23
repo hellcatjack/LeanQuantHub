@@ -15,11 +15,5 @@ if __name__ == "__main__":
         with ib_stream.stream_lock(stream_root.parent):
             runner = ib_stream.IBStreamRunner(project_id=0, data_root=stream_root.parent, api_mode="ib")
             runner.run_forever()
-    except RuntimeError:
-        ib_stream.write_stream_status(
-            stream_root,
-            status="disconnected",
-            symbols=[],
-            market_data_type="delayed",
-            error="ib_stream_lock_busy",
-        )
+    except RuntimeError as exc:
+        ib_stream.handle_stream_lock_error(stream_root, exc)
