@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 import threading
 import time
 from contextlib import contextmanager
@@ -96,6 +97,21 @@ def _format_stream_lock_error(stream_root: Path) -> str:
     if not parts:
         return "ib_stream_lock_busy"
     return "ib_stream_lock_busy " + " ".join(parts)
+
+
+def _fetch_snapshots_with_timeout(session, *, symbols: list[str], timeout_seconds: int) -> list[dict[str, Any]]:
+    if timeout_seconds <= 0:
+        return fetch_market_snapshots(session, symbols=symbols, store=False)
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(fetch_market_snapshots, session, symbols=symbols, store=False)
+    try:
+        return future.result(timeout=timeout_seconds)
+    except FuturesTimeoutError as exc:
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise TimeoutError("snapshot_timeout") from exc
+    finally:
+        if future.done():
+            executor.shutdown(wait=True)
 
 
 def handle_stream_lock_error(stream_root: Path, error: RuntimeError) -> dict[str, object]:
@@ -307,6 +323,7 @@ class IBStreamRunner:
         decision_snapshot_id: int | None = None,
         refresh_interval_seconds: int = 60,
         stale_seconds: int = 15,
+        snapshot_timeout_seconds: int = 10,
         max_symbols: int | None = None,
         data_root: Path | str | None = None,
         api_mode: str = "ib",
@@ -315,6 +332,7 @@ class IBStreamRunner:
         self.decision_snapshot_id = decision_snapshot_id
         self.refresh_interval_seconds = refresh_interval_seconds
         self.stale_seconds = stale_seconds
+        self.snapshot_timeout_seconds = snapshot_timeout_seconds
         self.max_symbols = max_symbols
         self.api_mode = api_mode
         self._stream_root = _resolve_stream_root(data_root)
@@ -357,7 +375,14 @@ class IBStreamRunner:
             return
         session = SessionLocal()
         try:
-            snapshots = fetch_market_snapshots(session, symbols=stale, store=False)
+            try:
+                snapshots = _fetch_snapshots_with_timeout(
+                    session,
+                    symbols=stale,
+                    timeout_seconds=int(self.snapshot_timeout_seconds or 0),
+                )
+            except TimeoutError as exc:
+                raise RuntimeError("snapshot_timeout") from exc
         finally:
             session.close()
         for item in snapshots:
@@ -433,6 +458,9 @@ class IBStreamRunner:
             self.max_symbols = config.get("max_symbols") or self.max_symbols
             self.refresh_interval_seconds = config.get("refresh_interval_seconds") or self.refresh_interval_seconds
             self.stale_seconds = config.get("stale_seconds") or self.stale_seconds
+            self.snapshot_timeout_seconds = (
+                config.get("snapshot_timeout_seconds") or self.snapshot_timeout_seconds
+            )
             market_data_type = config.get("market_data_type") or "delayed"
 
             symbols = self._ensure_symbols(config.get("symbols") or [])

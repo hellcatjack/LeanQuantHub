@@ -158,3 +158,58 @@ def test_stream_runner_records_snapshot_error(tmp_path, monkeypatch):
     status = ib_stream.get_stream_status(tmp_path)
     assert status["phase"] == "snapshot_error"
     assert "ib_connect_timeout" in (status.get("last_error") or "")
+
+
+def test_stream_runner_records_snapshot_timeout(tmp_path, monkeypatch):
+    stream_root = tmp_path / "stream"
+    stream_root.mkdir(parents=True, exist_ok=True)
+    (stream_root / "_config.json").write_text(
+        json.dumps(
+            {
+                "enabled": True,
+                "project_id": 1,
+                "symbols": ["AAPL"],
+                "market_data_type": "delayed",
+                "refresh_interval_seconds": 5,
+                "stale_seconds": 15,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    runner = ib_stream.IBStreamRunner(
+        project_id=1,
+        data_root=tmp_path,
+        api_mode="mock",
+        snapshot_timeout_seconds=1,
+    )
+
+    class DummySettings:
+        api_mode = "mock"
+        host = "127.0.0.1"
+        port = 4001
+        client_id = 1
+
+    monkeypatch.setattr(ib_stream, "get_or_create_ib_settings", lambda session: DummySettings())
+    monkeypatch.setattr(ib_stream, "SessionLocal", lambda: type("S", (), {"close": lambda self: None})())
+    monkeypatch.setattr(runner, "_ensure_client", lambda settings, symbols: None)
+
+    def _raise_timeout(*_args, **_kwargs):
+        raise TimeoutError("boom")
+
+    monkeypatch.setattr(ib_stream, "_fetch_snapshots_with_timeout", _raise_timeout)
+
+    def _stop(*_args, **_kwargs):
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(ib_stream.time, "sleep", _stop)
+
+    try:
+        runner.run_forever()
+    except RuntimeError as exc:
+        assert str(exc) == "stop"
+
+    status = ib_stream.get_stream_status(tmp_path)
+    assert status["phase"] == "snapshot_error"
+    assert "snapshot_timeout" in (status.get("last_error") or "")
