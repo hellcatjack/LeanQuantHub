@@ -19,6 +19,7 @@ from app.services.trade_order_builder import build_orders
 from app.services.trade_orders import create_trade_order, update_trade_order_status
 from app.services.trade_risk_engine import evaluate_orders
 from app.services.trade_alerts import notify_trade_alert
+from app.services.ib_account import fetch_account_summary
 
 
 @dataclass
@@ -381,6 +382,12 @@ def execute_trade_run(
         defaults = settings_row.risk_defaults if settings_row else {}
         risk_overrides = params.get("risk_overrides") if isinstance(params.get("risk_overrides"), dict) else {}
         risk_params = _merge_risk_params(defaults, risk_overrides)
+        account_summary = fetch_account_summary(session)
+        if isinstance(account_summary, dict):
+            cash_available = account_summary.get("cash_available")
+            if cash_available is not None and "cash_available" not in risk_params:
+                risk_params["cash_available"] = cash_available
+            params.setdefault("cash_available", cash_available)
         params["risk_effective"] = risk_params
         max_order_notional = risk_params.get("max_order_notional")
         max_position_ratio = risk_params.get("max_position_ratio")
