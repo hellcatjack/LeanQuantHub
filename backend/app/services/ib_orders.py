@@ -13,6 +13,7 @@ def apply_fill_to_order(
     fill_qty: float,
     fill_price: float,
     fill_time: datetime,
+    exec_id: str | None = None,
 ) -> TradeFill:
     current_status = str(order.status or "").strip().upper()
     total_prev = float(order.filled_quantity or 0.0)
@@ -28,8 +29,11 @@ def apply_fill_to_order(
         order,
         {"status": target_status, "filled_quantity": total_new, "avg_fill_price": avg_new},
     )
+    if not exec_id:
+        exec_id = f"mock:{order.id}:{int(fill_time.timestamp() * 1000)}"
     fill = TradeFill(
         order_id=order.id,
+        exec_id=exec_id,
         fill_quantity=float(fill_qty),
         fill_price=float(fill_price),
         commission=None,

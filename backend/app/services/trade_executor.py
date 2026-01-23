@@ -54,6 +54,57 @@ def _limit_allows_fill(side: str, price: float, limit_price: float) -> bool:
     return False
 
 
+def _normalize_order_status(status: str | None) -> str:
+    if not status:
+        return "NEW"
+    return str(status).strip().upper()
+
+
+def _apply_order_status(order: TradeOrder | dict[str, Any], *, status: str, **fields: Any) -> None:
+    normalized = _normalize_order_status(status)
+    if isinstance(order, dict):
+        order["status"] = normalized
+        for key, value in fields.items():
+            order[key] = value
+        if "last_status_ts" not in order:
+            order["last_status_ts"] = datetime.utcnow()
+        return
+    order.status = normalized
+    for key, value in fields.items():
+        if hasattr(order, key):
+            setattr(order, key, value)
+    if getattr(order, "last_status_ts", None) is None:
+        order.last_status_ts = datetime.utcnow()
+
+
+def _record_fill(
+    session,
+    *,
+    order: TradeOrder,
+    exec_id: str,
+    filled_qty: float,
+    price: float,
+    trade_time: datetime | None = None,
+    commission: float | None = None,
+    currency: str | None = None,
+    exchange: str | None = None,
+    raw_payload: dict[str, Any] | None = None,
+) -> TradeFill:
+    fill = TradeFill(
+        order_id=order.id,
+        exec_id=exec_id,
+        filled_qty=float(filled_qty),
+        price=float(price),
+        commission=commission,
+        trade_time=trade_time,
+        currency=currency,
+        exchange=exchange,
+        raw_payload=raw_payload,
+    )
+    session.add(fill)
+    return fill
+
+
 def _submit_ib_orders(session, orders, *, price_map):
     settings_row = get_or_create_ib_settings(session)
     executor = IBOrderExecutor(settings_row)
@@ -518,15 +569,16 @@ def execute_trade_run(
                     "params": {"source": "mock"},
                 },
             )
-            fill = TradeFill(
-                order_id=order.id,
-                fill_quantity=order.quantity,
-                fill_price=price,
-                commission=None,
-                fill_time=datetime.utcnow(),
-                params={"source": "mock"},
+            exec_id = f"mock:{order.id}:{int(datetime.utcnow().timestamp() * 1000)}"
+            _record_fill(
+                session,
+                order=order,
+                exec_id=exec_id,
+                filled_qty=order.quantity,
+                price=price,
+                trade_time=datetime.utcnow(),
+                raw_payload={"source": "mock"},
             )
-            session.add(fill)
             session.commit()
 
         if dry_run:
