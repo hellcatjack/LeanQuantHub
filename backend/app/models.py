@@ -604,6 +604,7 @@ class IBConnectionState(Base):
     status: Mapped[str] = mapped_column(String(32), default="unknown")
     message: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_heartbeat: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    degraded_since: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
     )

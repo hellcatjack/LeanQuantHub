@@ -1608,6 +1608,7 @@ class IBConnectionStateOut(BaseModel):
     status: str
     message: str | None
     last_heartbeat: datetime | None
+    degraded_since: datetime | None
     updated_at: datetime
 
     class Config:

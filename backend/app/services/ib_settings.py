@@ -85,6 +85,11 @@ def update_ib_state(
     row = get_or_create_ib_state(session)
     if status is not None:
         row.status = status
+        if status == "degraded":
+            if row.degraded_since is None:
+                row.degraded_since = datetime.utcnow()
+        elif status in {"connected", "mock"}:
+            row.degraded_since = None
     if message is not None:
         row.message = message
     if heartbeat:
