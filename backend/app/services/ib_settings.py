@@ -52,6 +52,18 @@ def resolve_ib_api_mode(settings: IBSettings | None) -> str:
     return mode
 
 
+_CLIENT_ID_CONFLICT_MARKERS = ("clientid", "client id", "client_id")
+
+
+def _is_client_id_conflict(message: str | None) -> bool:
+    if not message:
+        return False
+    lowered = message.lower()
+    if any(marker in lowered for marker in _CLIENT_ID_CONFLICT_MARKERS):
+        return "in use" in lowered or "duplicate" in lowered or "already" in lowered
+    return False
+
+
 def get_or_create_ib_state(session) -> IBConnectionState:
     row = session.query(IBConnectionState).first()
     if row:
@@ -106,6 +118,10 @@ def _probe_ib_api(
 
         def error(self, reqId, errorCode, errorString, advancedOrderRejectJson=""):  # type: ignore[override]  # noqa: N802
             fatal_codes = {502, 503, 504, 1100, 1101, 1102}
+            if _is_client_id_conflict(errorString):
+                self._error = f"client_id_conflict {errorCode} {errorString}"
+                self._ready.set()
+                return
             if errorCode in fatal_codes:
                 self._error = f"{errorCode} {errorString}"
                 self._ready.set()
@@ -134,6 +150,36 @@ def _probe_ib_api(
 
     client.disconnect()
     return (status, message)
+
+
+def ensure_ib_client_id(
+    session,
+    *,
+    max_attempts: int = 5,
+    timeout_seconds: float = 2.0,
+) -> IBSettings:
+    settings = get_or_create_ib_settings(session)
+    if resolve_ib_api_mode(settings) == "mock":
+        return settings
+    host = settings.host
+    port = settings.port
+    client_id = int(settings.client_id or 101)
+    attempts = max(1, int(max_attempts))
+    for _ in range(attempts):
+        result = _probe_ib_api(host, port, client_id, timeout_seconds)
+        if result:
+            status, message = result
+            if status == "connected":
+                if client_id != settings.client_id:
+                    settings.client_id = client_id
+                    session.commit()
+                    session.refresh(settings)
+                return settings
+            if _is_client_id_conflict(message):
+                client_id += 1
+                continue
+        break
+    return settings
 
 
 def probe_ib_connection(session, *, timeout_seconds: float = 2.0) -> IBConnectionState:
