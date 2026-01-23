@@ -12,7 +12,7 @@ from pathlib import Path
 
 from app.services.ib_market import fetch_market_snapshots
 from app.services.ib_order_executor import IBOrderExecutor
-from app.services.ib_settings import get_or_create_ib_settings
+from app.services.ib_settings import get_or_create_ib_settings, probe_ib_connection
 from app.services.job_lock import JobLock
 from app.services.trade_guard import get_or_create_guard_state, record_guard_event
 from app.services.trade_order_builder import build_orders
@@ -116,6 +116,11 @@ def _merge_risk_params(defaults: dict[str, Any] | None, overrides: dict[str, Any
     return merged
 
 
+def _ib_connection_ok(session) -> bool:
+    state = probe_ib_connection(session)
+    return (state.status or "").lower() in {"connected", "mock"}
+
+
 def execute_trade_run(
     run_id: int,
     *,
@@ -145,6 +150,23 @@ def execute_trade_run(
         if guard_state.status == "halted" and not force:
             run.status = "blocked"
             run.message = "guard_halted"
+            run.ended_at = datetime.utcnow()
+            run.updated_at = datetime.utcnow()
+            session.commit()
+            return TradeExecutionResult(
+                run_id=run.id,
+                status=run.status,
+                filled=0,
+                cancelled=0,
+                rejected=0,
+                skipped=0,
+                message=run.message,
+                dry_run=dry_run,
+            )
+
+        if not _ib_connection_ok(session):
+            run.status = "blocked"
+            run.message = "connection_unavailable"
             run.ended_at = datetime.utcnow()
             run.updated_at = datetime.utcnow()
             session.commit()

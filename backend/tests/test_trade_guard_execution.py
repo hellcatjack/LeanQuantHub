@@ -61,3 +61,35 @@ def test_execute_blocked_when_guard_halted(monkeypatch, tmp_path):
         assert result.message == "guard_halted"
     finally:
         session.close()
+
+
+def test_execution_blocks_when_disconnected(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "data_root", str(tmp_path))
+    os.environ["IB_API_MODE"] = "mock"
+
+    Session = _make_session_factory()
+    monkeypatch.setattr(trade_executor, "SessionLocal", Session)
+    monkeypatch.setattr(trade_executor, "_ib_connection_ok", lambda *_: False)
+    session = Session()
+    try:
+        project = Project(name="conn-test", description="")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        run = TradeRun(
+            project_id=project.id,
+            mode="paper",
+            status="queued",
+            decision_snapshot_id=1,
+            params={"portfolio_value": 10000},
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        result = trade_executor.execute_trade_run(run.id, dry_run=True)
+        assert result.status == "blocked"
+        assert result.message == "connection_unavailable"
+    finally:
+        session.close()
