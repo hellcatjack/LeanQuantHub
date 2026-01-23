@@ -36,3 +36,20 @@ def test_stream_config_roundtrip(tmp_path):
     loaded = ib_stream.read_stream_config(tmp_path)
     assert loaded["project_id"] == 1
     assert loaded["market_data_type"] == "delayed"
+
+
+def test_stream_status_exposes_degraded_fields(tmp_path):
+    status = ib_stream.write_stream_status(
+        tmp_path,
+        status="degraded",
+        symbols=["SPY"],
+        market_data_type="delayed",
+        degraded_since="2026-01-23T00:00:00Z",
+        last_snapshot_refresh="2026-01-23T00:00:10Z",
+        source="ib_snapshot",
+    )
+    assert status["degraded_since"] == "2026-01-23T00:00:00Z"
+    loaded = ib_stream.get_stream_status(tmp_path)
+    assert loaded["degraded_since"] == "2026-01-23T00:00:00Z"
+    assert loaded["last_snapshot_refresh"] == "2026-01-23T00:00:10Z"
+    assert loaded["source"] == "ib_snapshot"

@@ -114,6 +114,9 @@ def write_stream_status(
     symbols: Iterable[str],
     error: str | None = None,
     market_data_type: str = "delayed",
+    degraded_since: str | None = None,
+    last_snapshot_refresh: str | None = None,
+    source: str | None = None,
 ) -> dict[str, object]:
     stream_root.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -123,13 +126,22 @@ def write_stream_status(
         "ib_error_count": 0 if not error else 1,
         "last_error": error,
         "market_data_type": market_data_type,
+        "degraded_since": degraded_since,
+        "last_snapshot_refresh": last_snapshot_refresh,
+        "source": source,
     }
     (stream_root / "_status.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return payload
 
 
 def get_stream_status(data_root: Path | str | None = None) -> dict[str, object]:
-    stream_root = _resolve_stream_root(data_root)
+    stream_root = None
+    if data_root is not None:
+        candidate = Path(data_root)
+        if (candidate / "_status.json").exists():
+            stream_root = candidate
+    if stream_root is None:
+        stream_root = _resolve_stream_root(data_root)
     status_path = stream_root / "_status.json"
     if not status_path.exists():
         return {
@@ -139,6 +151,9 @@ def get_stream_status(data_root: Path | str | None = None) -> dict[str, object]:
             "ib_error_count": 0,
             "last_error": None,
             "market_data_type": "delayed",
+            "degraded_since": None,
+            "last_snapshot_refresh": None,
+            "source": None,
         }
     try:
         payload = json.loads(status_path.read_text(encoding="utf-8"))
@@ -150,6 +165,9 @@ def get_stream_status(data_root: Path | str | None = None) -> dict[str, object]:
             "ib_error_count": 1,
             "last_error": "invalid_status_json",
             "market_data_type": "delayed",
+            "degraded_since": None,
+            "last_snapshot_refresh": None,
+            "source": None,
         }
     return {
         "status": payload.get("status") or "unknown",
@@ -158,6 +176,9 @@ def get_stream_status(data_root: Path | str | None = None) -> dict[str, object]:
         "ib_error_count": int(payload.get("ib_error_count") or 0),
         "last_error": payload.get("last_error"),
         "market_data_type": payload.get("market_data_type") or "delayed",
+        "degraded_since": payload.get("degraded_since"),
+        "last_snapshot_refresh": payload.get("last_snapshot_refresh"),
+        "source": payload.get("source"),
     }
 
 

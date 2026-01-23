@@ -1427,6 +1427,9 @@ class IBStreamStatusOut(BaseModel):
     ib_error_count: int
     last_error: str | None
     market_data_type: str | None
+    degraded_since: str | None = None
+    last_snapshot_refresh: str | None = None
+    source: str | None = None
 
 
 class TradeSettingsOut(BaseModel):
