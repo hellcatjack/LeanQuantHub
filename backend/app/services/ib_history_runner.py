@@ -15,7 +15,7 @@ from app.services.ib_market import (
     ib_request_lock,
     write_bars_csv,
 )
-from app.services.ib_settings import get_or_create_ib_settings
+from app.services.ib_settings import ensure_ib_client_id
 from app.services.job_lock import JobLock
 from app.services.project_symbols import collect_active_project_symbols
 
@@ -138,7 +138,7 @@ def run_ib_history_job(job_id: int) -> None:
             job.failed_symbols = failed
             session.commit()
 
-            settings_row = get_or_create_ib_settings(session)
+            settings_row = ensure_ib_client_id(session)
             progress_last = time.monotonic()
 
             with ib_request_lock():

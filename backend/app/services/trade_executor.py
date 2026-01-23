@@ -12,7 +12,7 @@ from pathlib import Path
 
 from app.services.ib_market import fetch_market_snapshots
 from app.services.ib_order_executor import IBOrderExecutor
-from app.services.ib_settings import get_or_create_ib_settings, probe_ib_connection
+from app.services.ib_settings import ensure_ib_client_id, probe_ib_connection
 from app.services.job_lock import JobLock
 from app.services.trade_guard import get_or_create_guard_state, record_guard_event
 from app.services.trade_order_builder import build_orders
@@ -55,7 +55,7 @@ def _limit_allows_fill(side: str, price: float, limit_price: float) -> bool:
 
 
 def _submit_ib_orders(session, orders, *, price_map):
-    settings_row = get_or_create_ib_settings(session)
+    settings_row = ensure_ib_client_id(session)
     executor = IBOrderExecutor(settings_row)
     return executor.submit_orders(session, orders, price_map=price_map)
 

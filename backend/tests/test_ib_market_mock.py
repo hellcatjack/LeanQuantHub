@@ -48,3 +48,22 @@ def test_mock_snapshot_injects_source(monkeypatch, tmp_path):
     payload = result[0]["data"]
     assert payload is not None
     assert payload.get("source") == "mock"
+
+
+def test_market_snapshot_uses_ensure_client_id(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "data_root", str(tmp_path))
+    called = {"ok": False}
+
+    def _ensure(session, **kwargs):
+        called["ok"] = True
+        return SimpleNamespace(
+            market_data_type="realtime",
+            use_regulatory_snapshot=False,
+            api_mode="mock",
+        )
+
+    monkeypatch.setattr(ib_market, "ensure_ib_client_id", _ensure)
+
+    session = _DummySession()
+    ib_market.fetch_market_snapshots(session, symbols=["SPY"], store=False)
+    assert called["ok"] is True

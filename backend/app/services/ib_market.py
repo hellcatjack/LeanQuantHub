@@ -26,7 +26,7 @@ from app.core.config import settings
 from app.models import IBContractCache
 from app.services.job_lock import JobLock
 from app.services.project_symbols import collect_active_project_symbols
-from app.services.ib_settings import get_or_create_ib_settings, resolve_ib_api_mode
+from app.services.ib_settings import ensure_ib_client_id, resolve_ib_api_mode
 
 
 _MARKET_DATA_TYPE_MAP = {
@@ -585,7 +585,7 @@ def refresh_contract_cache(
     use_project_symbols: bool,
 ) -> dict[str, Any]:
     start = time.monotonic()
-    settings_row = get_or_create_ib_settings(session)
+    settings_row = ensure_ib_client_id(session)
     if use_project_symbols and not symbols:
         symbols, _benchmarks = collect_active_project_symbols(session)
     symbols = [_normalize_symbol(item) for item in (symbols or []) if _normalize_symbol(item)]
@@ -657,7 +657,7 @@ def fetch_market_snapshots(
     history_bar_size: str = "1 day",
     history_use_rth: bool = True,
 ) -> list[dict[str, Any]]:
-    settings_row = get_or_create_ib_settings(session)
+    settings_row = ensure_ib_client_id(session)
     api_mode = resolve_ib_api_mode(settings_row)
     market_data_type = _market_data_type_id(settings_row.market_data_type)
     use_regulatory_snapshot = bool(getattr(settings_row, "use_regulatory_snapshot", False))
@@ -750,7 +750,7 @@ def fetch_historical_bars(
     use_rth: bool,
     store: bool,
 ) -> dict[str, Any]:
-    settings_row = get_or_create_ib_settings(session)
+    settings_row = ensure_ib_client_id(session)
     symbol = _normalize_symbol(symbol)
     data_root = _ib_data_root() / "bars"
     data_root.mkdir(parents=True, exist_ok=True)
