@@ -1433,6 +1433,11 @@ class IBStreamStatusOut(BaseModel):
     last_snapshot_refresh: str | None = None
     source: str | None = None
     phase: str | None = None
+    snapshot_duration_ms: int | None = None
+    snapshot_timeout_seconds: int | None = None
+    ib_host: str | None = None
+    ib_port: int | None = None
+    ib_client_id: int | None = None
 
 
 class TradeSettingsOut(BaseModel):

@@ -102,3 +102,28 @@ def test_handle_stream_lock_error_reraises_non_lock_busy(tmp_path):
         assert str(exc) == "other"
     else:
         raise AssertionError("expected RuntimeError to be re-raised")
+
+
+def test_stream_status_exposes_snapshot_diagnostics(tmp_path):
+    status = ib_stream.write_stream_status(
+        tmp_path,
+        status="connected",
+        symbols=["SPY"],
+        market_data_type="delayed",
+        snapshot_duration_ms=1200,
+        snapshot_timeout_seconds=10,
+        ib_host="127.0.0.1",
+        ib_port=4001,
+        ib_client_id=7,
+    )
+    assert status["snapshot_duration_ms"] == 1200
+    assert status["snapshot_timeout_seconds"] == 10
+    assert status["ib_host"] == "127.0.0.1"
+    assert status["ib_port"] == 4001
+    assert status["ib_client_id"] == 7
+    loaded = ib_stream.get_stream_status(tmp_path)
+    assert loaded["snapshot_duration_ms"] == 1200
+    assert loaded["snapshot_timeout_seconds"] == 10
+    assert loaded["ib_host"] == "127.0.0.1"
+    assert loaded["ib_port"] == 4001
+    assert loaded["ib_client_id"] == 7

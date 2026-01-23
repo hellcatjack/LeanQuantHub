@@ -186,6 +186,11 @@ def write_stream_status(
     last_snapshot_refresh: str | None = None,
     source: str | None = None,
     phase: str | None = None,
+    snapshot_duration_ms: int | None = None,
+    snapshot_timeout_seconds: int | None = None,
+    ib_host: str | None = None,
+    ib_port: int | None = None,
+    ib_client_id: int | None = None,
 ) -> dict[str, object]:
     stream_root.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -199,6 +204,11 @@ def write_stream_status(
         "last_snapshot_refresh": last_snapshot_refresh,
         "source": source,
         "phase": phase,
+        "snapshot_duration_ms": snapshot_duration_ms,
+        "snapshot_timeout_seconds": snapshot_timeout_seconds,
+        "ib_host": ib_host,
+        "ib_port": ib_port,
+        "ib_client_id": ib_client_id,
     }
     (stream_root / "_status.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return payload
@@ -225,6 +235,11 @@ def get_stream_status(data_root: Path | str | None = None) -> dict[str, object]:
             "last_snapshot_refresh": None,
             "source": None,
             "phase": None,
+            "snapshot_duration_ms": None,
+            "snapshot_timeout_seconds": None,
+            "ib_host": None,
+            "ib_port": None,
+            "ib_client_id": None,
         }
     try:
         payload = json.loads(status_path.read_text(encoding="utf-8"))
@@ -239,6 +254,12 @@ def get_stream_status(data_root: Path | str | None = None) -> dict[str, object]:
             "degraded_since": None,
             "last_snapshot_refresh": None,
             "source": None,
+            "phase": None,
+            "snapshot_duration_ms": None,
+            "snapshot_timeout_seconds": None,
+            "ib_host": None,
+            "ib_port": None,
+            "ib_client_id": None,
         }
     return {
         "status": payload.get("status") or "unknown",
@@ -251,6 +272,11 @@ def get_stream_status(data_root: Path | str | None = None) -> dict[str, object]:
         "last_snapshot_refresh": payload.get("last_snapshot_refresh"),
         "source": payload.get("source"),
         "phase": payload.get("phase"),
+        "snapshot_duration_ms": payload.get("snapshot_duration_ms"),
+        "snapshot_timeout_seconds": payload.get("snapshot_timeout_seconds"),
+        "ib_host": payload.get("ib_host"),
+        "ib_port": payload.get("ib_port"),
+        "ib_client_id": payload.get("ib_client_id"),
     }
 
 
@@ -341,6 +367,9 @@ class IBStreamRunner:
         self._last_snapshot_refresh: str | None = None
         self._client: IBStreamClient | None = None
         self._subscribed_symbols: list[str] = []
+        self._ib_host: str | None = None
+        self._ib_port: int | None = None
+        self._ib_client_id: int | None = None
 
     def _write_tick(self, symbol: str, tick: dict[str, Any], source: str | None = None) -> dict[str, Any]:
         symbol = _normalize_symbol(symbol)
@@ -402,6 +431,11 @@ class IBStreamRunner:
         status: str = "connected",
         error: str | None = None,
         phase: str | None = None,
+        snapshot_duration_ms: int | None = None,
+        snapshot_timeout_seconds: int | None = None,
+        ib_host: str | None = None,
+        ib_port: int | None = None,
+        ib_client_id: int | None = None,
     ) -> dict[str, object]:
         return write_stream_status(
             self._stream_root,
@@ -413,6 +447,11 @@ class IBStreamRunner:
             last_snapshot_refresh=self._last_snapshot_refresh,
             source="ib_stream",
             phase=phase,
+            snapshot_duration_ms=snapshot_duration_ms,
+            snapshot_timeout_seconds=snapshot_timeout_seconds,
+            ib_host=ib_host,
+            ib_port=ib_port,
+            ib_client_id=ib_client_id,
         )
 
     def _ensure_symbols(self, symbols: list[str]) -> list[str]:
@@ -468,6 +507,9 @@ class IBStreamRunner:
             try:
                 settings = get_or_create_ib_settings(session)
                 self.api_mode = getattr(settings, "api_mode", self.api_mode) or self.api_mode
+                self._ib_host = getattr(settings, "host", None)
+                self._ib_port = int(getattr(settings, "port", 0) or 0) or None
+                self._ib_client_id = int(getattr(settings, "client_id", 0) or 0) or None
                 self._ensure_client(settings, symbols)
                 pre_status = "degraded" if self._degraded_since else "connected"
                 self._write_status_update(
@@ -475,10 +517,16 @@ class IBStreamRunner:
                     market_data_type=market_data_type,
                     status=pre_status,
                     phase="pre_snapshot",
+                    snapshot_timeout_seconds=int(self.snapshot_timeout_seconds or 0) or None,
+                    ib_host=self._ib_host,
+                    ib_port=self._ib_port,
+                    ib_client_id=self._ib_client_id,
                 )
+                snapshot_started = time.monotonic()
                 try:
                     self._refresh_snapshot_if_stale(symbols)
                 except Exception as exc:  # pragma: no cover - exercised via test monkeypatch
+                    duration_ms = int((time.monotonic() - snapshot_started) * 1000)
                     if self._degraded_since is None:
                         self._degraded_since = _utc_now()
                     self._write_status_update(
@@ -487,14 +535,25 @@ class IBStreamRunner:
                         status="degraded",
                         error=f"snapshot_error:{exc}",
                         phase="snapshot_error",
+                        snapshot_duration_ms=duration_ms,
+                        snapshot_timeout_seconds=int(self.snapshot_timeout_seconds or 0) or None,
+                        ib_host=self._ib_host,
+                        ib_port=self._ib_port,
+                        ib_client_id=self._ib_client_id,
                     )
                 else:
+                    duration_ms = int((time.monotonic() - snapshot_started) * 1000)
                     status = "degraded" if self._degraded_since else "connected"
                     self._write_status_update(
                         symbols,
                         market_data_type=market_data_type,
                         status=status,
                         phase="post_snapshot",
+                        snapshot_duration_ms=duration_ms,
+                        snapshot_timeout_seconds=int(self.snapshot_timeout_seconds or 0) or None,
+                        ib_host=self._ib_host,
+                        ib_port=self._ib_port,
+                        ib_client_id=self._ib_client_id,
                     )
             finally:
                 session.close()

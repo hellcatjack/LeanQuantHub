@@ -150,6 +150,9 @@ def test_stream_runner_records_snapshot_error(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ib_stream.time, "sleep", _stop)
 
+    ticks = iter([0.0, 1.2])
+    monkeypatch.setattr(ib_stream.time, "monotonic", lambda: next(ticks))
+
     try:
         runner.run_forever()
     except RuntimeError as exc:
@@ -158,6 +161,11 @@ def test_stream_runner_records_snapshot_error(tmp_path, monkeypatch):
     status = ib_stream.get_stream_status(tmp_path)
     assert status["phase"] == "snapshot_error"
     assert "ib_connect_timeout" in (status.get("last_error") or "")
+    assert status["snapshot_duration_ms"] == 1200
+    assert status["snapshot_timeout_seconds"] == 10
+    assert status["ib_host"] == "127.0.0.1"
+    assert status["ib_port"] == 4001
+    assert status["ib_client_id"] == 1
 
 
 def test_stream_runner_records_snapshot_timeout(tmp_path, monkeypatch):
