@@ -1684,6 +1684,18 @@ class TradeRunExecuteOut(BaseModel):
     dry_run: bool
 
 
+class TradeFillOut(BaseModel):
+    id: int
+    exec_id: str | None = None
+    fill_quantity: float
+    fill_price: float
+    currency: str | None = None
+    exchange: str | None = None
+
+    class Config:
+        from_attributes = True
+
+
 class TradeOrderOut(BaseModel):
     id: int
     run_id: int | None
@@ -1696,6 +1708,9 @@ class TradeOrderOut(BaseModel):
     status: str
     filled_quantity: float
     avg_fill_price: float | None
+    ib_order_id: int | None = None
+    ib_perm_id: int | None = None
+    rejected_reason: str | None = None
     params: dict | None
     created_at: datetime
     updated_at: datetime

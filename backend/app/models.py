@@ -2,7 +2,7 @@
 
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, Float, JSON, Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Float, JSON, Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, BigInteger
 from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -692,6 +692,10 @@ class TradeOrder(Base):
     status: Mapped[str] = mapped_column(String(32), default="NEW")
     filled_quantity: Mapped[float] = mapped_column(Float, default=0.0)
     avg_fill_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ib_order_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    ib_perm_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    last_status_ts: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    rejected_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     params: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
@@ -708,8 +712,15 @@ class TradeFill(Base):
     fill_price: Mapped[float] = mapped_column(Float, nullable=False)
     commission: Mapped[float | None] = mapped_column(Float, nullable=True)
     fill_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    exec_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    currency: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    exchange: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    raw_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     params: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
 
 
 class AuditLog(Base):
