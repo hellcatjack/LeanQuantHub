@@ -652,6 +652,7 @@ def fetch_market_snapshots(
     *,
     symbols: list[str],
     store: bool,
+    market_data_type: str | None = None,
     fallback_history: bool = False,
     history_duration: str = "5 D",
     history_bar_size: str = "1 day",
@@ -659,7 +660,8 @@ def fetch_market_snapshots(
 ) -> list[dict[str, Any]]:
     settings_row = ensure_ib_client_id(session)
     api_mode = resolve_ib_api_mode(settings_row)
-    market_data_type = _market_data_type_id(settings_row.market_data_type)
+    market_data_type_value = market_data_type or settings_row.market_data_type
+    market_data_type = _market_data_type_id(market_data_type_value)
     use_regulatory_snapshot = bool(getattr(settings_row, "use_regulatory_snapshot", False))
     symbols = [_normalize_symbol(item) for item in symbols if _normalize_symbol(item)]
     results: list[dict[str, Any]] = []
