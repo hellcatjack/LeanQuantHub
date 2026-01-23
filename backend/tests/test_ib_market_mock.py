@@ -40,7 +40,7 @@ def test_mock_snapshot_injects_source(monkeypatch, tmp_path):
         use_regulatory_snapshot=False,
         api_mode="mock",
     )
-    monkeypatch.setattr(ib_market, "get_or_create_ib_settings", lambda _session: dummy_settings)
+    monkeypatch.setattr(ib_market, "ensure_ib_client_id", lambda _session, **_kwargs: dummy_settings)
 
     session = _DummySession()
     result = ib_market.fetch_market_snapshots(session, symbols=["SPY"], store=False)

@@ -90,8 +90,8 @@ def test_ib_history_resume_skips_completed(monkeypatch, tmp_path):
     monkeypatch.setattr(ib_history_runner, "JobLock", _DummyLock)
     monkeypatch.setattr(
         ib_history_runner,
-        "get_or_create_ib_settings",
-        lambda _session: SimpleNamespace(api_mode="mock"),
+        "ensure_ib_client_id",
+        lambda _session, **_kwargs: SimpleNamespace(api_mode="mock"),
     )
 
     calls: list[str] = []

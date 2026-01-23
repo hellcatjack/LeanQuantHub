@@ -1,6 +1,7 @@
 from pathlib import Path
 import sys
 import csv
+from types import SimpleNamespace
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -37,6 +38,11 @@ def _write_items(path: Path):
 def test_execute_builds_orders_from_snapshot(tmp_path, monkeypatch):
     Session = _make_session_factory()
     monkeypatch.setattr(trade_executor, "SessionLocal", Session)
+    monkeypatch.setattr(
+        trade_executor,
+        "probe_ib_connection",
+        lambda _session: SimpleNamespace(status="connected"),
+    )
     monkeypatch.setattr(
         trade_executor,
         "fetch_market_snapshots",
