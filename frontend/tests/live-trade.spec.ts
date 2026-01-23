@@ -97,5 +97,7 @@ test("live trade page shows live warning in live mode", async ({ page }) => {
   );
 
   await page.goto("/live-trade");
-  await expect(page.getByText(/实盘模式|Live mode/i)).toBeVisible();
+  await expect(
+    page.locator(".form-error", { hasText: /实盘模式|Live mode/i })
+  ).toBeVisible();
 });
