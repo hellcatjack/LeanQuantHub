@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy.exc import IntegrityError
 
 from app.db import get_session
-from app.models import TradeGuardState, TradeOrder, TradeRun, TradeSettings
+from app.models import DecisionSnapshot, TradeGuardState, TradeOrder, TradeRun, TradeSettings
 from app.schemas import (
     TradeOrderCreate,
     TradeOrderOut,
@@ -128,9 +128,19 @@ def get_trade_run(run_id: int):
 def create_trade_run(payload: TradeRunCreate):
     with get_session() as session:
         params = payload.model_dump(exclude={"orders"})
+        snapshot_id = payload.decision_snapshot_id
+        if snapshot_id is None:
+            latest = (
+                session.query(DecisionSnapshot)
+                .filter(DecisionSnapshot.project_id == payload.project_id)
+                .order_by(DecisionSnapshot.created_at.desc())
+                .first()
+            )
+            if latest:
+                snapshot_id = latest.id
         run = TradeRun(
             project_id=payload.project_id,
-            decision_snapshot_id=payload.decision_snapshot_id,
+            decision_snapshot_id=snapshot_id,
             mode=payload.mode,
             status="queued",
             params=params,
