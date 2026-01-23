@@ -13,6 +13,7 @@ def apply_fill_to_order(
     fill_qty: float,
     fill_price: float,
     fill_time: datetime,
+    exec_id: str | None = None,
 ) -> TradeFill:
     current_status = str(order.status or "").strip().upper()
     total_prev = float(order.filled_quantity or 0.0)
@@ -34,6 +35,7 @@ def apply_fill_to_order(
         fill_price=float(fill_price),
         commission=None,
         fill_time=fill_time,
+        exec_id=exec_id,
         params={"source": "ib"},
     )
     session.add(fill)
