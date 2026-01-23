@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import TopBar from "../components/TopBar";
 import { api } from "../api";
 import { useI18n } from "../i18n";
+import { getOverviewStatus } from "../utils/ibOverview";
 
 interface IBSettings {
   id: number;
@@ -60,6 +61,53 @@ interface IBStreamStatus {
   ib_error_count: number;
   last_error?: string | null;
   market_data_type?: string | null;
+}
+
+interface IBStatusOverview {
+  connection?: {
+    status?: string | null;
+    message?: string | null;
+    last_heartbeat?: string | null;
+    updated_at?: string | null;
+  };
+  config?: {
+    host?: string | null;
+    port?: number | null;
+    client_id?: number | null;
+    account_id?: string | null;
+    mode?: string | null;
+    market_data_type?: string | null;
+    api_mode?: string | null;
+    use_regulatory_snapshot?: boolean | null;
+  };
+  stream?: {
+    status?: string | null;
+    subscribed_count?: number | null;
+    last_heartbeat?: string | null;
+    ib_error_count?: number | null;
+    last_error?: string | null;
+    market_data_type?: string | null;
+  };
+  snapshot_cache?: {
+    status?: string | null;
+    last_snapshot_at?: string | null;
+    symbol_sample_count?: number | null;
+  };
+  orders?: {
+    latest_order_id?: number | null;
+    latest_order_status?: string | null;
+    latest_order_at?: string | null;
+    latest_fill_id?: number | null;
+    latest_fill_at?: string | null;
+  };
+  alerts?: {
+    latest_alert_id?: number | null;
+    latest_alert_at?: string | null;
+    latest_alert_title?: string | null;
+  };
+  partial?: boolean;
+  errors?: string[];
+  refreshed_at?: string | null;
 }
 
 interface TradeRun {
@@ -147,6 +195,9 @@ export default function LiveTradePage() {
   const [ibStateLoading, setIbStateLoading] = useState(false);
   const [ibStateResult, setIbStateResult] = useState("");
   const [ibStateError, setIbStateError] = useState("");
+  const [ibOverview, setIbOverview] = useState<IBStatusOverview | null>(null);
+  const [ibOverviewLoading, setIbOverviewLoading] = useState(false);
+  const [ibOverviewError, setIbOverviewError] = useState("");
   const [ibContractForm, setIbContractForm] = useState({
     symbols: "SPY",
     use_project_symbols: false,
@@ -240,6 +291,20 @@ export default function LiveTradePage() {
       const detail = err?.response?.data?.detail || t("data.ib.loadError");
       setIbSettingsError(String(detail));
       setIbSettings(null);
+    }
+  };
+
+  const loadIbOverview = async () => {
+    setIbOverviewLoading(true);
+    try {
+      const res = await api.get<IBStatusOverview>("/api/ib/status/overview");
+      setIbOverview(res.data);
+      setIbOverviewError("");
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("trade.overviewError");
+      setIbOverviewError(String(detail));
+    } finally {
+      setIbOverviewLoading(false);
     }
   };
 
@@ -526,6 +591,7 @@ export default function LiveTradePage() {
     setLoading(true);
     await Promise.all([
       loadIbSettings(),
+      loadIbOverview(),
       loadIbState(true),
       loadIbStreamStatus(true),
       loadIbHistoryJobs(),
@@ -545,6 +611,15 @@ export default function LiveTradePage() {
       await loadIbStreamStatus(true);
     };
     const timer = window.setInterval(refresh, 10000);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      loadIbOverview();
+    }, 5000);
     return () => {
       window.clearInterval(timer);
     };
@@ -573,6 +648,21 @@ export default function LiveTradePage() {
     }
     return Boolean(ibSettings.host && ibSettings.port);
   }, [ibSettings]);
+
+  const overviewStatus = useMemo(() => getOverviewStatus(ibOverview), [ibOverview]);
+
+  const overviewStatusLabel = useMemo(() => {
+    if (overviewStatus === "ok") {
+      return t("trade.overview.status.ok");
+    }
+    if (overviewStatus === "down") {
+      return t("trade.overview.status.down");
+    }
+    if (overviewStatus === "partial") {
+      return t("trade.overview.status.partial");
+    }
+    return t("trade.overview.status.unknown");
+  }, [overviewStatus, t]);
 
   const statusLabel = useMemo(() => {
     if (!isConfigured) {
@@ -701,6 +791,74 @@ export default function LiveTradePage() {
       <TopBar title={t("trade.title")} />
       <div className="content">
         <div className="grid-2">
+          <div className="card">
+            <div className="card-title">{t("trade.overviewTitle")}</div>
+            <div className="card-meta">{t("trade.overviewMeta")}</div>
+            {ibOverview?.partial && (
+              <div className="form-hint" style={{ marginTop: "8px" }}>
+                {t("trade.overviewPartial")}
+              </div>
+            )}
+            <div className="overview-grid" style={{ marginTop: "12px" }}>
+              <div className="overview-card">
+                <div className="overview-label">{t("trade.overviewStatusLabel")}</div>
+                <div className="overview-value">{overviewStatusLabel}</div>
+                <div className="overview-sub">
+                  {t("trade.overviewRefreshedAt")} {formatDateTime(ibOverview?.refreshed_at)}
+                </div>
+              </div>
+              <div className="overview-card">
+                <div className="overview-label">{t("trade.overviewStreamLabel")}</div>
+                <div className="overview-value">
+                  {formatStatus(ibOverview?.stream?.status || "unknown")}
+                </div>
+                <div className="overview-sub">
+                  {t("trade.overviewStreamCount")}: {ibOverview?.stream?.subscribed_count ?? 0}
+                </div>
+              </div>
+              <div className="overview-card">
+                <div className="overview-label">{t("trade.overviewSnapshotLabel")}</div>
+                <div className="overview-value">
+                  {ibOverview?.snapshot_cache?.status || t("common.none")}
+                </div>
+                <div className="overview-sub">
+                  {t("trade.overviewSnapshotAt")}{" "}
+                  {formatDateTime(ibOverview?.snapshot_cache?.last_snapshot_at)}
+                </div>
+              </div>
+              <div className="overview-card">
+                <div className="overview-label">{t("trade.overviewOrderLabel")}</div>
+                <div className="overview-value">
+                  {ibOverview?.orders?.latest_order_status || t("common.none")}
+                </div>
+                <div className="overview-sub">
+                  {t("trade.overviewOrderAt")}{" "}
+                  {formatDateTime(ibOverview?.orders?.latest_order_at)}
+                </div>
+              </div>
+            </div>
+            <div className="meta-list" style={{ marginTop: "12px" }}>
+              <div className="meta-row">
+                <span>{t("trade.overviewAlertLabel")}</span>
+                <strong>{ibOverview?.alerts?.latest_alert_title || t("common.none")}</strong>
+              </div>
+              <div className="meta-row">
+                <span>{t("trade.overviewAlertAt")}</span>
+                <strong>{formatDateTime(ibOverview?.alerts?.latest_alert_at)}</strong>
+              </div>
+            </div>
+            {ibOverviewError && <div className="form-error">{ibOverviewError}</div>}
+            <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+              <button
+                className="button-secondary"
+                onClick={loadIbOverview}
+                disabled={ibOverviewLoading}
+              >
+                {ibOverviewLoading ? t("common.actions.loading") : t("trade.overviewRefresh")}
+              </button>
+            </div>
+          </div>
+
           <div className="card">
             <div className="card-title">{t("trade.statusTitle")}</div>
             <div className="card-meta">{t("trade.statusMeta")}</div>
