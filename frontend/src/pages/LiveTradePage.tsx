@@ -704,6 +704,11 @@ export default function LiveTradePage() {
           <div className="card">
             <div className="card-title">{t("trade.statusTitle")}</div>
             <div className="card-meta">{t("trade.statusMeta")}</div>
+            {ibSettings?.mode === "live" && (
+              <div className="form-error" style={{ marginTop: "8px" }}>
+                {t("trade.liveWarning")}
+              </div>
+            )}
             <div className="overview-grid" style={{ marginTop: "12px" }}>
               <div className="overview-card">
                 <div className="overview-label">{t("trade.statusLabel")}</div>

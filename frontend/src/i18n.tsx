@@ -2153,6 +2153,7 @@ const messages: Record<Locale, MessageTree> = {
       statusMeta: "IB 连接与配置状态",
       statusLabel: "状态",
       statusHint: "尚未配置 IB 连接，请先完成数据页配置。",
+      liveWarning: "当前为实盘模式，请确认账户与风控配置后再执行。",
       status: {
         unconfigured: "未配置",
         unknown: "未知",
@@ -4413,6 +4414,7 @@ const messages: Record<Locale, MessageTree> = {
       statusMeta: "IB connection and configuration status",
       statusLabel: "Status",
       statusHint: "IB settings are not configured. Please update settings in Data page.",
+      liveWarning: "Live mode is enabled. Confirm account and risk settings before execution.",
       status: {
         unconfigured: "Not configured",
         unknown: "Unknown",
