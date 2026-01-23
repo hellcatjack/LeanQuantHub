@@ -792,6 +792,21 @@ def _create_steps(session, run: PreTradeRun, template: PreTradeTemplate | None) 
     session.commit()
 
 
+def create_pretrade_run_for_project(
+    session,
+    *,
+    project_id: int,
+    template_id: int | None = None,
+) -> PreTradeRun:
+    template = session.get(PreTradeTemplate, template_id) if template_id else None
+    run = PreTradeRun(project_id=project_id, status="queued", params={})
+    session.add(run)
+    session.commit()
+    session.refresh(run)
+    _create_steps(session, run, template)
+    return run
+
+
 def _load_step_handler(step_key: str) -> StepHandler | None:
     for key, handler in STEP_DEFS:
         if key == step_key:

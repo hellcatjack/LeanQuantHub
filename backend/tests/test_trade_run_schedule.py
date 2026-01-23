@@ -65,3 +65,24 @@ def test_pretrade_can_trigger_trade_run(monkeypatch):
         assert trade_run.decision_snapshot_id == decision_snapshot_id
     finally:
         session.close()
+
+
+def test_create_pretrade_run_for_project_creates_steps():
+    Session = _make_session_factory()
+    session = Session()
+    try:
+        project = Project(name="pretrade-create", description="")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        run = pretrade_runner.create_pretrade_run_for_project(session, project_id=project.id)
+        steps = (
+            session.query(PreTradeStep)
+            .filter(PreTradeStep.run_id == run.id)
+            .all()
+        )
+        assert run.id is not None
+        assert len(steps) > 0
+    finally:
+        session.close()
