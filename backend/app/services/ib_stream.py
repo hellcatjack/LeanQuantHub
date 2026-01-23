@@ -2,10 +2,20 @@ from __future__ import annotations
 
 import csv
 import json
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterable, Any
+
+try:
+    from ibapi.client import EClient
+    from ibapi.wrapper import EWrapper
+    from ibapi.contract import Contract
+except Exception:  # pragma: no cover - ibapi optional in some environments
+    EClient = object  # type: ignore[assignment]
+    EWrapper = object  # type: ignore[assignment]
+    Contract = object  # type: ignore[assignment]
 
 from app.models import DecisionSnapshot, Project
 from app.routes.projects import _resolve_project_config
@@ -17,6 +27,9 @@ from app.services.job_lock import JobLock
 
 def _normalize_symbol(symbol: str | None) -> str:
     return str(symbol or "").strip().upper()
+
+_PRICE_TICKS = {1: "bid", 2: "ask", 4: "last", 6: "high", 7: "low", 9: "close"}
+_SIZE_TICKS = {0: "bid_size", 3: "ask_size", 5: "last_size", 8: "volume"}
 
 
 def _read_snapshot_symbols(path: str | None) -> list[str]:
@@ -198,6 +211,51 @@ def build_stream_symbols(
                 return _clip_symbols(symbols, max_symbols)
     return _clip_symbols(_collect_project_symbols(session, project_id), max_symbols)
 
+
+class IBStreamClient(EWrapper, EClient):
+    def __init__(self, host: str, port: int, client_id: int, on_tick) -> None:
+        EClient.__init__(self, wrapper=self)
+        self._host = host
+        self._port = port
+        self._client_id = client_id
+        self._on_tick = on_tick
+        self._thread: threading.Thread | None = None
+        self._req_id = 1
+        self._req_map: dict[int, str] = {}
+        self._error: str | None = None
+
+    def start(self) -> None:
+        self.connect(self._host, int(self._port), int(self._client_id))
+        self._thread = threading.Thread(target=self.run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        if self.isConnected():
+            self.disconnect()
+
+    def subscribe(self, symbols: list[str]) -> None:
+        for symbol in symbols:
+            req_id = self._req_id
+            self._req_id += 1
+            contract = Contract()
+            contract.symbol = _normalize_symbol(symbol)
+            contract.secType = "STK"
+            contract.exchange = "SMART"
+            contract.currency = "USD"
+            self._req_map[req_id] = _normalize_symbol(symbol)
+            self.reqMktData(req_id, contract, "", False, False, [])
+
+    def tickPrice(self, reqId: int, tickType: int, price: float, attrib) -> None:  # noqa: N802
+        key = _PRICE_TICKS.get(tickType)
+        symbol = self._req_map.get(reqId)
+        if key and symbol:
+            self._on_tick(symbol, {key: price})
+
+    def tickSize(self, reqId: int, tickType: int, size: int) -> None:  # noqa: N802
+        key = _SIZE_TICKS.get(tickType)
+        symbol = self._req_map.get(reqId)
+        if key and symbol:
+            self._on_tick(symbol, {key: size})
 
 class IBStreamRunner:
     def __init__(

@@ -47,3 +47,15 @@ def test_stream_runner_refreshes_snapshot_when_stale(tmp_path, monkeypatch):
 
     payload = json.loads((tmp_path / "stream" / "SPY.json").read_text(encoding="utf-8"))
     assert payload["source"] == "ib_snapshot"
+
+
+def test_ib_stream_client_emits_ticks():
+    events = []
+
+    client = ib_stream.IBStreamClient("127.0.0.1", 4001, 1, lambda symbol, tick: events.append((symbol, tick)))
+    client._req_map[1] = "SPY"
+    client.tickPrice(1, 4, 123.0, None)
+    client.tickSize(1, 5, 12)
+
+    assert any(evt[0] == "SPY" and evt[1].get("last") == 123.0 for evt in events)
+    assert any(evt[1].get("last_size") == 12 for evt in events)
