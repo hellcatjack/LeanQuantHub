@@ -63,6 +63,10 @@ def test_pretrade_can_trigger_trade_run(monkeypatch):
         trade_run = session.get(TradeRun, trade_run_id)
         assert trade_run is not None
         assert trade_run.decision_snapshot_id == decision_snapshot_id
+        assert isinstance(trade_run.params, dict)
+        strategy_snapshot = trade_run.params.get("strategy_snapshot")
+        assert isinstance(strategy_snapshot, dict)
+        assert isinstance(strategy_snapshot.get("backtest_params"), dict)
     finally:
         session.close()
 

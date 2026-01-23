@@ -38,7 +38,7 @@ from app.routes.datasets import (
     _refresh_alpha_listing,
     _start_bulk_sync_worker,
 )
-from app.routes.projects import _resolve_project_config
+from app.routes.projects import _get_latest_version, _resolve_project_config, PROJECT_CONFIG_TAG
 from app.services.alpha_fetch import load_alpha_fetch_config
 from app.services.alpha_rate import load_alpha_rate_config
 from app.services.bulk_auto import load_bulk_auto_config
@@ -712,6 +712,19 @@ def step_decision_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResu
         ctx.session.add(snapshot)
         ctx.session.commit()
         ctx.session.refresh(snapshot)
+    config = _resolve_project_config(ctx.session, ctx.run.project_id)
+    version = _get_latest_version(ctx.session, ctx.run.project_id, PROJECT_CONFIG_TAG)
+    strategy_snapshot = {
+        "project_config_version_id": version.id if version else None,
+        "project_config_hash": version.content_hash if version else None,
+        "project_config_created_at": version.created_at.isoformat() if version else None,
+        "backtest_params": config.get("backtest_params") if isinstance(config, dict) else None,
+        "strategy": config.get("strategy") if isinstance(config, dict) else None,
+        "signal_mode": config.get("signal_mode") if isinstance(config, dict) else None,
+        "backtest_start": config.get("backtest_start") if isinstance(config, dict) else None,
+        "backtest_end": config.get("backtest_end") if isinstance(config, dict) else None,
+        "benchmark": config.get("benchmark") if isinstance(config, dict) else None,
+    }
     trade_run: TradeRun | None = None
     if existing_trade_run_id:
         trade_run = ctx.session.get(TradeRun, int(existing_trade_run_id))
@@ -731,11 +744,22 @@ def step_decision_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResu
             decision_snapshot_id=snapshot.id,
             mode="paper",
             status="queued",
-            params={"pretrade_run_id": ctx.run.id},
+            params={
+                "pretrade_run_id": ctx.run.id,
+                "strategy_snapshot": strategy_snapshot,
+            },
         )
         ctx.session.add(trade_run)
         ctx.session.commit()
         ctx.session.refresh(trade_run)
+    else:
+        existing_params = dict(trade_run.params or {})
+        if "strategy_snapshot" not in existing_params:
+            existing_params["strategy_snapshot"] = strategy_snapshot
+        if "pretrade_run_id" not in existing_params:
+            existing_params["pretrade_run_id"] = ctx.run.id
+        trade_run.params = existing_params
+        ctx.session.commit()
     return StepResult(
         artifacts={
             "decision_snapshot": result.get("summary"),
@@ -771,6 +795,7 @@ def step_market_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResult
     trade_cfg = config.get("trade") if isinstance(config.get("trade"), dict) else {}
     market_data_type = trade_cfg.get("market_data_type")
     ttl_seconds = trade_cfg.get("market_snapshot_ttl_seconds")
+    exclude_symbols_raw = trade_cfg.get("market_snapshot_exclude_symbols")
     settings_row = get_or_create_ib_settings(ctx.session)
     market_data_type = market_data_type or settings_row.market_data_type or "realtime"
     try:
@@ -781,13 +806,44 @@ def step_market_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResult
     decision_snapshot_id = None
     if isinstance(ctx.step.artifacts, dict):
         decision_snapshot_id = ctx.step.artifacts.get("decision_snapshot_id")
+    if not decision_snapshot_id:
+        query = (
+            ctx.session.query(DecisionSnapshot)
+            .filter(DecisionSnapshot.project_id == ctx.run.project_id)
+        )
+        if ctx.run.started_at:
+            query = query.filter(DecisionSnapshot.created_at >= ctx.run.started_at)
+        latest = query.order_by(DecisionSnapshot.created_at.desc()).first()
+        if not latest:
+            latest = (
+                ctx.session.query(DecisionSnapshot)
+                .filter(DecisionSnapshot.project_id == ctx.run.project_id)
+                .order_by(DecisionSnapshot.created_at.desc())
+                .first()
+            )
+        if latest:
+            decision_snapshot_id = latest.id
     symbols = ib_stream.build_stream_symbols(
         ctx.session,
         project_id=ctx.run.project_id,
         decision_snapshot_id=decision_snapshot_id,
     )
+    excluded: set[str] = set()
+    if exclude_symbols_raw:
+        if isinstance(exclude_symbols_raw, (list, tuple, set)):
+            candidates = list(exclude_symbols_raw)
+        else:
+            raw = str(exclude_symbols_raw)
+            candidates = [item.strip() for item in raw.replace("\n", ",").split(",")]
+        excluded = {ib_stream._normalize_symbol(item) for item in candidates if ib_stream._normalize_symbol(item)}
+        if excluded:
+            symbols = [symbol for symbol in symbols if ib_stream._normalize_symbol(symbol) not in excluded]
     if not symbols:
-        raise StepSkip("market_snapshot_no_symbols")
+        reason = "market_snapshot_all_excluded" if excluded else "market_snapshot_no_symbols"
+        skip_artifacts: dict[str, Any] = {"decision_snapshot_id": decision_snapshot_id}
+        if excluded:
+            skip_artifacts["excluded_symbols"] = sorted(excluded)
+        raise StepSkip(reason, artifacts=skip_artifacts)
 
     stream_root = ib_stream._resolve_stream_root(None)
     if ib_stream.is_snapshot_fresh(stream_root, symbols, ttl_seconds=ttl_seconds):
@@ -797,6 +853,8 @@ def step_market_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResult
                     "skipped": True,
                     "symbols": symbols,
                     "ttl_seconds": ttl_seconds,
+                    "decision_snapshot_id": decision_snapshot_id,
+                    "excluded_symbols": sorted(excluded),
                 }
             }
         )
@@ -828,6 +886,8 @@ def step_market_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResult
                 "symbols": symbols,
                 "ttl_seconds": ttl_seconds,
                 "errors": errors,
+                "decision_snapshot_id": decision_snapshot_id,
+                "excluded_symbols": sorted(excluded),
             }
         }
     )
