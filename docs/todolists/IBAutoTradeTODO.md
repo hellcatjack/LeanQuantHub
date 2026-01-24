@@ -67,12 +67,13 @@
 ## Phase 1：Lean Bridge 数据接入（必做）
 ### 1.1 Bridge 输出规范
 - [ ] Lean ResultHandler 输出：`account_summary.json`、`positions.json`、`quotes.json`、`execution_events.jsonl`、`lean_bridge_status.json`。
-- [ ] 原子写入/轮转/心跳更新，避免半写入。
+- [ ] 输出目录统一为 `/data/share/stock/data/lean_bridge`（允许配置覆盖）。
+- [ ] 原子写入/轮转/心跳更新，避免半写入；行情/持仓支持节流更新。
 - 验收：后端可读取并识别 `stale`。
 
 ### 1.2 行情/账户读取与缓存
 - [x] 后端读取 bridge 文件并提供统一 API（`/api/brokerage/*`）。
-- [ ] 前端展示更新时间、数据来源、是否降级。
+- [ ] 前端展示更新时间、数据来源、是否降级（stale/degraded）。
 - 验收：UI/日志可查看 bridge 更新状态。
 
 ### 1.3 数据源策略（逻辑一致）
@@ -174,11 +175,12 @@
 ---
 
 ## 数据与存储设计（建议）
-- `data/ib/`  
-  - `contracts/` 合约缓存  
-  - `stream/` 实时行情  
-  - `bars/` 历史补齐  
-  - `orders/` 订单流水快照（可选）
+- `data/lean_bridge/`  
+  - `account_summary.json`  
+  - `positions.json`  
+  - `quotes.json`  
+  - `execution_events.jsonl`  
+  - `lean_bridge_status.json`
 - DB 表建议（如需新增）：
   - `ib_connection_state`
   - `ib_contract_cache`
