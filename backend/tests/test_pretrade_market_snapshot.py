@@ -65,7 +65,7 @@ def test_pretrade_market_snapshot_calls_fetch(monkeypatch, tmp_path):
             "_resolve_project_config",
             lambda _session, _pid: {"trade": {"market_data_type": "delayed", "market_snapshot_ttl_seconds": 30}},
         )
-        monkeypatch.setattr(pretrade_runner.ib_stream, "is_snapshot_fresh", lambda *_args, **_kwargs: False)
+        monkeypatch.setattr(pretrade_runner, "is_snapshot_fresh", lambda *_args, **_kwargs: False)
 
         ctx = pretrade_runner.StepContext(session=session, run=run, step=step)
         result = pretrade_runner.step_market_snapshot(ctx, {})
@@ -126,7 +126,7 @@ def test_pretrade_market_snapshot_filters_excluded_symbols(monkeypatch, tmp_path
                 }
             },
         )
-        monkeypatch.setattr(pretrade_runner.ib_stream, "is_snapshot_fresh", lambda *_args, **_kwargs: False)
+        monkeypatch.setattr(pretrade_runner, "is_snapshot_fresh", lambda *_args, **_kwargs: False)
 
         ctx = pretrade_runner.StepContext(session=session, run=run, step=step)
         pretrade_runner.step_market_snapshot(ctx, {})
@@ -187,21 +187,21 @@ def test_pretrade_market_snapshot_uses_latest_snapshot_when_missing_artifacts(mo
         session.commit()
         session.refresh(step)
 
-        def _build_stream_symbols(_session, *, project_id, decision_snapshot_id=None, **_kwargs):
+        def _build_market_symbols(_session, *, project_id, decision_snapshot_id=None, **_kwargs):
             assert decision_snapshot_id == snapshot_new.id
             return ["SPY"]
 
         def _fetch_market_snapshots(_session, *, symbols, store, market_data_type=None, **_kwargs):
             return [{"symbol": "SPY", "data": {"last": 1.0}, "error": None}]
 
-        monkeypatch.setattr(pretrade_runner.ib_stream, "build_stream_symbols", _build_stream_symbols)
+        monkeypatch.setattr(pretrade_runner, "build_market_symbols", _build_market_symbols)
         monkeypatch.setattr(pretrade_runner, "fetch_market_snapshots", _fetch_market_snapshots)
         monkeypatch.setattr(
             pretrade_runner,
             "_resolve_project_config",
             lambda _session, _pid: {"trade": {"market_data_type": "delayed"}},
         )
-        monkeypatch.setattr(pretrade_runner.ib_stream, "is_snapshot_fresh", lambda *_args, **_kwargs: False)
+        monkeypatch.setattr(pretrade_runner, "is_snapshot_fresh", lambda *_args, **_kwargs: False)
 
         ctx = pretrade_runner.StepContext(session=session, run=run, step=step)
         pretrade_runner.step_market_snapshot(ctx, {})

@@ -1,33 +1,15 @@
 from __future__ import annotations
 
-import json
-from datetime import datetime
-from pathlib import Path
-
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
-
-from app.core.config import settings
+from fastapi import APIRouter, HTTPException
 from app.db import get_session
 from app.schemas import (
     IBConnectionHeartbeat,
     IBConnectionStateOut,
     IBHealthOut,
-    IBContractCacheOut,
-    IBContractRefreshOut,
-    IBContractRefreshRequest,
     IBAccountSummaryOut,
     IBAccountPositionsOut,
-    IBHistoryJobCreate,
-    IBHistoryJobOut,
-    IBHistoricalOut,
-    IBHistoricalRequest,
-    IBMarketHealthOut,
-    IBMarketHealthRequest,
-    IBMarketSnapshotOut,
-    IBMarketSnapshotRequest,
     IBSettingsOut,
     IBSettingsUpdate,
-    IBStreamStartRequest,
     IBStreamStatusOut,
     IBStreamSnapshotOut,
     IBStatusOverviewOut,
@@ -40,18 +22,8 @@ from app.services.ib_settings import (
 )
 from app.services.ib_health import build_ib_health
 from app.services.ib_status_overview import build_ib_status_overview
-from app.services.ib_market import (
-    check_market_health,
-    fetch_historical_bars,
-    fetch_market_snapshots,
-    refresh_contract_cache,
-)
 from app.services.ib_account import get_account_summary, get_account_positions
-from app.services.ib_history_runner import cancel_ib_history_job, run_ib_history_job
-from app.services.project_symbols import collect_active_project_symbols
-from app.services import ib_stream
-from app.services.ib_stream_runner import start_stream_daemon, stop_stream_daemon
-from app.models import IBContractCache, IBHistoryJob
+from app.services.lean_bridge import read_quote, read_stream_status
 
 router = APIRouter(prefix="/api/ib", tags=["ib"])
 
@@ -174,7 +146,7 @@ def probe_ib_state():
 
 @router.get("/stream/status", response_model=IBStreamStatusOut)
 def get_ib_stream_status():
-    status = ib_stream.get_stream_status()
+    status = read_stream_status()
     return IBStreamStatusOut(**status)
 
 
@@ -182,261 +154,5 @@ def get_ib_stream_status():
 def get_ib_stream_snapshot(symbol: str):
     if not str(symbol or "").strip():
         raise HTTPException(status_code=400, detail="symbol_required")
-    payload = ib_stream.read_stream_snapshot(symbol)
+    payload = read_quote(symbol)
     return IBStreamSnapshotOut(**payload)
-
-
-@router.post("/stream/start", response_model=IBStreamStatusOut)
-def start_ib_stream(payload: IBStreamStartRequest):
-    with get_session() as session:
-        symbols = payload.symbols or []
-        if not symbols:
-            symbols = ib_stream.build_stream_symbols(
-                session,
-                project_id=payload.project_id,
-                decision_snapshot_id=payload.decision_snapshot_id,
-                max_symbols=payload.max_symbols,
-            )
-        market_data_type = payload.market_data_type or "delayed"
-        stream_root = ib_stream._resolve_stream_root(None)
-        ib_stream.write_stream_config(
-            stream_root,
-            {
-                "enabled": True,
-                "project_id": payload.project_id,
-                "decision_snapshot_id": payload.decision_snapshot_id,
-                "max_symbols": payload.max_symbols,
-                "market_data_type": market_data_type,
-                "symbols": symbols,
-            },
-        )
-        status = ib_stream.write_stream_status(
-            stream_root,
-            status="starting",
-            symbols=symbols,
-            market_data_type=market_data_type,
-        )
-        start_stream_daemon(data_root=stream_root.parent)
-        return IBStreamStatusOut(**status)
-
-
-@router.post("/stream/stop", response_model=IBStreamStatusOut)
-def stop_ib_stream():
-    current = ib_stream.get_stream_status()
-    market_data_type = current.get("market_data_type") or "delayed"
-    stream_root = ib_stream._resolve_stream_root(None)
-    config = ib_stream.read_stream_config(stream_root)
-    config["enabled"] = False
-    ib_stream.write_stream_config(stream_root, config)
-    status = ib_stream.write_stream_status(
-        stream_root,
-        status="stopped",
-        symbols=[],
-        market_data_type=market_data_type,
-    )
-    stop_stream_daemon()
-    return IBStreamStatusOut(**status)
-
-
-@router.get("/contracts", response_model=list[IBContractCacheOut])
-def list_ib_contracts(symbol: str | None = None, limit: int = 200):
-    with get_session() as session:
-        query = session.query(IBContractCache).order_by(IBContractCache.updated_at.desc())
-        if symbol:
-            query = query.filter(IBContractCache.symbol == symbol.strip().upper())
-        rows = query.limit(max(1, min(limit, 500))).all()
-        return [IBContractCacheOut.model_validate(row, from_attributes=True) for row in rows]
-
-
-@router.post("/contracts/refresh", response_model=IBContractRefreshOut)
-def refresh_ib_contracts(payload: IBContractRefreshRequest):
-    with get_session() as session:
-        try:
-            result = refresh_contract_cache(
-                session,
-                symbols=payload.symbols,
-                sec_type=payload.sec_type,
-                exchange=payload.exchange,
-                currency=payload.currency,
-                use_project_symbols=payload.use_project_symbols,
-            )
-        except RuntimeError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        record_audit(
-            session,
-            action="ib.contracts.refresh",
-            resource_type="ib_contract_cache",
-            resource_id=None,
-            detail={
-                "total": result.get("total"),
-                "updated": result.get("updated"),
-                "skipped": result.get("skipped"),
-            },
-        )
-        session.commit()
-        return IBContractRefreshOut(**result)
-
-
-@router.post("/market/snapshot", response_model=IBMarketSnapshotOut)
-def snapshot_ib_market(payload: IBMarketSnapshotRequest):
-    with get_session() as session:
-        try:
-            items = fetch_market_snapshots(
-                session,
-                symbols=payload.symbols,
-                store=payload.store,
-                fallback_history=payload.fallback_history,
-                history_duration=payload.history_duration,
-                history_bar_size=payload.history_bar_size,
-                history_use_rth=payload.history_use_rth,
-            )
-        except RuntimeError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        success = sum(1 for item in items if item.get("data") and not item.get("error"))
-        return IBMarketSnapshotOut(total=len(items), success=success, items=items)
-
-
-@router.post("/history", response_model=IBHistoricalOut)
-def fetch_ib_history(payload: IBHistoricalRequest):
-    with get_session() as session:
-        try:
-            result = fetch_historical_bars(
-                session,
-                symbol=payload.symbol,
-                duration=payload.duration,
-                bar_size=payload.bar_size,
-                end_datetime=payload.end_datetime,
-                use_rth=payload.use_rth,
-                store=payload.store,
-            )
-        except RuntimeError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return IBHistoricalOut(**result)
-
-
-@router.post("/market/health", response_model=IBMarketHealthOut)
-def check_ib_market_health(payload: IBMarketHealthRequest):
-    with get_session() as session:
-        symbols = payload.symbols or []
-        if payload.use_project_symbols and not symbols:
-            symbols, _benchmarks = collect_active_project_symbols(session)
-        symbols = [item for item in symbols if str(item).strip()]
-        if not symbols:
-            return IBMarketHealthOut(
-                status="blocked",
-                total=0,
-                success=0,
-                missing_symbols=[],
-                errors=["symbols_empty"],
-            )
-        if len(symbols) > 200:
-            return IBMarketHealthOut(
-                status="blocked",
-                total=len(symbols),
-                success=0,
-                missing_symbols=symbols,
-                errors=["symbols_too_many"],
-            )
-        try:
-            result = check_market_health(
-                session,
-                symbols=symbols,
-                min_success_ratio=payload.min_success_ratio,
-                fallback_history=payload.fallback_history,
-                history_duration=payload.history_duration,
-                history_bar_size=payload.history_bar_size,
-                history_use_rth=payload.history_use_rth,
-            )
-        except RuntimeError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return IBMarketHealthOut(**result)
-
-
-@router.get("/history-jobs", response_model=list[IBHistoryJobOut])
-def list_ib_history_jobs(
-    limit: int = Query(20, ge=1, le=200), offset: int = Query(0, ge=0)
-):
-    with get_session() as session:
-        jobs = (
-            session.query(IBHistoryJob)
-            .order_by(IBHistoryJob.created_at.desc())
-            .offset(offset)
-            .limit(limit)
-            .all()
-        )
-        return [IBHistoryJobOut.model_validate(job, from_attributes=True) for job in jobs]
-
-
-@router.get("/history-jobs/{job_id}", response_model=IBHistoryJobOut)
-def get_ib_history_job(job_id: int):
-    with get_session() as session:
-        job = session.get(IBHistoryJob, job_id)
-        if not job:
-            raise HTTPException(status_code=404, detail="job not found")
-        return IBHistoryJobOut.model_validate(job, from_attributes=True)
-
-
-@router.get("/history-jobs/{job_id}/progress")
-def get_ib_history_job_progress(job_id: int):
-    with get_session() as session:
-        job = session.get(IBHistoryJob, job_id)
-        if not job:
-            raise HTTPException(status_code=404, detail="job not found")
-    progress_path = Path(settings.artifact_root) / f"ib_history_job_{job_id}" / "progress.json"
-    if not progress_path.exists():
-        return {"status": job.status}
-    try:
-        payload = json.loads(progress_path.read_text(encoding="utf-8", errors="ignore"))
-    except json.JSONDecodeError:
-        return {"status": job.status}
-    if isinstance(payload, dict):
-        payload.setdefault("status", job.status)
-        return payload
-    return {"status": job.status}
-
-
-@router.post("/history-jobs", response_model=IBHistoryJobOut)
-def create_ib_history_job(
-    payload: IBHistoryJobCreate, background_tasks: BackgroundTasks
-):
-    params = payload.model_dump()
-    with get_session() as session:
-        job = IBHistoryJob(status="queued", params=params)
-        session.add(job)
-        session.commit()
-        session.refresh(job)
-        record_audit(
-            session,
-            action="ib_history_job.create",
-            resource_type="ib_history_job",
-            resource_id=job.id,
-            detail={"params": params},
-        )
-        session.commit()
-    background_tasks.add_task(run_ib_history_job, job.id)
-    return IBHistoryJobOut.model_validate(job, from_attributes=True)
-
-
-@router.post("/history-jobs/{job_id}/cancel", response_model=IBHistoryJobOut)
-def cancel_ib_history_job_route(job_id: int):
-    with get_session() as session:
-        job = session.get(IBHistoryJob, job_id)
-        if not job:
-            raise HTTPException(status_code=404, detail="job not found")
-        if job.status in {"done", "failed", "cancelled"}:
-            return IBHistoryJobOut.model_validate(job, from_attributes=True)
-        job.status = "cancelled"
-        job.message = "cancelled"
-        job.updated_at = datetime.utcnow()
-        session.commit()
-        cancel_ib_history_job(job_id)
-        record_audit(
-            session,
-            action="ib_history_job.cancel",
-            resource_type="ib_history_job",
-            resource_id=job.id,
-            detail={},
-        )
-        session.commit()
-        session.refresh(job)
-        return IBHistoryJobOut.model_validate(job, from_attributes=True)

@@ -92,10 +92,14 @@ def test_guard_skips_market_fetch_without_positions(monkeypatch):
         session.close()
 
 
-def test_read_local_snapshot_uses_data_root(tmp_path, monkeypatch):
-    stream_root = tmp_path / "ib" / "stream"
-    stream_root.mkdir(parents=True, exist_ok=True)
-    (stream_root / "SPY.json").write_text(json.dumps({"last": 10}), encoding="utf-8")
-    monkeypatch.setattr(trade_guard.settings, "data_root", None)
-    monkeypatch.setenv("DATA_ROOT", str(tmp_path))
-    assert trade_guard._read_local_snapshot("SPY") == {"last": 10}
+def test_read_local_snapshot_reads_bridge_cache(tmp_path, monkeypatch):
+    from app.services import lean_bridge
+
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir(parents=True, exist_ok=True)
+    (cache_root / "quotes.json").write_text(
+        json.dumps([{"symbol": "SPY", "last": 10}]),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(lean_bridge, "CACHE_ROOT", cache_root, raising=False)
+    assert trade_guard._read_local_snapshot("SPY") == {"symbol": "SPY", "last": 10}

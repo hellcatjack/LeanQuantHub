@@ -44,8 +44,12 @@ from app.services.alpha_rate import load_alpha_rate_config
 from app.services.bulk_auto import load_bulk_auto_config
 from app.services.decision_snapshot import generate_decision_snapshot
 from app.services.factor_score_runner import run_factor_score_job
-from app.services import ib_stream
-from app.services.ib_market import fetch_market_snapshots
+from app.services.lean_market import (
+    build_market_symbols,
+    fetch_market_snapshots,
+    is_snapshot_fresh,
+    normalize_symbol,
+)
 from app.services.ib_settings import get_or_create_ib_settings, update_ib_state
 from app.services.job_lock import JobLock
 from app.services.ml_runner import build_ml_config, run_ml_train
@@ -823,7 +827,7 @@ def step_market_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResult
             )
         if latest:
             decision_snapshot_id = latest.id
-    symbols = ib_stream.build_stream_symbols(
+    symbols = build_market_symbols(
         ctx.session,
         project_id=ctx.run.project_id,
         decision_snapshot_id=decision_snapshot_id,
@@ -835,9 +839,9 @@ def step_market_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResult
         else:
             raw = str(exclude_symbols_raw)
             candidates = [item.strip() for item in raw.replace("\n", ",").split(",")]
-        excluded = {ib_stream._normalize_symbol(item) for item in candidates if ib_stream._normalize_symbol(item)}
+        excluded = {normalize_symbol(item) for item in candidates if normalize_symbol(item)}
         if excluded:
-            symbols = [symbol for symbol in symbols if ib_stream._normalize_symbol(symbol) not in excluded]
+            symbols = [symbol for symbol in symbols if normalize_symbol(symbol) not in excluded]
     if not symbols:
         reason = "market_snapshot_all_excluded" if excluded else "market_snapshot_no_symbols"
         skip_artifacts: dict[str, Any] = {"decision_snapshot_id": decision_snapshot_id}
@@ -845,8 +849,7 @@ def step_market_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResult
             skip_artifacts["excluded_symbols"] = sorted(excluded)
         raise StepSkip(reason, artifacts=skip_artifacts)
 
-    stream_root = ib_stream._resolve_stream_root(None)
-    if ib_stream.is_snapshot_fresh(stream_root, symbols, ttl_seconds=ttl_seconds):
+    if is_snapshot_fresh(symbols, ttl_seconds=ttl_seconds):
         return StepResult(
             artifacts={
                 "market_snapshot": {
@@ -867,14 +870,6 @@ def step_market_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResult
     )
     errors = [f"{item.get('symbol')}:{item.get('error')}" for item in results if item.get("error")]
     error_message = "; ".join(errors) if errors else None
-    stream_status = "degraded" if errors else "ok"
-    ib_stream.write_stream_status(
-        stream_root,
-        status=stream_status,
-        symbols=symbols,
-        error=error_message,
-        market_data_type=market_data_type,
-    )
     if errors:
         update_ib_state(ctx.session, status="degraded", message=error_message, heartbeat=True)
         raise RuntimeError("market_snapshot_failed")

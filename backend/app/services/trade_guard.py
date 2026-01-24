@@ -2,31 +2,13 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date, datetime, timedelta
-import json
-import os
-from pathlib import Path
 from typing import Any
 
 from sqlalchemy import func
 
-from app.core.config import settings
 from app.models import TradeFill, TradeGuardState, TradeOrder, TradeRun, TradeSettings
-from app.services.ib_market import fetch_market_snapshots
-
-
-def _resolve_data_root() -> Path:
-    if settings.data_root:
-        return Path(settings.data_root)
-    env_root = os.getenv("DATA_ROOT")
-    if env_root:
-        return Path(env_root)
-    return Path("/data/share/stock/data")
-
-
-def _ib_stream_root() -> Path:
-    root = _resolve_data_root() / "ib" / "stream"
-    root.mkdir(parents=True, exist_ok=True)
-    return root
+from app.services.lean_market import fetch_market_snapshots
+from app.services.lean_bridge import read_quote
 
 
 def _parse_timestamp(value: str | None) -> datetime | None:
@@ -53,13 +35,14 @@ def _pick_price(snapshot: dict[str, Any] | None) -> float | None:
 
 
 def _read_local_snapshot(symbol: str) -> dict[str, Any] | None:
-    path = _ib_stream_root() / f"{symbol}.json"
-    if not path.exists():
+    payload = read_quote(symbol)
+    if not isinstance(payload, dict):
         return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    if not payload:
         return None
+    if payload.get("symbol") and len(payload.keys()) == 1:
+        return None
+    return payload
 
 
 def _resolve_trade_date() -> date:
