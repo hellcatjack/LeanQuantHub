@@ -1739,6 +1739,48 @@ class TradeOrderOut(BaseModel):
     class Config:
         from_attributes = True
 
+
+class TradeFillDetailOut(BaseModel):
+    id: int
+    order_id: int
+    exec_id: str | None = None
+    fill_quantity: float
+    fill_price: float
+    commission: float | None = None
+    fill_time: datetime | None = None
+    currency: str | None = None
+    exchange: str | None = None
+
+    class Config:
+        from_attributes = True
+
+
+class TradeRunDetailOut(BaseModel):
+    run: TradeRunOut
+    orders: list[TradeOrderOut]
+    fills: list[TradeFillDetailOut]
+    last_update_at: datetime | None
+
+
+class TradeSymbolSummaryOut(BaseModel):
+    symbol: str
+    target_weight: float | None = None
+    target_value: float | None = None
+    filled_qty: float
+    avg_fill_price: float | None = None
+    filled_value: float
+    pending_qty: float
+    last_status: str | None = None
+    delta_value: float | None = None
+    delta_weight: float | None = None
+    fill_ratio: float | None = None
+
+
+class TradeSymbolSummaryPageOut(BaseModel):
+    items: list[TradeSymbolSummaryOut]
+    last_update_at: datetime | None
+
+
 class AuditLogOut(BaseModel):
     id: int
     actor: str

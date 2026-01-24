@@ -12,14 +12,18 @@ from app.schemas import (
     TradeOrderOut,
     TradeOrderStatusUpdate,
     TradeRunCreate,
+    TradeRunDetailOut,
     TradeRunExecuteOut,
     TradeRunExecuteRequest,
     TradeRunOut,
+    TradeFillDetailOut,
     TradeSettingsOut,
     TradeSettingsUpdate,
     TradeGuardEvaluateOut,
     TradeGuardEvaluateRequest,
     TradeGuardStateOut,
+    TradeSymbolSummaryOut,
+    TradeSymbolSummaryPageOut,
 )
 from app.services.audit_log import record_audit
 from app.services.ib_market import check_market_health
@@ -27,6 +31,7 @@ from app.services.trade_guard import evaluate_intraday_guard, get_or_create_guar
 from app.services.trade_monitor import build_trade_overview
 from app.services.trade_executor import execute_trade_run
 from app.services.trade_orders import create_trade_order, update_trade_order_status
+from app.services.trade_run_summary import build_last_update_at, build_symbol_summary, build_trade_run_detail
 
 router = APIRouter(prefix="/api/trade", tags=["trade"])
 
@@ -129,6 +134,41 @@ def get_trade_run(run_id: int):
         if not run:
             raise HTTPException(status_code=404, detail="run not found")
         return TradeRunOut.model_validate(run, from_attributes=True)
+
+
+@router.get("/runs/{run_id}/detail", response_model=TradeRunDetailOut)
+def get_trade_run_detail(
+    run_id: int,
+    limit: int = Query(200, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    with get_session() as session:
+        try:
+            run, orders, fills, last_update_at = build_trade_run_detail(
+                session, run_id, limit=limit, offset=offset
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return TradeRunDetailOut(
+            run=TradeRunOut.model_validate(run, from_attributes=True),
+            orders=[TradeOrderOut.model_validate(order, from_attributes=True) for order in orders],
+            fills=[TradeFillDetailOut.model_validate(fill, from_attributes=True) for fill in fills],
+            last_update_at=last_update_at,
+        )
+
+
+@router.get("/runs/{run_id}/symbols", response_model=TradeSymbolSummaryPageOut)
+def get_trade_run_symbols(run_id: int):
+    with get_session() as session:
+        try:
+            items = build_symbol_summary(session, run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        last_update_at = build_last_update_at(session, run_id)
+        return TradeSymbolSummaryPageOut(
+            items=[TradeSymbolSummaryOut(**item) for item in items],
+            last_update_at=last_update_at,
+        )
 
 
 @router.post("/runs", response_model=TradeRunOut)
