@@ -9,13 +9,13 @@ from app.services.ib_settings import resolve_ib_api_mode
 def submit_orders_real(session, orders, *, price_map: dict[str, float] | None = None) -> dict:
     settings = session.query(IBSettings).first()
     if settings is None:
-        return {"filled": 0, "rejected": len(orders), "cancelled": 0}
+        return {"filled": 0, "rejected": len(orders), "cancelled": 0, "events": []}
     client = IBExecutionClient(settings.host, settings.port, settings.client_id)
     events = client.submit_orders(list(orders))
     filled = sum(1 for event in events if (event.status or "").upper() in {"FILLED", "PARTIAL"})
     rejected = sum(1 for event in events if (event.status or "").upper() == "REJECTED")
     cancelled = sum(1 for event in events if (event.status or "").upper() == "CANCELED")
-    return {"filled": filled, "rejected": rejected, "cancelled": cancelled}
+    return {"filled": filled, "rejected": rejected, "cancelled": cancelled, "events": events}
 
 
 class IBOrderExecutor:

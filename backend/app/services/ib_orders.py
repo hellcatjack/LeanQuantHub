@@ -56,4 +56,4 @@ def submit_orders_mock(session, orders, *, price_map: dict[str, float]):
         update_trade_order_status(session, order, {"status": "SUBMITTED"})
         apply_fill_to_order(session, order, fill_qty=order.quantity, fill_price=price, fill_time=datetime.utcnow())
         filled += 1
-    return {"filled": filled, "rejected": rejected}
+    return {"filled": filled, "rejected": rejected, "cancelled": 0, "events": []}

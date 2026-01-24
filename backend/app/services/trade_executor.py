@@ -12,13 +12,14 @@ from pathlib import Path
 
 from app.services.ib_market import fetch_market_snapshots
 from app.services.ib_order_executor import IBOrderExecutor
-from app.services.ib_settings import ensure_ib_client_id, probe_ib_connection
+from app.services.ib_settings import ensure_ib_client_id, probe_ib_connection, resolve_ib_api_mode
 from app.services.job_lock import JobLock
 from app.services.trade_guard import (
     _read_local_snapshot,
     get_or_create_guard_state,
     record_guard_event,
 )
+from app.services.ib_orders import apply_fill_to_order
 from app.services.trade_order_builder import build_orders
 from app.services.trade_orders import create_trade_order, update_trade_order_status
 from app.services.trade_risk_engine import evaluate_orders
@@ -76,6 +77,51 @@ def _submit_ib_orders(session, orders, *, price_map):
 
 def _execute_orders_with_ib(session, run, orders, *, price_map):
     result = _submit_ib_orders(session, orders, price_map=price_map)
+    events = []
+    if isinstance(result, dict):
+        events = result.get("events") or []
+    order_map = {order.id: order for order in orders}
+    now = datetime.utcnow()
+    for event in events:
+        order = order_map.get(getattr(event, "order_id", None))
+        if not order:
+            continue
+        ib_order_id = getattr(event, "ib_order_id", None)
+        if ib_order_id:
+            order.ib_order_id = ib_order_id
+        status = str(getattr(event, "status", "") or "").strip().upper()
+        if status in {"SUBMITTED", "PRESUBMITTED"}:
+            update_trade_order_status(session, order, {"status": "SUBMITTED"})
+            continue
+        if status == "REJECTED":
+            update_trade_order_status(
+                session,
+                order,
+                {"status": "REJECTED", "params": {"reason": "ib_rejected"}},
+            )
+            continue
+        if status in {"PARTIAL", "FILLED"}:
+            fill_qty = float(getattr(event, "filled", 0.0) or 0.0)
+            if fill_qty <= 0:
+                fill_qty = float(order.quantity)
+            fill_price = getattr(event, "avg_price", None)
+            if fill_price is None:
+                fill_price = price_map.get(order.symbol)
+            if fill_price is not None:
+                apply_fill_to_order(
+                    session,
+                    order,
+                    fill_qty=fill_qty,
+                    fill_price=float(fill_price),
+                    fill_time=now,
+                    exec_id=getattr(event, "exec_id", None),
+                )
+            else:
+                update_trade_order_status(
+                    session,
+                    order,
+                    {"status": "SUBMITTED", "params": {"warn": "fill_price_missing"}},
+                )
     return result
 
 
@@ -475,6 +521,35 @@ def execute_trade_run(
         cancelled = 0
         rejected = 0
         skipped = 0
+
+        ib_settings = ensure_ib_client_id(session)
+        api_mode = resolve_ib_api_mode(ib_settings)
+        if not dry_run and api_mode == "ib":
+            result = _execute_orders_with_ib(session, run, orders, price_map=price_map)
+            if isinstance(result, dict):
+                filled = int(result.get("filled") or 0)
+                rejected = int(result.get("rejected") or 0)
+                cancelled = int(result.get("cancelled") or 0)
+            skipped = sum(1 for order in orders if order.status in {"FILLED", "CANCELED", "REJECTED"})
+            if filled == 0 and rejected == 0 and cancelled == 0:
+                run.status = "running"
+                run.message = "submitted_ib"
+                run.updated_at = datetime.utcnow()
+                session.commit()
+            else:
+                _finalize_run_status(session, run, filled=filled, rejected=rejected, cancelled=cancelled)
+                run.message = "executed_ib"
+                session.commit()
+            return TradeExecutionResult(
+                run_id=run.id,
+                status=run.status,
+                filled=filled,
+                cancelled=cancelled,
+                rejected=rejected,
+                skipped=skipped,
+                message=run.message,
+                dry_run=dry_run,
+            )
 
         for order in orders:
             if order.status in {"FILLED", "CANCELED", "REJECTED"}:

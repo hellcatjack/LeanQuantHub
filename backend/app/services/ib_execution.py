@@ -25,6 +25,7 @@ class ExecutionEvent:
     exec_id: str | None
     filled: float
     avg_price: float | None
+    ib_order_id: int | None = None
 
 
 class _ExecutionClient(EWrapper, EClient):
@@ -85,14 +86,17 @@ class IBExecutionClient:
             symbol = str(getattr(order, "symbol", "") or "").strip().upper()
             side = str(getattr(order, "side", "") or "").strip().upper() or "BUY"
             quantity = float(getattr(order, "quantity", 0) or 0)
+            trade_order_id = getattr(order, "id", None)
+            event_order_id = int(trade_order_id) if trade_order_id is not None else next_id
             if not symbol or quantity <= 0:
                 events.append(
                     ExecutionEvent(
-                        order_id=next_id,
+                        order_id=event_order_id,
                         status="REJECTED",
                         exec_id=None,
                         filled=0.0,
                         avg_price=None,
+                        ib_order_id=None,
                     )
                 )
                 next_id += 1
@@ -109,11 +113,12 @@ class IBExecutionClient:
             client.placeOrder(next_id, contract, ib_order)
             events.append(
                 ExecutionEvent(
-                    order_id=next_id,
+                    order_id=event_order_id,
                     status="SUBMITTED",
                     exec_id=None,
                     filled=0.0,
                     avg_price=None,
+                    ib_order_id=next_id,
                 )
             )
             next_id += 1
