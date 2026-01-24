@@ -1661,6 +1661,7 @@ class TradeRunCreate(BaseModel):
     decision_snapshot_id: int | None = None
     mode: str = "paper"
     orders: list[TradeOrderCreate] = []
+    live_confirm_token: str | None = None
     require_market_health: bool = True
     health_min_success_ratio: float = 1.0
     health_fallback_history: bool = True
@@ -1690,6 +1691,7 @@ class TradeRunOut(BaseModel):
 class TradeRunExecuteRequest(BaseModel):
     dry_run: bool = False
     force: bool = False
+    live_confirm_token: str | None = None
 
 
 class TradeRunExecuteOut(BaseModel):

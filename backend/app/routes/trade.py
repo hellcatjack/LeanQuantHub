@@ -134,6 +134,10 @@ def get_trade_run(run_id: int):
 @router.post("/runs", response_model=TradeRunOut)
 def create_trade_run(payload: TradeRunCreate):
     with get_session() as session:
+        if (payload.mode or "").lower() == "live":
+            token = (payload.live_confirm_token or "").strip().upper()
+            if token != "LIVE":
+                raise HTTPException(status_code=403, detail="live_confirm_required")
         params = payload.model_dump(exclude={"orders"})
         snapshot_id = payload.decision_snapshot_id
         if snapshot_id is None:
@@ -145,6 +149,22 @@ def create_trade_run(payload: TradeRunCreate):
             )
             if latest:
                 snapshot_id = latest.id
+        day_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        existing = (
+            session.query(TradeRun)
+            .filter(
+                TradeRun.project_id == payload.project_id,
+                TradeRun.decision_snapshot_id == snapshot_id,
+                TradeRun.mode == payload.mode,
+                TradeRun.created_at >= day_start,
+            )
+            .order_by(TradeRun.created_at.desc())
+            .first()
+        )
+        if existing:
+            out = TradeRunOut.model_validate(existing, from_attributes=True)
+            out.orders_created = 0
+            return out
         run = TradeRun(
             project_id=payload.project_id,
             decision_snapshot_id=snapshot_id,
@@ -157,16 +177,8 @@ def create_trade_run(payload: TradeRunCreate):
         session.refresh(run)
 
         orders = payload.orders or []
-        if not orders:
-            run.status = "failed"
-            run.message = "orders_empty"
-            run.ended_at = datetime.utcnow()
-            session.commit()
-            out = TradeRunOut.model_validate(run, from_attributes=True)
-            out.orders_created = 0
-            return out
 
-        if payload.require_market_health:
+        if orders and payload.require_market_health:
             symbols = _build_market_symbols(orders)
             health = check_market_health(
                 session,
@@ -226,6 +238,14 @@ def create_trade_run(payload: TradeRunCreate):
 
 @router.post("/runs/{run_id}/execute", response_model=TradeRunExecuteOut)
 def execute_trade_run_route(run_id: int, payload: TradeRunExecuteRequest):
+    with get_session() as session:
+        run = session.get(TradeRun, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="run not found")
+        if (run.mode or "").lower() == "live":
+            token = (payload.live_confirm_token or "").strip().upper()
+            if token != "LIVE":
+                raise HTTPException(status_code=403, detail="live_confirm_required")
     try:
         result = execute_trade_run(run_id, dry_run=payload.dry_run, force=payload.force)
     except RuntimeError as exc:
