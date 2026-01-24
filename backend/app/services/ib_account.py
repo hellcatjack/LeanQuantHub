@@ -284,28 +284,34 @@ def _fetch_account_summary(session, mode: str) -> dict[str, str]:
     settings_row = ensure_ib_client_id(session)
     if resolve_ib_api_mode(settings_row) == "mock":
         return {}
-    with ib_request_lock():
-        with IBAccountSession(
-            settings_row.host,
-            settings_row.port,
-            settings_row.client_id,
-            timeout=5.0,
-        ) as api:
-            return api.request_account_summary(settings_row.account_id)
+    try:
+        with ib_request_lock():
+            with IBAccountSession(
+                settings_row.host,
+                settings_row.port,
+                settings_row.client_id,
+                timeout=5.0,
+            ) as api:
+                return api.request_account_summary(settings_row.account_id)
+    except Exception:
+        return {}
 
 
 def _fetch_account_positions(session, mode: str) -> list[dict[str, object]]:
     settings_row = ensure_ib_client_id(session)
     if resolve_ib_api_mode(settings_row) == "mock":
         return []
-    with ib_request_lock():
-        with IBAccountSession(
-            settings_row.host,
-            settings_row.port,
-            settings_row.client_id,
-            timeout=5.0,
-        ) as api:
-            return api.request_positions()
+    try:
+        with ib_request_lock():
+            with IBAccountSession(
+                settings_row.host,
+                settings_row.port,
+                settings_row.client_id,
+                timeout=5.0,
+            ) as api:
+                return api.request_positions()
+    except Exception:
+        return []
 
 
 def get_account_summary(session, *, mode: str, full: bool, force_refresh: bool = False) -> dict[str, object]:
