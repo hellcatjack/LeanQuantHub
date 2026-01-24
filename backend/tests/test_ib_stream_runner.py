@@ -7,7 +7,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 import app.services.ib_stream as ib_stream
-from app.services.ib_stream_runner import StreamSnapshotWriter
+from app.services.ib_stream_runner import StreamSnapshotWriter, StreamStatusWriter
 
 
 def test_stream_runner_mock_writes_files(tmp_path):
@@ -32,3 +32,9 @@ def test_stream_snapshot_writer_writes_symbol_snapshot(tmp_path: Path):
     writer = StreamSnapshotWriter(tmp_path)
     writer.write_snapshot("SPY", {"last": 100.0, "timestamp": "2026-01-23T00:00:00Z"})
     assert (tmp_path / "SPY.json").exists()
+
+
+def test_stream_status_writer_writes_status(tmp_path: Path):
+    writer = StreamStatusWriter(tmp_path)
+    writer.write_status(status="running", symbols=["SPY"], error=None, market_data_type="delayed")
+    assert (tmp_path / "_status.json").exists()
