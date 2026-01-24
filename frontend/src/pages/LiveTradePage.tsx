@@ -42,6 +42,18 @@ interface IBMarketHealthResult {
   errors: string[];
 }
 
+interface IBMarketSnapshotItem {
+  symbol: string;
+  data?: Record<string, any> | null;
+  error?: string | null;
+}
+
+interface IBMarketSnapshotOut {
+  total: number;
+  success: number;
+  items: IBMarketSnapshotItem[];
+}
+
 interface IBHistoryJob {
   id: number;
   status: string;
@@ -242,6 +254,10 @@ export default function LiveTradePage() {
   const [ibStreamLoading, setIbStreamLoading] = useState(false);
   const [ibStreamActionLoading, setIbStreamActionLoading] = useState(false);
   const [ibStreamError, setIbStreamError] = useState("");
+  const [marketSnapshot, setMarketSnapshot] = useState<IBMarketSnapshotItem | null>(null);
+  const [marketSnapshotSymbol, setMarketSnapshotSymbol] = useState("");
+  const [marketSnapshotLoading, setMarketSnapshotLoading] = useState(false);
+  const [marketSnapshotError, setMarketSnapshotError] = useState("");
   const [tradeRuns, setTradeRuns] = useState<TradeRun[]>([]);
   const [tradeOrders, setTradeOrders] = useState<TradeOrder[]>([]);
   const [guardState, setGuardState] = useState<TradeGuardState | null>(null);
@@ -491,6 +507,37 @@ export default function LiveTradePage() {
     }
   };
 
+  const loadMarketSnapshot = async (symbol?: string) => {
+    const target =
+      symbol || ibStreamStatus?.subscribed_symbols?.[0] || marketSnapshotSymbol || "";
+    if (!target) {
+      setMarketSnapshot(null);
+      setMarketSnapshotSymbol("");
+      return;
+    }
+    setMarketSnapshotLoading(true);
+    setMarketSnapshotError("");
+    try {
+      const res = await api.post<IBMarketSnapshotOut>("/api/ib/market/snapshot", {
+        symbols: [target],
+        store: false,
+        fallback_history: true,
+      });
+      const item = res.data.items?.[0] ?? null;
+      setMarketSnapshotSymbol(target);
+      setMarketSnapshot(item);
+      if (item?.error) {
+        setMarketSnapshotError(String(item.error));
+      }
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("trade.snapshotError");
+      setMarketSnapshotError(String(detail));
+      setMarketSnapshot(null);
+    } finally {
+      setMarketSnapshotLoading(false);
+    }
+  };
+
   const startIbStream = async () => {
     setIbStreamActionLoading(true);
     setIbStreamError("");
@@ -642,6 +689,19 @@ export default function LiveTradePage() {
     }
   }, [ibSettings?.market_data_type]);
 
+  const streamSymbolKey = useMemo(() => {
+    return (ibStreamStatus?.subscribed_symbols || []).join(",");
+  }, [ibStreamStatus?.subscribed_symbols]);
+
+  useEffect(() => {
+    if (streamSymbolKey) {
+      loadMarketSnapshot(ibStreamStatus?.subscribed_symbols?.[0]);
+    } else {
+      setMarketSnapshot(null);
+      setMarketSnapshotSymbol("");
+    }
+  }, [streamSymbolKey]);
+
   const isConfigured = useMemo(() => {
     if (!ibSettings) {
       return false;
@@ -785,6 +845,32 @@ export default function LiveTradePage() {
   const streamMarketDataType = useMemo(() => {
     return ibStreamStatus?.market_data_type || ibSettings?.market_data_type || t("common.none");
   }, [ibSettings?.market_data_type, ibStreamStatus?.market_data_type, t]);
+
+  const snapshotData = marketSnapshot?.data || {};
+  const snapshotPrice = useMemo(() => {
+    const last = Number(snapshotData.last ?? snapshotData.close ?? snapshotData.bid ?? snapshotData.ask);
+    return Number.isFinite(last) ? last : null;
+  }, [snapshotData]);
+  const snapshotPrevClose = useMemo(() => {
+    const prev = Number(snapshotData.close ?? snapshotData.open);
+    return Number.isFinite(prev) ? prev : null;
+  }, [snapshotData]);
+  const snapshotChange = useMemo(() => {
+    if (snapshotPrice == null || snapshotPrevClose == null) {
+      return null;
+    }
+    return snapshotPrice - snapshotPrevClose;
+  }, [snapshotPrice, snapshotPrevClose]);
+  const snapshotChangePct = useMemo(() => {
+    if (snapshotChange == null || snapshotPrevClose == null || snapshotPrevClose === 0) {
+      return null;
+    }
+    return (snapshotChange / snapshotPrevClose) * 100;
+  }, [snapshotChange, snapshotPrevClose]);
+  const snapshotVolume = useMemo(() => {
+    const volume = Number(snapshotData.volume ?? snapshotData.last_size ?? snapshotData.ask_size);
+    return Number.isFinite(volume) ? volume : null;
+  }, [snapshotData]);
 
   return (
     <div className="main">
@@ -940,6 +1026,48 @@ export default function LiveTradePage() {
               <a className="button-secondary" href="/data">
                 {t("trade.openData")}
               </a>
+            </div>
+          </div>
+
+          <div className="card">
+            <div className="card-title">{t("trade.snapshotTitle")}</div>
+            <div className="card-meta">{t("trade.snapshotMeta")}</div>
+            <div className="snapshot-hero" style={{ marginTop: "12px" }}>
+              <div className="snapshot-symbol">
+                {marketSnapshotSymbol || t("trade.snapshotEmpty")}
+              </div>
+              <div className="snapshot-price">
+                {snapshotPrice == null ? "--" : snapshotPrice.toFixed(2)}
+              </div>
+              <div
+                className={`snapshot-change ${
+                  snapshotChange != null && snapshotChange >= 0 ? "up" : "down"
+                }`}
+              >
+                {snapshotChange == null || snapshotChangePct == null
+                  ? "--"
+                  : `${snapshotChange >= 0 ? "+" : ""}${snapshotChange.toFixed(2)} (${snapshotChangePct.toFixed(2)}%)`}
+              </div>
+            </div>
+            <div className="meta-list" style={{ marginTop: "12px" }}>
+              <div className="meta-row">
+                <span>{t("trade.snapshotVolume")}</span>
+                <strong>{snapshotVolume == null ? "-" : snapshotVolume.toLocaleString()}</strong>
+              </div>
+              <div className="meta-row">
+                <span>{t("trade.snapshotUpdatedAt")}</span>
+                <strong>{formatDateTime(snapshotData.timestamp)}</strong>
+              </div>
+            </div>
+            {marketSnapshotError && <div className="form-error">{marketSnapshotError}</div>}
+            <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+              <button
+                className="button-secondary"
+                onClick={() => loadMarketSnapshot()}
+                disabled={marketSnapshotLoading}
+              >
+                {marketSnapshotLoading ? t("common.actions.loading") : t("trade.snapshotRefresh")}
+              </button>
             </div>
           </div>
 

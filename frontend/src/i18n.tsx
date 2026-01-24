@@ -2164,6 +2164,13 @@ const messages: Record<Locale, MessageTree> = {
       overviewOrderAt: "订单时间",
       overviewAlertLabel: "最近告警",
       overviewAlertAt: "告警时间",
+      snapshotTitle: "行情快照",
+      snapshotMeta: "标的最新价格与成交概览",
+      snapshotEmpty: "暂无快照数据",
+      snapshotVolume: "成交量",
+      snapshotUpdatedAt: "更新时间",
+      snapshotRefresh: "刷新快照",
+      snapshotError: "行情快照加载失败",
       overview: {
         status: {
           ok: "正常",
@@ -4448,6 +4455,13 @@ const messages: Record<Locale, MessageTree> = {
       overviewOrderAt: "Order Time",
       overviewAlertLabel: "Latest Alert",
       overviewAlertAt: "Alert Time",
+      snapshotTitle: "Market Snapshot",
+      snapshotMeta: "Latest price and volume overview",
+      snapshotEmpty: "No snapshot available",
+      snapshotVolume: "Volume",
+      snapshotUpdatedAt: "Updated at",
+      snapshotRefresh: "Refresh Snapshot",
+      snapshotError: "Failed to load market snapshot",
       overview: {
         status: {
           ok: "OK",

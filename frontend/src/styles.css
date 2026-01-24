@@ -439,6 +439,37 @@ a {
   margin-top: 6px;
 }
 
+.snapshot-hero {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.snapshot-symbol {
+  font-size: 14px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.snapshot-price {
+  font-size: 28px;
+  font-weight: 700;
+}
+
+.snapshot-change {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.snapshot-change.up {
+  color: #16a34a;
+}
+
+.snapshot-change.down {
+  color: #ef4444;
+}
+
 .algorithms-sidebar,
 .algorithms-main {
   display: flex;
