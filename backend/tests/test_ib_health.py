@@ -8,7 +8,7 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from types import SimpleNamespace
 from app.services import ib_health
-from app.routes import ib as ib_routes
+from app.routes import brokerage as brokerage_routes
 
 
 def test_ib_health_combines_stream_and_probe(monkeypatch):
@@ -28,13 +28,13 @@ def test_ib_health_route(monkeypatch):
     def _get_session():
         yield None
 
-    monkeypatch.setattr(ib_routes, "get_session", _get_session)
+    monkeypatch.setattr(brokerage_routes, "get_session", _get_session)
     monkeypatch.setattr(
-        ib_routes,
+        brokerage_routes,
         "build_ib_health",
         lambda _s: {"connection_status": "connected", "stream_status": "connected", "stream_last_heartbeat": None},
     )
 
-    resp = ib_routes.get_ib_health()
+    resp = brokerage_routes.get_ib_health()
     assert resp.connection_status == "connected"
     assert resp.stream_status == "connected"
