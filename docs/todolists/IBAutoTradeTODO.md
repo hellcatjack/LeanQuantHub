@@ -88,14 +88,14 @@
 
 ## Phase 2：订单与执行（必做）
 ### 2.1 订单状态机
-- [ ] NEW → SUBMITTED → PARTIAL → FILLED/CANCELED/REJECTED。
-- [ ] clientOrderId 幂等（重试不重复下单）。
-- [ ] 成交回报回写 DB。
+- [x] NEW → SUBMITTED → PARTIAL → FILLED/CANCELED/REJECTED。
+- [x] clientOrderId 幂等（重试不重复下单）。
+- [x] 成交回报回写 DB。
 - 验收：重复触发不会产生重复订单。
 
 ### 2.2 订单拆分与下单规则
-- [ ] 权重 → 目标市值 → 股数计算（整数、最小交易单位）。
-- [ ] 价格来源：IB 实时/近实时。
+- [x] 权重 → 目标市值 → 股数计算（整数、最小交易单位）。
+- [x] 价格来源：IB 实时/近实时。
 - [ ] 订单类型：首期支持 MKT 与 LMT（默认 MKT）。
 - 验收：输入权重能生成合法订单。
 

@@ -133,6 +133,17 @@ interface TradeRun {
   ended_at?: string | null;
 }
 
+interface TradeRunExecuteOut {
+  run_id: number;
+  status: string;
+  filled: number;
+  cancelled: number;
+  rejected: number;
+  skipped: number;
+  message?: string | null;
+  dry_run: boolean;
+}
+
 interface TradeOrder {
   id: number;
   run_id?: number | null;
@@ -263,6 +274,13 @@ export default function LiveTradePage() {
   const [guardState, setGuardState] = useState<TradeGuardState | null>(null);
   const [tradeSettings, setTradeSettings] = useState<TradeSettings | null>(null);
   const [tradeSettingsError, setTradeSettingsError] = useState("");
+  const [executeForm, setExecuteForm] = useState({
+    run_id: "",
+    live_confirm_token: "",
+  });
+  const [executeLoading, setExecuteLoading] = useState(false);
+  const [executeError, setExecuteError] = useState("");
+  const [executeResult, setExecuteResult] = useState("");
   const [guardLoading, setGuardLoading] = useState(false);
   const [guardError, setGuardError] = useState("");
   const [tradeError, setTradeError] = useState("");
@@ -286,6 +304,10 @@ export default function LiveTradePage() {
 
   const updateIbStreamForm = (key: keyof typeof ibStreamForm, value: any) => {
     setIbStreamForm((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const updateExecuteForm = (key: keyof typeof executeForm, value: string) => {
+    setExecuteForm((prev) => ({ ...prev, [key]: value }));
   };
 
   const loadIbSettings = async () => {
@@ -632,6 +654,36 @@ export default function LiveTradePage() {
     }
   };
 
+  const executeTradeRun = async () => {
+    setExecuteLoading(true);
+    setExecuteError("");
+    setExecuteResult("");
+    const runId = Number.parseInt(executeForm.run_id, 10);
+    if (!runId) {
+      setExecuteError(t("trade.executeRunRequired"));
+      setExecuteLoading(false);
+      return;
+    }
+    try {
+      const payload = {
+        dry_run: false,
+        force: false,
+        live_confirm_token: executeForm.live_confirm_token || undefined,
+      };
+      const res = await api.post<TradeRunExecuteOut>(`/api/trade/runs/${runId}/execute`, payload);
+      setExecuteResult(t("trade.executeSuccess"));
+      setTradeError("");
+      if (res.data?.status) {
+        await loadTradeActivity();
+      }
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("trade.executeError");
+      setExecuteError(String(detail));
+    } finally {
+      setExecuteLoading(false);
+    }
+  };
+
   const refreshAll = async () => {
     setLoading(true);
     await Promise.all([
@@ -677,6 +729,12 @@ export default function LiveTradePage() {
       setIbStreamForm((prev) => ({ ...prev, project_id: String(latestTradeRun.project_id) }));
     }
   }, [latestTradeRun?.project_id, ibStreamForm.project_id]);
+
+  useEffect(() => {
+    if (latestTradeRun?.id && !executeForm.run_id) {
+      setExecuteForm((prev) => ({ ...prev, run_id: String(latestTradeRun.id) }));
+    }
+  }, [latestTradeRun?.id, executeForm.run_id]);
 
   useEffect(() => {
     if (ibSettings?.market_data_type) {
@@ -1792,6 +1850,40 @@ export default function LiveTradePage() {
                 )}
               </tbody>
             </table>
+            <div className="form-grid" style={{ marginTop: "12px" }}>
+              <div className="form-row">
+                <label className="form-label">{t("trade.executeRunId")}</label>
+                <input
+                  type="number"
+                  className="form-input"
+                  value={executeForm.run_id}
+                  onChange={(event) => updateExecuteForm("run_id", event.target.value)}
+                />
+                <div className="form-hint">{t("trade.executeRunIdHint")}</div>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("trade.executeToken")}</label>
+                <input
+                  type="text"
+                  className="form-input"
+                  value={executeForm.live_confirm_token}
+                  placeholder={t("trade.executeTokenHint")}
+                  onChange={(event) => updateExecuteForm("live_confirm_token", event.target.value)}
+                />
+                <div className="form-hint">{t("trade.executeTokenHint")}</div>
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+              <button
+                className="button-primary"
+                onClick={executeTradeRun}
+                disabled={executeLoading}
+              >
+                {executeLoading ? t("common.actions.loading") : t("trade.executeSubmit")}
+              </button>
+            </div>
+            {executeError && <div className="form-hint">{executeError}</div>}
+            {executeResult && <div className="form-hint">{executeResult}</div>}
           </div>
         </div>
 

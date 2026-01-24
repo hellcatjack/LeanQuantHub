@@ -8,4 +8,10 @@ describe("LiveTradePage", () => {
     const html = ReactDOMServer.renderToString(React.createElement(LiveTradePage));
     expect(html).toContain("trade.snapshotTitle");
   });
+
+  it("renders execute trade run form", () => {
+    const html = ReactDOMServer.renderToString(React.createElement(LiveTradePage));
+    expect(html).toContain("trade.executeRunId");
+    expect(html).toContain("trade.executeSubmit");
+  });
 });
