@@ -19,50 +19,22 @@ def _make_session():
     return Session()
 
 
-def test_ensure_ib_client_id_auto_increments(monkeypatch):
+def test_ensure_ib_client_id_no_probe(monkeypatch):
     session = _make_session()
     try:
         row = IBSettings(client_id=101, host="127.0.0.1", port=7497, api_mode="ib")
         session.add(row)
         session.commit()
 
-        calls = {"n": 0}
-
-        def _fake_probe(host, port, client_id, timeout):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return ("disconnected", "ibapi error 326 clientId in use")
-            return ("connected", "ibapi ok")
-
-        monkeypatch.setattr(ib_settings, "_probe_ib_api", _fake_probe)
+        monkeypatch.setattr(
+            ib_settings,
+            "_probe_ib_api",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("probe")),
+            raising=False,
+        )
 
         updated = ib_settings.ensure_ib_client_id(session, max_attempts=3, timeout_seconds=0.1)
-        assert updated.client_id == 102
-    finally:
-        session.close()
-
-
-def test_probe_updates_client_id_on_conflict(monkeypatch):
-    session = _make_session()
-    try:
-        row = IBSettings(client_id=101, host="127.0.0.1", port=7497, api_mode="ib")
-        session.add(row)
-        session.commit()
-
-        calls = {"n": 0}
-
-        def _fake_probe(host, port, client_id, timeout):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return ("disconnected", "ibapi error 326 clientId in use")
-            return ("connected", "ibapi ok")
-
-        monkeypatch.setattr(ib_settings, "_probe_ib_api", _fake_probe)
-
-        state = ib_settings.probe_ib_connection(session, timeout_seconds=0.1)
-        assert state.status in {"connected", "mock"}
-        session.refresh(row)
-        assert row.client_id == 102
+        assert updated.client_id == 101
     finally:
         session.close()
 
@@ -73,25 +45,32 @@ def test_default_client_id_is_101(monkeypatch):
     assert defaults["client_id"] == 101
 
 
-def test_probe_ib_connection_falls_back_on_conflict(monkeypatch):
+def test_probe_ib_connection_uses_bridge_only(monkeypatch):
     session = _make_session()
     try:
         row = IBSettings(client_id=101, host="127.0.0.1", port=7497, api_mode="ib")
         session.add(row)
         session.commit()
 
-        def _fake_probe(host, port, client_id, timeout):
-            return ("disconnected", "ibapi error 326 clientId in use")
-
-        monkeypatch.setattr(ib_settings, "_probe_ib_api", _fake_probe)
+        monkeypatch.setattr(
+            ib_settings,
+            "_probe_ib_api",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("probe")),
+            raising=False,
+        )
         monkeypatch.setattr(
             ib_settings,
             "_probe_ib_account_session",
-            lambda *args, **kwargs: True,
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("probe")),
             raising=False,
+        )
+        monkeypatch.setattr(
+            ib_settings.socket,
+            "create_connection",
+            lambda *args, **kwargs: (_ for _ in ()).throw(OSError("blocked")),
         )
 
         state = ib_settings.probe_ib_connection(session, timeout_seconds=0.1)
-        assert state.status == "connected"
+        assert state.status == "disconnected"
     finally:
         session.close()

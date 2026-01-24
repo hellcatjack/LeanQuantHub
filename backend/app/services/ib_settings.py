@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import os
 import socket
-import threading
-import time
 from datetime import datetime
 
 from app.models import IBConnectionState, IBSettings
@@ -52,18 +50,6 @@ def resolve_ib_api_mode(settings: IBSettings | None) -> str:
     return mode
 
 
-_CLIENT_ID_CONFLICT_MARKERS = ("clientid", "client id", "client_id")
-
-
-def _is_client_id_conflict(message: str | None) -> bool:
-    if not message:
-        return False
-    lowered = message.lower()
-    if any(marker in lowered for marker in _CLIENT_ID_CONFLICT_MARKERS):
-        return "in use" in lowered or "duplicate" in lowered or "already" in lowered
-    return False
-
-
 def get_or_create_ib_state(session) -> IBConnectionState:
     row = session.query(IBConnectionState).first()
     if row:
@@ -99,114 +85,17 @@ def update_ib_state(
     return row
 
 
-def _probe_ib_api(
-    host: str,
-    port: int,
-    client_id: int,
-    timeout_seconds: float,
-) -> tuple[str, str] | None:
-    try:
-        from ibapi.client import EClient
-        from ibapi.wrapper import EWrapper
-    except Exception:
-        return None
-
-    class ProbeClient(EWrapper, EClient):
-        def __init__(self) -> None:
-            EWrapper.__init__(self)
-            EClient.__init__(self, self)
-            self._ready = threading.Event()
-            self._error: str | None = None
-
-        def nextValidId(self, orderId: int) -> None:  # noqa: N802
-            self._ready.set()
-
-        def error(self, reqId, errorCode, errorString, advancedOrderRejectJson=""):  # type: ignore[override]  # noqa: N802
-            fatal_codes = {502, 503, 504, 1100, 1101, 1102}
-            if _is_client_id_conflict(errorString):
-                self._error = f"client_id_conflict {errorCode} {errorString}"
-                self._ready.set()
-                return
-            if errorCode in fatal_codes:
-                self._error = f"{errorCode} {errorString}"
-                self._ready.set()
-
-    client = ProbeClient()
-    try:
-        client.connect(host, int(port), int(client_id))
-    except Exception as exc:
-        return ("disconnected", f"ibapi connect failed ({exc.__class__.__name__})")
-
-    thread = threading.Thread(target=client.run, daemon=True)
-    thread.start()
-    deadline = time.time() + timeout_seconds
-    while time.time() < deadline:
-        if client._ready.wait(timeout=0.1):
-            break
-
-    status = "connected"
-    message = "ibapi ok"
-    if client._error:
-        status = "disconnected"
-        message = f"ibapi error {client._error}"
-    elif not client._ready.is_set():
-        status = "disconnected"
-        message = "ibapi timeout"
-
-    client.disconnect()
-    return (status, message)
-
-
-def _probe_ib_account_session(
-    host: str,
-    port: int,
-    client_id: int,
-    timeout_seconds: float,
-) -> bool:
-    try:
-        from app.services.ib_account import IBAccountSession
-    except Exception:
-        return False
-    try:
-        with IBAccountSession(host, port, client_id, timeout=timeout_seconds) as api:
-            api.request_account_summary(None, "NetLiquidation")
-        return True
-    except Exception:
-        return False
-
-
 def ensure_ib_client_id(
     session,
     *,
     max_attempts: int = 5,
     timeout_seconds: float = 2.0,
 ) -> IBSettings:
-    settings = get_or_create_ib_settings(session)
-    if resolve_ib_api_mode(settings) == "mock":
-        return settings
-    host = settings.host
-    port = settings.port
-    client_id = int(settings.client_id or 101)
-    attempts = max(1, int(max_attempts))
-    for _ in range(attempts):
-        result = _probe_ib_api(host, port, client_id, timeout_seconds)
-        if result:
-            status, message = result
-            if status == "connected":
-                if client_id != settings.client_id:
-                    settings.client_id = client_id
-                    session.commit()
-                    session.refresh(settings)
-                return settings
-            if _is_client_id_conflict(message):
-                client_id += 1
-                continue
-        break
-    return settings
+    return get_or_create_ib_settings(session)
 
 
 def probe_ib_connection(session, *, timeout_seconds: float = 2.0) -> IBConnectionState:
-    settings = ensure_ib_client_id(session, timeout_seconds=timeout_seconds)
+    settings = get_or_create_ib_settings(session)
     if resolve_ib_api_mode(settings) == "mock":
         return update_ib_state(
             session,
@@ -216,38 +105,6 @@ def probe_ib_connection(session, *, timeout_seconds: float = 2.0) -> IBConnectio
         )
     host = settings.host
     port = settings.port
-    client_id = settings.client_id
-    if _probe_ib_account_session(host, port, int(client_id), timeout_seconds):
-        return update_ib_state(
-            session,
-            status="connected",
-            message="ibapi ok (account probe)",
-            heartbeat=True,
-        )
-    api_result = _probe_ib_api(host, port, client_id, timeout_seconds)
-    if api_result:
-        status, message = api_result
-        if status == "connected":
-            return update_ib_state(
-                session,
-                status=status,
-                message=message,
-                heartbeat=True,
-            )
-        if _is_client_id_conflict(message):
-            if _probe_ib_account_session(host, port, int(client_id), timeout_seconds):
-                return update_ib_state(
-                    session,
-                    status="connected",
-                    message="ibapi ok (fallback)",
-                    heartbeat=True,
-                )
-        return update_ib_state(
-            session,
-            status=status,
-            message=message,
-            heartbeat=True,
-        )
     try:
         with socket.create_connection((host, port), timeout=timeout_seconds):
             return update_ib_state(
