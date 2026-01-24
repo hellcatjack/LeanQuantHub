@@ -40,7 +40,8 @@ def build_orders(
         side = "BUY" if weight_value >= 0 else "SELL"
         target = abs(weight_value) * effective_value
         raw_qty = target / price
-        qty = int(raw_qty // max(1, lot_size)) * max(1, lot_size)
+        lot = max(1, int(lot_size))
+        qty = int(raw_qty / lot + 0.5) * lot
         if qty <= 0:
             continue
         orders.append(

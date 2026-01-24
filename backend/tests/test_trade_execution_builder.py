@@ -13,6 +13,7 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from app.models import Base, Project, TradeRun, DecisionSnapshot, TradeOrder, TradeSettings
 import app.services.trade_executor as trade_executor
+from app.services.trade_order_builder import build_orders
 
 
 def _make_session_factory():
@@ -142,3 +143,10 @@ def test_execute_blocks_when_execution_source_not_ib(tmp_path, monkeypatch):
         assert result.message == "execution_data_source_mismatch"
     finally:
         session.close()
+
+
+def test_build_orders_rounding():
+    items = [{"symbol": "SPY", "weight": 0.1}]
+    price_map = {"SPY": 60}
+    orders = build_orders(items, price_map=price_map, portfolio_value=1000)
+    assert orders[0]["quantity"] == 2
