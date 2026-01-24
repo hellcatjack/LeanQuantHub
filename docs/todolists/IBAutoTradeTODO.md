@@ -66,9 +66,9 @@
 
 ## Phase 1：Lean Bridge 数据接入（必做）
 ### 1.1 Bridge 输出规范
-- [ ] Lean ResultHandler 输出：`account_summary.json`、`positions.json`、`quotes.json`、`execution_events.jsonl`、`lean_bridge_status.json`。
-- [ ] 输出目录统一为 `/data/share/stock/data/lean_bridge`（允许配置覆盖）。
-- [ ] 原子写入/轮转/心跳更新，避免半写入；行情/持仓支持节流更新。
+- [x] Lean ResultHandler 输出：`account_summary.json`、`positions.json`、`quotes.json`、`execution_events.jsonl`、`lean_bridge_status.json`。
+- [x] 输出目录统一为 `/data/share/stock/data/lean_bridge`（允许配置覆盖）。
+- [x] 原子写入/轮转/心跳更新，避免半写入；行情/持仓支持节流更新。
 - 验收：后端可读取并识别 `stale`。
 
 ### 1.2 行情/账户读取与缓存
@@ -77,7 +77,7 @@
 - 验收：UI/日志可查看 bridge 更新状态。
 
 ### 1.3 数据源策略（逻辑一致）
-- [ ] 执行/账户/行情/成交来自 Lean bridge。
+- [x] 执行/账户/行情/成交来自 Lean bridge。
 - [ ] 研究/回测/信号生成使用 Alpha（PIT）。
 - [ ] 对账报告：回测价 vs 实盘成交价偏差解释。
 - 验收：执行不依赖 Alpha 行情，但偏差可解释。
