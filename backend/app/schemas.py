@@ -3,7 +3,7 @@
 from datetime import date, datetime
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ProjectCreate(BaseModel):
@@ -1433,6 +1433,32 @@ class IBStreamSnapshotOut(BaseModel):
     symbol: str
     data: dict | None
     error: str | None = None
+
+
+class IBAccountSummaryOut(BaseModel):
+    items: dict[str, float | str | None] = Field(default_factory=dict)
+    refreshed_at: datetime | None = None
+    source: str | None = None
+    stale: bool = False
+    full: bool = False
+
+
+class IBAccountPositionOut(BaseModel):
+    symbol: str
+    position: float
+    avg_cost: float | None = None
+    market_price: float | None = None
+    market_value: float | None = None
+    unrealized_pnl: float | None = None
+    realized_pnl: float | None = None
+    account: str | None = None
+    currency: str | None = None
+
+
+class IBAccountPositionsOut(BaseModel):
+    items: list[IBAccountPositionOut] = Field(default_factory=list)
+    refreshed_at: datetime | None = None
+    stale: bool = False
 
 
 class TradeSettingsOut(BaseModel):
