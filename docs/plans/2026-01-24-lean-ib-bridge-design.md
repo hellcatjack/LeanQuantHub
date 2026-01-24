@@ -22,7 +22,7 @@
 
 ## 核心决策
 - **移除**所有 IB API 直连执行与数据获取逻辑。
-- **新增 Lean Bridge 输出规范**，后端仅 ingest 输出文件。
+- **采用 Lean ResultHandler 输出桥接**（自定义 `LeanBridgeResultHandler`），后端仅 ingest 输出文件。
 - **`/api/ib/*` 仅保留读接口**（配置/订阅/历史补齐等写操作下线）。
 
 ## Lean Bridge 输出规范
@@ -73,6 +73,18 @@
 ```json
 {"order_id": 123, "symbol": "AAPL", "status": "FILLED", "filled": 10, "avg_price": 182.1, "exec_id": "123-1", "time": "2026-01-24T10:00:05Z"}
 ```
+5) `lean_bridge_status.json`
+```json
+{
+  "last_seen_utc": "2026-01-24T10:00:10Z",
+  "last_account_write": "2026-01-24T10:00:00Z",
+  "last_positions_write": "2026-01-24T10:00:00Z",
+  "last_quotes_write": "2026-01-24T10:00:01Z",
+  "last_event_append": "2026-01-24T10:00:05Z",
+  "last_error": null,
+  "event_lag_ms": 1200
+}
+```
 
 ### 频率建议
 - account/positions：30~60s
@@ -92,6 +104,9 @@
 - 文件缺失 → 标记 `stale=true`，保留旧缓存。
 - JSON 解析失败 → 记录 `last_error`，不覆盖旧值。
 - 事件重复 → 去重写入。
+### 文件写入保证
+- `account_summary.json/positions.json/quotes.json` 采用**原子写入**（临时文件 + 覆盖）。
+- `execution_events.jsonl` 使用**追加写**；超过阈值（如 50MB）进行轮转（`execution_events.YYYYMMDD.jsonl`）。
 
 ### 可观测性
 - `lean_bridge_status.json`：`last_seen` / `last_error` / `stale_flags` / `event_lag_ms`。
@@ -126,8 +141,34 @@
 3) 订单/成交回写与 Lean 事件一致，重复 ingest 不重复写入。
 4) 交易执行仅走 Lean IB Brokerage。
 
+## Lean 侧落地（ResultHandler）
+### 处理器名称
+- `StockLean.LeanBridgeResultHandler`（建议放在 `Lean_git/Engine/Results` 或 `Lean_git/Engine/Results/Bridge`）
+
+### 配置落地
+- `Launcher/config.json` 的 live 环境新增配置：
+  - `"result-handler": "StockLean.LeanBridgeResultHandler"`
+  - `"lean-bridge-output-dir": "/app/stocklean/artifacts/lean_bridge"`
+
+### 输出来源
+- 账户摘要与持仓：`IAlgorithm.Portfolio` + `IAlgorithm.Securities`。
+- 行情快照：优先使用 `Securities[symbol].Price` 及 `SecurityCache`（last/bid/ask/volume）。
+- 订单事件：`OrderEvent` 回调追加写入 `execution_events.jsonl`。
+
+## 测试与验证
+### Lean 侧单元测试
+1) 输出文件写入（account/positions/quotes）。
+2) 订单事件追加（execution_events.jsonl）。
+3) 原子写入失败场景（旧文件不被破坏）。
+
+### 集成验证
+1) 启动 live paper 运行（TWS 已开）。
+2) 触发 `trade_executor` 执行意图并启动 Lean。
+3) 确认 `artifacts/lean_bridge` 生成文件。
+4) `/api/ib/account/summary` 返回 `source=lean_bridge` 且 `stale=false`。
+5) 实盘交易页面可见账户与持仓数据。
+
 ## 风险与对策
 - **Lean 输出字段不足** → 需扩展 Lean 侧输出插件/脚本。
 - **事件延迟** → 桥接状态显示延迟与滞后告警。
 - **大频率文件写入** → 采用轮询间隔与增量 append。
-
