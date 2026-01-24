@@ -15,6 +15,8 @@ from app.schemas import (
     IBContractCacheOut,
     IBContractRefreshOut,
     IBContractRefreshRequest,
+    IBAccountSummaryOut,
+    IBAccountPositionsOut,
     IBHistoryJobCreate,
     IBHistoryJobOut,
     IBHistoricalOut,
@@ -44,6 +46,7 @@ from app.services.ib_market import (
     fetch_market_snapshots,
     refresh_contract_cache,
 )
+from app.services.ib_account import get_account_summary, get_account_positions
 from app.services.ib_history_runner import cancel_ib_history_job, run_ib_history_job
 from app.services.project_symbols import collect_active_project_symbols
 from app.services import ib_stream
@@ -126,7 +129,28 @@ def get_ib_health():
 def get_ib_status_overview():
     with get_session() as session:
         payload = build_ib_status_overview(session)
-        return IBStatusOverviewOut(**payload)
+    return IBStatusOverviewOut(**payload)
+
+
+@router.get("/account/summary", response_model=IBAccountSummaryOut)
+def get_ib_account_summary(mode: str = "paper", full: bool = False):
+    with get_session() as session:
+        payload = get_account_summary(session, mode=mode, full=full, force_refresh=False)
+        return IBAccountSummaryOut(**payload)
+
+
+@router.get("/account/positions", response_model=IBAccountPositionsOut)
+def get_ib_account_positions(mode: str = "paper"):
+    with get_session() as session:
+        payload = get_account_positions(session, mode=mode, force_refresh=False)
+        return IBAccountPositionsOut(**payload)
+
+
+@router.post("/account/refresh", response_model=IBAccountSummaryOut)
+def refresh_ib_account_summary(mode: str = "paper", full: bool = True):
+    with get_session() as session:
+        payload = get_account_summary(session, mode=mode, full=full, force_refresh=True)
+        return IBAccountSummaryOut(**payload)
 
 
 @router.post("/state/heartbeat", response_model=IBConnectionStateOut)
