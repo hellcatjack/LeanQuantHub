@@ -4,13 +4,22 @@ import json
 import subprocess
 from pathlib import Path
 
+from app.core.config import settings
+
 subprocess_run = subprocess.run
+
+
+def _bridge_output_dir() -> str:
+    base = settings.data_root or "/data/share/stock/data"
+    return str(Path(base) / "lean_bridge")
 
 
 def build_execution_config(*, intent_path: str, brokerage: str) -> dict:
     return {
         "brokerage": brokerage,
         "execution-intent-path": intent_path,
+        "result-handler": "QuantConnect.Lean.Engine.Results.LeanBridgeResultHandler",
+        "lean-bridge-output-dir": _bridge_output_dir(),
     }
 
 

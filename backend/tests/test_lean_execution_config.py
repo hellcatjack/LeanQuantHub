@@ -15,3 +15,11 @@ def test_build_execution_config_includes_intent_path(tmp_path):
     )
     assert config["execution-intent-path"].endswith("intent.json")
     assert "brokerage" in config
+
+def test_execution_config_includes_bridge_result_handler():
+    cfg = lean_execution.build_execution_config(
+        intent_path="/tmp/intent.json",
+        brokerage="InteractiveBrokersBrokerage",
+    )
+    assert cfg["result-handler"].endswith("LeanBridgeResultHandler")
+    assert cfg["lean-bridge-output-dir"] == "/data/share/stock/data/lean_bridge"

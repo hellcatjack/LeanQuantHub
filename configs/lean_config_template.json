@@ -32,6 +32,18 @@
         "QuantConnect.Lean.Engine.HistoricalData.SubscriptionDataReaderHistoryProvider"
       ],
       "transaction-handler": "QuantConnect.Lean.Engine.TransactionHandlers.BacktestingTransactionHandler"
+    },
+    "live": {
+      "live-mode": true,
+      "setup-handler": "QuantConnect.Lean.Engine.Setup.BrokerageSetupHandler",
+      "result-handler": "QuantConnect.Lean.Engine.Results.LeanBridgeResultHandler",
+      "data-feed-handler": "QuantConnect.Lean.Engine.DataFeeds.LiveTradingDataFeed",
+      "real-time-handler": "QuantConnect.Lean.Engine.RealTime.LiveTradingRealTimeHandler",
+      "history-provider": [
+        "QuantConnect.Lean.Engine.HistoricalData.SubscriptionDataReaderHistoryProvider"
+      ],
+      "transaction-handler": "QuantConnect.Lean.Engine.TransactionHandlers.BrokerageTransactionHandler"
     }
-  }
+  },
+  "lean-bridge-output-dir": "/data/share/stock/data/lean_bridge"
 }
