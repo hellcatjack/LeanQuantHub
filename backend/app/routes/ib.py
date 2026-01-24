@@ -46,6 +46,7 @@ from app.services.ib_market import (
 from app.services.ib_history_runner import cancel_ib_history_job, run_ib_history_job
 from app.services.project_symbols import collect_active_project_symbols
 from app.services import ib_stream
+from app.services.ib_stream_runner import start_stream_daemon, stop_stream_daemon
 from app.models import IBContractCache, IBHistoryJob
 
 router = APIRouter(prefix="/api/ib", tags=["ib"])
@@ -182,6 +183,7 @@ def start_ib_stream(payload: IBStreamStartRequest):
             symbols=symbols,
             market_data_type=market_data_type,
         )
+        start_stream_daemon(data_root=stream_root.parent)
         return IBStreamStatusOut(**status)
 
 
@@ -199,6 +201,7 @@ def stop_ib_stream():
         symbols=[],
         market_data_type=market_data_type,
     )
+    stop_stream_daemon()
     return IBStreamStatusOut(**status)
 
 

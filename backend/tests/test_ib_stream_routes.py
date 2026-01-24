@@ -39,6 +39,7 @@ def test_stream_start_writes_config(monkeypatch, tmp_path):
 
     monkeypatch.setattr(ib_routes, "get_session", _get_session)
     monkeypatch.setattr(ib_routes.ib_stream, "_resolve_stream_root", lambda _: tmp_path)
+    monkeypatch.setattr(ib_routes, "start_stream_daemon", lambda **_: True)
     payload = ib_routes.IBStreamStartRequest(project_id=1, symbols=["SPY"], market_data_type="delayed")
     ib_routes.start_ib_stream(payload)
     config = ib_routes.ib_stream.read_stream_config(tmp_path)
