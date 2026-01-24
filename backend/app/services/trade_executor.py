@@ -443,6 +443,17 @@ def execute_trade_run(
         risk_params = _merge_risk_params(defaults, risk_overrides)
         account_summary = fetch_account_summary(session)
         if isinstance(account_summary, dict):
+            net_liq = account_summary.get("NetLiquidation")
+            if net_liq is not None and not params.get("portfolio_value"):
+                try:
+                    portfolio_value = float(net_liq)
+                except (TypeError, ValueError):
+                    portfolio_value = 0.0
+                if portfolio_value > 0:
+                    params["portfolio_value"] = portfolio_value
+                    run.params = params
+                    run.updated_at = datetime.utcnow()
+                    session.commit()
             cash_available = account_summary.get("cash_available")
             if cash_available is not None and "cash_available" not in risk_params:
                 risk_params["cash_available"] = cash_available
