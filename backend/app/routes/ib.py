@@ -27,6 +27,7 @@ from app.schemas import (
     IBSettingsUpdate,
     IBStreamStartRequest,
     IBStreamStatusOut,
+    IBStreamSnapshotOut,
     IBStatusOverviewOut,
 )
 from app.services.audit_log import record_audit
@@ -151,6 +152,14 @@ def probe_ib_state():
 def get_ib_stream_status():
     status = ib_stream.get_stream_status()
     return IBStreamStatusOut(**status)
+
+
+@router.get("/stream/snapshot", response_model=IBStreamSnapshotOut)
+def get_ib_stream_snapshot(symbol: str):
+    if not str(symbol or "").strip():
+        raise HTTPException(status_code=400, detail="symbol_required")
+    payload = ib_stream.read_stream_snapshot(symbol)
+    return IBStreamSnapshotOut(**payload)
 
 
 @router.post("/stream/start", response_model=IBStreamStatusOut)

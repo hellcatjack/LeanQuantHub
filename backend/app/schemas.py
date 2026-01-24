@@ -1429,6 +1429,12 @@ class IBStreamStatusOut(BaseModel):
     market_data_type: str | None
 
 
+class IBStreamSnapshotOut(BaseModel):
+    symbol: str
+    data: dict | None
+    error: str | None = None
+
+
 class TradeSettingsOut(BaseModel):
     id: int
     risk_defaults: dict | None = None

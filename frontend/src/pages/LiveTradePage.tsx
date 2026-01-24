@@ -48,10 +48,10 @@ interface IBMarketSnapshotItem {
   error?: string | null;
 }
 
-interface IBMarketSnapshotOut {
-  total: number;
-  success: number;
-  items: IBMarketSnapshotItem[];
+interface IBStreamSnapshotOut {
+  symbol: string;
+  data?: Record<string, any> | null;
+  error?: string | null;
 }
 
 interface IBHistoryJob {
@@ -518,13 +518,11 @@ export default function LiveTradePage() {
     setMarketSnapshotLoading(true);
     setMarketSnapshotError("");
     try {
-      const res = await api.post<IBMarketSnapshotOut>("/api/ib/market/snapshot", {
-        symbols: [target],
-        store: false,
-        fallback_history: true,
+      const res = await api.get<IBStreamSnapshotOut>("/api/ib/stream/snapshot", {
+        params: { symbol: target },
       });
-      const item = res.data.items?.[0] ?? null;
-      setMarketSnapshotSymbol(target);
+      const item = res.data ? { symbol: res.data.symbol, data: res.data.data, error: res.data.error } : null;
+      setMarketSnapshotSymbol(res.data?.symbol || target);
       setMarketSnapshot(item);
       if (item?.error) {
         setMarketSnapshotError(String(item.error));

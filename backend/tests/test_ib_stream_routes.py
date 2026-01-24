@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+import json
 from pathlib import Path
 import sys
 
@@ -45,3 +46,17 @@ def test_stream_start_writes_config(monkeypatch, tmp_path):
     config = ib_routes.ib_stream.read_stream_config(tmp_path)
     assert config["project_id"] == 1
     assert config["symbols"] == ["SPY"]
+
+
+def test_stream_snapshot_route_reads_local_file(monkeypatch, tmp_path):
+    @contextmanager
+    def _get_session():
+        yield None
+
+    monkeypatch.setattr(ib_routes, "get_session", _get_session)
+    monkeypatch.setattr(ib_routes.ib_stream, "_resolve_stream_root", lambda _: tmp_path)
+    payload_path = tmp_path / "SPY.json"
+    payload_path.write_text(json.dumps({"symbol": "SPY", "last": 10.0}), encoding="utf-8")
+    resp = ib_routes.get_ib_stream_snapshot(symbol="SPY")
+    assert resp.symbol == "SPY"
+    assert resp.data["last"] == 10.0

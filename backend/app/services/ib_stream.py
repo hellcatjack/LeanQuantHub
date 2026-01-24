@@ -161,6 +161,24 @@ def get_stream_status(data_root: Path | str | None = None) -> dict[str, object]:
     }
 
 
+def read_stream_snapshot(symbol: str, data_root: Path | str | None = None) -> dict[str, object]:
+    normalized = _normalize_symbol(symbol)
+    if not normalized:
+        return {"symbol": "", "data": None, "error": "symbol_empty"}
+    stream_root = _resolve_stream_root(data_root)
+    path = stream_root / f"{normalized}.json"
+    if not path.exists():
+        return {"symbol": normalized, "data": None, "error": "snapshot_not_found"}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"symbol": normalized, "data": None, "error": "snapshot_invalid"}
+    if isinstance(payload, dict):
+        payload.setdefault("symbol", normalized)
+        return {"symbol": normalized, "data": payload, "error": None}
+    return {"symbol": normalized, "data": None, "error": "snapshot_invalid"}
+
+
 def is_snapshot_fresh(
     stream_root: Path,
     symbols: Iterable[str],
