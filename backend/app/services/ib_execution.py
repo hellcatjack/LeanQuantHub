@@ -86,6 +86,8 @@ class IBExecutionClient:
             symbol = str(getattr(order, "symbol", "") or "").strip().upper()
             side = str(getattr(order, "side", "") or "").strip().upper() or "BUY"
             quantity = float(getattr(order, "quantity", 0) or 0)
+            order_type = str(getattr(order, "order_type", "MKT") or "MKT").strip().upper()
+            limit_price = getattr(order, "limit_price", None)
             trade_order_id = getattr(order, "id", None)
             event_order_id = int(trade_order_id) if trade_order_id is not None else next_id
             if not symbol or quantity <= 0:
@@ -108,7 +110,11 @@ class IBExecutionClient:
             contract.currency = "USD"
             ib_order = Order()
             ib_order.action = "BUY" if side != "SELL" else "SELL"
-            ib_order.orderType = "MKT"
+            if order_type == "LMT" and limit_price is not None:
+                ib_order.orderType = "LMT"
+                ib_order.lmtPrice = float(limit_price)
+            else:
+                ib_order.orderType = "MKT"
             ib_order.totalQuantity = quantity
             client.placeOrder(next_id, contract, ib_order)
             events.append(

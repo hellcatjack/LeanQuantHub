@@ -24,6 +24,9 @@ def build_orders(
     limit_price: float | None = None,
 ) -> list[dict[str, Any]]:
     orders: list[dict[str, Any]] = []
+    normalized_order_type = str(order_type or "MKT").strip().upper()
+    if normalized_order_type == "LMT" and limit_price is None:
+        return []
     effective_value = portfolio_value * (1.0 - max(0.0, cash_buffer_ratio))
     for item in items:
         symbol = str(item.get("symbol") or "").strip().upper()
@@ -49,7 +52,7 @@ def build_orders(
                 "symbol": symbol,
                 "side": side,
                 "quantity": qty,
-                "order_type": order_type,
+                "order_type": normalized_order_type,
                 "limit_price": limit_price,
             }
         )
