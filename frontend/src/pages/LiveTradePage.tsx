@@ -393,7 +393,7 @@ export default function LiveTradePage() {
 
   const loadIbSettings = async () => {
     try {
-      const res = await api.get<IBSettings>("/api/ib/settings");
+      const res = await api.get<IBSettings>("/api/brokerage/settings");
       setIbSettings(res.data);
       setIbSettingsForm({
         host: res.data.host || "127.0.0.1",
@@ -416,7 +416,7 @@ export default function LiveTradePage() {
   const loadIbOverview = async () => {
     setIbOverviewLoading(true);
     try {
-      const res = await api.get<IBStatusOverview>("/api/ib/status/overview");
+      const res = await api.get<IBStatusOverview>("/api/brokerage/status/overview");
       setIbOverview(res.data);
       setIbOverviewError("");
     } catch (err: any) {
@@ -436,7 +436,7 @@ export default function LiveTradePage() {
       setAccountSummaryError("");
     }
     try {
-      const res = await api.get<IBAccountSummary>("/api/ib/account/summary", {
+      const res = await api.get<IBAccountSummary>("/api/brokerage/account/summary", {
         params: {
           mode: ibSettings?.mode || ibSettingsForm.mode || "paper",
           full,
@@ -467,7 +467,7 @@ export default function LiveTradePage() {
     setAccountPositionsLoading(true);
     setAccountPositionsError("");
     try {
-      const res = await api.get<IBAccountPositionsOut>("/api/ib/account/positions", {
+      const res = await api.get<IBAccountPositionsOut>("/api/brokerage/account/positions", {
         params: { mode: ibSettings?.mode || ibSettingsForm.mode || "paper" },
       });
       setAccountPositions(res.data.items || []);
@@ -488,7 +488,7 @@ export default function LiveTradePage() {
       setIbStateError("");
     }
     try {
-      const res = await api.get<IBConnectionState>("/api/ib/state");
+      const res = await api.get<IBConnectionState>("/api/brokerage/state");
       setIbState(res.data);
       if (!silent) {
         setIbStateResult("");
@@ -510,7 +510,7 @@ export default function LiveTradePage() {
     setIbStateError("");
     setIbStateResult("");
     try {
-      const res = await api.post<IBConnectionState>("/api/ib/state/probe");
+      const res = await api.post<IBConnectionState>("/api/brokerage/state/probe");
       setIbState(res.data);
       setIbStateResult(t("data.ib.probeOk"));
     } catch (err: any) {
@@ -536,7 +536,7 @@ export default function LiveTradePage() {
         api_mode: ibSettingsForm.api_mode,
         use_regulatory_snapshot: ibSettingsForm.use_regulatory_snapshot,
       };
-      const res = await api.post<IBSettings>("/api/ib/settings", payload);
+      const res = await api.post<IBSettings>("/api/brokerage/settings", payload);
       setIbSettings(res.data);
       setIbSettingsResult(t("data.ib.saved"));
     } catch (err: any) {
@@ -557,7 +557,7 @@ export default function LiveTradePage() {
         symbols: symbols.length ? symbols : undefined,
         use_project_symbols: ibContractForm.use_project_symbols,
       };
-      const res = await api.post<IBContractRefreshResult>("/api/ib/contracts/refresh", payload);
+      const res = await api.post<IBContractRefreshResult>("/api/brokerage/contracts/refresh", payload);
       setIbContractResult(res.data);
     } catch (err: any) {
       const detail = err?.response?.data?.detail || t("data.ib.contractsError");
@@ -582,7 +582,7 @@ export default function LiveTradePage() {
         history_bar_size: ibMarketHealthForm.history_bar_size,
         history_use_rth: ibMarketHealthForm.history_use_rth,
       };
-      const res = await api.post<IBMarketHealthResult>("/api/ib/market/health", payload);
+      const res = await api.post<IBMarketHealthResult>("/api/brokerage/market/health", payload);
       setIbMarketHealthResult(res.data);
     } catch (err: any) {
       const detail = err?.response?.data?.detail || t("data.ib.healthError");
@@ -595,7 +595,7 @@ export default function LiveTradePage() {
   const loadIbHistoryJobs = async () => {
     setIbHistoryLoading(true);
     try {
-      const res = await api.get<IBHistoryJob[]>("/api/ib/history-jobs", {
+      const res = await api.get<IBHistoryJob[]>("/api/brokerage/history-jobs", {
         params: { limit: 10, offset: 0 },
       });
       setIbHistoryJobs(res.data || []);
@@ -622,7 +622,7 @@ export default function LiveTradePage() {
         store: ibHistoryForm.store,
         min_delay_seconds: Number(ibHistoryForm.min_delay_seconds) || 0,
       };
-      await api.post("/api/ib/history-jobs", payload);
+      await api.post("/api/brokerage/history-jobs", payload);
       await loadIbHistoryJobs();
     } catch (err: any) {
       const detail = err?.response?.data?.detail || t("data.ib.historyStartError");
@@ -636,7 +636,7 @@ export default function LiveTradePage() {
     setIbHistoryActionLoading(true);
     setIbHistoryError("");
     try {
-      await api.post(`/api/ib/history-jobs/${jobId}/cancel`);
+      await api.post(`/api/brokerage/history-jobs/${jobId}/cancel`);
       await loadIbHistoryJobs();
     } catch (err: any) {
       const detail = err?.response?.data?.detail || t("data.ib.historyCancelError");
@@ -652,7 +652,7 @@ export default function LiveTradePage() {
       setIbStreamError("");
     }
     try {
-      const res = await api.get<IBStreamStatus>("/api/ib/stream/status");
+      const res = await api.get<IBStreamStatus>("/api/brokerage/stream/status");
       setIbStreamStatus(res.data);
     } catch (err: any) {
       const detail = err?.response?.data?.detail || t("data.ib.streamLoadError");
@@ -676,7 +676,7 @@ export default function LiveTradePage() {
     setMarketSnapshotLoading(true);
     setMarketSnapshotError("");
     try {
-      const res = await api.get<IBStreamSnapshotOut>("/api/ib/stream/snapshot", {
+      const res = await api.get<IBStreamSnapshotOut>("/api/brokerage/stream/snapshot", {
         params: { symbol: target },
       });
       const item = res.data ? { symbol: res.data.symbol, data: res.data.data, error: res.data.error } : null;
@@ -712,7 +712,7 @@ export default function LiveTradePage() {
       market_data_type: ibStreamForm.market_data_type || undefined,
     };
     try {
-      const res = await api.post<IBStreamStatus>("/api/ib/stream/start", payload);
+      const res = await api.post<IBStreamStatus>("/api/brokerage/stream/start", payload);
       setIbStreamStatus(res.data);
     } catch (err: any) {
       const detail = err?.response?.data?.detail || t("data.ib.streamStartError");
@@ -726,7 +726,7 @@ export default function LiveTradePage() {
     setIbStreamActionLoading(true);
     setIbStreamError("");
     try {
-      const res = await api.post<IBStreamStatus>("/api/ib/stream/stop");
+      const res = await api.post<IBStreamStatus>("/api/brokerage/stream/stop");
       setIbStreamStatus(res.data);
     } catch (err: any) {
       const detail = err?.response?.data?.detail || t("data.ib.streamStopError");
