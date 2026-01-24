@@ -71,3 +71,27 @@ def test_default_client_id_is_101(monkeypatch):
     monkeypatch.delenv("IB_CLIENT_ID", raising=False)
     defaults = ib_settings._resolve_default_settings()
     assert defaults["client_id"] == 101
+
+
+def test_probe_ib_connection_falls_back_on_conflict(monkeypatch):
+    session = _make_session()
+    try:
+        row = IBSettings(client_id=101, host="127.0.0.1", port=7497, api_mode="ib")
+        session.add(row)
+        session.commit()
+
+        def _fake_probe(host, port, client_id, timeout):
+            return ("disconnected", "ibapi error 326 clientId in use")
+
+        monkeypatch.setattr(ib_settings, "_probe_ib_api", _fake_probe)
+        monkeypatch.setattr(
+            ib_settings,
+            "_probe_ib_account_session",
+            lambda *args, **kwargs: True,
+            raising=False,
+        )
+
+        state = ib_settings.probe_ib_connection(session, timeout_seconds=0.1)
+        assert state.status == "connected"
+    finally:
+        session.close()

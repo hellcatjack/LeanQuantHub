@@ -549,10 +549,16 @@ def _read_bars_csv(path: Path) -> list[dict[str, Any]]:
 
 
 @contextmanager
-def ib_request_lock() -> Any:
+def ib_request_lock(wait_seconds: float = 0.0, retry_interval: float = 0.2) -> Any:
     lock = JobLock("ib_request", _resolve_data_root())
-    if not lock.acquire():
-        raise RuntimeError("ib_request_lock_busy")
+    deadline = time.time() + wait_seconds if wait_seconds and wait_seconds > 0 else None
+    interval = max(float(retry_interval), 0.01)
+    while True:
+        if lock.acquire():
+            break
+        if deadline is None or time.time() >= deadline:
+            raise RuntimeError("ib_request_lock_busy")
+        time.sleep(interval)
     try:
         yield
     finally:

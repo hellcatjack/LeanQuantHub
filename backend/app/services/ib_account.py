@@ -35,6 +35,7 @@ CORE_TAGS = {
     "CashBalance",
 }
 
+SUMMARY_TAGS = ",".join(sorted(CORE_TAGS))
 SUMMARY_TTL_SECONDS = 60
 
 _FATAL_ERROR_CODES = {502, 503, 504, 1100, 1101, 1102}
@@ -109,19 +110,44 @@ class IBAccountSession(EWrapper, EClient):
     def positionEnd(self):  # noqa: N802
         self._positions_event.set()
 
-    def request_account_summary(self, account_id: str | None, timeout: float | None = None) -> dict[str, str]:
+    def request_account_summary(
+        self,
+        account_id: str | None,
+        tags: str,
+        timeout: float | None = None,
+    ) -> dict[str, str]:
         req_id = 9001
         group = account_id or "All"
-        self.reqAccountSummary(req_id, group, "All")
+        self._summary_event.clear()
+        self._summary = {}
+        self.reqAccountSummary(req_id, group, tags)
         self._summary_event.wait(timeout or self._timeout)
         self.cancelAccountSummary(req_id)
         return dict(self._summary)
 
     def request_positions(self, timeout: float | None = None) -> list[dict[str, object]]:
+        self._positions_event.clear()
+        self._positions = []
         self.reqPositions()
         self._positions_event.wait(timeout or self._timeout)
         self.cancelPositions()
         return list(self._positions)
+
+
+def build_account_summary_tags(full: bool) -> str:
+    if full:
+        return "All"
+    return SUMMARY_TAGS
+
+
+def resolve_ib_account_settings(session):
+    return get_or_create_ib_settings(session)
+
+
+def iter_account_client_ids(base_id: int, *, attempts: int = 3) -> list[int]:
+    base = int(base_id or 101)
+    total = max(int(attempts), 1)
+    return [base + offset for offset in range(total)]
 
 
 def _parse_value(value: str) -> float | str | None:
@@ -280,38 +306,50 @@ def _merge_position_prices(
     return merged
 
 
-def _fetch_account_summary(session, mode: str) -> dict[str, str]:
-    settings_row = ensure_ib_client_id(session)
+def _fetch_account_summary(session, mode: str, full: bool) -> dict[str, str]:
+    settings_row = resolve_ib_account_settings(session)
     if resolve_ib_api_mode(settings_row) == "mock":
         return {}
-    try:
-        with ib_request_lock():
-            with IBAccountSession(
-                settings_row.host,
-                settings_row.port,
-                settings_row.client_id,
-                timeout=5.0,
-            ) as api:
-                return api.request_account_summary(settings_row.account_id)
-    except Exception:
-        return {}
+    tags = build_account_summary_tags(full)
+    with ib_request_lock(wait_seconds=2.0):
+        for client_id in iter_account_client_ids(int(settings_row.client_id or 101), attempts=3):
+            try:
+                with IBAccountSession(
+                    settings_row.host,
+                    settings_row.port,
+                    client_id,
+                    timeout=5.0,
+                ) as api:
+                    summary = api.request_account_summary(settings_row.account_id, tags)
+                    if full and not summary and tags == "All":
+                        summary = api.request_account_summary(
+                            settings_row.account_id,
+                            build_account_summary_tags(False),
+                        )
+                    if summary:
+                        return summary
+            except Exception:
+                continue
+    return {}
 
 
 def _fetch_account_positions(session, mode: str) -> list[dict[str, object]]:
-    settings_row = ensure_ib_client_id(session)
+    settings_row = resolve_ib_account_settings(session)
     if resolve_ib_api_mode(settings_row) == "mock":
         return []
-    try:
-        with ib_request_lock():
-            with IBAccountSession(
-                settings_row.host,
-                settings_row.port,
-                settings_row.client_id,
-                timeout=5.0,
-            ) as api:
-                return api.request_positions()
-    except Exception:
-        return []
+    with ib_request_lock(wait_seconds=2.0):
+        for client_id in iter_account_client_ids(int(settings_row.client_id or 101), attempts=3):
+            try:
+                with IBAccountSession(
+                    settings_row.host,
+                    settings_row.port,
+                    client_id,
+                    timeout=5.0,
+                ) as api:
+                    return api.request_positions()
+            except Exception:
+                continue
+    return []
 
 
 def get_account_summary(session, *, mode: str, full: bool, force_refresh: bool = False) -> dict[str, object]:
@@ -322,7 +360,7 @@ def get_account_summary(session, *, mode: str, full: bool, force_refresh: bool =
         refreshed_at = cached.get("refreshed_at")
         stale = _is_stale(refreshed_at)
         return _build_summary_payload(raw, refreshed_at, "cache", stale, full)
-    raw = _fetch_account_summary(session, mode)
+    raw = _fetch_account_summary(session, mode, full)
     if raw:
         refreshed_at = datetime.utcnow()
         write_cached_summary(cache_path, raw, refreshed_at)

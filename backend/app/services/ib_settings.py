@@ -157,6 +157,24 @@ def _probe_ib_api(
     return (status, message)
 
 
+def _probe_ib_account_session(
+    host: str,
+    port: int,
+    client_id: int,
+    timeout_seconds: float,
+) -> bool:
+    try:
+        from app.services.ib_account import IBAccountSession
+    except Exception:
+        return False
+    try:
+        with IBAccountSession(host, port, client_id, timeout=timeout_seconds) as api:
+            api.request_account_summary(None, "NetLiquidation")
+        return True
+    except Exception:
+        return False
+
+
 def ensure_ib_client_id(
     session,
     *,
@@ -199,9 +217,31 @@ def probe_ib_connection(session, *, timeout_seconds: float = 2.0) -> IBConnectio
     host = settings.host
     port = settings.port
     client_id = settings.client_id
+    if _probe_ib_account_session(host, port, int(client_id), timeout_seconds):
+        return update_ib_state(
+            session,
+            status="connected",
+            message="ibapi ok (account probe)",
+            heartbeat=True,
+        )
     api_result = _probe_ib_api(host, port, client_id, timeout_seconds)
     if api_result:
         status, message = api_result
+        if status == "connected":
+            return update_ib_state(
+                session,
+                status=status,
+                message=message,
+                heartbeat=True,
+            )
+        if _is_client_id_conflict(message):
+            if _probe_ib_account_session(host, port, int(client_id), timeout_seconds):
+                return update_ib_state(
+                    session,
+                    status="connected",
+                    message="ibapi ok (fallback)",
+                    heartbeat=True,
+                )
         return update_ib_state(
             session,
             status=status,

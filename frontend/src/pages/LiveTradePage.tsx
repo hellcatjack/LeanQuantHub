@@ -1606,46 +1606,48 @@ export default function LiveTradePage() {
                 </strong>
               </div>
             </div>
-            <table className="table" style={{ marginTop: "12px" }}>
-              <thead>
-                <tr>
-                  <th>{t("trade.positionTable.symbol")}</th>
-                  <th>{t("trade.positionTable.position")}</th>
-                  <th>{t("trade.positionTable.avgCost")}</th>
-                  <th>{t("trade.positionTable.marketPrice")}</th>
-                  <th>{t("trade.positionTable.marketValue")}</th>
-                  <th>{t("trade.positionTable.unrealized")}</th>
-                  <th>{t("trade.positionTable.realized")}</th>
-                  <th>{t("trade.positionTable.account")}</th>
-                  <th>{t("trade.positionTable.currency")}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {accountPositions.length ? (
-                  accountPositions.map((row) => (
-                    <tr key={`${row.symbol}-${row.account || ""}`}>
-                      <td>{row.symbol}</td>
-                      <td>{formatNumber(row.position ?? null, 4)}</td>
-                      <td>{formatNumber(row.avg_cost ?? null)}</td>
-                      <td>{formatNumber(row.market_price ?? null)}</td>
-                      <td>{formatNumber(row.market_value ?? null)}</td>
-                      <td>{formatNumber(row.unrealized_pnl ?? null)}</td>
-                      <td>{formatNumber(row.realized_pnl ?? null)}</td>
-                      <td>{row.account || t("common.none")}</td>
-                      <td>{row.currency || t("common.none")}</td>
-                    </tr>
-                  ))
-                ) : (
+            <div className="table-scroll" style={{ marginTop: "12px" }}>
+              <table className="table">
+                <thead>
                   <tr>
-                    <td colSpan={9} className="empty-state">
-                      {accountPositionsLoading
-                        ? t("common.actions.loading")
-                        : t("trade.accountPositionsEmpty")}
-                    </td>
+                    <th>{t("trade.positionTable.symbol")}</th>
+                    <th>{t("trade.positionTable.position")}</th>
+                    <th>{t("trade.positionTable.avgCost")}</th>
+                    <th>{t("trade.positionTable.marketPrice")}</th>
+                    <th>{t("trade.positionTable.marketValue")}</th>
+                    <th>{t("trade.positionTable.unrealized")}</th>
+                    <th>{t("trade.positionTable.realized")}</th>
+                    <th>{t("trade.positionTable.account")}</th>
+                    <th>{t("trade.positionTable.currency")}</th>
                   </tr>
-                )}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {accountPositions.length ? (
+                    accountPositions.map((row) => (
+                      <tr key={`${row.symbol}-${row.account || ""}`}>
+                        <td>{row.symbol}</td>
+                        <td>{formatNumber(row.position ?? null, 4)}</td>
+                        <td>{formatNumber(row.avg_cost ?? null)}</td>
+                        <td>{formatNumber(row.market_price ?? null)}</td>
+                        <td>{formatNumber(row.market_value ?? null)}</td>
+                        <td>{formatNumber(row.unrealized_pnl ?? null)}</td>
+                        <td>{formatNumber(row.realized_pnl ?? null)}</td>
+                        <td>{row.account || t("common.none")}</td>
+                        <td>{row.currency || t("common.none")}</td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan={9} className="empty-state">
+                        {accountPositionsLoading
+                          ? t("common.actions.loading")
+                          : t("trade.accountPositionsEmpty")}
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
 

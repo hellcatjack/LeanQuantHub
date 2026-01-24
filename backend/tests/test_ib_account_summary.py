@@ -15,3 +15,29 @@ def test_filter_summary_whitelist():
     assert "Foo" not in core
     full = _filter_summary(raw, full=True)
     assert "Foo" in full
+
+
+def test_build_summary_tags_uses_core_tags():
+    from app.services.ib_account import CORE_TAGS, build_account_summary_tags
+
+    tags = build_account_summary_tags(full=False)
+    parts = {item.strip() for item in tags.split(",") if item.strip()}
+    assert "All" not in parts
+    for tag in CORE_TAGS:
+        assert tag in parts
+
+
+def test_resolve_ib_account_settings_skips_probe(monkeypatch):
+    from app.services import ib_account as ib_account_module
+
+    sentinel = object()
+    monkeypatch.setattr(ib_account_module, "get_or_create_ib_settings", lambda _session: sentinel)
+    monkeypatch.setattr(ib_account_module, "ensure_ib_client_id", lambda _session: (_ for _ in ()).throw(RuntimeError("probe-called")))
+
+    assert ib_account_module.resolve_ib_account_settings(object()) is sentinel
+
+
+def test_iter_account_client_ids_defaults():
+    from app.services.ib_account import iter_account_client_ids
+
+    assert list(iter_account_client_ids(100, attempts=3)) == [100, 101, 102]

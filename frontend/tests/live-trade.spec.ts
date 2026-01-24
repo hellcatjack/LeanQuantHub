@@ -101,3 +101,134 @@ test("live trade page shows live warning in live mode", async ({ page }) => {
     page.locator(".form-error", { hasText: /实盘模式|Live mode/i })
   ).toBeVisible();
 });
+
+test("live trade positions table uses scroll wrapper", async ({ page }) => {
+  await page.route("**/api/ib/settings", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        id: 1,
+        host: "127.0.0.1",
+        port: 7497,
+        client_id: 1,
+        account_id: "DU123456",
+        mode: "paper",
+        market_data_type: "delayed",
+        api_mode: "ib",
+        use_regulatory_snapshot: false,
+        created_at: "2026-01-24T00:00:00Z",
+        updated_at: "2026-01-24T00:00:00Z",
+      }),
+    })
+  );
+  await page.route("**/api/ib/status/overview", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        status: "connected",
+        ib_state: { status: "connected", message: "ok" },
+        ib_stream: { status: "connected", market_data_type: "delayed" },
+        ib_settings: { mode: "paper", host: "127.0.0.1", port: 7497, client_id: 1 },
+      }),
+    })
+  );
+  await page.route("**/api/ib/state", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        id: 1,
+        status: "connected",
+        message: "ibapi ok",
+        last_heartbeat: "2026-01-24T00:00:00Z",
+        updated_at: "2026-01-24T00:00:00Z",
+      }),
+    })
+  );
+  await page.route("**/api/ib/stream/status", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        status: "connected",
+        last_heartbeat: "2026-01-24T00:00:00Z",
+        subscribed_symbols: ["AAPL"],
+        ib_error_count: 0,
+        last_error: null,
+        market_data_type: "delayed",
+      }),
+    })
+  );
+  await page.route("**/api/ib/history-jobs**", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: "[]" })
+  );
+  await page.route("**/api/ib/account/summary**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: {
+          NetLiquidation: 10000,
+          AvailableFunds: 5000,
+        },
+        refreshed_at: "2026-01-24T00:00:00Z",
+        source: "refresh",
+        stale: false,
+        full: false,
+      }),
+    })
+  );
+  await page.route("**/api/ib/account/positions**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: [
+          {
+            symbol: "AAPL",
+            position: 10,
+            avg_cost: 100,
+            market_price: 105,
+            market_value: 1050,
+            unrealized_pnl: 50,
+            realized_pnl: 0,
+            account: "DU123456",
+            currency: "USD",
+          },
+        ],
+        refreshed_at: "2026-01-24T00:00:00Z",
+        stale: false,
+      }),
+    })
+  );
+  await page.route("**/api/trade/settings", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        id: 1,
+        risk_defaults: {},
+        execution_data_source: "ib",
+        created_at: "2026-01-24T00:00:00Z",
+        updated_at: "2026-01-24T00:00:00Z",
+      }),
+    })
+  );
+  await page.route("**/api/trade/runs**", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: "[]" })
+  );
+  await page.route("**/api/trade/orders**", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: "[]" })
+  );
+
+  await page.goto("/live-trade");
+  const positionsCard = page.locator(".card", {
+    has: page.getByText(/当前持仓|Positions/i),
+  });
+  await expect(positionsCard).toBeVisible();
+  const scrollWrapper = positionsCard.locator(".table-scroll");
+  await expect(scrollWrapper).toBeVisible();
+  await expect(scrollWrapper.locator("table")).toBeVisible();
+});
