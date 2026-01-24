@@ -12,8 +12,12 @@ from app.routes import ib as ib_routes
 
 
 def test_ib_health_combines_stream_and_probe(monkeypatch):
-    monkeypatch.setattr(ib_health, "probe_ib_connection", lambda _s: SimpleNamespace(status="connected"))
-    monkeypatch.setattr(ib_health, "get_stream_status", lambda *_a, **_k: {"status": "connected"})
+    monkeypatch.setattr(
+        ib_health,
+        "read_bridge_status",
+        lambda _root: {"status": "connected", "last_heartbeat": "2026-01-24T00:00:00Z"},
+    )
+    monkeypatch.setattr(ib_health, "_resolve_bridge_root", lambda: Path("/tmp"))
     result = ib_health.build_ib_health(SimpleNamespace())
     assert result["connection_status"] == "connected"
     assert result["stream_status"] == "connected"

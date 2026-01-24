@@ -29,3 +29,23 @@ def read_account_summary(root: Path) -> dict:
     data.setdefault("items", [])
     data.setdefault("stale", False)
     return data
+
+
+def read_positions(root: Path) -> dict:
+    path = root / "positions.json"
+    data = _read_json(path)
+    if not isinstance(data, dict):
+        return {"items": [], "stale": True}
+    data.setdefault("items", [])
+    data.setdefault("stale", False)
+    return data
+
+
+def read_quotes(root: Path) -> dict:
+    path = root / "quotes.json"
+    data = _read_json(path)
+    if not isinstance(data, dict):
+        return {"items": [], "stale": True}
+    data.setdefault("items", [])
+    data.setdefault("stale", False)
+    return data

@@ -7,7 +7,8 @@ from typing import Any
 from sqlalchemy import or_
 
 from app.models import AuditLog, TradeFill, TradeOrder
-from app.services import ib_stream
+from app.core.config import settings
+from app.services.lean_bridge_reader import read_bridge_status, read_quotes
 from app.services.ib_settings import get_or_create_ib_settings, get_or_create_ib_state
 
 _SNAPSHOT_FRESH_SECONDS = 300
@@ -46,35 +47,23 @@ def _read_config(session) -> dict[str, Any]:
 
 
 def _read_stream_status() -> dict[str, Any]:
-    status = ib_stream.get_stream_status()
-    subscribed = status.get("subscribed_symbols") or []
+    status = read_bridge_status(_resolve_bridge_root())
+    subscribed = status.get("subscribed_symbols") or status.get("symbols") or []
     return {
         "status": status.get("status") or "unknown",
         "subscribed_count": len(subscribed),
         "last_heartbeat": status.get("last_heartbeat"),
-        "ib_error_count": int(status.get("ib_error_count") or 0),
+        "ib_error_count": int(status.get("error_count") or status.get("ib_error_count") or 0),
         "last_error": status.get("last_error"),
-        "market_data_type": status.get("market_data_type") or "delayed",
+        "market_data_type": status.get("market_data_type") or "unknown",
     }
 
 
 def _read_snapshot_cache() -> dict[str, Any]:
-    stream_root = ib_stream._resolve_stream_root(None)
-    last_snapshot_at = None
-    sample_count = 0
-    latest_mtime = None
-    for path in stream_root.glob("*.json"):
-        if path.name in {"_status.json", "_config.json"}:
-            continue
-        try:
-            stat = path.stat()
-        except FileNotFoundError:
-            continue
-        sample_count += 1
-        if latest_mtime is None or stat.st_mtime > latest_mtime:
-            latest_mtime = stat.st_mtime
-    if latest_mtime is not None:
-        last_snapshot_at = datetime.utcfromtimestamp(latest_mtime)
+    quotes = read_quotes(_resolve_bridge_root())
+    items = quotes.get("items") if isinstance(quotes.get("items"), list) else []
+    updated_at = quotes.get("updated_at") or quotes.get("refreshed_at")
+    last_snapshot_at = _parse_timestamp(updated_at)
     status = "unknown"
     if last_snapshot_at:
         if datetime.utcnow() - last_snapshot_at <= timedelta(seconds=_SNAPSHOT_FRESH_SECONDS):
@@ -84,8 +73,27 @@ def _read_snapshot_cache() -> dict[str, Any]:
     return {
         "status": status,
         "last_snapshot_at": last_snapshot_at,
-        "symbol_sample_count": sample_count,
+        "symbol_sample_count": len(items),
     }
+
+
+def _resolve_bridge_root() -> Path:
+    base = settings.data_root or settings.artifact_root
+    return Path(base) / "lean_bridge"
+
+
+def _parse_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
 
 
 def _read_orders(session) -> dict[str, Any]:

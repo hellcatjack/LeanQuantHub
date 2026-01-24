@@ -1,16 +1,21 @@
 from __future__ import annotations
 
-from app.services.ib_settings import probe_ib_connection
-from app.services import ib_stream
+from pathlib import Path
 
-get_stream_status = ib_stream.get_stream_status
+from app.core.config import settings
+from app.services.lean_bridge_reader import read_bridge_status
+
+
+def _resolve_bridge_root() -> Path:
+    base = settings.data_root or settings.artifact_root
+    return Path(base) / "lean_bridge"
 
 
 def build_ib_health(session) -> dict[str, object]:
-    state = probe_ib_connection(session)
-    stream = get_stream_status()
+    status = read_bridge_status(_resolve_bridge_root())
+    connection_status = status.get("status") or "unknown"
     return {
-        "connection_status": (state.status or "unknown"),
-        "stream_status": stream.get("status") or "unknown",
-        "stream_last_heartbeat": stream.get("last_heartbeat"),
+        "connection_status": connection_status,
+        "stream_status": connection_status,
+        "stream_last_heartbeat": status.get("last_heartbeat"),
     }

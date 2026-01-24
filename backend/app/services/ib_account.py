@@ -17,6 +17,8 @@ except Exception:  # pragma: no cover - optional dependency
     EWrapper = object  # type: ignore[assignment]
     _IBAPI_AVAILABLE = False
 
+from app.core.config import settings
+from app.services.lean_bridge_reader import read_account_summary, read_positions
 from app.services.ib_market import _ib_data_root, fetch_market_snapshots, ib_request_lock
 from app.services.ib_settings import ensure_ib_client_id, get_or_create_ib_settings, resolve_ib_api_mode
 
@@ -206,6 +208,11 @@ def _positions_cache_path(mode: str) -> Path:
     return root / f"positions_{safe_mode}.json"
 
 
+def _resolve_bridge_root() -> Path:
+    base = settings.data_root or settings.artifact_root
+    return Path(base) / "lean_bridge"
+
+
 def read_cached_summary(cache_path: Path) -> dict[str, Any] | None:
     if not cache_path.exists():
         return None
@@ -353,61 +360,37 @@ def _fetch_account_positions(session, mode: str) -> list[dict[str, object]]:
 
 
 def get_account_summary(session, *, mode: str, full: bool, force_refresh: bool = False) -> dict[str, object]:
-    cache_path = _summary_cache_path(mode)
-    cached = read_cached_summary(cache_path)
-    if cached and not force_refresh:
-        raw = cached.get("raw") if isinstance(cached.get("raw"), dict) else {}
-        refreshed_at = cached.get("refreshed_at")
-        stale = _is_stale(refreshed_at)
-        return _build_summary_payload(raw, refreshed_at, "cache", stale, full)
-    raw = _fetch_account_summary(session, mode, full)
-    if raw:
-        refreshed_at = datetime.utcnow()
-        write_cached_summary(cache_path, raw, refreshed_at)
-        return _build_summary_payload(raw, refreshed_at.isoformat(), "refresh", False, full)
-    if cached:
-        raw = cached.get("raw") if isinstance(cached.get("raw"), dict) else {}
-        refreshed_at = cached.get("refreshed_at")
-        return _build_summary_payload(raw, refreshed_at, "cache", True, full)
+    payload = read_account_summary(_resolve_bridge_root())
+    raw_items = payload.get("items")
+    items: dict[str, object] = {}
+    if isinstance(raw_items, dict):
+        items = raw_items
+    elif isinstance(raw_items, list):
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            if not name:
+                continue
+            items[str(name)] = item.get("value")
+    refreshed_at = payload.get("updated_at") or payload.get("refreshed_at")
+    stale = bool(payload.get("stale", True))
+    source = payload.get("source") or "lean_bridge"
     return {
-        "items": {},
-        "refreshed_at": None,
-        "source": "cache",
-        "stale": True,
+        "items": items,
+        "refreshed_at": refreshed_at,
+        "source": source,
+        "stale": stale,
         "full": full,
     }
 
 
 def get_account_positions(session, *, mode: str, force_refresh: bool = False) -> dict[str, object]:
-    cache_path = _positions_cache_path(mode)
-    cached = read_cached_positions(cache_path)
-    if cached and not force_refresh:
-        refreshed_at = cached.get("refreshed_at")
-        items = cached.get("items") if isinstance(cached.get("items"), list) else []
-        stale = _is_stale(refreshed_at)
-        return {"items": items, "refreshed_at": refreshed_at, "stale": stale}
-    raw = _fetch_account_positions(session, mode)
-    if raw:
-        symbols = [str(item.get("symbol") or "").strip().upper() for item in raw]
-        snapshots = fetch_market_snapshots(
-            session,
-            symbols=[symbol for symbol in symbols if symbol],
-            store=False,
-            fallback_history=True,
-            history_duration="5 D",
-            history_bar_size="1 day",
-            history_use_rth=True,
-        )
-        snapshot_map = {item.get("symbol"): item for item in snapshots}
-        merged = _merge_position_prices(raw, snapshot_map)
-        refreshed_at = datetime.utcnow()
-        write_cached_positions(cache_path, merged, refreshed_at)
-        return {"items": merged, "refreshed_at": refreshed_at.isoformat(), "stale": False}
-    if cached:
-        refreshed_at = cached.get("refreshed_at")
-        items = cached.get("items") if isinstance(cached.get("items"), list) else []
-        return {"items": items, "refreshed_at": refreshed_at, "stale": True}
-    return {"items": [], "refreshed_at": None, "stale": True}
+    payload = read_positions(_resolve_bridge_root())
+    items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    refreshed_at = payload.get("updated_at") or payload.get("refreshed_at")
+    stale = bool(payload.get("stale", True))
+    return {"items": items, "refreshed_at": refreshed_at, "stale": stale}
 
 
 def fetch_account_summary(session) -> dict[str, float | str | None]:
