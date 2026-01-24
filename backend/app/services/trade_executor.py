@@ -25,6 +25,10 @@ from app.services.trade_orders import create_trade_order, update_trade_order_sta
 from app.services.trade_risk_engine import evaluate_orders
 from app.services.trade_alerts import notify_trade_alert
 from app.services.ib_account import fetch_account_summary
+from app.services.trade_order_intent import write_order_intent
+
+
+ARTIFACT_ROOT = Path(settings.artifact_root) if settings.artifact_root else Path("/app/stocklean/artifacts")
 
 
 @dataclass
@@ -325,6 +329,17 @@ def execute_trade_run(
                     message=run.message,
                     dry_run=dry_run,
                 )
+
+            intent_path = write_order_intent(
+                session,
+                snapshot_id=run.decision_snapshot_id,
+                items=items,
+                output_dir=ARTIFACT_ROOT / "order_intents",
+            )
+            params["order_intent_path"] = intent_path
+            run.params = params
+            run.updated_at = datetime.utcnow()
+            session.commit()
 
             symbols = sorted({item.get("symbol") for item in items if item.get("symbol")})
             snapshots = fetch_market_snapshots(
