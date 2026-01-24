@@ -59,3 +59,14 @@ def test_read_quotes_ok(tmp_path: Path) -> None:
     result = read_quotes(tmp_path)
     assert result["items"][0]["symbol"] == "SPY"
     assert result["stale"] is False
+
+def test_bridge_status_stale_by_heartbeat(tmp_path: Path) -> None:
+    payload = {
+        "status": "ok",
+        "last_heartbeat": "2026-01-01T00:00:00Z",
+    }
+    (tmp_path / "lean_bridge_status.json").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+    result = read_bridge_status(tmp_path)
+    assert result["stale"] is True
