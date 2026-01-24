@@ -126,4 +126,7 @@ class IBExecutionClient:
         time.sleep(0.1)
         client.disconnect()
         thread.join(timeout=1)
+        captured = getattr(client, "_events", None)
+        if captured:
+            return list(captured)
         return events
