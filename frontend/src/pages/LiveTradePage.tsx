@@ -75,6 +75,32 @@ interface IBStreamStatus {
   market_data_type?: string | null;
 }
 
+interface IBAccountSummary {
+  items: Record<string, any>;
+  refreshed_at?: string | null;
+  source?: string | null;
+  stale: boolean;
+  full: boolean;
+}
+
+interface IBAccountPosition {
+  symbol: string;
+  position: number;
+  avg_cost?: number | null;
+  market_price?: number | null;
+  market_value?: number | null;
+  unrealized_pnl?: number | null;
+  realized_pnl?: number | null;
+  account?: string | null;
+  currency?: string | null;
+}
+
+interface IBAccountPositionsOut {
+  items: IBAccountPosition[];
+  refreshed_at?: string | null;
+  stale: boolean;
+}
+
 interface IBStatusOverview {
   connection?: {
     status?: string | null;
@@ -259,6 +285,16 @@ export default function LiveTradePage() {
   const [ibOverview, setIbOverview] = useState<IBStatusOverview | null>(null);
   const [ibOverviewLoading, setIbOverviewLoading] = useState(false);
   const [ibOverviewError, setIbOverviewError] = useState("");
+  const [accountSummary, setAccountSummary] = useState<IBAccountSummary | null>(null);
+  const [accountSummaryFull, setAccountSummaryFull] = useState<IBAccountSummary | null>(null);
+  const [accountSummaryLoading, setAccountSummaryLoading] = useState(false);
+  const [accountSummaryFullLoading, setAccountSummaryFullLoading] = useState(false);
+  const [accountSummaryError, setAccountSummaryError] = useState("");
+  const [accountSummaryFullError, setAccountSummaryFullError] = useState("");
+  const [accountPositions, setAccountPositions] = useState<IBAccountPosition[]>([]);
+  const [accountPositionsUpdatedAt, setAccountPositionsUpdatedAt] = useState<string | null>(null);
+  const [accountPositionsLoading, setAccountPositionsLoading] = useState(false);
+  const [accountPositionsError, setAccountPositionsError] = useState("");
   const [ibContractForm, setIbContractForm] = useState({
     symbols: "SPY",
     use_project_symbols: false,
@@ -388,6 +424,61 @@ export default function LiveTradePage() {
       setIbOverviewError(String(detail));
     } finally {
       setIbOverviewLoading(false);
+    }
+  };
+
+  const loadAccountSummary = async (full = false) => {
+    if (full) {
+      setAccountSummaryFullLoading(true);
+      setAccountSummaryFullError("");
+    } else {
+      setAccountSummaryLoading(true);
+      setAccountSummaryError("");
+    }
+    try {
+      const res = await api.get<IBAccountSummary>("/api/ib/account/summary", {
+        params: {
+          mode: ibSettings?.mode || ibSettingsForm.mode || "paper",
+          full,
+        },
+      });
+      if (full) {
+        setAccountSummaryFull(res.data);
+      } else {
+        setAccountSummary(res.data);
+      }
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("trade.accountSummaryError");
+      if (full) {
+        setAccountSummaryFullError(String(detail));
+      } else {
+        setAccountSummaryError(String(detail));
+      }
+    } finally {
+      if (full) {
+        setAccountSummaryFullLoading(false);
+      } else {
+        setAccountSummaryLoading(false);
+      }
+    }
+  };
+
+  const loadAccountPositions = async () => {
+    setAccountPositionsLoading(true);
+    setAccountPositionsError("");
+    try {
+      const res = await api.get<IBAccountPositionsOut>("/api/ib/account/positions", {
+        params: { mode: ibSettings?.mode || ibSettingsForm.mode || "paper" },
+      });
+      setAccountPositions(res.data.items || []);
+      setAccountPositionsUpdatedAt(res.data.refreshed_at || null);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("trade.accountPositionsError");
+      setAccountPositionsError(String(detail));
+      setAccountPositions([]);
+      setAccountPositionsUpdatedAt(null);
+    } finally {
+      setAccountPositionsLoading(false);
     }
   };
 
@@ -763,6 +854,8 @@ export default function LiveTradePage() {
       loadIbState(true),
       loadIbStreamStatus(true),
       loadIbHistoryJobs(),
+      loadAccountSummary(false),
+      loadAccountPositions(),
       loadTradeSettings(),
       loadTradeActivity(),
     ]);
@@ -792,6 +885,17 @@ export default function LiveTradePage() {
       window.clearInterval(timer);
     };
   }, []);
+
+  useEffect(() => {
+    const refresh = () => {
+      loadAccountSummary(false);
+      loadAccountPositions();
+    };
+    const timer = window.setInterval(refresh, 60000);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [ibSettings?.mode, ibSettingsForm.mode]);
 
   const latestTradeRun = tradeRuns[0];
 
@@ -924,6 +1028,35 @@ export default function LiveTradePage() {
     return String(value).toUpperCase();
   };
 
+  const accountSummaryOrder = [
+    "NetLiquidation",
+    "TotalCashValue",
+    "AvailableFunds",
+    "BuyingPower",
+    "GrossPositionValue",
+    "EquityWithLoanValue",
+    "UnrealizedPnL",
+    "RealizedPnL",
+    "InitMarginReq",
+    "MaintMarginReq",
+    "AccruedCash",
+    "CashBalance",
+  ];
+
+  const formatAccountValue = (value: any) => {
+    if (value === null || value === undefined) {
+      return t("common.none");
+    }
+    if (typeof value === "number") {
+      return formatNumber(value);
+    }
+    const parsed = Number(value);
+    if (!Number.isNaN(parsed)) {
+      return formatNumber(parsed);
+    }
+    return String(value);
+  };
+
   const formatNumber = (value?: number | null, digits = 2) => {
     if (value === null || value === undefined) {
       return t("common.none");
@@ -969,6 +1102,19 @@ export default function LiveTradePage() {
     }
     return (guardState.last_equity - guardState.equity_peak) / guardState.equity_peak;
   }, [guardState]);
+
+  const accountSummaryItems = useMemo(() => {
+    const items = accountSummary?.items || {};
+    return accountSummaryOrder.map((key) => ({
+      key,
+      value: items[key],
+    }));
+  }, [accountSummary, accountSummaryOrder]);
+
+  const accountSummaryFullItems = useMemo(() => {
+    const items = accountSummaryFull?.items || {};
+    return Object.entries(items).sort(([a], [b]) => a.localeCompare(b));
+  }, [accountSummaryFull]);
 
   const guardReason = useMemo(() => {
     if (!guardState?.halt_reason) {
@@ -1369,6 +1515,137 @@ export default function LiveTradePage() {
             >
               {ibSettingsSaving ? t("common.actions.loading") : t("common.actions.save")}
             </button>
+          </div>
+
+          <div className="card" style={{ marginTop: "16px" }}>
+            <div className="card-title">{t("trade.accountSummaryTitle")}</div>
+            <div className="card-meta">{t("trade.accountSummaryMeta")}</div>
+            {accountSummaryError && <div className="form-hint">{accountSummaryError}</div>}
+            <div className="overview-grid" style={{ marginTop: "12px" }}>
+              {accountSummaryItems.map((item) => (
+                <div className="overview-card" key={item.key}>
+                  <div className="overview-label">{item.key}</div>
+                  <div className="overview-value">{formatAccountValue(item.value)}</div>
+                </div>
+              ))}
+            </div>
+            <div className="meta-list" style={{ marginTop: "12px" }}>
+              <div className="meta-row">
+                <span>{t("trade.accountSummaryUpdatedAt")}</span>
+                <strong>
+                  {accountSummary?.refreshed_at
+                    ? formatDateTime(accountSummary.refreshed_at)
+                    : t("common.none")}
+                </strong>
+              </div>
+              <div className="meta-row">
+                <span>{t("trade.accountSummarySource")}</span>
+                <strong>{accountSummary?.source || t("common.none")}</strong>
+              </div>
+              {accountSummary?.stale && (
+                <div className="meta-row">
+                  <span>{t("trade.accountSummaryStale")}</span>
+                  <strong>{t("common.boolean.true")}</strong>
+                </div>
+              )}
+            </div>
+            <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+              <button
+                className="button-secondary"
+                onClick={() => loadAccountSummary(true)}
+                disabled={accountSummaryFullLoading}
+              >
+                {accountSummaryFullLoading
+                  ? t("common.actions.loading")
+                  : t("trade.accountSummaryRefresh")}
+              </button>
+            </div>
+            {accountSummaryFullError && <div className="form-hint">{accountSummaryFullError}</div>}
+            <details style={{ marginTop: "12px" }}>
+              <summary>{t("trade.accountSummaryFullTitle")}</summary>
+              <table className="table" style={{ marginTop: "8px" }}>
+                <thead>
+                  <tr>
+                    <th>{t("trade.accountSummaryTag")}</th>
+                    <th>{t("trade.accountSummaryValue")}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {accountSummaryFullItems.length ? (
+                    accountSummaryFullItems.map(([key, value]) => (
+                      <tr key={key}>
+                        <td>{key}</td>
+                        <td>{formatAccountValue(value)}</td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan={2} className="empty-state">
+                        {accountSummaryFullLoading
+                          ? t("common.actions.loading")
+                          : t("trade.accountSummaryFullEmpty")}
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </details>
+          </div>
+
+          <div className="card" style={{ marginTop: "16px" }}>
+            <div className="card-title">{t("trade.accountPositionsTitle")}</div>
+            <div className="card-meta">{t("trade.accountPositionsMeta")}</div>
+            {accountPositionsError && <div className="form-hint">{accountPositionsError}</div>}
+            <div className="meta-list" style={{ marginTop: "12px" }}>
+              <div className="meta-row">
+                <span>{t("trade.accountPositionsUpdatedAt")}</span>
+                <strong>
+                  {accountPositionsUpdatedAt
+                    ? formatDateTime(accountPositionsUpdatedAt)
+                    : t("common.none")}
+                </strong>
+              </div>
+            </div>
+            <table className="table" style={{ marginTop: "12px" }}>
+              <thead>
+                <tr>
+                  <th>{t("trade.positionTable.symbol")}</th>
+                  <th>{t("trade.positionTable.position")}</th>
+                  <th>{t("trade.positionTable.avgCost")}</th>
+                  <th>{t("trade.positionTable.marketPrice")}</th>
+                  <th>{t("trade.positionTable.marketValue")}</th>
+                  <th>{t("trade.positionTable.unrealized")}</th>
+                  <th>{t("trade.positionTable.realized")}</th>
+                  <th>{t("trade.positionTable.account")}</th>
+                  <th>{t("trade.positionTable.currency")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {accountPositions.length ? (
+                  accountPositions.map((row) => (
+                    <tr key={`${row.symbol}-${row.account || ""}`}>
+                      <td>{row.symbol}</td>
+                      <td>{formatNumber(row.position ?? null, 4)}</td>
+                      <td>{formatNumber(row.avg_cost ?? null)}</td>
+                      <td>{formatNumber(row.market_price ?? null)}</td>
+                      <td>{formatNumber(row.market_value ?? null)}</td>
+                      <td>{formatNumber(row.unrealized_pnl ?? null)}</td>
+                      <td>{formatNumber(row.realized_pnl ?? null)}</td>
+                      <td>{row.account || t("common.none")}</td>
+                      <td>{row.currency || t("common.none")}</td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={9} className="empty-state">
+                      {accountPositionsLoading
+                        ? t("common.actions.loading")
+                        : t("trade.accountPositionsEmpty")}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
           </div>
         </div>
 

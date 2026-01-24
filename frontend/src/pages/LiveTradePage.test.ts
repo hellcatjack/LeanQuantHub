@@ -15,6 +15,11 @@ describe("LiveTradePage", () => {
     expect(html).toContain("trade.executeSubmit");
   });
 
+  it("renders account summary section", () => {
+    const html = ReactDOMServer.renderToString(React.createElement(LiveTradePage));
+    expect(html).toContain("trade.accountSummaryTitle");
+  });
+
   it("renders symbol summary and fills table", () => {
     const html = ReactDOMServer.renderToString(React.createElement(LiveTradePage));
     expect(html).toContain("trade.symbolSummaryTitle");
