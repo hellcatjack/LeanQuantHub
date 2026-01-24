@@ -154,6 +154,44 @@ interface TradeOrder {
   created_at: string;
 }
 
+interface TradeFillDetail {
+  id: number;
+  order_id: number;
+  exec_id?: string | null;
+  fill_quantity: number;
+  fill_price: number;
+  commission?: number | null;
+  fill_time?: string | null;
+  currency?: string | null;
+  exchange?: string | null;
+}
+
+interface TradeRunDetail {
+  run: TradeRun;
+  orders: TradeOrder[];
+  fills: TradeFillDetail[];
+  last_update_at?: string | null;
+}
+
+interface TradeSymbolSummary {
+  symbol: string;
+  target_weight?: number | null;
+  target_value?: number | null;
+  filled_qty: number;
+  avg_fill_price?: number | null;
+  filled_value: number;
+  pending_qty: number;
+  last_status?: string | null;
+  delta_value?: number | null;
+  delta_weight?: number | null;
+  fill_ratio?: number | null;
+}
+
+interface TradeSymbolSummaryPage {
+  items: TradeSymbolSummary[];
+  last_update_at?: string | null;
+}
+
 interface TradeGuardState {
   id: number;
   project_id: number;
@@ -274,6 +312,13 @@ export default function LiveTradePage() {
   const [guardState, setGuardState] = useState<TradeGuardState | null>(null);
   const [tradeSettings, setTradeSettings] = useState<TradeSettings | null>(null);
   const [tradeSettingsError, setTradeSettingsError] = useState("");
+  const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
+  const [runDetail, setRunDetail] = useState<TradeRunDetail | null>(null);
+  const [symbolSummary, setSymbolSummary] = useState<TradeSymbolSummary[]>([]);
+  const [symbolSummaryUpdatedAt, setSymbolSummaryUpdatedAt] = useState<string | null>(null);
+  const [detailTab, setDetailTab] = useState<"orders" | "fills">("orders");
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState("");
   const [executeForm, setExecuteForm] = useState({
     run_id: "",
     live_confirm_token: "",
@@ -654,6 +699,32 @@ export default function LiveTradePage() {
     }
   };
 
+  const loadTradeRunData = async (runId: number) => {
+    setDetailLoading(true);
+    setDetailError("");
+    try {
+      const [detailRes, symbolsRes] = await Promise.all([
+        api.get<TradeRunDetail>(`/api/trade/runs/${runId}/detail`, {
+          params: { limit: 50, offset: 0 },
+        }),
+        api.get<TradeSymbolSummaryPage>(`/api/trade/runs/${runId}/symbols`),
+      ]);
+      setRunDetail(detailRes.data);
+      setSymbolSummary(symbolsRes.data?.items || []);
+      setSymbolSummaryUpdatedAt(
+        symbolsRes.data?.last_update_at || detailRes.data?.last_update_at || null
+      );
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("trade.detailError");
+      setDetailError(String(detail));
+      setRunDetail(null);
+      setSymbolSummary([]);
+      setSymbolSummaryUpdatedAt(null);
+    } finally {
+      setDetailLoading(false);
+    }
+  };
+
   const executeTradeRun = async () => {
     setExecuteLoading(true);
     setExecuteError("");
@@ -735,6 +806,22 @@ export default function LiveTradePage() {
       setExecuteForm((prev) => ({ ...prev, run_id: String(latestTradeRun.id) }));
     }
   }, [latestTradeRun?.id, executeForm.run_id]);
+
+  useEffect(() => {
+    if (latestTradeRun?.id && selectedRunId === null) {
+      setSelectedRunId(latestTradeRun.id);
+    }
+  }, [latestTradeRun?.id, selectedRunId]);
+
+  useEffect(() => {
+    if (selectedRunId) {
+      loadTradeRunData(selectedRunId);
+    } else {
+      setRunDetail(null);
+      setSymbolSummary([]);
+      setSymbolSummaryUpdatedAt(null);
+    }
+  }, [selectedRunId]);
 
   useEffect(() => {
     if (ibSettings?.market_data_type) {
@@ -845,6 +932,16 @@ export default function LiveTradePage() {
       return t("common.none");
     }
     return Number(value).toFixed(digits);
+  };
+
+  const formatPercent = (value?: number | null, digits = 2) => {
+    if (value === null || value === undefined) {
+      return t("common.none");
+    }
+    if (Number.isNaN(Number(value))) {
+      return t("common.none");
+    }
+    return `${(Number(value) * 100).toFixed(digits)}%`;
   };
 
   const guardEquity = useMemo(() => {
@@ -1852,6 +1949,27 @@ export default function LiveTradePage() {
             </table>
             <div className="form-grid" style={{ marginTop: "12px" }}>
               <div className="form-row">
+                <label className="form-label">{t("trade.runSelect")}</label>
+                <select
+                  className="form-select"
+                  value={selectedRunId ?? ""}
+                  onChange={(event) => {
+                    const next = Number(event.target.value);
+                    setSelectedRunId(Number.isNaN(next) || !next ? null : next);
+                  }}
+                >
+                  <option value="">{t("common.noneText")}</option>
+                  {tradeRuns.map((run) => (
+                    <option key={run.id} value={run.id}>
+                      #{run.id} · {formatStatus(run.status)}
+                    </option>
+                  ))}
+                </select>
+                <div className="form-hint">{t("trade.runSelectHint")}</div>
+              </div>
+            </div>
+            <div className="form-grid" style={{ marginTop: "12px" }}>
+              <div className="form-row">
                 <label className="form-label">{t("trade.executeRunId")}</label>
                 <input
                   type="number"
@@ -1888,41 +2006,157 @@ export default function LiveTradePage() {
         </div>
 
         <div className="card" style={{ marginTop: "16px" }}>
-          <div className="card-title">{t("trade.monitorTitle")}</div>
-          <div className="card-meta">{t("trade.monitorMeta")}</div>
-          {tradeError && <div className="form-hint">{tradeError}</div>}
+          <div className="card-title">{t("trade.symbolSummaryTitle")}</div>
+          <div className="card-meta">{t("trade.symbolSummaryMeta")}</div>
+          {detailError && <div className="form-hint">{detailError}</div>}
+          <div className="meta-list" style={{ marginTop: "12px" }}>
+            <div className="meta-row">
+              <span>{t("trade.symbolSummaryUpdatedAt")}</span>
+              <strong>
+                {symbolSummaryUpdatedAt ? formatDateTime(symbolSummaryUpdatedAt) : t("common.none")}
+              </strong>
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+            <button
+              className="button-secondary"
+              disabled={detailLoading || !selectedRunId}
+              onClick={() => selectedRunId && loadTradeRunData(selectedRunId)}
+            >
+              {detailLoading ? t("common.actions.loading") : t("trade.detailRefresh")}
+            </button>
+          </div>
           <table className="table" style={{ marginTop: "12px" }}>
             <thead>
               <tr>
-                <th>{t("trade.orderTable.id")}</th>
-                <th>{t("trade.orderTable.symbol")}</th>
-                <th>{t("trade.orderTable.side")}</th>
-                <th>{t("trade.orderTable.qty")}</th>
-                <th>{t("trade.orderTable.status")}</th>
-                <th>{t("trade.orderTable.createdAt")}</th>
+                <th>{t("trade.symbolTable.symbol")}</th>
+                <th>{t("trade.symbolTable.targetWeight")}</th>
+                <th>{t("trade.symbolTable.targetValue")}</th>
+                <th>{t("trade.symbolTable.filledQty")}</th>
+                <th>{t("trade.symbolTable.avgPrice")}</th>
+                <th>{t("trade.symbolTable.filledValue")}</th>
+                <th>{t("trade.symbolTable.pendingQty")}</th>
+                <th>{t("trade.symbolTable.deltaValue")}</th>
+                <th>{t("trade.symbolTable.deltaWeight")}</th>
+                <th>{t("trade.symbolTable.fillRatio")}</th>
+                <th>{t("trade.symbolTable.status")}</th>
               </tr>
             </thead>
             <tbody>
-              {tradeOrders.length ? (
-                tradeOrders.map((order) => (
-                  <tr key={order.id}>
-                    <td>#{order.id}</td>
-                    <td>{order.symbol || t("common.none")}</td>
-                    <td>{formatSide(order.side)}</td>
-                    <td>{order.quantity ?? t("common.none")}</td>
-                    <td>{formatStatus(order.status)}</td>
-                    <td>{formatDateTime(order.created_at)}</td>
+              {symbolSummary.length ? (
+                symbolSummary.map((row) => (
+                  <tr key={row.symbol}>
+                    <td>{row.symbol}</td>
+                    <td>{formatPercent(row.target_weight ?? null)}</td>
+                    <td>{formatNumber(row.target_value ?? null)}</td>
+                    <td>{formatNumber(row.filled_qty ?? 0, 2)}</td>
+                    <td>{formatNumber(row.avg_fill_price ?? null)}</td>
+                    <td>{formatNumber(row.filled_value ?? 0)}</td>
+                    <td>{formatNumber(row.pending_qty ?? 0, 2)}</td>
+                    <td>{formatNumber(row.delta_value ?? null)}</td>
+                    <td>{formatPercent(row.delta_weight ?? null)}</td>
+                    <td>{formatPercent(row.fill_ratio ?? null)}</td>
+                    <td>{row.last_status ? formatStatus(row.last_status) : t("common.none")}</td>
                   </tr>
                 ))
               ) : (
                 <tr>
-                  <td colSpan={6} className="empty-state">
-                    {t("trade.orderEmpty")}
+                  <td colSpan={11} className="empty-state">
+                    {detailLoading ? t("common.actions.loading") : t("trade.symbolSummaryEmpty")}
                   </td>
                 </tr>
               )}
             </tbody>
           </table>
+        </div>
+
+        <div className="card" style={{ marginTop: "16px" }}>
+          <div className="card-title">{t("trade.monitorTitle")}</div>
+          <div className="card-meta">{t("trade.monitorMeta")}</div>
+          {tradeError && <div className="form-hint">{tradeError}</div>}
+          <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+            <button
+              className={detailTab === "orders" ? "button-primary" : "button-secondary"}
+              onClick={() => setDetailTab("orders")}
+            >
+              {t("trade.ordersTitle")}
+            </button>
+            <button
+              className={detailTab === "fills" ? "button-primary" : "button-secondary"}
+              onClick={() => setDetailTab("fills")}
+            >
+              {t("trade.fillsTitle")}
+            </button>
+          </div>
+          {detailTab === "orders" ? (
+            <table className="table" style={{ marginTop: "12px" }}>
+              <thead>
+                <tr>
+                  <th>{t("trade.orderTable.id")}</th>
+                  <th>{t("trade.orderTable.symbol")}</th>
+                  <th>{t("trade.orderTable.side")}</th>
+                  <th>{t("trade.orderTable.qty")}</th>
+                  <th>{t("trade.orderTable.status")}</th>
+                  <th>{t("trade.orderTable.createdAt")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(runDetail?.orders || tradeOrders).length ? (
+                  (runDetail?.orders || tradeOrders).map((order) => (
+                    <tr key={order.id}>
+                      <td>#{order.id}</td>
+                      <td>{order.symbol || t("common.none")}</td>
+                      <td>{formatSide(order.side)}</td>
+                      <td>{order.quantity ?? t("common.none")}</td>
+                      <td>{formatStatus(order.status)}</td>
+                      <td>{formatDateTime(order.created_at)}</td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={6} className="empty-state">
+                      {t("trade.orderEmpty")}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          ) : (
+            <table className="table" style={{ marginTop: "12px" }}>
+              <thead>
+                <tr>
+                  <th>{t("trade.fillTable.orderId")}</th>
+                  <th>{t("trade.fillTable.execId")}</th>
+                  <th>{t("trade.fillTable.qty")}</th>
+                  <th>{t("trade.fillTable.price")}</th>
+                  <th>{t("trade.fillTable.commission")}</th>
+                  <th>{t("trade.fillTable.exchange")}</th>
+                  <th>{t("trade.fillTable.time")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {runDetail?.fills?.length ? (
+                  runDetail.fills.map((fill) => (
+                    <tr key={fill.id}>
+                      <td>#{fill.order_id}</td>
+                      <td>{fill.exec_id || t("common.none")}</td>
+                      <td>{formatNumber(fill.fill_quantity, 2)}</td>
+                      <td>{formatNumber(fill.fill_price, 4)}</td>
+                      <td>{formatNumber(fill.commission ?? null, 4)}</td>
+                      <td>{fill.exchange || t("common.none")}</td>
+                      <td>{fill.fill_time ? formatDateTime(fill.fill_time) : t("common.none")}</td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={7} className="empty-state">
+                      {t("trade.fillsEmpty")}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          )}
         </div>
       </div>
     </div>

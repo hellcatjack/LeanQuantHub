@@ -14,4 +14,10 @@ describe("LiveTradePage", () => {
     expect(html).toContain("trade.executeRunId");
     expect(html).toContain("trade.executeSubmit");
   });
+
+  it("renders symbol summary and fills table", () => {
+    const html = ReactDOMServer.renderToString(React.createElement(LiveTradePage));
+    expect(html).toContain("trade.symbolSummaryTitle");
+    expect(html).toContain("trade.fillsTitle");
+  });
 });
