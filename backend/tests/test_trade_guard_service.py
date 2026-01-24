@@ -1,4 +1,5 @@
 from datetime import date
+import json
 from pathlib import Path
 import sys
 
@@ -89,3 +90,12 @@ def test_guard_skips_market_fetch_without_positions(monkeypatch):
         assert result["status"] == "active"
     finally:
         session.close()
+
+
+def test_read_local_snapshot_uses_data_root(tmp_path, monkeypatch):
+    stream_root = tmp_path / "ib" / "stream"
+    stream_root.mkdir(parents=True, exist_ok=True)
+    (stream_root / "SPY.json").write_text(json.dumps({"last": 10}), encoding="utf-8")
+    monkeypatch.setattr(trade_guard.settings, "data_root", None)
+    monkeypatch.setenv("DATA_ROOT", str(tmp_path))
+    assert trade_guard._read_local_snapshot("SPY") == {"last": 10}

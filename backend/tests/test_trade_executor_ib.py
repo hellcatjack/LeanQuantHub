@@ -65,3 +65,12 @@ def test_execute_trade_run_sets_partial_status(monkeypatch):
     session.refresh(run)
     assert run.status == "partial"
     session.close()
+
+
+def test_resolve_snapshot_price_falls_back_to_local(monkeypatch):
+    monkeypatch.setattr(
+        trade_executor,
+        "_read_local_snapshot",
+        lambda symbol: {"last": 10.0},
+    )
+    assert trade_executor._resolve_snapshot_price("SPY", {}) == 10.0

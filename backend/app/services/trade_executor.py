@@ -14,7 +14,11 @@ from app.services.ib_market import fetch_market_snapshots
 from app.services.ib_order_executor import IBOrderExecutor
 from app.services.ib_settings import ensure_ib_client_id, probe_ib_connection
 from app.services.job_lock import JobLock
-from app.services.trade_guard import get_or_create_guard_state, record_guard_event
+from app.services.trade_guard import (
+    _read_local_snapshot,
+    get_or_create_guard_state,
+    record_guard_event,
+)
 from app.services.trade_order_builder import build_orders
 from app.services.trade_orders import create_trade_order, update_trade_order_status
 from app.services.trade_risk_engine import evaluate_orders
@@ -53,6 +57,15 @@ def _limit_allows_fill(side: str, price: float, limit_price: float) -> bool:
     if side == "SELL":
         return price >= limit_price
     return False
+
+
+def _resolve_snapshot_price(symbol: str, snapshot_map: dict[str, dict[str, Any]]) -> float | None:
+    payload = (snapshot_map.get(symbol) or {}).get("data")
+    price = _pick_price(payload)
+    if price is not None:
+        return price
+    local_snapshot = _read_local_snapshot(symbol)
+    return _pick_price(local_snapshot)
 
 
 def _submit_ib_orders(session, orders, *, price_map):
@@ -279,7 +292,7 @@ def execute_trade_run(
             )
             snapshot_map = {item.get("symbol"): item for item in snapshots}
             for symbol in symbols:
-                price = _pick_price((snapshot_map.get(symbol) or {}).get("data"))
+                price = _resolve_snapshot_price(symbol, snapshot_map)
                 if price is not None:
                     price_map[symbol] = price
 
@@ -399,7 +412,7 @@ def execute_trade_run(
 
         risk_orders = []
         for order in orders:
-            price = _pick_price((snapshot_map.get(order.symbol) or {}).get("data"))
+            price = _resolve_snapshot_price(order.symbol, snapshot_map)
             risk_orders.append(
                 {
                     "symbol": order.symbol,
@@ -468,8 +481,7 @@ def execute_trade_run(
                 skipped += 1
                 continue
             snapshot_item = snapshot_map.get(order.symbol) or {}
-            snapshot = snapshot_item.get("data")
-            price = _pick_price(snapshot)
+            price = _resolve_snapshot_price(order.symbol, snapshot_map)
             if price is None:
                 rejected += 1
                 record_guard_event(
