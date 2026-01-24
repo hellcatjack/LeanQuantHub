@@ -213,6 +213,7 @@ a {
   border-radius: 16px;
   padding: 18px;
   box-shadow: var(--shadow);
+  min-width: 0;
 }
 
 .form-grid {
@@ -3117,6 +3118,7 @@ a {
   border-radius: 12px;
   border: 1px solid var(--border);
   background: var(--panel);
+  min-width: 0;
 }
 
 .table-scroll .table {
