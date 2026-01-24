@@ -20,8 +20,6 @@ def test_trade_run_sets_order_intent_path(monkeypatch, tmp_path):
     Session = sessionmaker(bind=engine)
     monkeypatch.setattr(trade_executor, "SessionLocal", Session)
     monkeypatch.setattr(trade_executor, "probe_ib_connection", lambda _s: SimpleNamespace(status="connected"))
-    monkeypatch.setattr(trade_executor, "ensure_ib_client_id", lambda _s: SimpleNamespace())
-    monkeypatch.setattr(trade_executor, "resolve_ib_api_mode", lambda _s: "mock")
     monkeypatch.setattr(trade_executor, "fetch_market_snapshots", lambda *a, **k: [])
     monkeypatch.setattr(trade_executor, "evaluate_orders", lambda *_a, **_k: (True, [], []))
     monkeypatch.setattr(trade_executor, "fetch_account_summary", lambda *_a, **_k: {"NetLiquidation": 100000})
