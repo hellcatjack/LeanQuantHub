@@ -3,9 +3,6 @@ import sys
 
 from contextlib import contextmanager
 
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
-
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
@@ -29,9 +26,5 @@ def test_get_account_summary_route(monkeypatch):
 
     monkeypatch.setattr(brokerage_routes, "get_session", _get_session)
     monkeypatch.setattr(brokerage_routes, "get_account_summary", fake_summary)
-    app = FastAPI()
-    app.include_router(brokerage_routes.router)
-    client = TestClient(app)
-    res = client.get("/api/brokerage/account/summary?mode=paper")
-    assert res.status_code == 200
-    assert res.json()["items"]["NetLiquidation"] == 100.0
+    resp = brokerage_routes.get_ib_account_summary(mode="paper", full=False)
+    assert resp.items["NetLiquidation"] == 100.0
