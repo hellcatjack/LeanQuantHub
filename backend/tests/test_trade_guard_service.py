@@ -1,5 +1,4 @@
 from datetime import date
-import json
 from pathlib import Path
 import sys
 
@@ -77,9 +76,9 @@ def test_guard_skips_market_fetch_without_positions(monkeypatch):
     session = _make_session()
 
     def _boom(*args, **kwargs):
-        raise AssertionError("market fetch called")
+        raise AssertionError("quote fetch called")
 
-    monkeypatch.setattr(trade_guard, "fetch_market_snapshots", _boom)
+    monkeypatch.setattr(trade_guard, "read_quotes", _boom)
     try:
         result = evaluate_intraday_guard(
             session,
@@ -90,12 +89,3 @@ def test_guard_skips_market_fetch_without_positions(monkeypatch):
         assert result["status"] == "active"
     finally:
         session.close()
-
-
-def test_read_local_snapshot_uses_data_root(tmp_path, monkeypatch):
-    stream_root = tmp_path / "ib" / "stream"
-    stream_root.mkdir(parents=True, exist_ok=True)
-    (stream_root / "SPY.json").write_text(json.dumps({"last": 10}), encoding="utf-8")
-    monkeypatch.setattr(trade_guard.settings, "data_root", None)
-    monkeypatch.setenv("DATA_ROOT", str(tmp_path))
-    assert trade_guard._read_local_snapshot("SPY") == {"last": 10}

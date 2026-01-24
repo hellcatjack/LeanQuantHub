@@ -47,13 +47,16 @@ from app.services.ib_market import (
     refresh_contract_cache,
 )
 from app.services.ib_account import get_account_summary, get_account_positions
-from app.services.ib_history_runner import cancel_ib_history_job, run_ib_history_job
 from app.services.project_symbols import collect_active_project_symbols
-from app.services import ib_stream
-from app.services.ib_stream_runner import start_stream_daemon, stop_stream_daemon
+from app.services.lean_bridge_reader import read_bridge_status, read_quotes
 from app.models import IBContractCache, IBHistoryJob
 
 router = APIRouter(prefix="/api/ib", tags=["ib"])
+
+
+def _resolve_bridge_root() -> Path:
+    base = settings.data_root or settings.artifact_root
+    return Path(base) / "lean_bridge"
 
 
 def _mask_account(value: str | None) -> str | None:
@@ -174,68 +177,57 @@ def probe_ib_state():
 
 @router.get("/stream/status", response_model=IBStreamStatusOut)
 def get_ib_stream_status():
-    status = ib_stream.get_stream_status()
-    return IBStreamStatusOut(**status)
+    bridge_status = read_bridge_status(_resolve_bridge_root())
+    quotes = read_quotes(_resolve_bridge_root())
+    items = quotes.get("items") if isinstance(quotes.get("items"), list) else []
+    subscribed = sorted(
+        {
+            str(item.get("symbol") or "").strip().upper()
+            for item in items
+            if isinstance(item, dict) and str(item.get("symbol") or "").strip()
+        }
+    )
+    status = str(bridge_status.get("status") or "unknown")
+    last_heartbeat = bridge_status.get("last_heartbeat")
+    last_error = bridge_status.get("last_error")
+    stale = bool(bridge_status.get("stale", False))
+    return IBStreamStatusOut(
+        status=status if not stale else "degraded",
+        last_heartbeat=last_heartbeat,
+        subscribed_symbols=subscribed,
+        ib_error_count=1 if stale else 0,
+        last_error=last_error,
+        market_data_type=None,
+    )
 
 
 @router.get("/stream/snapshot", response_model=IBStreamSnapshotOut)
 def get_ib_stream_snapshot(symbol: str):
     if not str(symbol or "").strip():
         raise HTTPException(status_code=400, detail="symbol_required")
-    payload = ib_stream.read_stream_snapshot(symbol)
+    quotes = read_quotes(_resolve_bridge_root())
+    items = quotes.get("items") if isinstance(quotes.get("items"), list) else []
+    normalized = str(symbol or "").strip().upper()
+    payload = {"symbol": normalized, "data": None, "error": "snapshot_not_found"}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("symbol") or "").strip().upper() != normalized:
+            continue
+        data = item.get("data") if isinstance(item.get("data"), dict) else item
+        payload = {"symbol": normalized, "data": data if isinstance(data, dict) else None, "error": None}
+        break
     return IBStreamSnapshotOut(**payload)
 
 
 @router.post("/stream/start", response_model=IBStreamStatusOut)
 def start_ib_stream(payload: IBStreamStartRequest):
-    with get_session() as session:
-        symbols = payload.symbols or []
-        if not symbols:
-            symbols = ib_stream.build_stream_symbols(
-                session,
-                project_id=payload.project_id,
-                decision_snapshot_id=payload.decision_snapshot_id,
-                max_symbols=payload.max_symbols,
-            )
-        market_data_type = payload.market_data_type or "delayed"
-        stream_root = ib_stream._resolve_stream_root(None)
-        ib_stream.write_stream_config(
-            stream_root,
-            {
-                "enabled": True,
-                "project_id": payload.project_id,
-                "decision_snapshot_id": payload.decision_snapshot_id,
-                "max_symbols": payload.max_symbols,
-                "market_data_type": market_data_type,
-                "symbols": symbols,
-            },
-        )
-        status = ib_stream.write_stream_status(
-            stream_root,
-            status="starting",
-            symbols=symbols,
-            market_data_type=market_data_type,
-        )
-        start_stream_daemon(data_root=stream_root.parent)
-        return IBStreamStatusOut(**status)
+    return get_ib_stream_status()
 
 
 @router.post("/stream/stop", response_model=IBStreamStatusOut)
 def stop_ib_stream():
-    current = ib_stream.get_stream_status()
-    market_data_type = current.get("market_data_type") or "delayed"
-    stream_root = ib_stream._resolve_stream_root(None)
-    config = ib_stream.read_stream_config(stream_root)
-    config["enabled"] = False
-    ib_stream.write_stream_config(stream_root, config)
-    status = ib_stream.write_stream_status(
-        stream_root,
-        status="stopped",
-        symbols=[],
-        market_data_type=market_data_type,
-    )
-    stop_stream_daemon()
-    return IBStreamStatusOut(**status)
+    return get_ib_stream_status()
 
 
 @router.get("/contracts", response_model=list[IBContractCacheOut])
@@ -401,7 +393,7 @@ def create_ib_history_job(
 ):
     params = payload.model_dump()
     with get_session() as session:
-        job = IBHistoryJob(status="queued", params=params)
+        job = IBHistoryJob(status="failed", message="ib_history_disabled", params=params)
         session.add(job)
         session.commit()
         session.refresh(job)
@@ -413,7 +405,6 @@ def create_ib_history_job(
             detail={"params": params},
         )
         session.commit()
-    background_tasks.add_task(run_ib_history_job, job.id)
     return IBHistoryJobOut.model_validate(job, from_attributes=True)
 
 
@@ -429,7 +420,6 @@ def cancel_ib_history_job_route(job_id: int):
         job.message = "cancelled"
         job.updated_at = datetime.utcnow()
         session.commit()
-        cancel_ib_history_job(job_id)
         record_audit(
             session,
             action="ib_history_job.cancel",

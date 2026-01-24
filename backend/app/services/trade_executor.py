@@ -4,28 +4,26 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 import csv
+import json
 
 from app.core.config import settings
 from app.db import SessionLocal
-from app.models import DecisionSnapshot, TradeFill, TradeOrder, TradeRun, TradeSettings
+from app.models import DecisionSnapshot, TradeOrder, TradeRun, TradeSettings
 from pathlib import Path
 
-from app.services.ib_market import fetch_market_snapshots
-from app.services.ib_order_executor import IBOrderExecutor
-from app.services.ib_settings import ensure_ib_client_id, probe_ib_connection, resolve_ib_api_mode
 from app.services.job_lock import JobLock
 from app.services.trade_guard import (
-    _read_local_snapshot,
     get_or_create_guard_state,
     record_guard_event,
 )
-from app.services.ib_orders import apply_fill_to_order
 from app.services.trade_order_builder import build_orders
-from app.services.trade_orders import create_trade_order, update_trade_order_status
+from app.services.trade_orders import create_trade_order
 from app.services.trade_risk_engine import evaluate_orders
 from app.services.trade_alerts import notify_trade_alert
 from app.services.ib_account import fetch_account_summary
 from app.services.trade_order_intent import write_order_intent
+from app.services.lean_bridge_reader import read_bridge_status, read_quotes
+from app.services.lean_execution import build_execution_config, launch_execution
 
 
 ARTIFACT_ROOT = Path(settings.artifact_root) if settings.artifact_root else Path("/app/stocklean/artifacts")
@@ -56,77 +54,39 @@ def _pick_price(snapshot: dict[str, Any] | None) -> float | None:
     return None
 
 
-def _limit_allows_fill(side: str, price: float, limit_price: float) -> bool:
-    if side == "BUY":
-        return price <= limit_price
-    if side == "SELL":
-        return price >= limit_price
-    return False
+def _resolve_bridge_root() -> Path:
+    base = settings.data_root or settings.artifact_root
+    return Path(base) / "lean_bridge"
 
 
-def _resolve_snapshot_price(symbol: str, snapshot_map: dict[str, dict[str, Any]]) -> float | None:
-    payload = (snapshot_map.get(symbol) or {}).get("data")
-    price = _pick_price(payload)
-    if price is not None:
-        return price
-    local_snapshot = _read_local_snapshot(symbol)
-    return _pick_price(local_snapshot)
+def _bridge_connection_ok() -> bool:
+    status = read_bridge_status(_resolve_bridge_root())
+    state = str(status.get("status") or "").lower()
+    if status.get("stale") is True:
+        return False
+    return state in {"ok", "connected", "running"}
 
 
-def _submit_ib_orders(session, orders, *, price_map):
-    settings_row = ensure_ib_client_id(session)
-    executor = IBOrderExecutor(settings_row)
-    return executor.submit_orders(session, orders, price_map=price_map)
+def _quote_price(item: dict[str, Any]) -> float | None:
+    payload = item.get("data") if isinstance(item.get("data"), dict) else item
+    return _pick_price(payload if isinstance(payload, dict) else None)
 
 
-def _execute_orders_with_ib(session, run, orders, *, price_map):
-    result = _submit_ib_orders(session, orders, price_map=price_map)
-    events = []
-    if isinstance(result, dict):
-        events = result.get("events") or []
-    order_map = {order.id: order for order in orders}
-    now = datetime.utcnow()
-    for event in events:
-        order = order_map.get(getattr(event, "order_id", None))
-        if not order:
+def _build_price_map(symbols: list[str]) -> dict[str, float]:
+    symbol_set = {symbol for symbol in symbols if symbol}
+    quotes = read_quotes(_resolve_bridge_root())
+    items = quotes.get("items") if isinstance(quotes.get("items"), list) else []
+    prices: dict[str, float] = {}
+    for item in items:
+        if not isinstance(item, dict):
             continue
-        ib_order_id = getattr(event, "ib_order_id", None)
-        if ib_order_id:
-            order.ib_order_id = ib_order_id
-        status = str(getattr(event, "status", "") or "").strip().upper()
-        if status in {"SUBMITTED", "PRESUBMITTED"}:
-            update_trade_order_status(session, order, {"status": "SUBMITTED"})
+        symbol = str(item.get("symbol") or "").strip().upper()
+        if not symbol or symbol not in symbol_set:
             continue
-        if status == "REJECTED":
-            update_trade_order_status(
-                session,
-                order,
-                {"status": "REJECTED", "params": {"reason": "ib_rejected"}},
-            )
-            continue
-        if status in {"PARTIAL", "FILLED"}:
-            fill_qty = float(getattr(event, "filled", 0.0) or 0.0)
-            if fill_qty <= 0:
-                fill_qty = float(order.quantity)
-            fill_price = getattr(event, "avg_price", None)
-            if fill_price is None:
-                fill_price = price_map.get(order.symbol)
-            if fill_price is not None:
-                apply_fill_to_order(
-                    session,
-                    order,
-                    fill_qty=fill_qty,
-                    fill_price=float(fill_price),
-                    fill_time=now,
-                    exec_id=getattr(event, "exec_id", None),
-                )
-            else:
-                update_trade_order_status(
-                    session,
-                    order,
-                    {"status": "SUBMITTED", "params": {"warn": "fill_price_missing"}},
-                )
-    return result
+        price = _quote_price(item)
+        if price is not None:
+            prices[symbol] = price
+    return prices
 
 
 def _finalize_run_status(session, run, *, filled: int, rejected: int, cancelled: int):
@@ -181,11 +141,6 @@ def _merge_risk_params(defaults: dict[str, Any] | None, overrides: dict[str, Any
     return merged
 
 
-def _ib_connection_ok(session) -> bool:
-    state = probe_ib_connection(session)
-    return (state.status or "").lower() in {"connected", "mock"}
-
-
 def execute_trade_run(
     run_id: int,
     *,
@@ -231,14 +186,14 @@ def execute_trade_run(
             )
 
         settings_row = session.query(TradeSettings).order_by(TradeSettings.id.desc()).first()
-        execution_source = (settings_row.execution_data_source if settings_row else "ib") or "ib"
-        if execution_source.lower() != "ib":
+        execution_source = (settings_row.execution_data_source if settings_row else "lean") or "lean"
+        if execution_source.lower() != "lean":
             params = dict(run.params or {})
             params["execution_data_source"] = execution_source
-            params["expected_execution_data_source"] = "ib"
+            params["expected_execution_data_source"] = "lean"
             run.status = "blocked"
             run.message = "execution_data_source_mismatch"
-            run.params = params
+            run.params = dict(params)
             run.ended_at = datetime.utcnow()
             run.updated_at = datetime.utcnow()
             session.commit()
@@ -253,13 +208,13 @@ def execute_trade_run(
                 dry_run=dry_run,
             )
 
-        if not _ib_connection_ok(session):
+        if not _bridge_connection_ok():
             run.status = "blocked"
-            run.message = "connection_unavailable"
+            run.message = "bridge_unavailable"
             run.ended_at = datetime.utcnow()
             run.updated_at = datetime.utcnow()
             session.commit()
-            notify_trade_alert(session, f"Trade run blocked: IB connection unavailable (run={run.id})")
+            notify_trade_alert(session, f"Trade run blocked: lean bridge unavailable (run={run.id})")
             return TradeExecutionResult(
                 run_id=run.id,
                 status=run.status,
@@ -293,7 +248,6 @@ def execute_trade_run(
                 message=run.message,
                 dry_run=dry_run,
             )
-        snapshot_map: dict[str, dict[str, Any]] = {}
         price_map: dict[str, float] = {}
         params = dict(run.params or {})
         if not orders:
@@ -337,25 +291,12 @@ def execute_trade_run(
                 output_dir=ARTIFACT_ROOT / "order_intents",
             )
             params["order_intent_path"] = intent_path
-            run.params = params
+            run.params = dict(params)
             run.updated_at = datetime.utcnow()
             session.commit()
 
             symbols = sorted({item.get("symbol") for item in items if item.get("symbol")})
-            snapshots = fetch_market_snapshots(
-                session,
-                symbols=symbols,
-                store=False,
-                fallback_history=True,
-                history_duration="5 D",
-                history_bar_size="1 day",
-                history_use_rth=True,
-            )
-            snapshot_map = {item.get("symbol"): item for item in snapshots}
-            for symbol in symbols:
-                price = _resolve_snapshot_price(symbol, snapshot_map)
-                if price is not None:
-                    price_map[symbol] = price
+            price_map = _build_price_map(symbols)
 
             if "portfolio_value" not in params:
                 account_summary = fetch_account_summary(session)
@@ -368,7 +309,7 @@ def execute_trade_run(
                             portfolio_value = 0.0
                         if portfolio_value > 0:
                             params["portfolio_value"] = portfolio_value
-                            run.params = params
+                            run.params = dict(params)
                             run.updated_at = datetime.utcnow()
                             session.commit()
                     cash_available = account_summary.get("cash_available")
@@ -453,22 +394,13 @@ def execute_trade_run(
                 "created_orders": created,
             }
             params["price_map"] = price_map
-            run.params = params
+            run.params = dict(params)
             run.updated_at = datetime.utcnow()
             session.commit()
 
-        if not snapshot_map:
+        if not price_map:
             symbols = sorted({order.symbol for order in orders})
-            snapshots = fetch_market_snapshots(
-                session,
-                symbols=symbols,
-                store=False,
-                fallback_history=True,
-                history_duration="5 D",
-                history_bar_size="1 day",
-                history_use_rth=True,
-            )
-            snapshot_map = {item.get("symbol"): item for item in snapshots}
+            price_map = _build_price_map(symbols)
 
         defaults = settings_row.risk_defaults if settings_row else {}
         risk_overrides = params.get("risk_overrides") if isinstance(params.get("risk_overrides"), dict) else {}
@@ -483,7 +415,7 @@ def execute_trade_run(
                     portfolio_value = 0.0
                 if portfolio_value > 0:
                     params["portfolio_value"] = portfolio_value
-                    run.params = params
+                    run.params = dict(params)
                     run.updated_at = datetime.utcnow()
                     session.commit()
             cash_available = account_summary.get("cash_available")
@@ -501,7 +433,7 @@ def execute_trade_run(
 
         risk_orders = []
         for order in orders:
-            price = _resolve_snapshot_price(order.symbol, snapshot_map)
+            price = price_map.get(order.symbol)
             risk_orders.append(
                 {
                     "symbol": order.symbol,
@@ -528,7 +460,7 @@ def execute_trade_run(
                 "count": len(blocked_orders),
                 "risk_effective": risk_params,
             }
-            run.params = params
+            run.params = dict(params)
             run.ended_at = datetime.utcnow()
             run.updated_at = datetime.utcnow()
             session.commit()
@@ -548,41 +480,16 @@ def execute_trade_run(
         run.updated_at = datetime.utcnow()
         session.commit()
 
-        symbols = sorted({order.symbol for order in orders})
-        snapshots = fetch_market_snapshots(
-            session,
-            symbols=symbols,
-            store=False,
-            fallback_history=True,
-            history_duration="5 D",
-            history_bar_size="1 day",
-            history_use_rth=True,
-        )
-        snapshot_map = {item.get("symbol"): item for item in snapshots}
-
         filled = 0
         cancelled = 0
         rejected = 0
         skipped = 0
-
-        ib_settings = ensure_ib_client_id(session)
-        api_mode = resolve_ib_api_mode(ib_settings)
-        if not dry_run and api_mode == "ib":
-            result = _execute_orders_with_ib(session, run, orders, price_map=price_map)
-            if isinstance(result, dict):
-                filled = int(result.get("filled") or 0)
-                rejected = int(result.get("rejected") or 0)
-                cancelled = int(result.get("cancelled") or 0)
-            skipped = sum(1 for order in orders if order.status in {"FILLED", "CANCELED", "REJECTED"})
-            if filled == 0 and rejected == 0 and cancelled == 0:
-                run.status = "running"
-                run.message = "submitted_ib"
-                run.updated_at = datetime.utcnow()
-                session.commit()
-            else:
-                _finalize_run_status(session, run, filled=filled, rejected=rejected, cancelled=cancelled)
-                run.message = "executed_ib"
-                session.commit()
+        if dry_run:
+            run.status = "done"
+            run.message = "dry_run"
+            run.ended_at = datetime.utcnow()
+            run.updated_at = datetime.utcnow()
+            session.commit()
             return TradeExecutionResult(
                 run_id=run.id,
                 status=run.status,
@@ -594,93 +501,36 @@ def execute_trade_run(
                 dry_run=dry_run,
             )
 
-        for order in orders:
-            if order.status in {"FILLED", "CANCELED", "REJECTED"}:
-                skipped += 1
-                continue
-            snapshot_item = snapshot_map.get(order.symbol) or {}
-            price = _resolve_snapshot_price(order.symbol, snapshot_map)
-            if price is None:
-                rejected += 1
-                record_guard_event(
-                    session,
-                    project_id=run.project_id,
-                    mode=run.mode,
-                    event="market_data_error",
-                )
-                if not dry_run:
-                    update_trade_order_status(
-                        session,
-                        order,
-                        {
-                            "status": "REJECTED",
-                            "params": {"reason": "price_unavailable", "source": "mock"},
-                        },
-                    )
-                continue
-
-            side = (order.side or "").strip().upper()
-            limit_price = order.limit_price
-            should_fill = True
-            if (order.order_type or "").upper() == "LMT":
-                if limit_price is None:
-                    should_fill = False
-                else:
-                    should_fill = _limit_allows_fill(side, price, float(limit_price))
-
-            if not should_fill:
-                cancelled += 1
-                if not dry_run:
-                    update_trade_order_status(
-                        session,
-                        order,
-                        {
-                            "status": "CANCELED",
-                            "params": {"reason": "limit_not_reached", "source": "mock"},
-                        },
-                    )
-                continue
-
-            filled += 1
-            if dry_run:
-                continue
-            update_trade_order_status(session, order, {"status": "SUBMITTED"})
-            update_trade_order_status(
-                session,
-                order,
-                {
-                    "status": "FILLED",
-                    "filled_quantity": order.quantity,
-                    "avg_fill_price": price,
-                    "params": {"source": "mock"},
-                },
-            )
-            fill = TradeFill(
-                order_id=order.id,
-                fill_quantity=order.quantity,
-                fill_price=price,
-                commission=None,
-                fill_time=datetime.utcnow(),
-                params={"source": "mock"},
-            )
-            session.add(fill)
-            session.commit()
-
-        if dry_run:
-            run.status = "queued"
-            run.message = "dry_run_only"
-            run.started_at = None
-            run.updated_at = datetime.utcnow()
-        else:
-            if filled == 0:
-                run.status = "failed"
-            elif rejected or cancelled:
-                run.status = "partial"
-            else:
-                run.status = "done"
-            run.message = "executed_mock"
+        intent_path = params.get("order_intent_path")
+        if not intent_path:
+            run.status = "failed"
+            run.message = "order_intent_missing"
             run.ended_at = datetime.utcnow()
             run.updated_at = datetime.utcnow()
+            session.commit()
+            return TradeExecutionResult(
+                run_id=run.id,
+                status=run.status,
+                filled=filled,
+                cancelled=cancelled,
+                rejected=rejected,
+                skipped=skipped,
+                message=run.message,
+                dry_run=dry_run,
+            )
+
+        config = build_execution_config(
+            intent_path=intent_path,
+            brokerage="InteractiveBrokersBrokerage",
+        )
+        config_dir = ARTIFACT_ROOT / "lean_execution"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        config_path = config_dir / f"trade_run_{run.id}.json"
+        config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+        launch_execution(config_path=str(config_path))
+        run.status = "running"
+        run.message = "submitted_lean"
+        run.updated_at = datetime.utcnow()
         session.commit()
 
         return TradeExecutionResult(

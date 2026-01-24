@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import os
 import subprocess
@@ -44,9 +45,8 @@ from app.services.alpha_rate import load_alpha_rate_config
 from app.services.bulk_auto import load_bulk_auto_config
 from app.services.decision_snapshot import generate_decision_snapshot
 from app.services.factor_score_runner import run_factor_score_job
-from app.services import ib_stream
-from app.services.ib_market import fetch_market_snapshots
-from app.services.ib_settings import get_or_create_ib_settings, update_ib_state
+from app.services.lean_bridge_reader import read_quotes
+from app.services.ib_settings import update_ib_state
 from app.services.job_lock import JobLock
 from app.services.ml_runner import build_ml_config, run_ml_train
 from app.services.pit_runner import (
@@ -64,6 +64,121 @@ from app.services.project_symbols import collect_active_project_symbols, write_s
 from app.services.trade_executor import execute_trade_run
 
 PRETRADE_ACTIVE_STATUSES = {"queued", "running"}
+
+
+def _resolve_bridge_root() -> Path:
+    base = settings.data_root or settings.artifact_root
+    return Path(base) / "lean_bridge"
+
+
+def _normalize_symbol(symbol: str | None) -> str:
+    return str(symbol or "").strip().upper()
+
+
+def _read_snapshot_symbols(path: str | None) -> list[str]:
+    if not path:
+        return []
+    file_path = Path(path)
+    if not file_path.exists():
+        return []
+    symbols: set[str] = set()
+    with file_path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            symbol = _normalize_symbol(row.get("symbol"))
+            if symbol:
+                symbols.add(symbol)
+    return sorted(symbols)
+
+
+def _clip_symbols(symbols: list[str], max_symbols: int | None) -> list[str]:
+    items = sorted({_normalize_symbol(symbol) for symbol in symbols if _normalize_symbol(symbol)})
+    if max_symbols is not None:
+        try:
+            limit = max(0, int(max_symbols))
+        except (TypeError, ValueError):
+            limit = None
+        if limit:
+            return items[:limit]
+    return items
+
+
+def _build_snapshot_symbols(
+    session,
+    *,
+    project_id: int,
+    decision_snapshot_id: int | None = None,
+    max_symbols: int | None = None,
+) -> list[str]:
+    if decision_snapshot_id:
+        snapshot = session.get(DecisionSnapshot, decision_snapshot_id)
+        if snapshot:
+            symbols = _read_snapshot_symbols(snapshot.items_path)
+            if symbols:
+                return _clip_symbols(symbols, max_symbols)
+    config = _resolve_project_config(session, project_id)
+    return _clip_symbols(collect_active_project_symbols(config), max_symbols)
+
+
+def _parse_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(text).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+def _quote_timestamp(item: dict[str, Any], fallback: str | None) -> datetime | None:
+    ts = item.get("timestamp")
+    if isinstance(ts, str):
+        parsed = _parse_timestamp(ts)
+        if parsed:
+            return parsed
+    payload = item.get("data") if isinstance(item.get("data"), dict) else None
+    if isinstance(payload, dict):
+        ts = payload.get("timestamp")
+        if isinstance(ts, str):
+            parsed = _parse_timestamp(ts)
+            if parsed:
+                return parsed
+    return _parse_timestamp(fallback)
+
+
+def _quotes_ready(symbols: list[str], ttl_seconds: int | None) -> tuple[bool, list[str], list[str]]:
+    if ttl_seconds is None:
+        return False, symbols, []
+    quotes = read_quotes(_resolve_bridge_root())
+    items = quotes.get("items") if isinstance(quotes.get("items"), list) else []
+    stale = bool(quotes.get("stale", False))
+    updated_at = quotes.get("updated_at") or quotes.get("refreshed_at")
+    now = datetime.utcnow()
+    ttl = max(0, int(ttl_seconds))
+    quotes_map = {
+        _normalize_symbol(item.get("symbol")): item
+        for item in items
+        if isinstance(item, dict) and _normalize_symbol(item.get("symbol"))
+    }
+    missing: list[str] = []
+    stale_symbols: list[str] = []
+    for symbol in symbols:
+        item = quotes_map.get(symbol)
+        if not item:
+            missing.append(symbol)
+            continue
+        ts = _quote_timestamp(item, updated_at)
+        if stale and ts is None:
+            stale_symbols.append(symbol)
+            continue
+        if ts and ttl > 0 and now - ts > timedelta(seconds=ttl):
+            stale_symbols.append(symbol)
+    ok = not missing and not stale_symbols
+    return ok, missing, stale_symbols
 
 
 @dataclass
@@ -793,11 +908,8 @@ def step_trade_execute(ctx: StepContext, params: dict[str, Any]) -> StepResult:
 def step_market_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResult:
     config = _resolve_project_config(ctx.session, ctx.run.project_id)
     trade_cfg = config.get("trade") if isinstance(config.get("trade"), dict) else {}
-    market_data_type = trade_cfg.get("market_data_type")
     ttl_seconds = trade_cfg.get("market_snapshot_ttl_seconds")
     exclude_symbols_raw = trade_cfg.get("market_snapshot_exclude_symbols")
-    settings_row = get_or_create_ib_settings(ctx.session)
-    market_data_type = market_data_type or settings_row.market_data_type or "realtime"
     try:
         ttl_seconds = int(ttl_seconds) if ttl_seconds is not None else 30
     except (TypeError, ValueError):
@@ -823,7 +935,7 @@ def step_market_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResult
             )
         if latest:
             decision_snapshot_id = latest.id
-    symbols = ib_stream.build_stream_symbols(
+    symbols = _build_snapshot_symbols(
         ctx.session,
         project_id=ctx.run.project_id,
         decision_snapshot_id=decision_snapshot_id,
@@ -835,9 +947,9 @@ def step_market_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResult
         else:
             raw = str(exclude_symbols_raw)
             candidates = [item.strip() for item in raw.replace("\n", ",").split(",")]
-        excluded = {ib_stream._normalize_symbol(item) for item in candidates if ib_stream._normalize_symbol(item)}
+        excluded = {_normalize_symbol(item) for item in candidates if _normalize_symbol(item)}
         if excluded:
-            symbols = [symbol for symbol in symbols if ib_stream._normalize_symbol(symbol) not in excluded]
+            symbols = [symbol for symbol in symbols if _normalize_symbol(symbol) not in excluded]
     if not symbols:
         reason = "market_snapshot_all_excluded" if excluded else "market_snapshot_no_symbols"
         skip_artifacts: dict[str, Any] = {"decision_snapshot_id": decision_snapshot_id}
@@ -845,8 +957,8 @@ def step_market_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResult
             skip_artifacts["excluded_symbols"] = sorted(excluded)
         raise StepSkip(reason, artifacts=skip_artifacts)
 
-    stream_root = ib_stream._resolve_stream_root(None)
-    if ib_stream.is_snapshot_fresh(stream_root, symbols, ttl_seconds=ttl_seconds):
+    ok, missing, stale_symbols = _quotes_ready(symbols, ttl_seconds)
+    if ok:
         return StepResult(
             artifacts={
                 "market_snapshot": {
@@ -859,38 +971,10 @@ def step_market_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResult
             }
         )
 
-    results = fetch_market_snapshots(
-        ctx.session,
-        symbols=symbols,
-        store=True,
-        market_data_type=market_data_type,
-    )
-    errors = [f"{item.get('symbol')}:{item.get('error')}" for item in results if item.get("error")]
-    error_message = "; ".join(errors) if errors else None
-    stream_status = "degraded" if errors else "ok"
-    ib_stream.write_stream_status(
-        stream_root,
-        status=stream_status,
-        symbols=symbols,
-        error=error_message,
-        market_data_type=market_data_type,
-    )
-    if errors:
-        update_ib_state(ctx.session, status="degraded", message=error_message, heartbeat=True)
-        raise RuntimeError("market_snapshot_failed")
-    update_ib_state(ctx.session, status="connected", message="market_snapshot_ok", heartbeat=True)
-    return StepResult(
-        artifacts={
-            "market_snapshot": {
-                "skipped": False,
-                "symbols": symbols,
-                "ttl_seconds": ttl_seconds,
-                "errors": errors,
-                "decision_snapshot_id": decision_snapshot_id,
-                "excluded_symbols": sorted(excluded),
-            }
-        }
-    )
+    errors = [f"{symbol}:missing" for symbol in missing] + [f"{symbol}:stale" for symbol in stale_symbols]
+    error_message = "; ".join(errors) if errors else "market_snapshot_unavailable"
+    update_ib_state(ctx.session, status="degraded", message=error_message, heartbeat=True)
+    raise RuntimeError("market_snapshot_failed")
 
 
 STEP_DEFS = [

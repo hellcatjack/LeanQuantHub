@@ -971,6 +971,42 @@ export default function LiveTradePage() {
     return t("trade.overview.status.unknown");
   }, [overviewStatus, t]);
 
+  const bridgeStatusLabel = useMemo(() => {
+    const snapshotStatus = ibOverview?.snapshot_cache?.status;
+    const streamStatus = ibOverview?.stream?.status;
+    const isStale =
+      accountSummary?.stale === true || snapshotStatus === "stale" || streamStatus === "degraded";
+    if (isStale) {
+      return t("trade.bridgeStatus.stale");
+    }
+    if (snapshotStatus || streamStatus) {
+      return t("trade.bridgeStatus.ok");
+    }
+    return t("trade.bridgeStatus.unknown");
+  }, [
+    accountSummary?.stale,
+    ibOverview?.snapshot_cache?.status,
+    ibOverview?.stream?.status,
+    t,
+  ]);
+
+  const bridgeSource = useMemo(() => {
+    return accountSummary?.source || "lean_bridge";
+  }, [accountSummary?.source]);
+
+  const bridgeUpdatedAt = useMemo(() => {
+    return (
+      ibOverview?.stream?.last_heartbeat ||
+      ibOverview?.snapshot_cache?.last_snapshot_at ||
+      accountSummary?.refreshed_at ||
+      null
+    );
+  }, [
+    accountSummary?.refreshed_at,
+    ibOverview?.snapshot_cache?.last_snapshot_at,
+    ibOverview?.stream?.last_heartbeat,
+  ]);
+
   const statusLabel = useMemo(() => {
     if (!isConfigured) {
       return t("trade.status.unconfigured");
@@ -1209,6 +1245,16 @@ export default function LiveTradePage() {
                 <div className="overview-sub">
                   {t("trade.overviewSnapshotAt")}{" "}
                   {formatDateTime(ibOverview?.snapshot_cache?.last_snapshot_at)}
+                </div>
+              </div>
+              <div className="overview-card">
+                <div className="overview-label">{t("trade.bridgeLabel")}</div>
+                <div className="overview-value">{bridgeStatusLabel}</div>
+                <div className="overview-sub">
+                  {t("trade.bridgeSource")} {bridgeSource || t("common.none")}
+                </div>
+                <div className="overview-sub">
+                  {t("trade.bridgeUpdatedAt")} {formatDateTime(bridgeUpdatedAt)}
                 </div>
               </div>
               <div className="overview-card">

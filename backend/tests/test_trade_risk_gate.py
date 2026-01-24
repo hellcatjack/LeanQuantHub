@@ -28,6 +28,13 @@ def test_risk_gate_blocks_large_single_position(monkeypatch, tmp_path):
 
     Session = _make_session_factory()
     monkeypatch.setattr(trade_executor, "SessionLocal", Session)
+    monkeypatch.setattr(trade_executor, "_bridge_connection_ok", lambda *_a, **_k: True, raising=False)
+    monkeypatch.setattr(
+        trade_executor,
+        "read_quotes",
+        lambda _root: {"items": [{"symbol": "SPY", "last": 100}], "stale": False},
+        raising=False,
+    )
     session = Session()
     try:
         project = Project(name="risk-test", description="")

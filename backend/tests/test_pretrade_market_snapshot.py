@@ -1,6 +1,8 @@
+from __future__ import annotations
+
+from datetime import datetime
 from pathlib import Path
 import sys
-from types import SimpleNamespace
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -20,7 +22,16 @@ def _make_session():
     return Session()
 
 
-def test_pretrade_market_snapshot_calls_fetch(monkeypatch, tmp_path):
+def _quotes_payload(symbols: list[str]) -> dict:
+    now = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    return {
+        "items": [{"symbol": symbol, "last": 1.0, "timestamp": now} for symbol in symbols],
+        "updated_at": now,
+        "stale": False,
+    }
+
+
+def test_pretrade_market_snapshot_skips_when_quotes_ready(monkeypatch, tmp_path):
     session = _make_session()
     try:
         project = Project(name="pretrade-snap", description="")
@@ -51,28 +62,18 @@ def test_pretrade_market_snapshot_calls_fetch(monkeypatch, tmp_path):
         session.commit()
         session.refresh(step)
 
-        called = {"ok": False, "symbols": None, "market_data_type": None}
-
-        def _fetch_market_snapshots(_session, *, symbols, store, market_data_type=None, **_kwargs):
-            called["ok"] = True
-            called["symbols"] = symbols
-            called["market_data_type"] = market_data_type
-            return [{"symbol": "SPY", "data": {"last": 1.0}, "error": None}]
-
-        monkeypatch.setattr(pretrade_runner, "fetch_market_snapshots", _fetch_market_snapshots)
+        monkeypatch.setattr(pretrade_runner, "read_quotes", lambda *_args, **_kwargs: _quotes_payload(["SPY", "AAPL"]))
         monkeypatch.setattr(
             pretrade_runner,
             "_resolve_project_config",
-            lambda _session, _pid: {"trade": {"market_data_type": "delayed", "market_snapshot_ttl_seconds": 30}},
+            lambda _session, _pid: {"trade": {"market_snapshot_ttl_seconds": 30}},
         )
-        monkeypatch.setattr(pretrade_runner.ib_stream, "is_snapshot_fresh", lambda *_args, **_kwargs: False)
 
         ctx = pretrade_runner.StepContext(session=session, run=run, step=step)
         result = pretrade_runner.step_market_snapshot(ctx, {})
 
-        assert called["ok"] is True
-        assert called["market_data_type"] == "delayed"
-        assert "market_snapshot" in (result.artifacts or {})
+        assert result.artifacts is not None
+        assert result.artifacts["market_snapshot"]["skipped"] is True
     finally:
         session.close()
 
@@ -108,30 +109,23 @@ def test_pretrade_market_snapshot_filters_excluded_symbols(monkeypatch, tmp_path
         session.commit()
         session.refresh(step)
 
-        called = {"symbols": None}
-
-        def _fetch_market_snapshots(_session, *, symbols, store, market_data_type=None, **_kwargs):
-            called["symbols"] = symbols
-            return [{"symbol": "SPY", "data": {"last": 1.0}, "error": None}]
-
-        monkeypatch.setattr(pretrade_runner, "fetch_market_snapshots", _fetch_market_snapshots)
+        monkeypatch.setattr(pretrade_runner, "read_quotes", lambda *_args, **_kwargs: _quotes_payload(["SPY", "AAPL"]))
         monkeypatch.setattr(
             pretrade_runner,
             "_resolve_project_config",
             lambda _session, _pid: {
                 "trade": {
-                    "market_data_type": "realtime",
                     "market_snapshot_ttl_seconds": 30,
                     "market_snapshot_exclude_symbols": ["BRK.B", "1143.HK"],
                 }
             },
         )
-        monkeypatch.setattr(pretrade_runner.ib_stream, "is_snapshot_fresh", lambda *_args, **_kwargs: False)
 
         ctx = pretrade_runner.StepContext(session=session, run=run, step=step)
-        pretrade_runner.step_market_snapshot(ctx, {})
+        result = pretrade_runner.step_market_snapshot(ctx, {})
 
-        assert set(called["symbols"] or []) == {"SPY", "AAPL"}
+        assert result.artifacts is not None
+        assert result.artifacts["market_snapshot"]["excluded_symbols"] == ["1143.HK", "BRK.B"]
     finally:
         session.close()
 
@@ -187,23 +181,20 @@ def test_pretrade_market_snapshot_uses_latest_snapshot_when_missing_artifacts(mo
         session.commit()
         session.refresh(step)
 
-        def _build_stream_symbols(_session, *, project_id, decision_snapshot_id=None, **_kwargs):
+        def _build_snapshot_symbols(_session, *, project_id, decision_snapshot_id=None, **_kwargs):
             assert decision_snapshot_id == snapshot_new.id
-            return ["SPY"]
+            return ["AAPL"]
 
-        def _fetch_market_snapshots(_session, *, symbols, store, market_data_type=None, **_kwargs):
-            return [{"symbol": "SPY", "data": {"last": 1.0}, "error": None}]
-
-        monkeypatch.setattr(pretrade_runner.ib_stream, "build_stream_symbols", _build_stream_symbols)
-        monkeypatch.setattr(pretrade_runner, "fetch_market_snapshots", _fetch_market_snapshots)
+        monkeypatch.setattr(pretrade_runner, "_build_snapshot_symbols", _build_snapshot_symbols)
+        monkeypatch.setattr(pretrade_runner, "read_quotes", lambda *_args, **_kwargs: _quotes_payload(["AAPL"]))
         monkeypatch.setattr(
             pretrade_runner,
             "_resolve_project_config",
-            lambda _session, _pid: {"trade": {"market_data_type": "delayed"}},
+            lambda _session, _pid: {"trade": {"market_snapshot_ttl_seconds": 30}},
         )
-        monkeypatch.setattr(pretrade_runner.ib_stream, "is_snapshot_fresh", lambda *_args, **_kwargs: False)
 
         ctx = pretrade_runner.StepContext(session=session, run=run, step=step)
-        pretrade_runner.step_market_snapshot(ctx, {})
+        result = pretrade_runner.step_market_snapshot(ctx, {})
+        assert result.artifacts is not None
     finally:
         session.close()

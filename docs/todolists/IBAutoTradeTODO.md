@@ -71,7 +71,7 @@
 - 验收：后端可读取并识别 `stale`。
 
 ### 1.2 行情/账户读取与缓存
-- [ ] 后端读取 bridge 文件并提供统一 API（可保留 `/api/ib/*` 兼容层）。
+- [x] 后端读取 bridge 文件并提供统一 API（可保留 `/api/ib/*` 兼容层）。
 - [ ] 前端展示更新时间、数据来源、是否降级。
 - 验收：UI/日志可查看 bridge 更新状态。
 
@@ -103,9 +103,9 @@
 - 验收：同一 TradeRun 可由 Lean 执行并完成回写。
 
 ### 2.4 清理旧 IB 直连代码（必做）
-- [ ] 删除/迁移 `backend/app/services/ib_*`（market/stream/history/execution/order_executor/health/status_overview）。
-- [ ] 路由 `/api/ib/*` 改为 bridge 兼容层或迁移到 `/api/brokerage/*`。
-- [ ] 删除 `scripts/run_ib_stream.py` 与相关测试。
+- [x] 删除/迁移 `backend/app/services/ib_*`（market/stream/history/execution/order_executor/health/status_overview）。
+- [x] 路由 `/api/ib/*` 改为 bridge 兼容层或迁移到 `/api/brokerage/*`。
+- [x] 删除 `scripts/run_ib_stream.py` 与相关测试。
 - [ ] 前端 LiveTrade 改为读取 bridge 数据源。
 - 验收：无 IB 直连依赖，IB API 连接仅由 Lean 负责。
 

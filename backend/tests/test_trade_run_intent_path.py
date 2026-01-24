@@ -19,10 +19,13 @@ def test_trade_run_sets_order_intent_path(monkeypatch, tmp_path):
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine)
     monkeypatch.setattr(trade_executor, "SessionLocal", Session)
-    monkeypatch.setattr(trade_executor, "probe_ib_connection", lambda _s: SimpleNamespace(status="connected"))
-    monkeypatch.setattr(trade_executor, "ensure_ib_client_id", lambda _s: SimpleNamespace())
-    monkeypatch.setattr(trade_executor, "resolve_ib_api_mode", lambda _s: "mock")
-    monkeypatch.setattr(trade_executor, "fetch_market_snapshots", lambda *a, **k: [])
+    monkeypatch.setattr(trade_executor, "_bridge_connection_ok", lambda *_a, **_k: True, raising=False)
+    monkeypatch.setattr(
+        trade_executor,
+        "read_quotes",
+        lambda _root: {"items": [{"symbol": "AAPL", "last": 100.0}], "stale": False},
+        raising=False,
+    )
     monkeypatch.setattr(trade_executor, "evaluate_orders", lambda *_a, **_k: (True, [], []))
     monkeypatch.setattr(trade_executor, "fetch_account_summary", lambda *_a, **_k: {"NetLiquidation": 100000})
     monkeypatch.setattr(trade_executor, "_read_decision_items", lambda *_a, **_k: [{"symbol": "AAPL", "weight": 0.1}])

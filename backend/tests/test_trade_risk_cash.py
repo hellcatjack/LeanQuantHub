@@ -1,8 +1,6 @@
 from pathlib import Path
 import sys
 import csv
-from types import SimpleNamespace
-
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -37,15 +35,12 @@ def _write_items(path: Path):
 def test_trade_executor_injects_cash_available(tmp_path, monkeypatch):
     Session = _make_session_factory()
     monkeypatch.setattr(trade_executor, "SessionLocal", Session)
+    monkeypatch.setattr(trade_executor, "_bridge_connection_ok", lambda *_a, **_k: True, raising=False)
     monkeypatch.setattr(
         trade_executor,
-        "fetch_market_snapshots",
-        lambda *a, **k: [{"symbol": "AAA", "data": {"last": 50}}],
-    )
-    monkeypatch.setattr(
-        trade_executor,
-        "probe_ib_connection",
-        lambda _s: SimpleNamespace(status="connected"),
+        "read_quotes",
+        lambda _root: {"items": [{"symbol": "AAA", "last": 50}], "stale": False},
+        raising=False,
     )
     monkeypatch.setattr(
         trade_executor,

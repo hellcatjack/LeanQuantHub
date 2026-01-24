@@ -1,8 +1,6 @@
 from pathlib import Path
 import sys
 import csv
-from types import SimpleNamespace
-
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -39,18 +37,18 @@ def _write_items(path: Path):
 def test_execute_builds_orders_from_snapshot(tmp_path, monkeypatch):
     Session = _make_session_factory()
     monkeypatch.setattr(trade_executor, "SessionLocal", Session)
+    monkeypatch.setattr(trade_executor, "_bridge_connection_ok", lambda *_a, **_k: True, raising=False)
     monkeypatch.setattr(
         trade_executor,
-        "probe_ib_connection",
-        lambda _session: SimpleNamespace(status="connected"),
-    )
-    monkeypatch.setattr(
-        trade_executor,
-        "fetch_market_snapshots",
-        lambda *a, **k: [
-            {"symbol": "AAA", "data": {"last": 50}},
-            {"symbol": "BBB", "data": {"last": 25}},
-        ],
+        "read_quotes",
+        lambda _root: {
+            "items": [
+                {"symbol": "AAA", "last": 50},
+                {"symbol": "BBB", "last": 25},
+            ],
+            "stale": False,
+        },
+        raising=False,
     )
     session = Session()
     try:
@@ -97,13 +95,15 @@ def test_merge_risk_params_override():
     assert merged["max_symbols"] == 5
 
 
-def test_execute_blocks_when_execution_source_not_ib(tmp_path, monkeypatch):
+def test_execute_blocks_when_execution_source_not_lean(tmp_path, monkeypatch):
     Session = _make_session_factory()
     monkeypatch.setattr(trade_executor, "SessionLocal", Session)
+    monkeypatch.setattr(trade_executor, "_bridge_connection_ok", lambda *_a, **_k: True, raising=False)
     monkeypatch.setattr(
         trade_executor,
-        "fetch_market_snapshots",
-        lambda *a, **k: [{"symbol": "AAA", "data": {"last": 50}}],
+        "read_quotes",
+        lambda _root: {"items": [{"symbol": "AAA", "last": 50}], "stale": False},
+        raising=False,
     )
     session = Session()
     try:

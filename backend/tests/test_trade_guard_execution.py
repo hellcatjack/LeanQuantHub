@@ -69,7 +69,7 @@ def test_execution_blocks_when_disconnected(monkeypatch, tmp_path):
 
     Session = _make_session_factory()
     monkeypatch.setattr(trade_executor, "SessionLocal", Session)
-    monkeypatch.setattr(trade_executor, "_ib_connection_ok", lambda *_: False)
+    monkeypatch.setattr(trade_executor, "_bridge_connection_ok", lambda *_: False, raising=False)
     session = Session()
     try:
         project = Project(name="conn-test", description="")
@@ -90,6 +90,6 @@ def test_execution_blocks_when_disconnected(monkeypatch, tmp_path):
 
         result = trade_executor.execute_trade_run(run.id, dry_run=True)
         assert result.status == "blocked"
-        assert result.message == "connection_unavailable"
+        assert result.message == "bridge_unavailable"
     finally:
         session.close()

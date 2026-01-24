@@ -22,6 +22,7 @@ def _make_session_factory():
 def test_trade_run_requires_decision_snapshot(monkeypatch):
     Session = _make_session_factory()
     monkeypatch.setattr(trade_executor, "SessionLocal", Session)
+    monkeypatch.setattr(trade_executor, "_bridge_connection_ok", lambda *_a, **_k: True, raising=False)
 
     session = Session()
     try:

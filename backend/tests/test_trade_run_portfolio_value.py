@@ -8,7 +8,6 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from types import SimpleNamespace
 
 from app.models import Base, DecisionSnapshot, TradeOrder, TradeRun
 import app.services.trade_executor as trade_executor
@@ -19,13 +18,12 @@ def test_trade_run_records_portfolio_value(monkeypatch):
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
     monkeypatch.setattr(trade_executor, "SessionLocal", Session)
-    monkeypatch.setattr(trade_executor, "probe_ib_connection", lambda _session: SimpleNamespace(status="connected"))
-    monkeypatch.setattr(trade_executor, "ensure_ib_client_id", lambda _s: SimpleNamespace())
-    monkeypatch.setattr(trade_executor, "resolve_ib_api_mode", lambda _s: "mock")
+    monkeypatch.setattr(trade_executor, "_bridge_connection_ok", lambda *_a, **_k: True, raising=False)
     monkeypatch.setattr(
         trade_executor,
-        "fetch_market_snapshots",
-        lambda *a, **k: [{"symbol": "SPY", "data": {"last": 100}}],
+        "read_quotes",
+        lambda _root: {"items": [{"symbol": "SPY", "last": 100}], "stale": False},
+        raising=False,
     )
     monkeypatch.setattr(trade_executor, "evaluate_orders", lambda *_a, **_k: (True, [], []))
     monkeypatch.setattr(trade_executor, "fetch_account_summary", lambda *_a, **_k: {"NetLiquidation": 100000})
@@ -64,13 +62,12 @@ def test_trade_run_uses_account_summary_for_portfolio_value_when_no_orders(monke
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
     monkeypatch.setattr(trade_executor, "SessionLocal", Session)
-    monkeypatch.setattr(trade_executor, "probe_ib_connection", lambda _session: SimpleNamespace(status="connected"))
-    monkeypatch.setattr(trade_executor, "ensure_ib_client_id", lambda _s: SimpleNamespace())
-    monkeypatch.setattr(trade_executor, "resolve_ib_api_mode", lambda _s: "mock")
+    monkeypatch.setattr(trade_executor, "_bridge_connection_ok", lambda *_a, **_k: True, raising=False)
     monkeypatch.setattr(
         trade_executor,
-        "fetch_market_snapshots",
-        lambda *a, **k: [{"symbol": "AAA", "data": {"last": 100}}],
+        "read_quotes",
+        lambda _root: {"items": [{"symbol": "AAA", "last": 100}], "stale": False},
+        raising=False,
     )
     monkeypatch.setattr(trade_executor, "evaluate_orders", lambda *_a, **_k: (True, [], []))
     monkeypatch.setattr(trade_executor, "fetch_account_summary", lambda *_a, **_k: {"NetLiquidation": 50000})

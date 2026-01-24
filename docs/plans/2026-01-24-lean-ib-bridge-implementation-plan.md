@@ -8,6 +8,13 @@
 
 **Tech Stack:** FastAPI, SQLAlchemy, Python, JSON/JSONL, Lean Engine
 
+## 实施调整记录（2026-01-24）
+- 实际落地使用 `lean_bridge_reader.py` 作为读取层，未新增 `lean_bridge.py` 写缓存模块。
+- `/api/ib/*` 已改为直接读取 Lean Bridge 输出（状态/行情/账户）。
+- `ib_market.py` 改为 Lean Bridge 行情读取实现；历史/合约刷新返回 `unsupported`。
+- `ib_account.py` 精简为仅从 Lean Bridge 读取账户/持仓。
+- 清理：移除 `ib_execution.py`/`ib_order_executor.py`/`ib_stream_runner.py`/`ib_history_runner.py` 及脚本与测试。
+
 ---
 
 ### Task 1: Lean Bridge 读取与缓存（account/positions/quotes）
@@ -327,4 +334,3 @@ git commit -m "chore: remove ib api data path, use lean bridge"
 - 每个 Task 的测试必须先失败后通过。
 - 每个 Task 完成后独立提交。
 - 前端如涉及 UI 变更，需 `npm run build` 并重启前端服务。
-

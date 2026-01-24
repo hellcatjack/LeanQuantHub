@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date, datetime, timedelta
-import json
 import os
 from pathlib import Path
 from typing import Any
@@ -11,7 +10,7 @@ from sqlalchemy import func
 
 from app.core.config import settings
 from app.models import TradeFill, TradeGuardState, TradeOrder, TradeRun, TradeSettings
-from app.services.ib_market import fetch_market_snapshots
+from app.services.lean_bridge_reader import read_quotes
 
 
 def _resolve_data_root() -> Path:
@@ -23,10 +22,9 @@ def _resolve_data_root() -> Path:
     return Path("/data/share/stock/data")
 
 
-def _ib_stream_root() -> Path:
-    root = _resolve_data_root() / "ib" / "stream"
-    root.mkdir(parents=True, exist_ok=True)
-    return root
+def _resolve_bridge_root() -> Path:
+    base = settings.data_root or settings.artifact_root
+    return Path(base) / "lean_bridge"
 
 
 def _parse_timestamp(value: str | None) -> datetime | None:
@@ -50,16 +48,6 @@ def _pick_price(snapshot: dict[str, Any] | None) -> float | None:
         except (TypeError, ValueError):
             continue
     return None
-
-
-def _read_local_snapshot(symbol: str) -> dict[str, Any] | None:
-    path = _ib_stream_root() / f"{symbol}.json"
-    if not path.exists():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
 
 
 def _resolve_trade_date() -> date:
@@ -151,7 +139,7 @@ def _resolve_prices(
 ) -> tuple[dict[str, float], str, int]:
     resolved: dict[str, float] = {}
     errors = 0
-    source = "ib"
+    source = "lean_bridge"
     now = datetime.utcnow()
 
     if not symbols:
@@ -166,32 +154,34 @@ def _resolve_prices(
         if resolved:
             return resolved, source, errors
 
-    snapshots = fetch_market_snapshots(
-        session,
-        symbols=symbols,
-        store=False,
-        fallback_history=True,
-        history_duration="5 D",
-        history_bar_size="1 day",
-        history_use_rth=True,
-    )
-    snapshot_map = {item.get("symbol"): item for item in snapshots}
-
+    quotes = read_quotes(_resolve_bridge_root())
+    items = quotes.get("items") if isinstance(quotes.get("items"), list) else []
+    stale = bool(quotes.get("stale", False))
+    updated_at = quotes.get("updated_at") or quotes.get("refreshed_at")
+    quotes_map = {
+        str(item.get("symbol") or "").strip().upper(): item
+        for item in items
+        if isinstance(item, dict) and str(item.get("symbol") or "").strip()
+    }
     for symbol in symbols:
-        payload = (snapshot_map.get(symbol) or {}).get("data") or None
-        price = _pick_price(payload)
-        ts = _parse_timestamp((payload or {}).get("timestamp"))
-        if price is not None and ts:
-            if now - ts <= timedelta(seconds=stale_seconds):
-                resolved[symbol] = price
-                continue
-        local = _read_local_snapshot(symbol)
-        local_price = _pick_price(local)
-        if local_price is not None:
-            resolved[symbol] = local_price
-            source = "local"
-        else:
+        payload = quotes_map.get(symbol)
+        if not isinstance(payload, dict):
             errors += 1
+            continue
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+        price = _pick_price(data if isinstance(data, dict) else None)
+        ts_value = payload.get("timestamp") or (data.get("timestamp") if isinstance(data, dict) else None) or updated_at
+        ts = _parse_timestamp(ts_value if isinstance(ts_value, str) else None)
+        if price is None:
+            errors += 1
+            continue
+        if stale and ts is None:
+            errors += 1
+            continue
+        if ts and now - ts > timedelta(seconds=stale_seconds):
+            errors += 1
+            continue
+        resolved[symbol] = price
 
     return resolved, source, errors
 
