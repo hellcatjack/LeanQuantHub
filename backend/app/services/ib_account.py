@@ -40,6 +40,8 @@ SUMMARY_TTL_SECONDS = 60
 
 _FATAL_ERROR_CODES = {502, 503, 504, 1100, 1101, 1102}
 
+CACHE_ROOT = Path("/app/stocklean/data/lean_bridge/cache")
+
 
 class IBAccountSession(EWrapper, EClient):
     def __init__(self, host: str, port: int, client_id: int, timeout: float = 5.0) -> None:
@@ -352,7 +354,29 @@ def _fetch_account_positions(session, mode: str) -> list[dict[str, object]]:
     return []
 
 
-def get_account_summary(session, *, mode: str, full: bool, force_refresh: bool = False) -> dict[str, object]:
+def _read_bridge_summary() -> dict[str, object] | None:
+    path = CACHE_ROOT / "account_summary.json"
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def get_account_summary(session=None, *, mode: str = "paper", full: bool = False, force_refresh: bool = False) -> dict[str, object]:
+    bridge = _read_bridge_summary()
+    if bridge is not None:
+        return bridge
+    if session is None:
+        return {}
+    return _get_account_summary_legacy(session, mode=mode, full=full, force_refresh=force_refresh)
+
+
+def _get_account_summary_legacy(session, *, mode: str, full: bool, force_refresh: bool = False) -> dict[str, object]:
     cache_path = _summary_cache_path(mode)
     cached = read_cached_summary(cache_path)
     if cached and not force_refresh:
@@ -414,7 +438,10 @@ def fetch_account_summary(session) -> dict[str, float | str | None]:
     settings_row = get_or_create_ib_settings(session)
     mode = settings_row.mode or "paper"
     summary = get_account_summary(session, mode=mode, full=False, force_refresh=False)
-    items = summary.get("items") if isinstance(summary.get("items"), dict) else {}
+    if isinstance(summary.get("items"), dict):
+        items = summary.get("items")
+    else:
+        items = summary
     cash_available = items.get("AvailableFunds") or items.get("CashBalance") or items.get("TotalCashValue")
     if isinstance(cash_available, str):
         try:
