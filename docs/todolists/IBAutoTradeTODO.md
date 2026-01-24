@@ -5,7 +5,7 @@
 ## 目标与范围
 - 目标：从数据→信号→风控→执行→监控形成可追溯闭环，可在 Paper/Live 切换。
 - 交易账户：IB PRO（优先 Paper，再 Live）。
-- 数据源（逻辑一致）：**研究/回测/信号**使用 Alpha（PIT），**执行/成交**使用 IB；允许成交价偏差但需可解释。
+- 数据源（逻辑一致）：**研究/回测/信号**使用 Alpha（PIT），**执行/成交/账户/行情**由 Lean IB Brokerage 输出桥接文件提供（系统不直连 IB）；允许成交价偏差但需可解释。
 - 周期：周一开盘调仓（与现有 PreTrade checklist 对齐）。
 
 ## 菜单与入口（对齐最新主菜单布局）
@@ -44,16 +44,18 @@
 ---
 
 ## Phase 0：基础设施与连通（必做）
-### 0.1 IB 连接管理
+### 0.1 Lean IB 连接管理（通过 Bridge 监控）
 - [ ] IB Gateway/TWS 常驻服务（systemd 用户服务），支持自动重连。
-- [x] 连接健康检测与状态展示（UI/接口）。
-- [ ] Paper/Live 开关：UI 可配置，默认 Paper。
-- 验收：断线 60 秒内可恢复，状态可查询。
+- [ ] Lean 进程常驻/调度输出 `lean_bridge_status.json` 心跳。
+- [ ] 连接健康检测与状态展示（UI/接口）改为读取 bridge 心跳。
+- [ ] Paper/Live 开关：UI 可配置并写入 Lean 配置，默认 Paper。
+- 验收：bridge 心跳 60 秒内刷新，状态可查询。
 
 ### 0.2 交易配置管理（配置与安全）
-- [ ] 后端配置项：IB_HOST、IB_PORT、IB_CLIENT_ID、IB_ACCOUNT、IB_MODE。
+- [ ] 后端配置项：IB_HOST、IB_PORT、IB_CLIENT_ID、IB_ACCOUNT、IB_MODE（作为 Brokerage 配置）。
 - [ ] UI 配置时**不明文显示**敏感字段（只展示掩码）。
-- 验收：配置保存后能成功建立连接。
+- [ ] 配置保存后写入 Lean 启动配置/参数（单一来源）。
+- 验收：配置保存后 Lean 可正常建立连接并输出 bridge 心跳。
 
 ### 0.3 单实例交易锁
 - [ ] 复用现有 TradeTODO 的锁/心跳逻辑，加入 IB 交易流程前置校验。
@@ -62,26 +64,20 @@
 
 ---
 
-## Phase 1：IB 数据接入（必做）
-### 1.1 合约主数据缓存
-- [ ] symbol → IB conId 缓存（交易所、货币、乘数）。
-- [ ] 允许刷新合约缓存（增量为主）。
-- 验收：项目主题标的全部可解析 conId。
+## Phase 1：Lean Bridge 数据接入（必做）
+### 1.1 Bridge 输出规范
+- [ ] Lean ResultHandler 输出：`account_summary.json`、`positions.json`、`quotes.json`、`execution_events.jsonl`、`lean_bridge_status.json`。
+- [ ] 原子写入/轮转/心跳更新，避免半写入。
+- 验收：后端可读取并识别 `stale`。
 
-### 1.2 实时行情订阅
-- [x] IB L1 订阅（bid/ask/last/volume）。
-- [x] 行情缓存落地到 `data/ib/stream/`（或统一 data_root/ib）。
-- [x] 订阅速率与连接状态监控。
-- 验收：UI/日志可查看实时行情刷新。
+### 1.2 行情/账户读取与缓存
+- [ ] 后端读取 bridge 文件并提供统一 API（可保留 `/api/ib/*` 兼容层）。
+- [ ] 前端展示更新时间、数据来源、是否降级。
+- 验收：UI/日志可查看 bridge 更新状态。
 
-### 1.3 历史数据补齐（最小化）
-- [x] IB historical 用于最近窗口补齐（日线/分钟线）。
-- [x] 控速、断点续跑、幂等写入。
-- [x] 验收：指定周期内数据完整率可审计。
-
-### 1.4 数据源策略（逻辑一致）
-- [x] 实盘/模拟执行行情与成交来自 IB。
-- [x] 研究/回测/信号生成使用 Alpha（PIT）。
+### 1.3 数据源策略（逻辑一致）
+- [ ] 执行/账户/行情/成交来自 Lean bridge。
+- [ ] 研究/回测/信号生成使用 Alpha（PIT）。
 - [ ] 对账报告：回测价 vs 实盘成交价偏差解释。
 - 验收：执行不依赖 Alpha 行情，但偏差可解释。
 
@@ -89,15 +85,15 @@
 
 ## Phase 2：订单与执行（必做）
 ### 2.1 订单状态机
-- [x] NEW → SUBMITTED → PARTIAL → FILLED/CANCELED/REJECTED。
-- [x] clientOrderId 幂等（重试不重复下单）。
-- [x] 成交回报回写 DB。
+- [ ] NEW → SUBMITTED → PARTIAL → FILLED/CANCELED/REJECTED（来源为 Lean OrderEvent）。
+- [ ] clientOrderId 幂等（重试不重复下单）。
+- [ ] 成交回报回写 DB（从 bridge 事件流解析）。
 - 验收：重复触发不会产生重复订单。
 
 ### 2.2 订单拆分与下单规则
-- [x] 权重 → 目标市值 → 股数计算（整数、最小交易单位）。
-- [x] 价格来源：IB 实时/近实时。
-- [x] 订单类型：首期支持 MKT 与 LMT（默认 MKT）。
+- [ ] 权重 → 目标市值 → 股数计算（整数、最小交易单位）。
+- [ ] 价格来源：Lean bridge 行情（或 Lean 内部估算）。
+- [ ] 订单类型：首期支持 MKT 与 LMT（默认 MKT）。
 - 验收：输入权重能生成合法订单。
 
 ### 2.3 Lean IB 执行接入（新增）
@@ -105,6 +101,13 @@
 - [ ] OrderEvent → trade_orders / trade_fills 回写。
 - [ ] 订单语义映射（MKT/LMT/TIF/最小手数）。
 - 验收：同一 TradeRun 可由 Lean 执行并完成回写。
+
+### 2.4 清理旧 IB 直连代码（必做）
+- [ ] 删除/迁移 `backend/app/services/ib_*`（market/stream/history/execution/order_executor/health/status_overview）。
+- [ ] 路由 `/api/ib/*` 改为 bridge 兼容层或迁移到 `/api/brokerage/*`。
+- [ ] 删除 `scripts/run_ib_stream.py` 与相关测试。
+- [ ] 前端 LiveTrade 改为读取 bridge 数据源。
+- 验收：无 IB 直连依赖，IB API 连接仅由 Lean 负责。
 
 ---
 
@@ -144,8 +147,8 @@
 ---
 
 ## Phase 5：监控与告警（必做）
-- [ ] 账户/持仓/订单/PNL 实时监控面板。
-  - [x] 实盘交易页展示账户摘要与持仓明细。
+- [ ] 账户/持仓/订单/PNL 实时监控面板（来自 bridge）。
+  - [ ] 实盘交易页展示账户摘要与持仓明细（bridge 来源）。
   - [ ] 订单/PNL 统一监控面板补全与汇总指标。
 - [ ] 回测 vs 实盘偏差展示（价格/成交/滑点解释）。
 - [ ] Telegram 告警：断线、下单失败、风控触发。
@@ -185,7 +188,7 @@
 ---
 
 ## UI/UX 设计要点
-- 交易状态清晰：连接状态、数据源、账户模式（Paper/Live）。
+- 交易状态清晰：连接状态（bridge 心跳）、数据源（Lean bridge）、账户模式（Paper/Live）。
 - 执行按钮必须二次确认（Live）。
 - 订单与持仓展示不与回测混淆，突出“实盘信号版本”。
 

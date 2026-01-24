@@ -1,133 +1,65 @@
-# Lean IB Bridge 设计（禁止直连 IB API）
+# Lean IB Bridge 统一执行与可视化设计
 
-> 目标：**系统内账户/持仓/行情可视化完全由 Lean 输出桥接提供**，后端不再直连 IB API。执行链路统一走 Lean IB Brokerage。
+## 背景
+当前系统在后端直接连接 IB（行情/账户/历史/执行），与计划中的 Lean IB 执行存在双通道与一致性风险。为实现全栈一致、可审计、可回放，决定以 Lean IB Brokerage 作为唯一执行通道，并通过 Lean 输出桥接文件提供账户/行情/成交可视化，后端不再直接调用 IB API。
 
-## 背景与现状评估
-- 现有系统存在两条并行链路：
-  1) **IB 直连数据/账户/stream**：`ib_market/ib_stream/ib_account` + `/api/ib/*`。
-  2) **IB 直连下单**：`ib_execution.py → ib_order_executor.py → trade_executor.py`。
-- 已新增 Lean 执行骨架：`trade_order_intent.py`、`lean_execution.py`（配置/启动/事件 ingest skeleton）。
-- 需求变更：**禁止 IB API 直连**，所有可视化数据必须来自 Lean 输出/日志/事件桥接。
+## 目标
+- 执行/账户/持仓/行情/订单/成交 **仅来自 Lean 输出**。
+- 系统保留 IB 配置管理，但仅用于生成/更新 Lean 启动配置。
+- 清理旧 IB 直连代码路径，避免并行数据源造成的冲突。
+- 前端可清晰展示数据来源、更新时间、是否降级。
 
-## 目标与非目标
-### 目标
-- 执行统一来源：Lean IB Brokerage。
-- 可视化统一来源：Lean Bridge 输出文件。
-- 保持 `/api/ib/*` 的读取兼容（内部改为读 Lean Bridge）。
-- 交易与审计可回溯（订单、成交回写 DB）。
+## 非目标
+- 不改变研究/回测/信号现有 Alpha 数据源策略。
+- 不在首期强制改造 Lean 的算法研究/回测入口。
+- 不引入期权等复杂品种支持。
 
-### 非目标
-- 不在本阶段实现 Lean 侧复杂 PnL 分解或历史回补。
-- 不保留任何 IB API 直连数据或下单路径。
+## 架构与数据流
+1) **Lean 执行层**
+- Lean 算法读取本系统生成的订单意图（CSV/JSON）并通过 IB Brokerage 执行。
+- 自定义 ResultHandler 输出桥接文件到 `data/lean_bridge/` 或 `artifacts/lean_bridge/`（以可配置路径为准）。
 
-## 核心决策
-- **移除**所有 IB API 直连执行与数据获取逻辑。
-- **新增 Lean Bridge 输出规范**，后端仅 ingest 输出文件。
-- **`/api/ib/*` 仅保留读接口**（配置/订阅/历史补齐等写操作下线）。
+2) **Bridge 输出（统一数据来源）**
+- `account_summary.json`：账户摘要（净值、现金、购买力等）。
+- `positions.json`：持仓明细。
+- `quotes.json`：当前行情快照（可选，取决于 Lean 是否订阅）。
+- `execution_events.jsonl`：订单/成交事件流。
+- `lean_bridge_status.json`：输出状态与心跳（last_heartbeat/last_error/stale）。
 
-## Lean Bridge 输出规范
-输出目录：`/app/stocklean/artifacts/lean_bridge/`
+3) **后端读取与缓存**
+- 后端提供 `lean_bridge` 读取服务：解析文件、处理缺失/过期、缓存到内存或 DB。
+- `/api/ib/*` 兼容层在首期保留，但改为读取 lean_bridge 输出（后续可迁移为 `/api/brokerage/*`）。
 
-### 文件与字段（JSON）
-1) `account_summary.json`
-```json
-{
-  "account": "U123456",
-  "currency": "USD",
-  "NetLiquidation": 100000,
-  "TotalCashValue": 45000,
-  "AvailableFunds": 44000,
-  "EquityWithLoanValue": 100000,
-  "timestamp": "2026-01-24T10:00:00Z"
-}
-```
-2) `positions.json`
-```json
-[
-  {
-    "symbol": "AAPL",
-    "quantity": 10,
-    "average_price": 180.5,
-    "market_price": 182.1,
-    "market_value": 1821,
-    "unrealized_pnl": 16,
-    "timestamp": "2026-01-24T10:00:00Z"
-  }
-]
-```
-3) `quotes.json`
-```json
-[
-  {
-    "symbol": "AAPL",
-    "bid": 182.0,
-    "ask": 182.2,
-    "last": 182.1,
-    "volume": 120000,
-    "timestamp": "2026-01-24T10:00:01Z",
-    "source": "ib"
-  }
-]
-```
-4) `execution_events.jsonl`
-```json
-{"order_id": 123, "symbol": "AAPL", "status": "FILLED", "filled": 10, "avg_price": 182.1, "exec_id": "123-1", "time": "2026-01-24T10:00:05Z"}
-```
+4) **前端展示**
+- LiveTrade 页面以 lean_bridge 作为数据源，显示数据来源与更新时间。
+- 连接状态与降级信息由 `lean_bridge_status.json` 驱动。
 
-### 频率建议
-- account/positions：30~60s
-- quotes：1~5s
-- events：实时追加
+## 配置管理策略
+- UI/DB 继续管理 IB 配置：host/port/client_id/account_id/mode。
+- 后端将配置写入 Lean 启动配置（如 `Launcher/config.json` 或运行参数），保证单一来源。
+- 前端显示需明确“配置用于 Lean 执行”，并对敏感字段做掩码。
 
-## 后端 Bridge 服务设计
-新增 `lean_bridge.py`（或同名服务）用于：
-- 读取 Lean Bridge 文件并写入缓存与 DB。
-- 写入桥接健康状态：`lean_bridge_status.json`。
+## 错误处理与降级
+- 当 bridge 文件不存在或超时，API 返回 `stale=true`，并展示“数据滞后/连接未更新”。
+- 不触发任何 IB 直连回退，避免双通道数据不一致。
 
-### 写入策略
-- **缓存**：`data/lean_bridge/cache/*.json`（UI 快速读取）。
-- **DB 回写**：`trade_orders/trade_fills` 幂等写入（按 `exec_id` 或 `order_id+time` 去重）。
+## 安全与审计
+- 配置敏感字段前端仅显示掩码。
+- 订单/成交事件通过桥接文件记录，可追溯。
+- 后端审计日志记录配置变更与执行调用。
 
-### 错误与降级
-- 文件缺失 → 标记 `stale=true`，保留旧缓存。
-- JSON 解析失败 → 记录 `last_error`，不覆盖旧值。
-- 事件重复 → 去重写入。
+## 测试与验证
+- 后端：bridge 读取服务单测（正常/缺失/过期/损坏 JSON）。
+- 前端：Playwright 验证 LiveTrade 页面在 bridge 数据存在时正确展示与不溢出布局。
+- 端到端：Lean 输出桥接文件后，系统 UI 账户/持仓/成交可正确显示。
 
-### 可观测性
-- `lean_bridge_status.json`：`last_seen` / `last_error` / `stale_flags` / `event_lag_ms`。
-- UI 实盘交易页展示桥接状态与更新时间。
+## 清理范围（旧 IB 直连）
+- 删除/迁移：`backend/app/services/ib_*`（market/stream/history/execution/order_executor/health/status_overview）。
+- 删除脚本：`scripts/run_ib_stream.py`。
+- 路由：`backend/app/routes/ib.py` 改为 lean_bridge 兼容层或迁移到 `brokerage` 路由。
+- 前端：`LiveTradePage.tsx` 相关接口调用替换为 lean_bridge 数据源。
 
-## 接口兼容策略
-- `/api/ib/*` 保留为**只读**，数据来源改为 Lean Bridge 缓存。
-- 移除或禁用写操作：
-  - 订阅/停止订阅
-  - 历史补齐
-  - 合约刷新
-  - 直连健康探测
-
-## 清理范围（IB 直连相关）
-### 必须移除（执行链路）
-- `backend/app/services/ib_execution.py`
-- `backend/app/services/ib_order_executor.py`
-- `backend/app/services/ib_orders.py`
-- 相关测试：`test_ib_execution_*`、`test_trade_executor_ib.py` 等
-
-### 必须替换（数据链路）
-- `ib_market.py`、`ib_stream.py`、`ib_stream_runner.py`、`ib_account.py`、`ib_history_runner.py`
-- `routes/ib.py` 改为读取 Lean Bridge 输出
-
-### 执行链路调整
-- `trade_executor.py`：仅生成订单意图 + 触发 `lean_execution.launch_execution`
-- `lean_execution.py`：事件 ingest → 回写订单/成交
-
-## 验收标准
-1) 系统 UI 可展示账户/持仓/行情（不直连 IB API）。
-2) Lean 输出停止时 UI 显示“数据过期”。
-3) 订单/成交回写与 Lean 事件一致，重复 ingest 不重复写入。
-4) 交易执行仅走 Lean IB Brokerage。
-
-## 风险与对策
-- **Lean 输出字段不足** → 需扩展 Lean 侧输出插件/脚本。
-- **事件延迟** → 桥接状态显示延迟与滞后告警。
-- **大频率文件写入** → 采用轮询间隔与增量 append。
-
+## 风险与应对
+- **Lean 输出不稳定**：以 `lean_bridge_status.json` 心跳为准，UI 提示降级。
+- **迁移期 API 兼容**：保留 `/api/ib/*` 但内部走 bridge，降低前端改动风险。
+- **数据时效性**：明确展示更新时间，避免“看似实时”的误解。
