@@ -31,7 +31,10 @@ def test_ib_account_positions_uses_bridge(monkeypatch):
     monkeypatch.setattr(
         ib_account_module,
         "read_positions",
-        lambda _root: {"items": [{"symbol": "AAA", "position": 2}], "stale": False},
+        lambda _root: {
+            "items": [{"symbol": "AAA", "quantity": 2, "market_value": 10}],
+            "stale": False,
+        },
     )
     monkeypatch.setattr(ib_account_module, "_resolve_bridge_root", lambda: Path("/tmp"))
 
@@ -39,4 +42,6 @@ def test_ib_account_positions_uses_bridge(monkeypatch):
         session=None, mode="paper", force_refresh=False
     )
     assert payload["items"][0]["symbol"] == "AAA"
+    assert payload["items"][0]["position"] == 2
+    assert payload["items"][0]["market_price"] == 5
     assert payload["stale"] is False

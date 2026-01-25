@@ -45,7 +45,26 @@ def get_account_summary(session, *, mode: str, full: bool, force_refresh: bool =
 
 def get_account_positions(session, *, mode: str, force_refresh: bool = False) -> dict[str, object]:
     payload = read_positions(_resolve_bridge_root())
-    items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    raw_items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    items: list[dict[str, object]] = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        normalized = dict(item)
+        if "position" not in normalized and "quantity" in normalized:
+            normalized["position"] = normalized.get("quantity")
+        if (
+            normalized.get("market_price") is None
+            and normalized.get("market_value") is not None
+            and normalized.get("position") not in (None, 0, 0.0)
+        ):
+            try:
+                normalized["market_price"] = float(normalized["market_value"]) / float(
+                    normalized["position"]
+                )
+            except (TypeError, ValueError, ZeroDivisionError):
+                pass
+        items.append(normalized)
     refreshed_at = payload.get("updated_at") or payload.get("refreshed_at")
     stale = bool(payload.get("stale", True))
     return {"items": items, "refreshed_at": refreshed_at, "stale": stale}
