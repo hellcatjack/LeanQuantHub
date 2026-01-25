@@ -19,6 +19,8 @@ test("live trade page loads real positions and summary", async ({ page }) => {
     has: page.locator(".card-title", { hasText: /当前持仓|Positions/i }),
   });
   await expect(positionsCard).toBeVisible();
+  const spansTwo = await positionsCard.evaluate((el) => el.classList.contains("span-2"));
+  expect(spansTwo).toBeTruthy();
 
   const rows = positionsCard.locator("tbody tr");
   await expect(rows).not.toHaveCount(0);

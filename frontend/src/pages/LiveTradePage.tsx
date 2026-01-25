@@ -971,24 +971,25 @@ export default function LiveTradePage() {
     return t("trade.overview.status.unknown");
   }, [overviewStatus, t]);
 
+  const bridgeIsStale = useMemo(() => {
+    const snapshotStatus = ibOverview?.snapshot_cache?.status;
+    const streamStatus = ibOverview?.stream?.status;
+    return (
+      accountSummary?.stale === true || snapshotStatus === "stale" || streamStatus === "degraded"
+    );
+  }, [accountSummary?.stale, ibOverview?.snapshot_cache?.status, ibOverview?.stream?.status]);
+
   const bridgeStatusLabel = useMemo(() => {
     const snapshotStatus = ibOverview?.snapshot_cache?.status;
     const streamStatus = ibOverview?.stream?.status;
-    const isStale =
-      accountSummary?.stale === true || snapshotStatus === "stale" || streamStatus === "degraded";
-    if (isStale) {
+    if (bridgeIsStale) {
       return t("trade.bridgeStatus.stale");
     }
     if (snapshotStatus || streamStatus) {
       return t("trade.bridgeStatus.ok");
     }
     return t("trade.bridgeStatus.unknown");
-  }, [
-    accountSummary?.stale,
-    ibOverview?.snapshot_cache?.status,
-    ibOverview?.stream?.status,
-    t,
-  ]);
+  }, [bridgeIsStale, ibOverview?.snapshot_cache?.status, ibOverview?.stream?.status, t]);
 
   const bridgeSource = useMemo(() => {
     return accountSummary?.source || "lean_bridge";
@@ -1006,6 +1007,10 @@ export default function LiveTradePage() {
     ibOverview?.snapshot_cache?.last_snapshot_at,
     ibOverview?.stream?.last_heartbeat,
   ]);
+
+  const positionsStale = useMemo(() => {
+    return !accountPositionsLoading && accountPositions.length === 0 && bridgeIsStale;
+  }, [accountPositions.length, accountPositionsLoading, bridgeIsStale]);
 
   const statusLabel = useMemo(() => {
     if (!isConfigured) {
@@ -1638,9 +1643,29 @@ export default function LiveTradePage() {
             </details>
           </div>
 
-          <div className="card" style={{ marginTop: "16px" }}>
+          <div className="card span-2" style={{ marginTop: "16px" }}>
             <div className="card-title">{t("trade.accountPositionsTitle")}</div>
             <div className="card-meta">{t("trade.accountPositionsMeta")}</div>
+            {positionsStale && (
+              <div className="form-hint warn" style={{ marginTop: "8px" }}>
+                <div>{t("trade.accountPositionsStaleHint")}</div>
+                <div className="meta-row" style={{ marginTop: "6px" }}>
+                  <span>{t("trade.accountPositionsStaleUpdatedAt")}</span>
+                  <strong>
+                    {bridgeUpdatedAt ? formatDateTime(bridgeUpdatedAt) : t("common.none")}
+                  </strong>
+                  <button
+                    className="button-compact"
+                    onClick={loadAccountPositions}
+                    disabled={accountPositionsLoading}
+                  >
+                    {accountPositionsLoading
+                      ? t("common.actions.loading")
+                      : t("trade.accountPositionsRefresh")}
+                  </button>
+                </div>
+              </div>
+            )}
             {accountPositionsError && <div className="form-hint">{accountPositionsError}</div>}
             <div className="meta-list" style={{ marginTop: "12px" }}>
               <div className="meta-row">

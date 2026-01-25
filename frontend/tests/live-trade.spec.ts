@@ -177,3 +177,145 @@ test("live trade positions table uses scroll wrapper", async ({ page }) => {
   const table = page.locator(".table-scroll").first();
   await expect(table).toBeVisible();
 });
+
+test("live trade shows stale positions hint when bridge stale and positions empty", async ({
+  page,
+}) => {
+  await page.route("**/api/brokerage/settings", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        id: 1,
+        host: "127.0.0.1",
+        port: 7497,
+        client_id: 1,
+        account_id: "DU123456",
+        mode: "paper",
+        market_data_type: "delayed",
+        api_mode: "ib",
+        use_regulatory_snapshot: false,
+        created_at: "2026-01-25T00:00:00Z",
+        updated_at: "2026-01-25T00:00:00Z",
+      }),
+    })
+  );
+  await page.route("**/api/brokerage/status/overview", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        connection: {
+          status: "connected",
+          message: "ok",
+          last_heartbeat: "2026-01-25T00:00:00Z",
+          updated_at: "2026-01-25T00:00:00Z",
+        },
+        stream: {
+          status: "connected",
+          subscribed_count: 0,
+          last_heartbeat: "2026-01-25T00:00:00Z",
+          ib_error_count: 0,
+          last_error: null,
+          market_data_type: "delayed",
+        },
+        snapshot_cache: {
+          status: "fresh",
+          last_snapshot_at: "2026-01-25T00:00:00Z",
+          symbol_sample_count: 0,
+        },
+        orders: {},
+        alerts: {},
+        partial: false,
+        errors: [],
+        refreshed_at: "2026-01-25T00:00:00Z",
+      }),
+    })
+  );
+  await page.route("**/api/brokerage/state", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        id: 1,
+        status: "connected",
+        message: "ok",
+        last_heartbeat: "2026-01-25T00:00:00Z",
+        updated_at: "2026-01-25T00:00:00Z",
+      }),
+    })
+  );
+  await page.route("**/api/brokerage/stream/status", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        status: "connected",
+        last_heartbeat: "2026-01-25T00:00:00Z",
+        subscribed_symbols: [],
+        ib_error_count: 0,
+        last_error: null,
+        market_data_type: "delayed",
+      }),
+    })
+  );
+  await page.route("**/api/brokerage/history/jobs", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([]),
+    })
+  );
+  await page.route("**/api/brokerage/account/summary**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: {},
+        refreshed_at: "2026-01-25T00:00:00Z",
+        source: "lean_bridge",
+        stale: true,
+        full: false,
+      }),
+    })
+  );
+  await page.route("**/api/brokerage/account/positions**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: [],
+        refreshed_at: "2026-01-25T00:00:00Z",
+        stale: true,
+      }),
+    })
+  );
+  await page.route("**/api/trade/settings", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({}),
+    })
+  );
+  await page.route("**/api/trade/runs**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([]),
+    })
+  );
+  await page.route("**/api/trade/orders**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([]),
+    })
+  );
+
+  await page.goto("/live-trade");
+  await expect(
+    page.locator(".form-hint.warn", {
+      hasText: /持仓为空且数据已过期|Positions are empty and data is stale/i,
+    })
+  ).toBeVisible();
+});

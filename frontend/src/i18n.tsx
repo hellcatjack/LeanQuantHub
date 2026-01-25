@@ -2228,6 +2228,10 @@ const messages: Record<Locale, MessageTree> = {
       accountPositionsUpdatedAt: "最近刷新",
       accountPositionsEmpty: "暂无持仓或未刷新",
       accountPositionsError: "持仓加载失败",
+      accountPositionsStaleHint:
+        "持仓为空且数据已过期，可能是 Lean Bridge 未更新。请检查 Lean 运行状态或点击刷新。",
+      accountPositionsStaleUpdatedAt: "Bridge 最近心跳",
+      accountPositionsRefresh: "刷新持仓",
       positionTable: {
         symbol: "标的",
         position: "持仓",
@@ -4595,6 +4599,10 @@ const messages: Record<Locale, MessageTree> = {
       accountPositionsUpdatedAt: "Last updated",
       accountPositionsEmpty: "No positions or not refreshed",
       accountPositionsError: "Failed to load positions",
+      accountPositionsStaleHint:
+        "Positions are empty and data is stale. Lean Bridge may not be updating. Check Lean status or click refresh.",
+      accountPositionsStaleUpdatedAt: "Bridge heartbeat",
+      accountPositionsRefresh: "Refresh positions",
       positionTable: {
         symbol: "Symbol",
         position: "Position",
