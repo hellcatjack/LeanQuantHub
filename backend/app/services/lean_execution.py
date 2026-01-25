@@ -65,8 +65,8 @@ def _resolve_environment(brokerage: str, mode: str) -> str:
 def build_execution_config(*, intent_path: str, brokerage: str, project_id: int, mode: str) -> dict:
     payload = dict(_load_template_config())
     payload["environment"] = _resolve_environment(brokerage, mode)
-    payload.setdefault("algorithm-type-name", "LeanBridgeSmokeAlgorithm")
-    if payload.get("algorithm-type-name") == "LeanBridgeSmokeAlgorithm":
+    payload["algorithm-type-name"] = "LeanBridgeExecutionAlgorithm"
+    if payload.get("algorithm-type-name") in {"LeanBridgeSmokeAlgorithm", "LeanBridgeExecutionAlgorithm"}:
         payload["algorithm-language"] = "CSharp"
     payload.setdefault("data-folder", "/data/share/stock/data/lean")
     payload["brokerage"] = brokerage
