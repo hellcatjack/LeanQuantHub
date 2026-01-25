@@ -2672,15 +2672,6 @@ a {
   font-weight: 600;
 }
 
-.id-chip-copy {
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  font-size: 12px;
-  color: var(--muted);
-  padding: 0;
-}
-
 .alpha-rate-section {
   margin-top: 12px;
   padding: 12px;
