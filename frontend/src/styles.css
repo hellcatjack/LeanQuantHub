@@ -2655,6 +2655,31 @@ a {
   padding: 8px 10px;
 }
 
+.id-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: #f8faff;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.id-chip-text {
+  font-weight: 600;
+}
+
+.id-chip-copy {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--muted);
+  padding: 0;
+}
+
 .alpha-rate-section {
   margin-top: 12px;
   padding: 12px;
