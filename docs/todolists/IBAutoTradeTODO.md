@@ -52,9 +52,10 @@
 - 验收：bridge 心跳 60 秒内刷新，状态可查询。
 
 ### 0.2 交易配置管理（配置与安全）
-- [ ] 后端配置项：IB_HOST、IB_PORT、IB_CLIENT_ID、IB_ACCOUNT、IB_MODE（作为 Brokerage 配置）。
+- [ ] 后端配置项：IB_HOST、IB_PORT、IB_CLIENT_ID、IB_ACCOUNT、IB_MODE（IB_CLIENT_ID 仅保留兼容，不参与执行）。
 - [ ] UI 配置时**不明文显示**敏感字段（只展示掩码）。
 - [ ] 配置保存后写入 Lean 启动配置/参数（单一来源）。
+- [x] client id 规则：project_id 优先（paper=base+pid，live=base+offset+pid），写入 `ib-client-id`。
 - 验收：配置保存后 Lean 可正常建立连接并输出 bridge 心跳。
 
 ### 0.3 单实例交易锁
