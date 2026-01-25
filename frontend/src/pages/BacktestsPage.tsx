@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { api } from "../api";
+import IdChip from "../components/IdChip";
 import BacktestInlinePreview from "../components/BacktestInlinePreview";
 import PaginationBar from "../components/PaginationBar";
 import ReportsPanel from "../components/ReportsPanel";
@@ -292,8 +293,12 @@ export default function BacktestsPage() {
           <tbody>
             {runs.map((run) => (
               <tr key={run.id}>
-                <td className="backtest-id">{run.id}</td>
-                <td className="backtest-project">{run.project_id}</td>
+                <td className="backtest-id">
+                  <IdChip label={t("backtests.table.id")} value={run.id} />
+                </td>
+                <td className="backtest-project">
+                  <IdChip label={t("backtests.table.project")} value={run.project_id} />
+                </td>
                 <td className="backtest-status">
                   <span className={`pill ${run.status === "success" ? "success" : "danger"}`}>
                     {renderStatus(run.status)}
@@ -317,13 +322,16 @@ export default function BacktestsPage() {
                 ))}
                 <td className="backtest-report">
                   {run.report_id ? (
-                    <button
-                      type="button"
-                      className="link-button"
-                      onClick={() => setPreviewReportId(run.report_id ?? null)}
-                    >
-                      {t("common.actions.view")}
-                    </button>
+                    <div className="table-actions">
+                      <IdChip label={t("backtests.table.report")} value={run.report_id} />
+                      <button
+                        type="button"
+                        className="link-button"
+                        onClick={() => setPreviewReportId(run.report_id ?? null)}
+                      >
+                        {t("common.actions.view")}
+                      </button>
+                    </div>
                   ) : (
                     t("common.none")
                   )}

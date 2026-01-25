@@ -180,6 +180,81 @@ test("live trade positions table uses scroll wrapper", async ({ page }) => {
   await expect(table).toBeVisible();
 });
 
+test("live trade positions table stays within card width", async ({ page }) => {
+  await page.setViewportSize({ width: 960, height: 800 });
+  await page.route("**/api/brokerage/account/positions**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: [
+          {
+            symbol: "VERY-LONG-SYMBOL-NAME",
+            position: 12,
+            avg_cost: 420.5,
+            market_price: 432.1,
+            market_value: 5185.2,
+            unrealized_pnl: 139.2,
+            realized_pnl: 0.0,
+            account: "DU123456",
+            currency: "USD",
+          },
+        ],
+        refreshed_at: "2026-01-24T00:00:00Z",
+        stale: false,
+      }),
+    })
+  );
+  await page.goto("/live-trade");
+  const card = page.locator(".card", { hasText: /当前持仓|Positions/i }).first();
+  const tableScroll = card.locator(".table-scroll");
+  await expect(tableScroll).toBeVisible();
+  const cardBox = await card.boundingBox();
+  const scrollBox = await tableScroll.boundingBox();
+  expect(cardBox).not.toBeNull();
+  expect(scrollBox).not.toBeNull();
+  if (!cardBox || !scrollBox) {
+    throw new Error("Missing layout metrics");
+  }
+  expect(scrollBox.width).toBeLessThanOrEqual(cardBox.width + 1);
+});
+
+test("live trade positions table does not cause horizontal page scroll", async ({ page }) => {
+  await page.setViewportSize({ width: 480, height: 800 });
+  await page.route("**/api/brokerage/account/positions**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: [
+          {
+            symbol: "LONG-SYMBOL",
+            position: 12,
+            avg_cost: 420.5,
+            market_price: 432.1,
+            market_value: 5185.2,
+            unrealized_pnl: 139.2,
+            realized_pnl: 0.0,
+            account: "DU1234567890",
+            currency: "USD",
+          },
+        ],
+        refreshed_at: "2026-01-24T00:00:00Z",
+        stale: false,
+      }),
+    })
+  );
+  await page.goto("/live-trade");
+  const hasOverflow = await page.evaluate(() => {
+    const content = document.querySelector(".content");
+    if (!content) {
+      return true;
+    }
+    return content.scrollWidth > content.clientWidth;
+  });
+  expect(hasOverflow).toBe(false);
+});
+
 test("live trade shows stale positions hint when bridge stale and positions empty", async ({
   page,
 }) => {

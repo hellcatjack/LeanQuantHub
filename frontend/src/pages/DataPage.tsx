@@ -3,6 +3,7 @@ import axios from "axios";
 import { api } from "../api";
 import DatasetChartPanel from "../components/DatasetChartPanel";
 import PaginationBar from "../components/PaginationBar";
+import IdChip from "../components/IdChip";
 import TopBar from "../components/TopBar";
 import { useI18n } from "../i18n";
 import { DatasetSummary, Paginated } from "../types";
@@ -3523,7 +3524,9 @@ export default function DataPage() {
                 <tbody>
                   {pitJobs.map((job) => (
                     <tr key={job.id}>
-                      <td>{job.id}</td>
+                      <td>
+                        <IdChip label={t("data.id.job")} value={job.id} />
+                      </td>
                       <td>{renderStatus(job.status)}</td>
                       <td>{job.snapshot_count ?? t("common.none")}</td>
                       <td>{formatDateTime(job.created_at)}</td>
@@ -3879,7 +3882,9 @@ export default function DataPage() {
                 <tbody>
                   {pitFundJobs.map((job) => (
                     <tr key={job.id}>
-                      <td>{job.id}</td>
+                      <td>
+                        <IdChip label={t("data.id.job")} value={job.id} />
+                      </td>
                       <td>{renderStatus(job.status)}</td>
                       <td>{renderPitFundMode(job)}</td>
                       <td>{job.snapshot_count ?? t("common.none")}</td>
@@ -3954,9 +3959,9 @@ export default function DataPage() {
               {pretradeRunDetail ? (
                 <div className="progress-block">
                   <div className="progress-meta">
+                    <IdChip label={t("data.id.run")} value={pretradeRunDetail.run.id} />
                     <span>
                       {t("data.pretrade.summaryLine", {
-                        id: pretradeRunDetail.run.id,
                         status: renderStatus(pretradeRunDetail.run.status),
                       })}
                     </span>
@@ -3990,10 +3995,12 @@ export default function DataPage() {
                     </span>
                     {pretradeRunDetail.run.fallback_used &&
                     pretradeRunDetail.run.fallback_run_id ? (
-                      <span>
-                        {t("data.pretrade.summaryFallback", {
-                          id: pretradeRunDetail.run.fallback_run_id,
-                        })}
+                      <span style={{ display: "inline-flex", gap: "8px", alignItems: "center" }}>
+                        {t("data.pretrade.summaryFallback")}
+                        <IdChip
+                          label={t("data.id.run")}
+                          value={pretradeRunDetail.run.fallback_run_id}
+                        />
                       </span>
                     ) : null}
                   </div>
@@ -4100,7 +4107,9 @@ export default function DataPage() {
                           : t("common.none");
                       return (
                         <tr key={run.id}>
-                          <td>{run.id}</td>
+                          <td>
+                            <IdChip label={t("data.id.run")} value={run.id} />
+                          </td>
                           <td>{renderStatus(run.status)}</td>
                           <td>{windowLabel}</td>
                           <td>{formatDateTime(run.created_at)}</td>
@@ -4573,7 +4582,9 @@ export default function DataPage() {
                   <tbody>
                     {pretradeTemplates.map((template) => (
                       <tr key={template.id}>
-                        <td>{template.id}</td>
+                        <td>
+                          <IdChip label={t("data.id.template")} value={template.id} />
+                        </td>
                         <td>{template.name}</td>
                         <td>{template.is_active ? t("common.boolean.true") : t("common.boolean.false")}</td>
                         <td>
@@ -4950,7 +4961,9 @@ export default function DataPage() {
                     <tbody>
                       {bulkHistory.map((item) => (
                         <tr key={item.id}>
-                          <td>{item.id}</td>
+                          <td>
+                            <IdChip label={t("data.id.job")} value={item.id} />
+                          </td>
                           <td>{renderBulkStatus(item.status)}</td>
                           <td>{renderBulkPhase(item.phase)}</td>
                           <td>
@@ -5124,7 +5137,9 @@ export default function DataPage() {
                 const alphaMeta = resolveAlphaMeta(job);
                 return (
                   <tr key={job.id}>
-                    <td>{job.id}</td>
+                    <td>
+                      <IdChip label={t("data.id.job")} value={job.id} />
+                    </td>
                     <td>{job.dataset_name || `#${job.dataset_id}`}</td>
                     <td>
                       <span

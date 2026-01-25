@@ -1262,6 +1262,11 @@ const messages: Record<Locale, MessageTree> = {
     },
     data: {
       title: "数据管理",
+      id: {
+        run: "批次",
+        job: "作业",
+        template: "模板",
+      },
       coverage: {
         title: "数据覆盖",
         meta: "数据层更新与质量监控",
@@ -1403,11 +1408,11 @@ const messages: Record<Locale, MessageTree> = {
         settingsSaved: "已保存设置",
         settingsLoadError: "读取设置失败",
         settingsSaveError: "保存设置失败",
-        summaryLine: "运行 #{id} · 状态 {status}",
+        summaryLine: "状态 {status}",
         summaryProgress: "完成 {done}/{total} · {percent}%",
         summaryDeadline: "截止 {at}",
         summaryWindow: "窗口 {start} ~ {end}",
-        summaryFallback: "回退到运行 #{id}",
+        summaryFallback: "回退到运行",
         summaryEmpty: "暂无运行记录",
         windowStart: "窗口开始日期",
         windowEnd: "窗口结束日期",
@@ -3654,6 +3659,11 @@ const messages: Record<Locale, MessageTree> = {
     },
     data: {
       title: "Data Management",
+      id: {
+        run: "Run",
+        job: "Job",
+        template: "Template",
+      },
       coverage: {
         title: "Coverage",
         meta: "Data sync and quality monitoring.",
@@ -3795,11 +3805,11 @@ const messages: Record<Locale, MessageTree> = {
         settingsSaved: "Settings saved",
         settingsLoadError: "Failed to load settings",
         settingsSaveError: "Failed to save settings",
-        summaryLine: "Run #{id} · {status}",
+        summaryLine: "{status}",
         summaryProgress: "Done {done}/{total} · {percent}%",
         summaryDeadline: "Deadline {at}",
         summaryWindow: "Window {start} ~ {end}",
-        summaryFallback: "Fallback to run #{id}",
+        summaryFallback: "Fallback run",
         summaryEmpty: "No runs yet",
         windowStart: "Window start date",
         windowEnd: "Window end date",

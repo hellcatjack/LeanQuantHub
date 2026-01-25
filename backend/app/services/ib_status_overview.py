@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy import or_
 
 from app.models import AuditLog, TradeFill, TradeOrder
-from app.core.config import settings
+from app.services.lean_bridge_paths import resolve_bridge_root
 from app.services.lean_bridge_reader import read_bridge_status, read_quotes
 from app.services.ib_settings import get_or_create_ib_settings, get_or_create_ib_state
 
@@ -78,8 +78,7 @@ def _read_snapshot_cache() -> dict[str, Any]:
 
 
 def _resolve_bridge_root() -> Path:
-    base = settings.data_root or settings.artifact_root
-    return Path(base) / "lean_bridge"
+    return resolve_bridge_root()
 
 
 def _parse_timestamp(value: str | None) -> datetime | None:

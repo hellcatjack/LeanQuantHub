@@ -22,6 +22,7 @@ from app.services.trade_risk_engine import evaluate_orders
 from app.services.trade_alerts import notify_trade_alert
 from app.services.ib_account import fetch_account_summary
 from app.services.trade_order_intent import write_order_intent
+from app.services.lean_bridge_paths import resolve_bridge_root
 from app.services.lean_bridge_reader import read_bridge_status, read_quotes
 from app.services.lean_execution import build_execution_config, launch_execution
 
@@ -55,8 +56,7 @@ def _pick_price(snapshot: dict[str, Any] | None) -> float | None:
 
 
 def _resolve_bridge_root() -> Path:
-    base = settings.data_root or settings.artifact_root
-    return Path(base) / "lean_bridge"
+    return resolve_bridge_root()
 
 
 def _bridge_connection_ok() -> bool:

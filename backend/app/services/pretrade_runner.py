@@ -45,6 +45,7 @@ from app.services.alpha_rate import load_alpha_rate_config
 from app.services.bulk_auto import load_bulk_auto_config
 from app.services.decision_snapshot import generate_decision_snapshot
 from app.services.factor_score_runner import run_factor_score_job
+from app.services.lean_bridge_paths import resolve_bridge_root
 from app.services.lean_bridge_reader import read_quotes
 from app.services.ib_settings import update_ib_state
 from app.services.job_lock import JobLock
@@ -67,8 +68,7 @@ PRETRADE_ACTIVE_STATUSES = {"queued", "running"}
 
 
 def _resolve_bridge_root() -> Path:
-    base = settings.data_root or settings.artifact_root
-    return Path(base) / "lean_bridge"
+    return resolve_bridge_root()
 
 
 def _normalize_symbol(symbol: str | None) -> str:

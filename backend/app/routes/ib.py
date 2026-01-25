@@ -48,6 +48,7 @@ from app.services.ib_market import (
 )
 from app.services.ib_account import get_account_summary, get_account_positions
 from app.services.project_symbols import collect_active_project_symbols
+from app.services.lean_bridge_paths import resolve_bridge_root
 from app.services.lean_bridge_reader import read_bridge_status, read_quotes
 from app.models import IBContractCache, IBHistoryJob
 
@@ -55,8 +56,7 @@ router = APIRouter(prefix="/api/ib", tags=["ib"])
 
 
 def _resolve_bridge_root() -> Path:
-    base = settings.data_root or settings.artifact_root
-    return Path(base) / "lean_bridge"
+    return resolve_bridge_root()
 
 
 def _mask_account(value: str | None) -> str | None:

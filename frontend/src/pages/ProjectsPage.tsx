@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
+import IdChip from "../components/IdChip";
 import PaginationBar from "../components/PaginationBar";
 import TopBar from "../components/TopBar";
 import { useI18n } from "../i18n";
@@ -4754,8 +4755,12 @@ export default function ProjectsPage() {
                         <span className="pill warn">{t("projects.list.archivedTag")}</span>
                       )}
                     </div>
-                    <div className="project-item-meta">
-                      #{project.id} | {formatDateTime(project.created_at)}
+                    <div
+                      className="project-item-meta"
+                      style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}
+                    >
+                      <IdChip label={t("projects.table.project")} value={project.id} />
+                      <span>{formatDateTime(project.created_at)}</span>
                     </div>
                   </div>
                 ))}

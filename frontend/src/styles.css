@@ -213,6 +213,7 @@ a {
   border-radius: 16px;
   padding: 18px;
   box-shadow: var(--shadow);
+  min-width: 0;
 }
 
 .form-grid {
@@ -3145,6 +3146,7 @@ a {
 .table-scroll {
   width: 100%;
   max-width: 100%;
+  min-width: 0;
   overflow-x: auto;
   overflow-y: hidden;
   border-radius: 12px;

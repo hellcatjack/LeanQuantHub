@@ -3,14 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from app.core.config import settings
+from app.services.lean_bridge_paths import resolve_bridge_root
 from app.services.ib_settings import get_or_create_ib_settings
 from app.services.lean_bridge_reader import read_account_summary, read_positions
 
 
 def _resolve_bridge_root() -> Path:
-    base = settings.data_root or settings.artifact_root
-    return Path(base) / "lean_bridge"
+    return resolve_bridge_root()
 
 
 def _normalize_items(raw_items: Any) -> dict[str, object]:
