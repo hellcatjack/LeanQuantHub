@@ -319,3 +319,100 @@ test("live trade shows stale positions hint when bridge stale and positions empt
     })
   ).toBeVisible();
 });
+
+test("project binding: requires project before execute", async ({ page }) => {
+  await page.route("**/api/projects/page**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ items: [], total: 0, page: 1, page_size: 200 }),
+    })
+  );
+  await page.route("**/api/decisions/latest**", (route) => route.abort());
+  await page.route("**/api/trade/runs**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([]),
+    })
+  );
+  await page.goto("/live-trade");
+  await expect(
+    page.locator(".form-hint", { hasText: /请选择项目|Select a project/i })
+  ).toBeVisible();
+  await expect(page.locator("button", { hasText: /执行交易|Execute/i })).toBeDisabled();
+});
+
+test("project binding: snapshot missing disables execute", async ({ page }) => {
+  await page.route("**/api/projects/page**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: [{ id: 16, name: "Project 16" }],
+        total: 1,
+        page: 1,
+        page_size: 200,
+      }),
+    })
+  );
+  await page.route("**/api/decisions/latest**", (route) =>
+    route.fulfill({
+      status: 404,
+      contentType: "application/json",
+      body: JSON.stringify({ detail: "snapshot not found" }),
+    })
+  );
+  await page.route("**/api/trade/runs**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([]),
+    })
+  );
+  await page.goto("/live-trade");
+  await expect(
+    page.locator(".form-hint", { hasText: /未生成快照|Snapshot not generated/i })
+  ).toBeVisible();
+  await expect(page.locator("button", { hasText: /执行交易|Execute/i })).toBeDisabled();
+});
+
+test("project binding: snapshot present enables execute", async ({ page }) => {
+  await page.route("**/api/projects/page**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: [{ id: 16, name: "Project 16" }],
+        total: 1,
+        page: 1,
+        page_size: 200,
+      }),
+    })
+  );
+  await page.route("**/api/decisions/latest?project_id=16", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        id: 91,
+        project_id: 16,
+        status: "success",
+        snapshot_date: "2026-01-25",
+        summary: { total_items: 42, version: "v1" },
+      }),
+    })
+  );
+  await page.route("**/api/trade/runs**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([]),
+    })
+  );
+  await page.goto("/live-trade");
+  await expect(
+    page.locator(".meta-row", { hasText: /快照日期|Snapshot date/i })
+  ).toBeVisible();
+  await expect(page.locator("button", { hasText: /执行交易|Execute/i })).not.toBeDisabled();
+});
