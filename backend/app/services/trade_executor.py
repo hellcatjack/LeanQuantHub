@@ -522,6 +522,8 @@ def execute_trade_run(
         config = build_execution_config(
             intent_path=intent_path,
             brokerage="InteractiveBrokersBrokerage",
+            project_id=run.project_id,
+            mode=run.mode,
         )
         config_dir = ARTIFACT_ROOT / "lean_execution"
         config_dir.mkdir(parents=True, exist_ok=True)

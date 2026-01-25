@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     alpha_rate_limit_retries: int = 3
     alpha_max_retries: int = 3
     ml_python_path: str = ""
+    ib_client_id_base: int = 1000
+    ib_client_id_live_offset: int = 5000
     market_timezone: str = "America/New_York"
     market_session_open: str = "09:30"
     market_session_close: str = "16:00"
