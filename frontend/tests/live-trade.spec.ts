@@ -94,7 +94,9 @@ test("live trade page shows bridge status card", async ({ page }) => {
 
 test("live trade run table shows decision snapshot column", async ({ page }) => {
   await page.goto("/live-trade");
-  await expect(page.getByText(/决策快照|Decision Snapshot/i)).toBeVisible();
+  await expect(
+    page.getByRole("columnheader", { name: /决策快照|Decision Snapshot/i })
+  ).toBeVisible();
 });
 
 test("live trade page shows ib stream card", async ({ page }) => {
