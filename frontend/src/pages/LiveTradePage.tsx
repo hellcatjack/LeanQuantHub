@@ -148,6 +148,20 @@ interface IBStatusOverview {
   refreshed_at?: string | null;
 }
 
+interface ProjectSummary {
+  id: number;
+  name: string;
+  description?: string | null;
+}
+
+interface DecisionSnapshotSummary {
+  id: number;
+  project_id: number;
+  status?: string | null;
+  snapshot_date?: string | null;
+  summary?: Record<string, any> | null;
+}
+
 interface TradeRun {
   id: number;
   project_id: number;
@@ -285,6 +299,12 @@ export default function LiveTradePage() {
   const [ibOverview, setIbOverview] = useState<IBStatusOverview | null>(null);
   const [ibOverviewLoading, setIbOverviewLoading] = useState(false);
   const [ibOverviewError, setIbOverviewError] = useState("");
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [projectError, setProjectError] = useState("");
+  const [selectedProjectId, setSelectedProjectId] = useState("");
+  const [snapshot, setSnapshot] = useState<DecisionSnapshotSummary | null>(null);
+  const [snapshotLoading, setSnapshotLoading] = useState(false);
+  const [snapshotError, setSnapshotError] = useState("");
   const [accountSummary, setAccountSummary] = useState<IBAccountSummary | null>(null);
   const [accountSummaryFull, setAccountSummaryFull] = useState<IBAccountSummary | null>(null);
   const [accountSummaryLoading, setAccountSummaryLoading] = useState(false);
@@ -424,6 +444,50 @@ export default function LiveTradePage() {
       setIbOverviewError(String(detail));
     } finally {
       setIbOverviewLoading(false);
+    }
+  };
+
+  const loadProjects = async () => {
+    try {
+      const res = await api.get("/api/projects/page", { params: { page: 1, page_size: 200 } });
+      const items = (res.data?.items || []) as ProjectSummary[];
+      setProjects(items);
+      setProjectError("");
+      setSelectedProjectId((prev) => {
+        if (prev && items.some((item) => String(item.id) === prev)) {
+          return prev;
+        }
+        return items.length ? String(items[0].id) : "";
+      });
+    } catch (err) {
+      setProjects([]);
+      setProjectError(t("trade.projectLoadError"));
+    }
+  };
+
+  const loadLatestSnapshot = async (projectId: string) => {
+    if (!projectId) {
+      setSnapshot(null);
+      setSnapshotError("");
+      return;
+    }
+    setSnapshotLoading(true);
+    setSnapshotError("");
+    try {
+      const res = await api.get<DecisionSnapshotSummary>("/api/decisions/latest", {
+        params: { project_id: Number(projectId) },
+      });
+      setSnapshot(res.data);
+    } catch (err: any) {
+      if (err?.response?.status === 404) {
+        setSnapshot(null);
+        setSnapshotError(t("trade.snapshotMissing"));
+      } else {
+        setSnapshot(null);
+        setSnapshotError(t("trade.snapshotLoadError"));
+      }
+    } finally {
+      setSnapshotLoading(false);
     }
   };
 
@@ -867,6 +931,19 @@ export default function LiveTradePage() {
   }, []);
 
   useEffect(() => {
+    loadProjects();
+  }, []);
+
+  useEffect(() => {
+    loadLatestSnapshot(selectedProjectId);
+  }, [selectedProjectId]);
+
+  useEffect(() => {
+    setSelectedRunId(null);
+    setExecuteForm((prev) => ({ ...prev, run_id: "" }));
+  }, [selectedProjectId]);
+
+  useEffect(() => {
     const refresh = async () => {
       await loadIbState(true);
       await loadIbStreamStatus(true);
@@ -897,7 +974,14 @@ export default function LiveTradePage() {
     };
   }, [ibSettings?.mode, ibSettingsForm.mode]);
 
-  const latestTradeRun = tradeRuns[0];
+  const filteredTradeRuns = useMemo(() => {
+    if (!selectedProjectId) {
+      return tradeRuns;
+    }
+    return tradeRuns.filter((run) => String(run.project_id) === selectedProjectId);
+  }, [selectedProjectId, tradeRuns]);
+
+  const latestTradeRun = filteredTradeRuns[0];
 
   useEffect(() => {
     if (latestTradeRun?.project_id && !ibStreamForm.project_id) {
@@ -1011,6 +1095,20 @@ export default function LiveTradePage() {
   const positionsStale = useMemo(() => {
     return !accountPositionsLoading && accountPositions.length === 0 && bridgeIsStale;
   }, [accountPositions.length, accountPositionsLoading, bridgeIsStale]);
+
+  const selectedProject = useMemo(() => {
+    if (!selectedProjectId) {
+      return null;
+    }
+    return projects.find((project) => String(project.id) === selectedProjectId) || null;
+  }, [projects, selectedProjectId]);
+
+  const snapshotReady = useMemo(() => Boolean(snapshot?.id), [snapshot?.id]);
+
+  const canExecute = useMemo(
+    () => Boolean(selectedProjectId) && snapshotReady,
+    [selectedProjectId, snapshotReady]
+  );
 
   const statusLabel = useMemo(() => {
     if (!isConfigured) {
@@ -2154,6 +2252,61 @@ export default function LiveTradePage() {
           )}
         </div>
 
+        <div className="card" style={{ marginTop: "16px" }}>
+          <div className="card-title">{t("trade.projectBindingTitle")}</div>
+          <div className="card-meta">{t("trade.projectBindingMeta")}</div>
+          {projectError && <div className="form-hint">{projectError}</div>}
+          <div className="form-grid two-col" style={{ marginTop: "12px" }}>
+            <div className="form-row">
+              <label className="form-label">{t("trade.projectSelect")}</label>
+              <select
+                className="form-select"
+                value={selectedProjectId}
+                onChange={(event) => setSelectedProjectId(event.target.value)}
+              >
+                <option value="">{t("trade.projectSelectPlaceholder")}</option>
+                {projects.map((project) => (
+                  <option key={project.id} value={project.id}>
+                    #{project.id} · {project.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+          {!selectedProjectId && (
+            <div className="form-hint">{t("trade.projectSelectHint")}</div>
+          )}
+          <div className="meta-list" style={{ marginTop: "12px" }}>
+            <div className="meta-row">
+              <span>{t("trade.snapshotStatus")}</span>
+              <strong>
+                {snapshotLoading
+                  ? t("common.actions.loading")
+                  : snapshotReady
+                    ? t("trade.snapshotReady")
+                    : t("trade.snapshotMissing")}
+              </strong>
+            </div>
+            <div className="meta-row">
+              <span>{t("trade.snapshotDate")}</span>
+              <strong>{snapshot?.snapshot_date || t("common.none")}</strong>
+            </div>
+            <div className="meta-row">
+              <span>{t("trade.snapshotId")}</span>
+              <strong>{snapshot?.id ? `#${snapshot.id}` : t("common.none")}</strong>
+            </div>
+          </div>
+          {selectedProject && (
+            <div className="form-hint" style={{ marginTop: "8px" }}>
+              {t("trade.projectBindingSelected", {
+                id: selectedProject.id,
+                name: selectedProject.name,
+              })}
+            </div>
+          )}
+          {snapshotError && <div className="form-hint">{snapshotError}</div>}
+        </div>
+
         <div className="grid-2" style={{ marginTop: "16px" }}>
           <div className="card">
             <div className="card-title">{t("trade.guardTitle")}</div>
@@ -2274,8 +2427,8 @@ export default function LiveTradePage() {
                 </tr>
               </thead>
               <tbody>
-                {tradeRuns.length ? (
-                  tradeRuns.map((run) => (
+                {filteredTradeRuns.length ? (
+                  filteredTradeRuns.map((run) => (
                     <tr key={run.id}>
                       <td>#{run.id}</td>
                       <td>{formatStatus(run.status)}</td>
@@ -2309,13 +2462,25 @@ export default function LiveTradePage() {
                   }}
                 >
                   <option value="">{t("common.noneText")}</option>
-                  {tradeRuns.map((run) => (
-                    <option key={run.id} value={run.id}>
-                      #{run.id} · {formatStatus(run.status)}
-                    </option>
-                  ))}
+                {filteredTradeRuns.map((run) => (
+                  <option key={run.id} value={run.id}>
+                    #{run.id} · {formatStatus(run.status)}
+                  </option>
+                ))}
                 </select>
                 <div className="form-hint">{t("trade.runSelectHint")}</div>
+              </div>
+            </div>
+            <div className="meta-list" style={{ marginTop: "12px" }}>
+              <div className="meta-row">
+                <span>{t("trade.executeContext")}</span>
+                <strong>
+                  {selectedProjectId
+                    ? `${t("trade.projectShort")}${selectedProjectId}`
+                    : t("trade.projectSelectPlaceholder")}
+                  {snapshot?.snapshot_date ? ` · ${snapshot.snapshot_date}` : ""}
+                  {snapshot?.id ? ` · #${snapshot.id}` : ""}
+                </strong>
               </div>
             </div>
             <div className="form-grid" style={{ marginTop: "12px" }}>
@@ -2345,11 +2510,16 @@ export default function LiveTradePage() {
               <button
                 className="button-primary"
                 onClick={executeTradeRun}
-                disabled={executeLoading}
+                disabled={executeLoading || !canExecute}
               >
                 {executeLoading ? t("common.actions.loading") : t("trade.executeSubmit")}
               </button>
             </div>
+            {!canExecute && selectedProjectId && !snapshotError && (
+              <div className="form-hint" style={{ marginTop: "8px" }}>
+                {t("trade.executeBlockedSnapshot")}
+              </div>
+            )}
             {executeError && <div className="form-hint">{executeError}</div>}
             {executeResult && <div className="form-hint">{executeResult}</div>}
           </div>
