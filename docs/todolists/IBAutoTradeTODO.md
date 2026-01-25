@@ -44,6 +44,7 @@
 ---
 
 ## Phase 0：基础设施与连通（必做）
+> 优先级：Phase 0–2 先行，详见 `docs/plans/2026-01-25-ib-autotrade-phase0-2-plan.md`。
 ### 0.1 Lean IB 连接管理（通过 Bridge 监控）
 - [ ] IB Gateway/TWS 常驻服务（systemd 用户服务），支持自动重连。
 - [ ] Lean 进程常驻/调度输出 `lean_bridge_status.json` 心跳。
