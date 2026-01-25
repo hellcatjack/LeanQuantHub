@@ -2290,6 +2290,11 @@ const messages: Record<Locale, MessageTree> = {
       executeBlockedProject: "请选择项目后执行。",
       executeBlockedSnapshot: "当日快照未生成，无法执行。",
       projectShort: "项目#",
+      id: {
+        project: "项目",
+        snapshot: "快照",
+        run: "批次",
+      },
       executionTitle: "下单执行与风控",
       executionMeta: "最近交易批次与执行状态",
       executionDataSource: "执行数据源",
@@ -4678,6 +4683,11 @@ const messages: Record<Locale, MessageTree> = {
       executeBlockedProject: "Select a project before executing.",
       executeBlockedSnapshot: "Snapshot not generated. Execution blocked.",
       projectShort: "Project #",
+      id: {
+        project: "Project",
+        snapshot: "Snapshot",
+        run: "Run",
+      },
       executionTitle: "Execution & Risk",
       executionMeta: "Latest trade runs and execution status",
       executionDataSource: "Execution Data Source",

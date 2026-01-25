@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import TopBar from "../components/TopBar";
+import IdChip from "../components/IdChip";
 import { api } from "../api";
 import { useI18n } from "../i18n";
 import { getOverviewStatus } from "../utils/ibOverview";
@@ -2381,8 +2382,12 @@ export default function LiveTradePage() {
             <div className="overview-grid" style={{ marginTop: "12px" }}>
               <div className="overview-card">
                 <div className="overview-label">{t("trade.latestRun")}</div>
-                <div className="overview-value">
-                  {latestTradeRun ? `#${latestTradeRun.id}` : t("common.none")}
+              <div className="overview-value">
+                  {latestTradeRun ? (
+                    <IdChip label={t("trade.id.run")} value={latestTradeRun.id} />
+                  ) : (
+                    t("common.none")
+                  )}
                 </div>
                 <div className="overview-sub">
                   {latestTradeRun
@@ -2430,13 +2435,20 @@ export default function LiveTradePage() {
                 {filteredTradeRuns.length ? (
                   filteredTradeRuns.map((run) => (
                     <tr key={run.id}>
-                      <td>#{run.id}</td>
+                      <td>
+                        <IdChip label={t("trade.id.run")} value={run.id} />
+                      </td>
                       <td>{formatStatus(run.status)}</td>
                       <td>{formatRunMode(run.mode)}</td>
                       <td>
-                        {run.decision_snapshot_id
-                          ? `#${run.decision_snapshot_id}`
-                          : t("common.none")}
+                        {run.decision_snapshot_id ? (
+                          <IdChip
+                            label={t("trade.id.snapshot")}
+                            value={run.decision_snapshot_id}
+                          />
+                        ) : (
+                          t("common.none")
+                        )}
                       </td>
                       <td>{formatDateTime(run.created_at)}</td>
                     </tr>
@@ -2472,15 +2484,13 @@ export default function LiveTradePage() {
               </div>
             </div>
             <div className="meta-list" style={{ marginTop: "12px" }}>
-              <div className="meta-row">
+              <div className="meta-row" style={{ alignItems: "flex-start" }}>
                 <span>{t("trade.executeContext")}</span>
-                <strong>
-                  {selectedProjectId
-                    ? `${t("trade.projectShort")}${selectedProjectId}`
-                    : t("trade.projectSelectPlaceholder")}
-                  {snapshot?.snapshot_date ? ` · ${snapshot.snapshot_date}` : ""}
-                  {snapshot?.id ? ` · #${snapshot.id}` : ""}
-                </strong>
+                <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                  <IdChip label={t("trade.id.project")} value={selectedProjectId || null} />
+                  <IdChip label={t("trade.id.snapshot")} value={snapshot?.id} />
+                  <IdChip label={t("trade.id.run")} value={latestTradeRun?.id} />
+                </div>
               </div>
             </div>
             <div className="form-grid" style={{ marginTop: "12px" }}>

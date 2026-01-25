@@ -322,6 +322,59 @@ test("live trade shows stale positions hint when bridge stale and positions empt
   ).toBeVisible();
 });
 
+test("live trade shows id chips in execution context", async ({ page }) => {
+  await page.route("**/api/projects/page**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: [{ id: 16, name: "Project 16" }],
+        total: 1,
+        page: 1,
+        page_size: 200,
+      }),
+    })
+  );
+  await page.route("**/api/decisions/latest?project_id=16", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        id: 91,
+        project_id: 16,
+        status: "success",
+        snapshot_date: "2026-01-25",
+      }),
+    })
+  );
+  await page.route("**/api/trade/runs**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([
+        {
+          id: 88,
+          project_id: 16,
+          decision_snapshot_id: 91,
+          mode: "paper",
+          status: "queued",
+          created_at: "2026-01-25T00:00:00Z",
+        },
+      ]),
+    })
+  );
+  await page.goto("/live-trade");
+  await expect(
+    page.locator(".id-chip-text", { hasText: /项目#16|Project#16/i })
+  ).toBeVisible();
+  await expect(
+    page.locator(".id-chip-text", { hasText: /快照#91|Snapshot#91/i }).first()
+  ).toBeVisible();
+  await expect(
+    page.locator(".id-chip-text", { hasText: /批次#88|Run#88/i }).first()
+  ).toBeVisible();
+});
+
 test("project binding: requires project before execute", async ({ page }) => {
   await page.route("**/api/projects/page**", (route) =>
     route.fulfill({
