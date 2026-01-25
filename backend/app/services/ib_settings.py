@@ -5,6 +5,18 @@ import socket
 from datetime import datetime
 
 from app.models import IBConnectionState, IBSettings
+from app.core.config import settings
+
+
+MAX_CLIENT_ID = 2_147_483_647
+
+
+def derive_client_id(*, project_id: int, mode: str) -> int:
+    base = settings.ib_client_id_base
+    live_offset = settings.ib_client_id_live_offset
+    pid = abs(int(project_id))
+    cid = base + pid + (live_offset if str(mode).lower() == "live" else 0)
+    return cid if cid <= MAX_CLIENT_ID else base
 
 
 def _resolve_default_settings() -> dict[str, object]:
