@@ -21,6 +21,8 @@
   "ib-host": "192.168.1.31",
   "ib-port": "7497",
   "ib-client-id": "101",
+  "ib-validate-subscription": false,
+  "ib-automater-enabled": false,
   "ib-trading-mode": "paper",
   "live-mode": true,
   "live-mode-brokerage": "InteractiveBrokersBrokerage",
