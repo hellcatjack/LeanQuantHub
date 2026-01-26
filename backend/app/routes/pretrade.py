@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import math
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 
@@ -16,6 +17,7 @@ from app.schemas import (
     PreTradeRunCreate,
     PreTradeRunDetail,
     PreTradeRunOut,
+    PreTradeRunPageOut,
     PreTradeSettingsOut,
     PreTradeSettingsUpdate,
     PreTradeSummaryOut,
@@ -37,6 +39,16 @@ from app.services.pretrade_runner import (
 )
 
 router = APIRouter(prefix="/api/pretrade", tags=["pretrade"])
+
+MAX_PAGE_SIZE = 200
+
+
+def _coerce_pagination(page: int, page_size: int, total: int) -> tuple[int, int, int]:
+    safe_page_size = min(max(page_size, 1), MAX_PAGE_SIZE)
+    total_pages = max(1, math.ceil(total / safe_page_size)) if total else 1
+    safe_page = min(max(page, 1), total_pages)
+    offset = (safe_page - 1) * safe_page_size
+    return safe_page, safe_page_size, offset
 
 
 def _mask_token(value: str | None) -> str | None:
@@ -199,6 +211,32 @@ def list_pretrade_runs(
         if project_id is not None:
             query = query.filter(PreTradeRun.project_id == project_id)
         return query.offset(offset).limit(limit).all()
+
+
+@router.get("/runs/page", response_model=PreTradeRunPageOut)
+def list_pretrade_runs_page(
+    project_id: int | None = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=MAX_PAGE_SIZE),
+):
+    with get_session() as session:
+        query = session.query(PreTradeRun)
+        if project_id is not None:
+            query = query.filter(PreTradeRun.project_id == project_id)
+        total = query.count()
+        safe_page, safe_page_size, offset = _coerce_pagination(page, page_size, total)
+        items = (
+            query.order_by(PreTradeRun.created_at.desc())
+            .offset(offset)
+            .limit(safe_page_size)
+            .all()
+        )
+        return PreTradeRunPageOut(
+            items=items,
+            total=total,
+            page=safe_page,
+            page_size=safe_page_size,
+        )
 
 
 @router.get("/summary", response_model=PreTradeSummaryOut)

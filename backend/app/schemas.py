@@ -1353,6 +1353,13 @@ class PreTradeRunOut(BaseModel):
         from_attributes = True
 
 
+class PreTradeRunPageOut(BaseModel):
+    items: list[PreTradeRunOut]
+    total: int
+    page: int
+    page_size: int
+
+
 class PreTradeStepOut(BaseModel):
     id: int
     run_id: int
