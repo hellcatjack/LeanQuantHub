@@ -170,6 +170,29 @@ def list_fundamental_jobs(
         return jobs
 
 
+@router.get("/fundamental-jobs/page", response_model=PitFundamentalJobPageOut)
+def list_fundamental_jobs_page(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=MAX_PAGE_SIZE),
+):
+    with get_session() as session:
+        total = session.query(PitFundamentalJob).count()
+        safe_page, safe_page_size, offset = _coerce_pagination(page, page_size, total)
+        items = (
+            session.query(PitFundamentalJob)
+            .order_by(PitFundamentalJob.created_at.desc())
+            .offset(offset)
+            .limit(safe_page_size)
+            .all()
+        )
+        return PitFundamentalJobPageOut(
+            items=items,
+            total=total,
+            page=safe_page,
+            page_size=safe_page_size,
+        )
+
+
 @router.get("/fundamental-jobs/{job_id}", response_model=PitFundamentalJobOut)
 def get_fundamental_job(job_id: int):
     with get_session() as session:

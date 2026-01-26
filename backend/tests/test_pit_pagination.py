@@ -44,3 +44,29 @@ def test_pit_weekly_jobs_page(monkeypatch):
     assert len(dumped["items"]) == 5
 
     session.close()
+
+
+def test_pit_fundamental_jobs_page(monkeypatch):
+    session = _make_session()
+
+    for idx in range(9):
+        session.add(PitFundamentalJob(status="queued", params={"i": idx}))
+    session.commit()
+
+    @contextmanager
+    def _get_session():
+        try:
+            yield session
+        finally:
+            pass
+
+    monkeypatch.setattr(pit_routes, "get_session", _get_session)
+
+    resp = pit_routes.list_fundamental_jobs_page(page=1, page_size=4)
+    dumped = resp.model_dump()
+    assert dumped["total"] == 9
+    assert dumped["page"] == 1
+    assert dumped["page_size"] == 4
+    assert len(dumped["items"]) == 4
+
+    session.close()
