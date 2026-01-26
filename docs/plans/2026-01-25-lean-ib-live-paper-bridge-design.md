@@ -7,7 +7,7 @@
 - 连接与权限问题是否可被清晰诊断
 
 ## 目标
-- 使用 **TWS paper**（`192.168.1.31:7497`，`clientId=101`）启动 Lean live-interactive。
+- 使用 **TWS paper**（`192.168.1.31:7497`，`clientId=105`）启动 Lean live-interactive。
 - Bridge 输出持续刷新：`lean_bridge_status.json` 心跳更新；`account_summary.json` 可读且数值合理。
 - 记录清晰的启动步骤与故障排查路径。
 
@@ -29,10 +29,28 @@
   - `lean-bridge-output-dir = /data/share/stock/data/lean_bridge`
   - `ib-host = 192.168.1.31`
   - `ib-port = 7497`
-  - `ib-client-id = 101`
+  - `ib-client-id = 105`
   - `ib-trading-mode = paper`
+  - `ib-validate-subscription = false`
+  - `ib-automater-enabled = false`
+  - `data-queue-handler = ["InteractiveBrokersBrokerage"]`
 - 指定算法为 `LeanBridgeSmokeAlgorithm`（无行情订阅），用于验证桥接文件稳定输出。
-- 设置 `PYTHONNET_PYDLL` 与 `PYTHONHOME`，确保 pythonnet 正常初始化。
+- 账户号允许 IB 自动回传，不强制设置 `ib-account`。
+- 设置 `PYTHONNET_PYDLL` 与 `PYTHONHOME`（Python 3.11），确保 pythonnet 正常初始化。
+
+**实际配置文件：** `/app/stocklean/Lean_git/Launcher/config-lean-bridge-live-paper.json`  
+**启动命令（示例）：**
+```
+set -a
+source /app/stocklean/backend/.env
+set +a
+export PYTHONNET_PYDLL=/app/stocklean/.venv/lib/libpython3.11.so
+export PYTHONHOME=/app/stocklean/.venv
+export PYTHONPATH=/app/stocklean/.venv/lib/python3.11/site-packages
+export LEAN_DATA_FOLDER=/data/share/stock/data/lean
+/app/stocklean/Lean_git/Launcher/bin/Release/QuantConnect.Lean.Launcher \
+  --config /app/stocklean/Lean_git/Launcher/config-lean-bridge-live-paper.json
+```
 
 ### 2) 验证路径
 - **第一阶段（账户与心跳）**：
@@ -46,9 +64,12 @@
 - **连接失败**：检查 TWS API 开启、IP 白名单、`clientId` 冲突。
 - **行情订阅失败**：检查 IB market data 权限与交易时间；必要时启用延迟行情。
 - **bridge 文件不更新**：检查输出路径权限，确认 ResultHandler 初始化日志。
-- **Python GIL 崩溃**：检查 `PYTHONNET_PYDLL`/`PYTHONHOME` 指向 Python 3.10.19。
+- **提示未选择交易模式**：补齐 `ib-trading-mode = paper|live`。
+- **订阅校验失败（Invalid api user id or token）**：未配置 QC 用户 token 时，设置 `ib-validate-subscription=false`。
+- **ibgateway 路径错误（C:\\ibgateway）**：在 Linux 环境应设置 `ib-automater-enabled=false`，避免 IBAutomater 管理网关。
+- **Python 崩溃**：检查 `PYTHONNET_PYDLL`/`PYTHONHOME` 指向 `/app/stocklean/.venv` 的 Python 3.11。
 
 ## 成功标准
 - Bridge 文件在 `/data/share/stock/data/lean_bridge` 生成并持续更新。
 - 日志无 IB 连接错误，心跳可持续刷新。
-
+- 账户摘要与 TWS Paper 余额一致（本次验证约 **30997 美元**，包含 **NVDA 1 股**）。

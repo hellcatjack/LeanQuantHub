@@ -50,7 +50,7 @@
 - [ ] Lean 进程常驻/调度输出 `lean_bridge_status.json` 心跳。
 - [ ] 连接健康检测与状态展示（UI/接口）改为读取 bridge 心跳。
 - [ ] Paper/Live 开关：UI 可配置并写入 Lean 配置，默认 Paper。
-- [x] Live-interactive（Paper）启动验证通过：`/app/stocklean/.worktrees/lean-ib-live-interactive/scripts/run_lean_live_interactive_paper.sh` + `configs/lean_live_interactive_paper.json`（`ib-validate-subscription=false`、`ib-automater-enabled=false`），bridge 目录输出正常。
+- [x] Live-interactive（Paper）启动验证通过：`/app/stocklean/Lean_git/Launcher/config-lean-bridge-live-paper.json`（`ib-trading-mode=paper`、`ib-validate-subscription=false`、`ib-automater-enabled=false`），bridge 目录输出正常。
 - 验收：bridge 心跳 60 秒内刷新，状态可查询。
 
 ### 0.2 交易配置管理（配置与安全）

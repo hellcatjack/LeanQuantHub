@@ -19,6 +19,16 @@ def test_build_execution_config_includes_intent_path(tmp_path):
     assert config["execution-intent-path"].endswith("intent.json")
     assert "brokerage" in config
 
+
+def test_build_execution_config_uses_execution_algorithm(tmp_path):
+    config = lean_execution.build_execution_config(
+        intent_path=str(tmp_path / "intent.json"),
+        brokerage="InteractiveBrokersBrokerage",
+        project_id=16,
+        mode="paper",
+    )
+    assert config["algorithm-type-name"] == "LeanBridgeExecutionAlgorithm"
+
 def test_execution_config_includes_bridge_result_handler():
     cfg = lean_execution.build_execution_config(
         intent_path="/tmp/intent.json",
@@ -62,7 +72,7 @@ def test_build_execution_config_merges_template(monkeypatch, tmp_path):
         mode="paper",
     )
     assert cfg["environment"] == "live-interactive"
-    assert cfg["algorithm-type-name"] == "LeanBridgeSmokeAlgorithm"
+    assert cfg["algorithm-type-name"] == "LeanBridgeExecutionAlgorithm"
     assert cfg["execution-intent-path"].endswith("intent.json")
     assert cfg["ib-client-id"] == 1016
 
@@ -153,7 +163,7 @@ def test_template_fallback_overrides_empty_values(monkeypatch, tmp_path):
     assert cfg["data-folder"] == "/data/share/stock/data/lean"
 
 
-def test_execution_config_forces_csharp_for_smoke_algorithm(monkeypatch, tmp_path):
+def test_execution_config_forces_csharp_for_execution_algorithm(monkeypatch, tmp_path):
     template = tmp_path / "template.json"
     template.write_text(
         json.dumps({"algorithm-language": "Python", "algorithm-type-name": "LeanBridgeSmokeAlgorithm"}),
