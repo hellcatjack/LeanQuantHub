@@ -53,6 +53,19 @@ const PRETRADE_STEP_GROUPS = [
   },
 ];
 
+const PRETRADE_DATA_GATE_KEYS = new Set([
+  "calendar_refresh",
+  "trading_day_check",
+  "price_incremental",
+  "listing_refresh",
+  "fundamentals_refresh",
+  "pit_weekly",
+  "pit_fundamentals",
+  "training_scoring",
+  "decision_snapshot",
+  "audit",
+]);
+
 interface DatasetQuality {
   dataset_id: number;
   frequency?: string | null;
@@ -2727,6 +2740,55 @@ export default function DataPage() {
     return summarizePretradeSteps(pretradeRunDetail.steps || []);
   }, [pretradeRunDetail]);
 
+  const pretradeGateSummary = useMemo(() => {
+    if (!pretradeRunDetail) {
+      return null;
+    }
+    const steps = pretradeRunDetail.steps || [];
+    const dataSteps = steps.filter((step) => PRETRADE_DATA_GATE_KEYS.has(step.step_key));
+    const dataSummary = summarizePretradeSteps(dataSteps);
+    const dataStatus =
+      dataSummary.total === 0
+        ? "queued"
+        : dataSummary.failed > 0
+          ? "failed"
+          : dataSummary.done < dataSummary.total
+            ? "running"
+            : "success";
+
+    const bridgeStep = steps.find((step) => step.step_key === "bridge_gate");
+    const bridgeGate = (bridgeStep?.artifacts as Record<string, unknown> | null)?.[
+      "bridge_gate"
+    ] as
+      | {
+          ok?: boolean;
+          missing?: string[];
+          stale?: string[];
+          checks?: Record<
+            string,
+            { ok?: boolean; updated_at?: string | null; ttl_seconds?: number | null }
+          >;
+        }
+      | undefined;
+    const tradeOk = bridgeGate?.ok ?? (bridgeStep?.status === "success");
+    const tradeStatus = tradeOk
+      ? "success"
+      : bridgeStep
+        ? "failed"
+        : "queued";
+
+    return {
+      data: {
+        status: dataStatus,
+        summary: dataSummary,
+      },
+      trade: {
+        status: tradeStatus,
+        gate: bridgeGate,
+      },
+    };
+  }, [pretradeRunDetail]);
+
   const latestSyncByDataset = useMemo(() => {
     const map = new Map<number, DataSyncJob>();
     for (const job of syncJobs) {
@@ -4068,6 +4130,66 @@ export default function DataPage() {
                       </span>
                     ) : null}
                   </div>
+                  {pretradeGateSummary && (
+                    <>
+                      <div className="progress-meta">
+                        <span className={`pill ${statusClass(pretradeGateSummary.data.status)}`}>
+                          {t("data.pretrade.gates.data.title")}
+                          {pretradeGateSummary.data.summary.total > 0
+                            ? ` · ${t("data.pretrade.gates.data.summary", {
+                                done: pretradeGateSummary.data.summary.done,
+                                total: pretradeGateSummary.data.summary.total,
+                                failed: pretradeGateSummary.data.summary.failed,
+                              })}`
+                            : ` · ${t("common.none")}`}
+                        </span>
+                        <span className={`pill ${statusClass(pretradeGateSummary.trade.status)}`}>
+                          {t("data.pretrade.gates.trade.title")}
+                        </span>
+                      </div>
+                      {pretradeGateSummary.trade.gate?.checks && (
+                        <div className="progress-meta">
+                          {(
+                            [
+                              ["heartbeat", "data.pretrade.gates.trade.heartbeat"],
+                              ["account", "data.pretrade.gates.trade.account"],
+                              ["positions", "data.pretrade.gates.trade.positions"],
+                              ["quotes", "data.pretrade.gates.trade.quotes"],
+                            ] as const
+                          ).map(([key, label]) => {
+                            const check = pretradeGateSummary.trade.gate?.checks?.[key];
+                            const updatedAt = check?.updated_at
+                              ? formatDateTime(check.updated_at)
+                              : t("common.none");
+                            return (
+                              <span key={key}>
+                                {t(label)}: {updatedAt}
+                              </span>
+                            );
+                          })}
+                        </div>
+                      )}
+                      {(pretradeGateSummary.trade.gate?.missing?.length ||
+                        pretradeGateSummary.trade.gate?.stale?.length) && (
+                        <div className="progress-meta">
+                          {pretradeGateSummary.trade.gate?.missing?.length ? (
+                            <span className="form-hint danger">
+                              {t("data.pretrade.gates.trade.missing", {
+                                items: pretradeGateSummary.trade.gate?.missing?.join(", "),
+                              })}
+                            </span>
+                          ) : null}
+                          {pretradeGateSummary.trade.gate?.stale?.length ? (
+                            <span className="form-hint danger">
+                              {t("data.pretrade.gates.trade.stale", {
+                                items: pretradeGateSummary.trade.gate?.stale?.join(", "),
+                              })}
+                            </span>
+                          ) : null}
+                        </div>
+                      )}
+                    </>
+                  )}
                   {pretradeRunDetail.run.message && (
                     <div className="progress-meta">{pretradeRunDetail.run.message}</div>
                   )}

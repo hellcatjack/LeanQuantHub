@@ -12,6 +12,9 @@ test("data page shows pagination bars for PIT and PreTrade", async ({ page }) =>
     page.getByText(/PIT (Fundamental Snapshots|Fundamental Job|基本面快照|基本面任务)/)
   ).toBeVisible();
   await expect(page.getByText(/PreTrade (Checklist|周度检查)/)).toBeVisible();
+  await expect(
+    page.getByText(/Data gate|数据门禁|No runs yet|暂无运行记录/)
+  ).toBeVisible();
 
   const paginations = page.locator(".pagination");
   const count = await paginations.count();

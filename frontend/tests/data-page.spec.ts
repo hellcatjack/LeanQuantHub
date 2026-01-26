@@ -99,7 +99,7 @@ test("data page shows id chips for pretrade runs", async ({ page }) => {
           {
             id: 5001,
             run_id: 1001,
-            step_key: "bridge_gate",
+            step_key: "calendar_refresh",
             step_order: 0,
             status: "success",
             progress: 1,
@@ -113,6 +113,54 @@ test("data page shows id chips for pretrade runs", async ({ page }) => {
             started_at: "2026-01-25T00:00:00Z",
             ended_at: "2026-01-25T00:00:01Z",
             updated_at: "2026-01-25T00:00:01Z",
+          },
+          {
+            id: 5002,
+            run_id: 1001,
+            step_key: "decision_snapshot",
+            step_order: 1,
+            status: "success",
+            progress: 1,
+            retry_count: 0,
+            next_retry_at: null,
+            message: "",
+            log_path: null,
+            params: null,
+            artifacts: null,
+            created_at: "2026-01-25T00:00:01Z",
+            started_at: "2026-01-25T00:00:01Z",
+            ended_at: "2026-01-25T00:00:02Z",
+            updated_at: "2026-01-25T00:00:02Z",
+          },
+          {
+            id: 5003,
+            run_id: 1001,
+            step_key: "bridge_gate",
+            step_order: 2,
+            status: "success",
+            progress: 1,
+            retry_count: 0,
+            next_retry_at: null,
+            message: "",
+            log_path: null,
+            params: null,
+            artifacts: {
+              bridge_gate: {
+                ok: true,
+                missing: [],
+                stale: [],
+                checks: {
+                  heartbeat: { ok: true, updated_at: "2026-01-25T00:00:02Z" },
+                  account: { ok: true, updated_at: "2026-01-25T00:00:02Z" },
+                  positions: { ok: true, updated_at: "2026-01-25T00:00:02Z" },
+                  quotes: { ok: true, updated_at: "2026-01-25T00:00:02Z" },
+                },
+              },
+            },
+            created_at: "2026-01-25T00:00:02Z",
+            started_at: "2026-01-25T00:00:02Z",
+            ended_at: "2026-01-25T00:00:03Z",
+            updated_at: "2026-01-25T00:00:03Z",
           },
         ],
       });
@@ -246,4 +294,6 @@ test("data page shows id chips for pretrade runs", async ({ page }) => {
     page.locator(".id-chip-text", { hasText: /Run#1001|批次#1001/i }).first()
   ).toBeVisible();
   await expect(page.getByText(/Lean Bridge 交易门禁|Lean bridge gate/i)).toBeVisible();
+  await expect(page.getByText(/Data gate|数据门禁/i)).toBeVisible();
+  await expect(page.getByText(/Trade gate|交易门禁/i)).toBeVisible();
 });

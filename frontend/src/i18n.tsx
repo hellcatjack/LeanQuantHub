@@ -1414,6 +1414,21 @@ const messages: Record<Locale, MessageTree> = {
         summaryWindow: "窗口 {start} ~ {end}",
         summaryFallback: "回退到运行",
         summaryEmpty: "暂无运行记录",
+        gates: {
+          data: {
+            title: "数据门禁",
+            summary: "完成 {done}/{total} · 失败 {failed}",
+          },
+          trade: {
+            title: "交易门禁",
+            heartbeat: "心跳",
+            account: "账户",
+            positions: "持仓",
+            quotes: "行情",
+            missing: "缺失: {items}",
+            stale: "过期: {items}",
+          },
+        },
         windowStart: "窗口开始日期",
         windowEnd: "窗口结束日期",
         run: {
@@ -3824,6 +3839,21 @@ const messages: Record<Locale, MessageTree> = {
         summaryWindow: "Window {start} ~ {end}",
         summaryFallback: "Fallback run",
         summaryEmpty: "No runs yet",
+        gates: {
+          data: {
+            title: "Data gate",
+            summary: "{done}/{total} · failed {failed}",
+          },
+          trade: {
+            title: "Trade gate",
+            heartbeat: "Heartbeat",
+            account: "Account",
+            positions: "Positions",
+            quotes: "Quotes",
+            missing: "Missing: {items}",
+            stale: "Stale: {items}",
+          },
+        },
         windowStart: "Window start date",
         windowEnd: "Window end date",
         run: {
