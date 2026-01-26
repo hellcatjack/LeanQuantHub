@@ -1,152 +1,183 @@
-# Lean IB 账户摘要准确性修复 Implementation Plan
+# Lean IB Account Summary Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan.
+> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** 将 `account_summary.json` 的账户信息改为 IB 原始摘要，确保实盘交易页展示准确。
+**Goal:** Replace Lean Bridge account summary output with a merged IB account snapshot (AccountUpdates + AccountSummary, BASE‑first) so UI shows real IB values.
 
-**Architecture:** 在 `InteractiveBrokersBrokerage` 内缓存账户摘要快照并提供读取接口；`LeanBridgeResultHandler` 从 IB 快照生成 `account_summary.json`，无快照则标记 `stale=true`。
+**Architecture:** Add snapshot accessors in IB brokerage/account data, expose brokerage from transaction handler, and update `LeanBridgeResultHandler` to build summary from IB snapshot with BASE‑first + source priority merge and stale fallback.
 
-**Tech Stack:** C# (.NET), Lean Engine, xUnit (Lean Tests)
-
----
-
-### Task 1: 提交设计文档
-
-**Files:**
-- Modify: `docs/plans/2026-01-26-lean-ib-account-summary-design.md`
-
-**Step 1: 提交设计文档**
-
-Run:
-```bash
-git add docs/plans/2026-01-26-lean-ib-account-summary-design.md
-git commit -m "docs: add lean ib account summary design"
-```
-Expected: commit created.
+**Tech Stack:** C# (.NET), QuantConnect Lean (Lean_git), NUnit tests, JSON output.
 
 ---
 
-### Task 2: 新增账户摘要快照读取接口（TDD）
+### Task 1: Account snapshot helper (TDD)
 
 **Files:**
+- Create: `Lean_git/Tests/Common/Brokerages/InteractiveBrokersAccountDataTests.cs`
 - Modify: `Lean_git/Brokerages/InteractiveBrokers/QuantConnect.InteractiveBrokersBrokerage/InteractiveBrokersAccountData.cs`
-- Modify: `Lean_git/Brokerages/InteractiveBrokers/QuantConnect.InteractiveBrokersBrokerage/InteractiveBrokersBrokerage.cs`
-- Test: `Lean_git/Brokerages/InteractiveBrokers/QuantConnect.InteractiveBrokersBrokerage.Tests/InteractiveBrokersBrokerageTests.cs` (新增测试)
 
-**Step 1: 写失败测试**
-
+**Step 1: Write the failing test**
 ```csharp
-[Test]
-public void AccountSummarySnapshotReturnsBaseValues()
+using NUnit.Framework;
+using QuantConnect.Brokerages.InteractiveBrokers;
+
+namespace QuantConnect.Tests.Common.Brokerages
 {
-    var ib = new InteractiveBrokersBrokerage(...); // 使用现有测试模式初始化
-    ib.SetAccountSummaryValue("BASE", "NetLiquidation", "123456.78");
-    var snapshot = ib.GetAccountSummarySnapshot();
-    Assert.AreEqual("123456.78", snapshot["BASE:NetLiquidation"]);
+    [TestFixture]
+    public class InteractiveBrokersAccountDataTests
+    {
+        [Test]
+        public void GetAccountSummarySnapshotReturnsCopy()
+        {
+            var data = new InteractiveBrokersAccountData();
+            data.AccountProperties["BASE:NetLiquidation"] = "123";
+
+            var snapshot = data.GetAccountSummarySnapshot();
+            snapshot["BASE:NetLiquidation"] = "999";
+
+            Assert.AreEqual("123", data.AccountProperties["BASE:NetLiquidation"]);
+        }
+    }
 }
 ```
 
-**Step 2: 运行测试（应失败）**
+**Step 2: Run test to verify it fails**
+Run: `dotnet test /app/stocklean/Lean_git/Tests/QuantConnect.Tests.csproj --filter FullyQualifiedName~InteractiveBrokersAccountDataTests.GetAccountSummarySnapshotReturnsCopy`
+Expected: FAIL (method `GetAccountSummarySnapshot` not found).
 
-Run:
-```bash
-dotnet test Brokerages/InteractiveBrokers/QuantConnect.InteractiveBrokersBrokerage.Tests/QuantConnect.InteractiveBrokersBrokerage.Tests.csproj --filter FullyQualifiedName~AccountSummarySnapshotReturnsBaseValues
+**Step 3: Write minimal implementation**
+```csharp
+public Dictionary<string, string> GetAccountSummarySnapshot()
+{
+    return new Dictionary<string, string>(AccountProperties);
+}
 ```
-Expected: FAIL (方法不存在/不可访问)。
 
-**Step 3: 最小实现**
-
-- 在 `InteractiveBrokersAccountData` 增加线程安全的快照读取方法。
-- 在 `InteractiveBrokersBrokerage` 暴露 `GetAccountSummarySnapshot()`，仅返回拷贝。
-- 在测试中使用可控方式写入 AccountProperties（如直接注入或测试辅助方法）。
-
-**Step 4: 运行测试（应通过）**
-
-Run:
-```bash
-dotnet test Brokerages/InteractiveBrokers/QuantConnect.InteractiveBrokersBrokerage.Tests/QuantConnect.InteractiveBrokersBrokerage.Tests.csproj --filter FullyQualifiedName~AccountSummarySnapshotReturnsBaseValues
-```
+**Step 4: Run test to verify it passes**
+Run: `dotnet test /app/stocklean/Lean_git/Tests/QuantConnect.Tests.csproj --filter FullyQualifiedName~InteractiveBrokersAccountDataTests.GetAccountSummarySnapshotReturnsCopy`
 Expected: PASS.
 
-**Step 5: 提交**
-
+**Step 5: Commit**
 ```bash
 git add Lean_git/Brokerages/InteractiveBrokers/QuantConnect.InteractiveBrokersBrokerage/InteractiveBrokersAccountData.cs \
-        Lean_git/Brokerages/InteractiveBrokers/QuantConnect.InteractiveBrokersBrokerage/InteractiveBrokersBrokerage.cs \
-        Lean_git/Tests/Brokerages/InteractiveBrokersBrokerageTests.cs
-git commit -m "feat(ib): expose account summary snapshot"
+        Lean_git/Tests/Common/Brokerages/InteractiveBrokersAccountDataTests.cs
+git commit -m "test: add IB account snapshot helper"
 ```
 
 ---
 
-### Task 3: LeanBridgeResultHandler 使用 IB 账户摘要（TDD）
+### Task 2: Brokerage snapshot exposure + IB AccountSummary ingestion (TDD)
 
 **Files:**
-- Modify: `Lean_git/Engine/Results/LeanBridgeResultHandler.cs`
+- Modify: `Lean_git/Brokerages/InteractiveBrokers/QuantConnect.InteractiveBrokersBrokerage/InteractiveBrokersBrokerage.cs`
 - Modify: `Lean_git/Engine/TransactionHandlers/BrokerageTransactionHandler.cs`
-- Test: `Lean_git/Tests/Engine/Results/LeanBridgeResultHandlerTests.cs` (新增测试)
 
-**Step 1: 写失败测试**
+**Step 1: Write the failing test**
+Add to `Lean_git/Tests/Engine/Results/LeanBridgeResultHandlerTests.cs` a test that:
+- Creates a temp output dir
+- Creates `InteractiveBrokersBrokerage` and injects snapshot values (via internal test helper to be added)
+- Initializes `BrokerageTransactionHandler` with brokerage
+- Runs `LeanBridgeResultHandler.ProcessSynchronousEvents(true)`
+- Asserts `account_summary.json` uses snapshot values
 
+Example test skeleton (insert near existing tests):
 ```csharp
 [Test]
 public void BuildAccountSummaryUsesBrokerageSnapshot()
 {
-    var handler = new LeanBridgeResultHandler();
-    // 使用测试桩注入 BrokerageTransactionHandler + InteractiveBrokersBrokerage
-    var summary = handler.TestBuildAccountSummary(now);
-    Assert.AreEqual(123456.78m, summary["items"]["NetLiquidation"]);
+    using var dir = new TemporaryDirectory();
+    Config.Set("lean-bridge-output-dir", dir.Directory);
+
+    var algo = new AlgorithmStub();
+    var brokerage = new InteractiveBrokersBrokerage();
+    brokerage.SetAccountSummaryValueForTesting("BASE", "NetLiquidation", "123456.78");
+    brokerage.SetAccountSummaryValueForTesting("BASE", "TotalCashValue", "90000.00");
+
+    var resultHandler = new LeanBridgeResultHandler();
+    resultHandler.Initialize(new ResultHandlerInitializeParameters(algo, null, null, null, null, null, null, null));
+
+    var transactionHandler = new TestableBrokerageTransactionHandler();
+    transactionHandler.Initialize(algo, brokerage, resultHandler);
+    resultHandler.SetTransactionHandler(transactionHandler);
+
+    resultHandler.ProcessSynchronousEvents(true);
+
+    var json = JObject.Parse(File.ReadAllText(Path.Combine(dir.Directory, "account_summary.json")));
+    Assert.AreEqual(123456.78m, json["items"]["NetLiquidation"].Value<decimal>());
+    Assert.AreEqual("lean_bridge", json["source"].Value<string>());
 }
 ```
 
-**Step 2: 运行测试（应失败）**
+**Step 2: Run test to verify it fails**
+Run: `dotnet test /app/stocklean/Lean_git/Tests/QuantConnect.Tests.csproj --filter FullyQualifiedName~BuildAccountSummaryUsesBrokerageSnapshot`
+Expected: FAIL (missing helper + still using Algorithm.Portfolio).
 
-Run:
-```bash
-dotnet test Tests/QuantConnect.Tests.csproj --filter FullyQualifiedName~BuildAccountSummaryUsesBrokerageSnapshot
-```
-Expected: FAIL.
+**Step 3: Write minimal implementation**
+- In `InteractiveBrokersBrokerage`:
+  - Add `public Dictionary<string,string> GetAccountSummarySnapshot()`
+  - Add `internal void SetAccountSummaryValueForTesting(...)` to seed `AccountProperties`
+  - Update `HandleAccountSummary` to record to `_accountData.AccountProperties[$"{e.Currency}:{e.Tag}"] = e.Value`
+- In `BrokerageTransactionHandler`:
+  - Add `public IBrokerage Brokerage => _brokerage;`
 
-**Step 3: 最小实现**
-
-- 通过 `TransactionHandler` 获取 brokerage（在 `BrokerageTransactionHandler` 暴露只读属性）。
-- 若 brokerage 为 `InteractiveBrokersBrokerage`，读取快照并组装 items。
-- 若快照为空则输出空 items + `stale=true`。
-
-**Step 4: 运行测试（应通过）**
-
-Run:
-```bash
-dotnet test Tests/QuantConnect.Tests.csproj --filter FullyQualifiedName~BuildAccountSummaryUsesBrokerageSnapshot
-```
+**Step 4: Run test to verify it passes**
+Run: `dotnet test /app/stocklean/Lean_git/Tests/QuantConnect.Tests.csproj --filter FullyQualifiedName~BuildAccountSummaryUsesBrokerageSnapshot`
 Expected: PASS.
 
-**Step 5: 提交**
-
+**Step 5: Commit**
 ```bash
-git add Lean_git/Engine/Results/LeanBridgeResultHandler.cs \
+git add Lean_git/Brokerages/InteractiveBrokers/QuantConnect.InteractiveBrokersBrokerage/InteractiveBrokersBrokerage.cs \
         Lean_git/Engine/TransactionHandlers/BrokerageTransactionHandler.cs \
         Lean_git/Tests/Engine/Results/LeanBridgeResultHandlerTests.cs
-git commit -m "feat(bridge): use ib account summary for bridge"
+git commit -m "feat: expose ib account snapshot and test hook"
 ```
 
 ---
 
-### Task 4: 集成验证
+### Task 3: LeanBridgeResultHandler uses merged snapshot (TDD)
 
-**Step 1: 运行 Lean live/paper**
+**Files:**
+- Modify: `Lean_git/Engine/Results/LeanBridgeResultHandler.cs`
 
-Run:
+**Step 1: Write the failing test**
+Extend the test in Task 2 (or add a second test) to assert merge behavior:
+- `BASE` wins over non‑BASE
+- AccountUpdates values override AccountSummary values
+- Empty snapshot yields `items={}` and `stale=true`
+
+**Step 2: Run test to verify it fails**
+Run: `dotnet test /app/stocklean/Lean_git/Tests/QuantConnect.Tests.csproj --filter FullyQualifiedName~BuildAccountSummaryUsesBrokerageSnapshot`
+Expected: FAIL (merge logic missing).
+
+**Step 3: Write minimal implementation**
+Implement in `LeanBridgeResultHandler`:
+- Detect `BrokerageTransactionHandler` + `InteractiveBrokersBrokerage`
+- Read snapshot via `GetAccountSummarySnapshot()`
+- Merge with BASE‑first + source priority
+- Build items list, set `stale=true` when empty
+
+**Step 4: Run test to verify it passes**
+Run: `dotnet test /app/stocklean/Lean_git/Tests/QuantConnect.Tests.csproj --filter FullyQualifiedName~BuildAccountSummaryUsesBrokerageSnapshot`
+Expected: PASS.
+
+**Step 5: Commit**
 ```bash
-# 依据现有启动脚本或配置启动
+git add Lean_git/Engine/Results/LeanBridgeResultHandler.cs \
+        Lean_git/Tests/Engine/Results/LeanBridgeResultHandlerTests.cs
+git commit -m "fix: lean bridge account summary from ib snapshot"
 ```
-Expected: `account_summary.json` 显示 IB 真实净值。
 
-**Step 2: 验证 UI**
+---
 
-- 打开 `http://192.168.1.31:8081/live-trade`
-- 确认“账户概览”与 TWS Paper 一致。
+### Task 4: Manual verification (no code)
 
-**Step 3: 提交验证记录（可选）**
+**Step 1: Run Lean live (paper)**
+- Ensure TWS/Gateway connected
+- Start Lean live and wait for bridge output
 
-记录 `account_summary.json` 与 TWS 对照结果到日志或文档（如需）。
+**Step 2: Verify output**
+- Compare `/data/share/stock/data/lean_bridge/account_summary.json` with TWS Account Summary
+- Confirm UI matches values
+
+**Step 3: Note results in task log**
+
