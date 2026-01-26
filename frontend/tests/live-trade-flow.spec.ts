@@ -1,6 +1,15 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page, type TestInfo } from "@playwright/test";
 
 const shouldRun = process.env.PLAYWRIGHT_LIVE_TRADE === "1";
+
+test("paper flow - attach artifacts helper", async ({ page }, testInfo) => {
+  test.skip(!shouldRun, "requires PLAYWRIGHT_LIVE_TRADE=1 and live env");
+
+  const before = testInfo.attachments.length;
+  await page.goto("/live-trade");
+  await attachArtifacts("smoke", page, testInfo, ["log"]);
+  expect(testInfo.attachments.length).toBeGreaterThan(before);
+});
 
 test("paper flow - account summary testids", async ({ page }) => {
   test.skip(!shouldRun, "requires PLAYWRIGHT_LIVE_TRADE=1 and live env");
@@ -17,10 +26,36 @@ const parseNumber = (raw: string | null) => {
   return Number.parseFloat(normalized);
 };
 
-test("paper flow for project 16", async ({ page }) => {
+const attachArtifacts = async (
+  label: string,
+  page: Page,
+  testInfo: TestInfo,
+  consoleLines: string[]
+) => {
+  const prefix = `playwright-artifacts/${label}`;
+  await testInfo.attach(`${prefix}/screenshot`, {
+    body: await page.screenshot({ fullPage: true }),
+    contentType: "image/png",
+  });
+  await testInfo.attach(`${prefix}/html`, {
+    body: await page.content(),
+    contentType: "text/html",
+  });
+  await testInfo.attach(`${prefix}/console`, {
+    body: consoleLines.join("\n"),
+    contentType: "text/plain",
+  });
+};
+
+test("paper flow for project 16", async ({ page }, testInfo) => {
   test.skip(!shouldRun, "requires PLAYWRIGHT_LIVE_TRADE=1 and live env");
 
   const projectId = "16";
+  const attachmentBaseline = testInfo.attachments.length;
+  const consoleLines: string[] = [];
+  page.on("console", (msg) => {
+    consoleLines.push(`[${new Date().toISOString()}] ${msg.type()} ${msg.text()}`);
+  });
 
   console.log("[flow] open data page");
   await page.goto("/data");
@@ -44,6 +79,7 @@ test("paper flow for project 16", async ({ page }) => {
       if (detail && (detail.includes("已有运行中的") || detail.includes("单实例"))) {
         pretradeBlocked = true;
         console.log("[flow] pretrade blocked", detail);
+        await attachArtifacts("pretrade-blocked", page, testInfo, consoleLines);
       } else {
         throw new Error(`pretrade run failed: ${detail || "unknown error"}`);
       }
@@ -59,6 +95,9 @@ test("paper flow for project 16", async ({ page }) => {
       throw err;
     }
   }
+  if (pretradeBlocked) {
+    expect(testInfo.attachments.length).toBeGreaterThan(attachmentBaseline);
+  }
   console.log("[flow] pretrade status final", await pretradeStatus.getAttribute("data-status"));
 
   console.log("[flow] open projects page");
@@ -73,9 +112,14 @@ test("paper flow for project 16", async ({ page }) => {
     await page.getByTestId("decision-snapshot-run").click();
   }
 
-  await expect
-    .poll(async () => (await snapshotDate.textContent())?.trim() || "")
-    .not.toBe("-");
+  try {
+    await expect
+      .poll(async () => (await snapshotDate.textContent())?.trim() || "")
+      .not.toBe("-");
+  } catch (err) {
+    await attachArtifacts("decision-empty", page, testInfo, consoleLines);
+    throw err;
+  }
   console.log("[flow] decision snapshot final", (await snapshotDate.textContent())?.trim());
 
   console.log("[flow] open live-trade page");
@@ -83,15 +127,25 @@ test("paper flow for project 16", async ({ page }) => {
   await page.getByTestId("live-trade-project-select").selectOption(projectId);
 
   const tradeSnapshotStatus = page.getByTestId("live-trade-snapshot-status");
-  await expect(tradeSnapshotStatus).toBeVisible();
+  try {
+    await expect(tradeSnapshotStatus).toBeVisible();
 
-  const tradeSnapshotDate = page.getByTestId("live-trade-snapshot-date");
-  await expect(tradeSnapshotDate).not.toHaveText("-");
+    const tradeSnapshotDate = page.getByTestId("live-trade-snapshot-date");
+    await expect(tradeSnapshotDate).not.toHaveText("-");
+  } catch (err) {
+    await attachArtifacts("snapshot-missing", page, testInfo, consoleLines);
+    throw err;
+  }
 
   const netLiq = page.getByTestId("account-summary-NetLiquidation-value");
   await expect(netLiq).toBeVisible();
   const netLiqValue = parseNumber(await netLiq.textContent());
   console.log("[flow] net liquidation", netLiqValue);
-  expect(netLiqValue).toBeGreaterThanOrEqual(30000);
-  expect(netLiqValue).toBeLessThanOrEqual(32000);
+  try {
+    expect(netLiqValue).toBeGreaterThanOrEqual(30000);
+    expect(netLiqValue).toBeLessThanOrEqual(32000);
+  } catch (err) {
+    await attachArtifacts("account-mismatch", page, testInfo, consoleLines);
+    throw err;
+  }
 });
