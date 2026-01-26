@@ -1138,6 +1138,13 @@ class PitWeeklyJobOut(BaseModel):
         from_attributes = True
 
 
+class PitWeeklyJobPageOut(BaseModel):
+    items: list[PitWeeklyJobOut]
+    total: int
+    page: int
+    page_size: int
+
+
 class PitFundamentalJobCreate(BaseModel):
     start: str | None = None
     end: str | None = None
@@ -1180,6 +1187,13 @@ class PitFundamentalJobOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class PitFundamentalJobPageOut(BaseModel):
+    items: list[PitFundamentalJobOut]
+    total: int
+    page: int
+    page_size: int
 
 
 class FactorScoreJobCreate(BaseModel):

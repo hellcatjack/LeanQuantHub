@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+import math
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
@@ -12,8 +13,10 @@ from app.models import PitFundamentalJob, PitWeeklyJob
 from app.schemas import (
     PitFundamentalJobCreate,
     PitFundamentalJobOut,
+    PitFundamentalJobPageOut,
     PitWeeklyJobCreate,
     PitWeeklyJobOut,
+    PitWeeklyJobPageOut,
 )
 from app.services.audit_log import record_audit
 from app.services.pit_runner import run_pit_fundamental_job, run_pit_weekly_job
@@ -37,6 +40,16 @@ def _touch_cancel_flag(job_id: int) -> Path:
 
 router = APIRouter(prefix="/api/pit", tags=["pit"])
 
+MAX_PAGE_SIZE = 200
+
+
+def _coerce_pagination(page: int, page_size: int, total: int) -> tuple[int, int, int]:
+    safe_page_size = min(max(page_size, 1), MAX_PAGE_SIZE)
+    total_pages = max(1, math.ceil(total / safe_page_size)) if total else 1
+    safe_page = min(max(page, 1), total_pages)
+    offset = (safe_page - 1) * safe_page_size
+    return safe_page, safe_page_size, offset
+
 
 @router.get("/weekly-jobs", response_model=list[PitWeeklyJobOut])
 def list_weekly_jobs(limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0)):
@@ -49,6 +62,29 @@ def list_weekly_jobs(limit: int = Query(50, ge=1, le=500), offset: int = Query(0
             .all()
         )
         return jobs
+
+
+@router.get("/weekly-jobs/page", response_model=PitWeeklyJobPageOut)
+def list_weekly_jobs_page(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=MAX_PAGE_SIZE),
+):
+    with get_session() as session:
+        total = session.query(PitWeeklyJob).count()
+        safe_page, safe_page_size, offset = _coerce_pagination(page, page_size, total)
+        items = (
+            session.query(PitWeeklyJob)
+            .order_by(PitWeeklyJob.created_at.desc())
+            .offset(offset)
+            .limit(safe_page_size)
+            .all()
+        )
+        return PitWeeklyJobPageOut(
+            items=items,
+            total=total,
+            page=safe_page,
+            page_size=safe_page_size,
+        )
 
 
 @router.get("/weekly-jobs/{job_id}", response_model=PitWeeklyJobOut)
