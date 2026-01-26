@@ -1705,9 +1705,18 @@ export default function LiveTradePage() {
             {accountSummaryError && <div className="form-hint">{accountSummaryError}</div>}
             <div className="overview-grid" style={{ marginTop: "12px" }}>
               {accountSummaryItems.map((item) => (
-                <div className="overview-card" key={item.key}>
+                <div
+                  className="overview-card"
+                  key={item.key}
+                  data-testid={`account-summary-${item.key}`}
+                >
                   <div className="overview-label">{item.key}</div>
-                  <div className="overview-value">{formatAccountValue(item.value)}</div>
+                  <div
+                    className="overview-value"
+                    data-testid={`account-summary-${item.key}-value`}
+                  >
+                    {formatAccountValue(item.value)}
+                  </div>
                 </div>
               ))}
             </div>
