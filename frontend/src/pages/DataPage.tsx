@@ -543,7 +543,7 @@ export default function DataPage() {
   const [bulkHistory, setBulkHistory] = useState<BulkSyncJob[]>([]);
   const [bulkHistoryTotal, setBulkHistoryTotal] = useState(0);
   const [bulkHistoryPage, setBulkHistoryPage] = useState(1);
-  const [bulkHistoryPageSize, setBulkHistoryPageSize] = useState(5);
+  const [bulkHistoryPageSize, setBulkHistoryPageSize] = useState(10);
   const [bulkActionLoading, setBulkActionLoading] = useState<Record<number, boolean>>({});
   const [pitForm, setPitForm] = useState({
     start: "",
@@ -555,6 +555,9 @@ export default function DataPage() {
   const [pitActionLoading, setPitActionLoading] = useState(false);
   const [pitActionError, setPitActionError] = useState("");
   const [pitActionResult, setPitActionResult] = useState("");
+  const [pitWeeklyPage, setPitWeeklyPage] = useState(1);
+  const [pitWeeklyPageSize, setPitWeeklyPageSize] = useState(10);
+  const [pitWeeklyTotal, setPitWeeklyTotal] = useState(0);
   const [pitQuality, setPitQuality] = useState<PitWeeklyQuality | null>(null);
   const [pitQualityError, setPitQualityError] = useState("");
   const [pitProgress, setPitProgress] = useState<PitWeeklyProgress | null>(null);
@@ -574,6 +577,9 @@ export default function DataPage() {
   });
   const [pitFundJobs, setPitFundJobs] = useState<PitFundamentalJob[]>([]);
   const [pitFundLoadError, setPitFundLoadError] = useState("");
+  const [pitFundPage, setPitFundPage] = useState(1);
+  const [pitFundPageSize, setPitFundPageSize] = useState(10);
+  const [pitFundTotal, setPitFundTotal] = useState(0);
   const [pitFundCacheLoading, setPitFundCacheLoading] = useState(false);
   const [pitFundSnapshotLoading, setPitFundSnapshotLoading] = useState(false);
   const [pitFundActionError, setPitFundActionError] = useState("");
@@ -629,6 +635,9 @@ export default function DataPage() {
   const [pretradeTelegramTesting, setPretradeTelegramTesting] = useState(false);
   const [pretradeRuns, setPretradeRuns] = useState<PreTradeRun[]>([]);
   const [pretradeRunsError, setPretradeRunsError] = useState("");
+  const [pretradeRunsPage, setPretradeRunsPage] = useState(1);
+  const [pretradeRunsPageSize, setPretradeRunsPageSize] = useState(10);
+  const [pretradeRunsTotal, setPretradeRunsTotal] = useState(0);
   const [pretradeRunId, setPretradeRunId] = useState<number | null>(null);
   const [pretradeRunDetail, setPretradeRunDetail] = useState<PreTradeRunDetail | null>(null);
   const [pretradeRunLoading, setPretradeRunLoading] = useState(false);
@@ -678,15 +687,17 @@ export default function DataPage() {
 
   const loadPitWeeklyJobs = async () => {
     try {
-      const res = await api.get<PitWeeklyJob[]>("/api/pit/weekly-jobs", {
-        params: { limit: 5, offset: 0 },
+      const res = await api.get<Paginated<PitWeeklyJob>>("/api/pit/weekly-jobs/page", {
+        params: { page: pitWeeklyPage, page_size: pitWeeklyPageSize },
       });
-      setPitJobs(res.data);
+      setPitJobs(res.data.items);
+      setPitWeeklyTotal(res.data.total);
       setPitLoadError("");
-      return res.data;
+      return res.data.items;
     } catch (err: any) {
       if (err?.response?.status === 404) {
         setPitJobs([]);
+        setPitWeeklyTotal(0);
         setPitLoadError("");
         return [];
       }
@@ -730,15 +741,20 @@ export default function DataPage() {
 
   const loadPitFundJobs = async () => {
     try {
-      const res = await api.get<PitFundamentalJob[]>("/api/pit/fundamental-jobs", {
-        params: { limit: 5, offset: 0 },
-      });
-      setPitFundJobs(res.data);
+      const res = await api.get<Paginated<PitFundamentalJob>>(
+        "/api/pit/fundamental-jobs/page",
+        {
+          params: { page: pitFundPage, page_size: pitFundPageSize },
+        }
+      );
+      setPitFundJobs(res.data.items);
+      setPitFundTotal(res.data.total);
       setPitFundLoadError("");
-      return res.data;
+      return res.data.items;
     } catch (err: any) {
       if (err?.response?.status === 404) {
         setPitFundJobs([]);
+        setPitFundTotal(0);
         setPitFundLoadError("");
         return [];
       }
@@ -861,25 +877,32 @@ export default function DataPage() {
   const loadPretradeRuns = async (projectId: string) => {
     if (!projectId) {
       setPretradeRuns([]);
+      setPretradeRunsTotal(0);
       return [];
     }
     try {
-      const res = await api.get<PreTradeRun[]>("/api/pretrade/runs", {
-        params: { project_id: Number(projectId), limit: 20, offset: 0 },
+      const res = await api.get<Paginated<PreTradeRun>>("/api/pretrade/runs/page", {
+        params: {
+          project_id: Number(projectId),
+          page: pretradeRunsPage,
+          page_size: pretradeRunsPageSize,
+        },
       });
-      setPretradeRuns(res.data);
+      setPretradeRuns(res.data.items);
+      setPretradeRunsTotal(res.data.total);
       setPretradeRunsError("");
       setPretradeRunId((prev) => {
-        if (prev && res.data.some((item) => item.id === prev)) {
+        if (prev && res.data.items.some((item) => item.id === prev)) {
           return prev;
         }
-        return res.data.length ? res.data[0].id : null;
+        return res.data.items.length ? res.data.items[0].id : null;
       });
-      return res.data;
+      return res.data.items;
     } catch (err: any) {
       const detail = err?.response?.data?.detail || t("data.pretrade.runLoadError");
       setPretradeRunsError(String(detail));
       setPretradeRuns([]);
+      setPretradeRunsTotal(0);
       return [];
     }
   };
@@ -1645,10 +1668,12 @@ export default function DataPage() {
     if (!pretradeProjectId) {
       setPretradeTemplates([]);
       setPretradeRuns([]);
+      setPretradeRunsTotal(0);
       resetPretradeTemplateEditor();
       setPretradeTemplatePreviewId(null);
       return;
     }
+    setPretradeRunsPage(1);
     resetPretradeTemplateEditor();
     setPretradeTemplatePreviewId(null);
     loadPretradeTemplates(pretradeProjectId);
@@ -1683,7 +1708,7 @@ export default function DataPage() {
       mounted = false;
       window.clearInterval(timer);
     };
-  }, [pretradeProjectId, pretradeRunId]);
+  }, [pretradeProjectId, pretradeRunId, pretradeRunsPage, pretradeRunsPageSize]);
 
   useEffect(() => {
     let mounted = true;
@@ -1746,7 +1771,7 @@ export default function DataPage() {
       mounted = false;
       window.clearInterval(timer);
     };
-  }, []);
+  }, [pitWeeklyPage, pitWeeklyPageSize, pitFundPage, pitFundPageSize, bulkHistoryPage, bulkHistoryPageSize]);
 
   useEffect(() => {
     loadThemeOptions();
@@ -3535,6 +3560,16 @@ export default function DataPage() {
                 </tbody>
               </table>
             )}
+            <PaginationBar
+              page={pitWeeklyPage}
+              pageSize={pitWeeklyPageSize}
+              total={pitWeeklyTotal}
+              onPageChange={setPitWeeklyPage}
+              onPageSizeChange={(size) => {
+                setPitWeeklyPage(1);
+                setPitWeeklyPageSize(size);
+              }}
+            />
           </div>
         </div>
 
@@ -3939,6 +3974,16 @@ export default function DataPage() {
                 </tbody>
               </table>
             )}
+            <PaginationBar
+              page={pitFundPage}
+              pageSize={pitFundPageSize}
+              total={pitFundTotal}
+              onPageChange={setPitFundPage}
+              onPageSizeChange={(size) => {
+                setPitFundPage(1);
+                setPitFundPageSize(size);
+              }}
+            />
           </div>
         </div>
 
@@ -4168,6 +4213,16 @@ export default function DataPage() {
                   </tbody>
                 </table>
               )}
+              <PaginationBar
+                page={pretradeRunsPage}
+                pageSize={pretradeRunsPageSize}
+                total={pretradeRunsTotal}
+                onPageChange={setPretradeRunsPage}
+                onPageSizeChange={(size) => {
+                  setPretradeRunsPage(1);
+                  setPretradeRunsPageSize(size);
+                }}
+              />
               <div className="section-divider" />
               <div className="form-hint">{t("data.pretrade.steps.title")}</div>
               {!pretradeRunDetail ? (
