@@ -2264,6 +2264,7 @@ export default function LiveTradePage() {
                 className="form-select"
                 value={selectedProjectId}
                 onChange={(event) => setSelectedProjectId(event.target.value)}
+                data-testid="live-trade-project-select"
               >
                 <option value="">{t("trade.projectSelectPlaceholder")}</option>
                 {projects.map((project) => (
@@ -2390,11 +2391,13 @@ export default function LiveTradePage() {
                   )}
                 </div>
                 <div className="overview-sub">
-                  {latestTradeRun
-                    ? `${formatStatus(latestTradeRun.status)} · ${formatDateTime(
-                        latestTradeRun.created_at
-                      )}`
-                    : t("trade.runEmpty")}
+                  <span data-testid="paper-trade-status">
+                    {latestTradeRun
+                      ? `${formatStatus(latestTradeRun.status)} · ${formatDateTime(
+                          latestTradeRun.created_at
+                        )}`
+                      : t("trade.runEmpty")}
+                  </span>
                 </div>
               </div>
               <div className="overview-card">
@@ -2521,6 +2524,7 @@ export default function LiveTradePage() {
                 className="button-primary"
                 onClick={executeTradeRun}
                 disabled={executeLoading || !canExecute}
+                data-testid="paper-trade-execute"
               >
                 {executeLoading ? t("common.actions.loading") : t("trade.executeSubmit")}
               </button>

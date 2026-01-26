@@ -4745,6 +4745,7 @@ export default function ProjectsPage() {
                         : "project-item"
                     }
                     onClick={() => setSelectedProjectId(project.id)}
+                    data-testid={`project-item-${project.id}`}
                   >
                     <div
                       className="project-item-title"
@@ -4865,6 +4866,7 @@ export default function ProjectsPage() {
                   key={tab.key}
                   className={projectTab === tab.key ? "tab-button active" : "tab-button"}
                   onClick={() => setProjectTab(tab.key)}
+                  data-testid={`project-tab-${tab.key}`}
                 >
                   {tab.label}
                 </button>
@@ -7256,6 +7258,7 @@ export default function ProjectsPage() {
                     className="button-primary"
                     onClick={runDecisionSnapshot}
                     disabled={!selectedProjectId || decisionLoading}
+                    data-testid="decision-snapshot-run"
                   >
                     {decisionLoading
                       ? t("common.actions.loading")
@@ -7281,7 +7284,9 @@ export default function ProjectsPage() {
                       </div>
                       <div className="meta-row">
                         <span>{t("projects.decision.snapshotDate")}</span>
-                        <strong>{decisionSummary?.snapshot_date || "-"}</strong>
+                        <strong data-testid="decision-snapshot-today">
+                          {decisionSummary?.snapshot_date || "-"}
+                        </strong>
                       </div>
                       <div className="meta-row">
                         <span>{t("projects.decision.asOf")}</span>

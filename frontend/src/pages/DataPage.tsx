@@ -3956,43 +3956,44 @@ export default function DataPage() {
               {pretradeRunActionResult && (
                 <div className="form-success">{pretradeRunActionResult}</div>
               )}
-              {pretradeRunDetail ? (
-                <div className="progress-block">
-                  <div className="progress-meta">
-                    <IdChip label={t("data.id.run")} value={pretradeRunDetail.run.id} />
-                    <span>
-                      {t("data.pretrade.summaryLine", {
-                        status: renderStatus(pretradeRunDetail.run.status),
-                      })}
-                    </span>
-                    {pretradeSummary && (
+              <div data-testid="pretrade-weekly-status">
+                {pretradeRunDetail ? (
+                  <div className="progress-block">
+                    <div className="progress-meta">
+                      <IdChip label={t("data.id.run")} value={pretradeRunDetail.run.id} />
                       <span>
-                        {t("data.pretrade.summaryProgress", {
-                          done: pretradeSummary.done,
-                          total: pretradeSummary.total,
-                          percent: pretradeSummary.percent,
+                        {t("data.pretrade.summaryLine", {
+                          status: renderStatus(pretradeRunDetail.run.status),
                         })}
                       </span>
-                    )}
-                    {pretradeRunDetail.run.deadline_at && (
+                      {pretradeSummary && (
+                        <span>
+                          {t("data.pretrade.summaryProgress", {
+                            done: pretradeSummary.done,
+                            total: pretradeSummary.total,
+                            percent: pretradeSummary.percent,
+                          })}
+                        </span>
+                      )}
+                      {pretradeRunDetail.run.deadline_at && (
+                        <span>
+                          {t("data.pretrade.summaryDeadline", {
+                            at: formatDateTime(pretradeRunDetail.run.deadline_at),
+                          })}
+                        </span>
+                      )}
+                    </div>
+                    <div className="progress-meta">
                       <span>
-                        {t("data.pretrade.summaryDeadline", {
-                          at: formatDateTime(pretradeRunDetail.run.deadline_at),
+                        {t("data.pretrade.summaryWindow", {
+                          start: pretradeRunDetail.run.window_start
+                            ? formatDateTime(pretradeRunDetail.run.window_start)
+                            : t("common.none"),
+                          end: pretradeRunDetail.run.window_end
+                            ? formatDateTime(pretradeRunDetail.run.window_end)
+                            : t("common.none"),
                         })}
                       </span>
-                    )}
-                  </div>
-                  <div className="progress-meta">
-                    <span>
-                      {t("data.pretrade.summaryWindow", {
-                        start: pretradeRunDetail.run.window_start
-                          ? formatDateTime(pretradeRunDetail.run.window_start)
-                          : t("common.none"),
-                        end: pretradeRunDetail.run.window_end
-                          ? formatDateTime(pretradeRunDetail.run.window_end)
-                          : t("common.none"),
-                      })}
-                    </span>
                     {pretradeRunDetail.run.fallback_used &&
                     pretradeRunDetail.run.fallback_run_id ? (
                       <span style={{ display: "inline-flex", gap: "8px", alignItems: "center" }}>
@@ -4007,10 +4008,11 @@ export default function DataPage() {
                   {pretradeRunDetail.run.message && (
                     <div className="progress-meta">{pretradeRunDetail.run.message}</div>
                   )}
-                </div>
-              ) : (
-                <div className="form-hint">{t("data.pretrade.summaryEmpty")}</div>
-              )}
+                  </div>
+                ) : (
+                  <div className="form-hint">{t("data.pretrade.summaryEmpty")}</div>
+                )}
+              </div>
               <div className="section-divider" />
               <div className="section-title">{t("data.pretrade.run.title")}</div>
               <div className="form-grid two-col">
@@ -4018,6 +4020,7 @@ export default function DataPage() {
                   className="form-select"
                   value={pretradeProjectId}
                   onChange={(e) => setPretradeProjectId(e.target.value)}
+                  data-testid="pretrade-project-select"
                 >
                   <option value="">{t("data.pretrade.projectSelect")}</option>
                   {pretradeProjects.map((project) => (
@@ -4030,6 +4033,7 @@ export default function DataPage() {
                   className="form-select"
                   value={pretradeTemplateId}
                   onChange={(e) => setPretradeTemplateId(e.target.value)}
+                  data-testid="pretrade-template-select"
                 >
                   <option value="">{t("data.pretrade.templateAuto")}</option>
                   {pretradeTemplates.map((template) => (
@@ -4065,6 +4069,7 @@ export default function DataPage() {
                   className="primary-button large"
                   onClick={createPretradeRun}
                   disabled={pretradeRunLoading}
+                  data-testid="pretrade-weekly-run"
                 >
                   {pretradeRunLoading
                     ? t("common.actions.loading")
