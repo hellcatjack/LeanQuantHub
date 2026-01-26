@@ -59,6 +59,31 @@ def _mask_token(value: str | None) -> str | None:
     return f"{value[:3]}***{value[-3:]}"
 
 
+PRETRADE_TERMINAL_STATUSES = {"success", "failed", "skipped", "canceled"}
+
+
+def _finalize_cancel_if_possible(session, run: PreTradeRun) -> bool:
+    if run.status != "cancel_requested":
+        return False
+    remaining = (
+        session.query(PreTradeStep)
+        .filter(
+            PreTradeStep.run_id == run.id,
+            ~PreTradeStep.status.in_(PRETRADE_TERMINAL_STATUSES),
+        )
+        .count()
+    )
+    if remaining > 0:
+        return False
+    now = datetime.utcnow()
+    run.status = "canceled"
+    run.message = "canceled"
+    run.ended_at = now
+    run.updated_at = now
+    session.commit()
+    return True
+
+
 @router.get("/settings", response_model=PreTradeSettingsOut)
 def get_pretrade_settings():
     with get_session() as session:
@@ -231,6 +256,9 @@ def list_pretrade_runs_page(
             .limit(safe_page_size)
             .all()
         )
+        for run in items:
+            if _finalize_cancel_if_possible(session, run):
+                session.refresh(run)
         return PreTradeRunPageOut(
             items=items,
             total=total,
@@ -289,6 +317,8 @@ def get_pretrade_run(run_id: int):
         run = session.get(PreTradeRun, run_id)
         if not run:
             raise HTTPException(status_code=404, detail="run not found")
+        _finalize_cancel_if_possible(session, run)
+        session.refresh(run)
         steps = (
             session.query(PreTradeStep)
             .filter(PreTradeStep.run_id == run_id)
@@ -352,8 +382,24 @@ def cancel_pretrade_run(run_id: int):
             raise HTTPException(status_code=404, detail="run not found")
         if run.status in {"success", "failed", "canceled"}:
             return run
+        now = datetime.utcnow()
+        if run.status == "queued":
+            run.status = "canceled"
+            run.message = "canceled"
+            run.ended_at = now
+            run.updated_at = now
+            session.query(PreTradeStep).filter(PreTradeStep.run_id == run.id).update(
+                {
+                    "status": "canceled",
+                    "message": "run_canceled",
+                    "ended_at": now,
+                    "updated_at": now,
+                }
+            )
+            session.commit()
+            return run
         run.status = "cancel_requested"
-        run.updated_at = datetime.utcnow()
+        run.updated_at = now
         session.commit()
         return run
 
