@@ -250,6 +250,10 @@ def _get_or_create_settings(session) -> PreTradeSettings:
         retry_max_delay_seconds=1800,
         deadline_timezone="America/New_York",
         update_project_only=True,
+        bridge_heartbeat_ttl_seconds=60,
+        bridge_account_ttl_seconds=300,
+        bridge_positions_ttl_seconds=300,
+        bridge_quotes_ttl_seconds=60,
     )
     session.add(settings_row)
     session.commit()

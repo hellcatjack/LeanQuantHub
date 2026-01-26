@@ -1302,6 +1302,10 @@ class PreTradeSettingsUpdate(BaseModel):
     deadline_timezone: str | None = None
     update_project_only: bool | None = None
     auto_decision_snapshot: bool | None = None
+    bridge_heartbeat_ttl_seconds: int | None = None
+    bridge_account_ttl_seconds: int | None = None
+    bridge_positions_ttl_seconds: int | None = None
+    bridge_quotes_ttl_seconds: int | None = None
 
 
 class PreTradeSettingsOut(BaseModel):
@@ -1316,6 +1320,10 @@ class PreTradeSettingsOut(BaseModel):
     deadline_timezone: str | None
     update_project_only: bool
     auto_decision_snapshot: bool
+    bridge_heartbeat_ttl_seconds: int
+    bridge_account_ttl_seconds: int
+    bridge_positions_ttl_seconds: int
+    bridge_quotes_ttl_seconds: int
     created_at: datetime
     updated_at: datetime
 

@@ -489,6 +489,10 @@ class PreTradeSettings(Base):
     deadline_timezone: Mapped[str | None] = mapped_column(String(64), nullable=True)
     update_project_only: Mapped[bool] = mapped_column(Boolean, default=True)
     auto_decision_snapshot: Mapped[bool] = mapped_column(Boolean, default=True)
+    bridge_heartbeat_ttl_seconds: Mapped[int] = mapped_column(Integer, default=60)
+    bridge_account_ttl_seconds: Mapped[int] = mapped_column(Integer, default=300)
+    bridge_positions_ttl_seconds: Mapped[int] = mapped_column(Integer, default=300)
+    bridge_quotes_ttl_seconds: Mapped[int] = mapped_column(Integer, default=60)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
