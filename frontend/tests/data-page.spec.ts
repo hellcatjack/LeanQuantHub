@@ -4,10 +4,19 @@ test("data page shows id chips for pretrade runs", async ({ page }) => {
   await page.route("**/api/**", (route) => {
     const url = new URL(route.request().url());
     const path = url.pathname;
+    const corsHeaders = {
+      "access-control-allow-origin": "*",
+      "access-control-allow-methods": "GET,POST,PUT,DELETE,OPTIONS",
+      "access-control-allow-headers": "*",
+    };
+    if (route.request().method() === "OPTIONS") {
+      return route.fulfill({ status: 204, headers: corsHeaders, body: "" });
+    }
     const json = (body: unknown) =>
       route.fulfill({
         status: 200,
         contentType: "application/json",
+        headers: corsHeaders,
         body: JSON.stringify(body),
       });
 
@@ -20,11 +29,11 @@ test("data page shows id chips for pretrade runs", async ({ page }) => {
     if (path === "/api/datasets/bulk-sync-jobs/page") {
       return json({ items: [], total: 0, page: 1, page_size: 200 });
     }
-    if (path === "/api/pit/weekly-jobs") {
-      return json([]);
+    if (path === "/api/pit/weekly-jobs/page") {
+      return json({ items: [], total: 0, page: 1, page_size: 10 });
     }
-    if (path === "/api/pit/fundamental-jobs") {
-      return json([]);
+    if (path === "/api/pit/fundamental-jobs/page") {
+      return json({ items: [], total: 0, page: 1, page_size: 10 });
     }
     if (path === "/api/projects/page") {
       return json({
@@ -63,22 +72,27 @@ test("data page shows id chips for pretrade runs", async ({ page }) => {
         },
       ]);
     }
-    if (path === "/api/pretrade/runs") {
-      return json([
-        {
-          id: 1001,
-          project_id: 16,
-          status: "finished",
-          created_at: "2026-01-25T00:00:00Z",
-          updated_at: "2026-01-25T00:00:00Z",
-          window_start: null,
-          window_end: null,
-          deadline_at: null,
-          fallback_used: false,
-          fallback_run_id: null,
-          message: "",
-        },
-      ]);
+    if (path === "/api/pretrade/runs/page") {
+      return json({
+        items: [
+          {
+            id: 1001,
+            project_id: 16,
+            status: "finished",
+            created_at: "2026-01-25T00:00:00Z",
+            updated_at: "2026-01-25T00:00:00Z",
+            window_start: null,
+            window_end: null,
+            deadline_at: null,
+            fallback_used: false,
+            fallback_run_id: null,
+            message: "",
+          },
+        ],
+        total: 1,
+        page: 1,
+        page_size: 10,
+      });
     }
     if (path.startsWith("/api/pretrade/runs/")) {
       return json({
