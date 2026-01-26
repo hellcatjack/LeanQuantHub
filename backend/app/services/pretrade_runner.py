@@ -7,7 +7,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from datetime import date, datetime, time as time_cls, timedelta
+from datetime import date, datetime, time as time_cls, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -46,7 +46,11 @@ from app.services.bulk_auto import load_bulk_auto_config
 from app.services.decision_snapshot import generate_decision_snapshot
 from app.services.factor_score_runner import run_factor_score_job
 from app.services.lean_bridge_paths import resolve_bridge_root
-from app.services.lean_bridge_reader import read_quotes
+from app.services.lean_bridge_reader import (
+    parse_bridge_timestamp,
+    read_bridge_payload,
+    read_quotes,
+)
 from app.services.ib_settings import update_ib_state
 from app.services.job_lock import JobLock
 from app.services.ml_runner import build_ml_config, run_ml_train
@@ -179,6 +183,49 @@ def _quotes_ready(symbols: list[str], ttl_seconds: int | None) -> tuple[bool, li
             stale_symbols.append(symbol)
     ok = not missing and not stale_symbols
     return ok, missing, stale_symbols
+
+
+def _coerce_ttl(value: int | None, default: int) -> int:
+    try:
+        ttl = int(value) if value is not None else default
+    except (TypeError, ValueError):
+        ttl = default
+    if ttl <= 0:
+        ttl = default
+    return ttl
+
+
+def _bridge_payload_check(
+    root: Path,
+    *,
+    filename: str,
+    ttl_seconds: int,
+    timestamp_keys: list[str],
+) -> dict[str, Any]:
+    payload = read_bridge_payload(root, filename)
+    if payload is None:
+        return {
+            "ok": False,
+            "missing": True,
+            "updated_at": None,
+            "ttl_seconds": ttl_seconds,
+            "age_seconds": None,
+            "items": None,
+        }
+    ts = parse_bridge_timestamp(payload, timestamp_keys)
+    now = datetime.now(timezone.utc)
+    age_seconds = int((now - ts).total_seconds()) if ts else None
+    ok = bool(ts and age_seconds is not None and age_seconds <= ttl_seconds)
+    items = payload.get("items")
+    count = len(items) if isinstance(items, list) else None
+    return {
+        "ok": ok,
+        "missing": False,
+        "updated_at": ts.isoformat() if ts else None,
+        "ttl_seconds": ttl_seconds,
+        "age_seconds": age_seconds,
+        "items": count,
+    }
 
 
 @dataclass
@@ -890,6 +937,60 @@ def step_decision_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResu
     )
 
 
+def step_bridge_gate(ctx: StepContext, params: dict[str, Any]) -> StepResult:
+    settings_row = _get_or_create_settings(ctx.session)
+    bridge_root = _resolve_bridge_root()
+
+    heartbeat_ttl = _coerce_ttl(settings_row.bridge_heartbeat_ttl_seconds, 60)
+    account_ttl = _coerce_ttl(settings_row.bridge_account_ttl_seconds, 300)
+    positions_ttl = _coerce_ttl(settings_row.bridge_positions_ttl_seconds, 300)
+    quotes_ttl = _coerce_ttl(settings_row.bridge_quotes_ttl_seconds, 60)
+
+    checks = {
+        "heartbeat": _bridge_payload_check(
+            bridge_root,
+            filename="lean_bridge_status.json",
+            ttl_seconds=heartbeat_ttl,
+            timestamp_keys=["last_heartbeat", "updated_at"],
+        ),
+        "account": _bridge_payload_check(
+            bridge_root,
+            filename="account_summary.json",
+            ttl_seconds=account_ttl,
+            timestamp_keys=["updated_at", "refreshed_at"],
+        ),
+        "positions": _bridge_payload_check(
+            bridge_root,
+            filename="positions.json",
+            ttl_seconds=positions_ttl,
+            timestamp_keys=["updated_at", "refreshed_at"],
+        ),
+        "quotes": _bridge_payload_check(
+            bridge_root,
+            filename="quotes.json",
+            ttl_seconds=quotes_ttl,
+            timestamp_keys=["updated_at", "refreshed_at"],
+        ),
+    }
+
+    missing = [key for key, item in checks.items() if item.get("missing")]
+    stale = [
+        key
+        for key, item in checks.items()
+        if not item.get("missing") and not item.get("ok")
+    ]
+    gate = {
+        "ok": not missing and not stale,
+        "missing": missing,
+        "stale": stale,
+        "checks": checks,
+    }
+    ctx.update(artifacts={"bridge_gate": gate})
+    if not gate["ok"]:
+        raise RuntimeError("bridge_gate_failed")
+    return StepResult(artifacts={"bridge_gate": gate})
+
+
 def step_trade_execute(ctx: StepContext, params: dict[str, Any]) -> StepResult:
     trade_run_id = None
     if isinstance(ctx.step.artifacts, dict):
@@ -991,6 +1092,7 @@ STEP_DEFS = [
     ("pit_fundamentals", step_pit_fundamentals),
     ("training_scoring", step_training_scoring),
     ("decision_snapshot", step_decision_snapshot),
+    ("bridge_gate", step_bridge_gate),
     ("market_snapshot", step_market_snapshot),
     ("trade_execute", step_trade_execute),
     ("audit", step_audit),

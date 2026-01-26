@@ -28,6 +28,26 @@ def _parse_iso(ts: str | None) -> datetime | None:
     return value.astimezone(timezone.utc)
 
 
+def read_bridge_payload(root: Path, filename: str) -> dict | None:
+    path = root / filename
+    data = _read_json(path)
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+def parse_bridge_timestamp(payload: dict | None, keys: list[str]) -> datetime | None:
+    if not isinstance(payload, dict):
+        return None
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            parsed = _parse_iso(value)
+            if parsed:
+                return parsed
+    return None
+
+
 def _is_stale(heartbeat: datetime | None) -> bool:
     if heartbeat is None:
         return True
