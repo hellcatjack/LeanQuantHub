@@ -3951,12 +3951,19 @@ export default function DataPage() {
                 <div className="form-error">{pretradeProjectsError}</div>
               )}
               {pretradeRunActionError && (
-                <div className="form-error">{pretradeRunActionError}</div>
+                <div className="form-error" data-testid="pretrade-weekly-error">
+                  {pretradeRunActionError}
+                </div>
               )}
               {pretradeRunActionResult && (
-                <div className="form-success">{pretradeRunActionResult}</div>
+                <div className="form-success" data-testid="pretrade-weekly-result">
+                  {pretradeRunActionResult}
+                </div>
               )}
-              <div data-testid="pretrade-weekly-status">
+              <div
+                data-testid="pretrade-weekly-status"
+                data-status={pretradeRunDetail?.run.status || ""}
+              >
                 {pretradeRunDetail ? (
                   <div className="progress-block">
                     <div className="progress-meta">

@@ -1,19 +1,73 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 
-test("workflow selectors exist", async ({ page }) => {
+test.setTimeout(120_000);
+
+const waitForOutcome = async (
+  page: Page,
+  successId: string,
+  errorId: string,
+  timeout = 60_000,
+  allowErrors: string[] = []
+) => {
+  await Promise.race([
+    page.getByTestId(successId).waitFor({ state: "visible", timeout }),
+    page.getByTestId(errorId).waitFor({ state: "visible", timeout }),
+  ]);
+  if (await page.getByTestId(errorId).isVisible()) {
+    const message = await page.getByTestId(errorId).innerText();
+    if (!allowErrors.some((item) => message.includes(item))) {
+      throw new Error(message || `${errorId} visible`);
+    }
+    return message;
+  }
+  return null;
+};
+
+test("live trade paper workflow", async ({ page }) => {
   await page.goto("/data");
-  await expect(page.getByTestId("pretrade-weekly-run")).toBeVisible();
-  await expect(page.getByTestId("pretrade-weekly-status")).toBeVisible();
+  const pretradeProjectSelect = page.getByTestId("pretrade-project-select");
+  await expect(pretradeProjectSelect.locator("option", { hasText: "#16" })).toHaveCount(1, {
+    timeout: 60_000,
+  });
+  await pretradeProjectSelect.selectOption("16");
+  await expect(pretradeProjectSelect).toHaveValue("16");
+  const pretradeStatus = page.getByTestId("pretrade-weekly-status");
+  const initialPretradeValue = (await pretradeStatus.getAttribute("data-status")) || "";
+  if (!initialPretradeValue) {
+    await page.getByTestId("pretrade-weekly-run").click();
+  }
+  await expect(pretradeStatus).toHaveAttribute("data-status", /success|failed|canceled/, {
+    timeout: 90_000,
+  });
+  const pretradeValue = (await pretradeStatus.getAttribute("data-status")) || "";
+  if (pretradeValue !== "success") {
+    throw new Error(`pretrade status ${pretradeValue}`);
+  }
 
   await page.goto("/projects");
-  await expect(page.getByTestId("project-item-16")).toBeVisible();
   await page.getByTestId("project-item-16").click();
-  await expect(page.getByTestId("project-tab-algorithm")).toBeVisible();
   await page.getByTestId("project-tab-algorithm").click();
-  await expect(page.getByTestId("decision-snapshot-run")).toBeVisible();
+  await page.getByTestId("decision-snapshot-run").click();
+  await expect(page.getByTestId("decision-snapshot-message")).toBeVisible({ timeout: 60_000 });
+  await expect(page.getByTestId("decision-snapshot-today")).not.toHaveText("-", {
+    timeout: 60_000,
+  });
 
   await page.goto("/live-trade");
-  await expect(page.getByTestId("live-trade-project-select")).toBeVisible();
-  await expect(page.getByTestId("paper-trade-execute")).toBeVisible();
-  await expect(page.getByTestId("paper-trade-status")).toBeVisible();
+  await page.getByTestId("live-trade-project-select").selectOption("16");
+  const createRunButton = page.getByTestId("paper-trade-create");
+  const priorRunId = await page.getByTestId("paper-trade-run-id").inputValue();
+  await expect(createRunButton).toBeVisible({ timeout: 10_000 });
+  await createRunButton.click();
+  const runIdInput = page.getByTestId("paper-trade-run-id");
+  await expect(runIdInput).not.toHaveValue("", { timeout: 60_000 });
+  if (priorRunId) {
+    await expect(runIdInput).not.toHaveValue(priorRunId, { timeout: 60_000 });
+  }
+  const tradeStatus = page.getByTestId("paper-trade-status");
+  await expect(tradeStatus).toHaveAttribute("data-status", /queued|blocked|failed|done|running/, {
+    timeout: 60_000,
+  });
+  await page.getByTestId("paper-trade-execute").click();
+  await waitForOutcome(page, "paper-trade-result", "paper-trade-error");
 });

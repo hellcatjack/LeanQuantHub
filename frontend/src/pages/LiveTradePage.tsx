@@ -383,6 +383,9 @@ export default function LiveTradePage() {
   const [executeLoading, setExecuteLoading] = useState(false);
   const [executeError, setExecuteError] = useState("");
   const [executeResult, setExecuteResult] = useState("");
+  const [createRunLoading, setCreateRunLoading] = useState(false);
+  const [createRunError, setCreateRunError] = useState("");
+  const [createRunResult, setCreateRunResult] = useState("");
   const [guardLoading, setGuardLoading] = useState(false);
   const [guardError, setGuardError] = useState("");
   const [tradeError, setTradeError] = useState("");
@@ -410,6 +413,35 @@ export default function LiveTradePage() {
 
   const updateExecuteForm = (key: keyof typeof executeForm, value: string) => {
     setExecuteForm((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const createTradeRun = async () => {
+    if (!selectedProjectId) {
+      setCreateRunError(t("trade.executeBlockedProject"));
+      return;
+    }
+    setCreateRunLoading(true);
+    setCreateRunError("");
+    setCreateRunResult("");
+    try {
+      const payload = {
+        project_id: Number(selectedProjectId),
+        decision_snapshot_id: snapshot?.id ?? undefined,
+        mode: ibSettings?.mode || ibSettingsForm.mode || "paper",
+      };
+      const res = await api.post<TradeRun>("/api/trade/runs", payload);
+      if (res.data?.id) {
+        setExecuteForm((prev) => ({ ...prev, run_id: String(res.data.id) }));
+        setSelectedRunId(res.data.id);
+      }
+      setCreateRunResult(t("trade.createRunSuccess"));
+      await loadTradeActivity();
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("trade.createRunError");
+      setCreateRunError(String(detail));
+    } finally {
+      setCreateRunLoading(false);
+    }
   };
 
   const loadIbSettings = async () => {
@@ -2391,7 +2423,10 @@ export default function LiveTradePage() {
                   )}
                 </div>
                 <div className="overview-sub">
-                  <span data-testid="paper-trade-status">
+                  <span
+                    data-testid="paper-trade-status"
+                    data-status={latestTradeRun?.status || ""}
+                  >
                     {latestTradeRun
                       ? `${formatStatus(latestTradeRun.status)} · ${formatDateTime(
                           latestTradeRun.created_at
@@ -2465,6 +2500,18 @@ export default function LiveTradePage() {
                 )}
               </tbody>
             </table>
+            <div style={{ display: "flex", gap: "10px", flexWrap: "wrap", marginTop: "12px" }}>
+              <button
+                className="button-secondary"
+                onClick={createTradeRun}
+                disabled={createRunLoading || !selectedProjectId}
+                data-testid="paper-trade-create"
+              >
+                {createRunLoading ? t("common.actions.loading") : t("trade.createRun")}
+              </button>
+            </div>
+            {createRunError && <div className="form-hint">{createRunError}</div>}
+            {createRunResult && <div className="form-hint">{createRunResult}</div>}
             <div className="form-grid" style={{ marginTop: "12px" }}>
               <div className="form-row">
                 <label className="form-label">{t("trade.runSelect")}</label>
@@ -2504,6 +2551,7 @@ export default function LiveTradePage() {
                   className="form-input"
                   value={executeForm.run_id}
                   onChange={(event) => updateExecuteForm("run_id", event.target.value)}
+                  data-testid="paper-trade-run-id"
                 />
                 <div className="form-hint">{t("trade.executeRunIdHint")}</div>
               </div>
@@ -2534,8 +2582,16 @@ export default function LiveTradePage() {
                 {t("trade.executeBlockedSnapshot")}
               </div>
             )}
-            {executeError && <div className="form-hint">{executeError}</div>}
-            {executeResult && <div className="form-hint">{executeResult}</div>}
+            {executeError && (
+              <div className="form-hint" data-testid="paper-trade-error">
+                {executeError}
+              </div>
+            )}
+            {executeResult && (
+              <div className="form-hint" data-testid="paper-trade-result">
+                {executeResult}
+              </div>
+            )}
           </div>
         </div>
 

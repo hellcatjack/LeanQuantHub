@@ -676,6 +676,7 @@ export default function ProjectsPage() {
   const [decisionTrainJobId, setDecisionTrainJobId] = useState<string>("");
   const [decisionSnapshotDate, setDecisionSnapshotDate] = useState("");
   const [decisionMessage, setDecisionMessage] = useState("");
+  const decisionPollRef = useRef(0);
   const [factorJobs, setFactorJobs] = useState<FactorScoreJob[]>([]);
   const [factorLoadError, setFactorLoadError] = useState("");
   const [factorActionMessage, setFactorActionMessage] = useState("");
@@ -1000,6 +1001,48 @@ export default function ProjectsPage() {
     }
   };
 
+  const fetchDecisionSnapshot = async (snapshotId: number) => {
+    if (!Number.isFinite(snapshotId)) {
+      return null;
+    }
+    try {
+      const res = await api.get<DecisionSnapshotDetail>(`/api/decisions/${snapshotId}`);
+      return res.data;
+    } catch {
+      return null;
+    }
+  };
+
+  const isDecisionSnapshotReady = (snapshot: DecisionSnapshotDetail | null) => {
+    if (!snapshot) {
+      return false;
+    }
+    if (snapshot.status === "failed") {
+      return true;
+    }
+    const summary = (snapshot.summary as Record<string, any> | null) || null;
+    return Boolean(summary?.snapshot_date || snapshot.snapshot_date);
+  };
+
+  const pollDecisionSnapshot = async (snapshotId: number, pollToken: number) => {
+    const maxAttempts = 30;
+    const intervalMs = 2000;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      if (decisionPollRef.current !== pollToken) {
+        return null;
+      }
+      const detail = await fetchDecisionSnapshot(snapshotId);
+      if (detail) {
+        setDecisionLatest(detail);
+        if (isDecisionSnapshotReady(detail)) {
+          return detail;
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
+    return null;
+  };
+
   const buildDecisionPayload = () => {
     const trainJobId = decisionTrainJobId
       ? Number(decisionTrainJobId)
@@ -1048,10 +1091,20 @@ export default function ProjectsPage() {
     setDecisionMessage("");
     try {
       const payload = buildDecisionPayload();
-      await api.post("/api/decisions/run", payload);
+      const res = await api.post<DecisionSnapshotDetail>("/api/decisions/run", payload);
+      const snapshotId = res.data?.id ? Number(res.data.id) : null;
       setDecisionMessage(t("projects.decision.runQueued"));
       setDecisionPreview(null);
-      await loadDecisionLatest(selectedProjectId);
+      if (snapshotId) {
+        const pollToken = decisionPollRef.current + 1;
+        decisionPollRef.current = pollToken;
+        const detail = await pollDecisionSnapshot(snapshotId, pollToken);
+        if (detail?.status === "failed") {
+          setDecisionMessage(t("projects.decision.runError"));
+        }
+      } else {
+        await loadDecisionLatest(selectedProjectId);
+      }
     } catch (err) {
       setDecisionMessage(t("projects.decision.runError"));
     } finally {
@@ -7265,7 +7318,11 @@ export default function ProjectsPage() {
                       : t("projects.decision.run")}
                   </button>
                 </div>
-                {decisionMessage && <div className="form-hint">{decisionMessage}</div>}
+                {decisionMessage && (
+                  <div className="form-hint" data-testid="decision-snapshot-message">
+                    {decisionMessage}
+                  </div>
+                )}
                 {decisionData ? (
                   <>
                     <div className="section-divider" />
