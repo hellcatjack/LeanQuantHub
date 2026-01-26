@@ -95,7 +95,26 @@ test("data page shows id chips for pretrade runs", async ({ page }) => {
           fallback_run_id: null,
           message: "",
         },
-        steps: [],
+        steps: [
+          {
+            id: 5001,
+            run_id: 1001,
+            step_key: "bridge_gate",
+            step_order: 0,
+            status: "success",
+            progress: 1,
+            retry_count: 0,
+            next_retry_at: null,
+            message: "",
+            log_path: null,
+            params: null,
+            artifacts: null,
+            created_at: "2026-01-25T00:00:00Z",
+            started_at: "2026-01-25T00:00:00Z",
+            ended_at: "2026-01-25T00:00:01Z",
+            updated_at: "2026-01-25T00:00:01Z",
+          },
+        ],
       });
     }
     if (path === "/api/datasets/sync-jobs/speed") {
@@ -226,4 +245,5 @@ test("data page shows id chips for pretrade runs", async ({ page }) => {
   await expect(
     page.locator(".id-chip-text", { hasText: /Run#1001|批次#1001/i }).first()
   ).toBeVisible();
+  await expect(page.getByText(/Lean Bridge 交易门禁|Lean bridge gate/i)).toBeVisible();
 });

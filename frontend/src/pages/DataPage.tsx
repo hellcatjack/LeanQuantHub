@@ -18,6 +18,9 @@ const PRETRADE_STEP_KEYS = [
   "pit_fundamentals",
   "training_scoring",
   "decision_snapshot",
+  "bridge_gate",
+  "market_snapshot",
+  "trade_execute",
   "audit",
 ];
 
@@ -38,7 +41,15 @@ const PRETRADE_STEP_GROUPS = [
   },
   {
     key: "model",
-    steps: ["training_scoring", "decision_snapshot", "audit"],
+    steps: ["training_scoring", "decision_snapshot"],
+  },
+  {
+    key: "trade",
+    steps: ["bridge_gate", "market_snapshot", "trade_execute"],
+  },
+  {
+    key: "audit",
+    steps: ["audit"],
   },
 ];
 
