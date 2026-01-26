@@ -307,7 +307,13 @@ test("data page shows id chips for pretrade runs", async ({ page }) => {
   await expect(
     page.locator(".id-chip-text", { hasText: /Run#1001|批次#1001/i }).first()
   ).toBeVisible();
-  await expect(page.getByText(/Lean Bridge 交易门禁|Lean bridge gate/i)).toBeVisible();
-  await expect(page.getByText(/Data gate|数据门禁/i)).toBeVisible();
-  await expect(page.getByText(/Trade gate|交易门禁/i)).toBeVisible();
+  await expect(
+    page.locator(".pretrade-step-name", { hasText: /Lean Bridge 交易门禁|Lean bridge gate/i }).first()
+  ).toBeVisible();
+  await expect(
+    page.locator(".progress-meta .pill", { hasText: /Data gate|数据门禁/i }).first()
+  ).toBeVisible();
+  await expect(
+    page.locator(".progress-meta .pill", { hasText: /Trade gate|交易门禁/i }).first()
+  ).toBeVisible();
 });
