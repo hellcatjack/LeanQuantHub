@@ -2322,7 +2322,7 @@ export default function LiveTradePage() {
           <div className="meta-list" style={{ marginTop: "12px" }}>
             <div className="meta-row">
               <span>{t("trade.snapshotStatus")}</span>
-              <strong>
+              <strong data-testid="live-trade-snapshot-status">
                 {snapshotLoading
                   ? t("common.actions.loading")
                   : snapshotReady
@@ -2332,11 +2332,15 @@ export default function LiveTradePage() {
             </div>
             <div className="meta-row">
               <span>{t("trade.snapshotDate")}</span>
-              <strong>{snapshot?.snapshot_date || t("common.none")}</strong>
+              <strong data-testid="live-trade-snapshot-date">
+                {snapshot?.snapshot_date || t("common.none")}
+              </strong>
             </div>
             <div className="meta-row">
               <span>{t("trade.snapshotId")}</span>
-              <strong>{snapshot?.id ? `#${snapshot.id}` : t("common.none")}</strong>
+              <strong data-testid="live-trade-snapshot-id">
+                {snapshot?.id ? `#${snapshot.id}` : t("common.none")}
+              </strong>
             </div>
           </div>
           {selectedProject && (
