@@ -85,6 +85,14 @@
 - [ ] 对账报告：回测价 vs 实盘成交价偏差解释。
 - 验收：执行不依赖 Alpha 行情，但偏差可解释。
 
+### 1.4 PreTrade 数据门禁 + Lean Bridge 交易门禁（新增）
+- [ ] PreTrade 增加 `bridge_gate` 步骤：读取 `lean_bridge_status.json`/`account_summary.json`/`positions.json`/`quotes.json`，四项任一 stale/缺失/超时即阻断 `trade_execute`。
+- [ ] 门禁阈值可配置（默认）：心跳 60s、账户 300s、持仓 300s、行情 60s；写入 `PreTradeStep.artifacts.bridge_gate`（实际时间戳 + 阈值 + 缺失列表）。
+- [ ] 数据门禁补强：`trading_day_check` 强制 `coverage_end >= 上一交易日`；PIT 周度/基本面缺失清单写入 artifacts（含文件路径）。
+- [ ] Data 页 PreTrade 摘要区拆分“数据门禁/交易门禁”状态与原因；交易门禁显示 Lean Bridge 心跳/账户/持仓/行情更新时间。
+- [ ] PreTrade 模板编辑器/步骤列表纳入 `bridge_gate`（默认开启），并与 `market_snapshot`/`trade_execute` 顺序对齐。
+- 验收：任一门禁失败均阻断交易并给出可追溯原因；门禁通过后才允许进入下单。
+
 ---
 
 ## Phase 2：订单与执行（必做）
