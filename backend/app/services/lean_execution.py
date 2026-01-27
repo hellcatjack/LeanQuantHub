@@ -73,6 +73,8 @@ def build_execution_config(*, intent_path: str, brokerage: str, project_id: int,
     payload["execution-intent-path"] = intent_path
     payload["result-handler"] = "QuantConnect.Lean.Engine.Results.LeanBridgeResultHandler"
     payload["lean-bridge-output-dir"] = _bridge_output_dir()
+    payload["lean-bridge-watchlist-path"] = str(Path(_bridge_output_dir()) / "watchlist.json")
+    payload["lean-bridge-watchlist-refresh-seconds"] = "5"
     payload["ib-client-id"] = derive_client_id(project_id=project_id, mode=mode)
     return payload
 

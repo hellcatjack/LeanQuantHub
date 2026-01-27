@@ -49,7 +49,13 @@ from app.services.lean_bridge_paths import resolve_bridge_root
 from app.services.lean_bridge_reader import (
     parse_bridge_timestamp,
     read_bridge_payload,
+    read_positions,
     read_quotes,
+)
+from app.services.lean_bridge_watchlist import (
+    merge_symbols,
+    resolve_watchlist_path,
+    write_watchlist,
 )
 from app.services.ib_settings import update_ib_state
 from app.services.job_lock import JobLock
@@ -1055,6 +1061,31 @@ def step_market_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResult
         excluded = {_normalize_symbol(item) for item in candidates if _normalize_symbol(item)}
         if excluded:
             symbols = [symbol for symbol in symbols if _normalize_symbol(symbol) not in excluded]
+    bridge_root = _resolve_bridge_root()
+    position_symbols: list[str] = []
+    positions_payload = read_positions(bridge_root)
+    if isinstance(positions_payload, dict):
+        items = positions_payload.get("items")
+        if isinstance(items, list):
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                symbol = _normalize_symbol(item.get("symbol"))
+                if symbol:
+                    position_symbols.append(symbol)
+    symbols = merge_symbols(symbols, position_symbols)
+    if excluded and symbols:
+        symbols = [symbol for symbol in symbols if _normalize_symbol(symbol) not in excluded]
+    if symbols:
+        write_watchlist(
+            resolve_watchlist_path(bridge_root),
+            symbols,
+            meta={
+                "source": "pretrade",
+                "project_id": ctx.run.project_id,
+                "decision_snapshot_id": decision_snapshot_id,
+            },
+        )
     if not symbols:
         reason = "market_snapshot_all_excluded" if excluded else "market_snapshot_no_symbols"
         skip_artifacts: dict[str, Any] = {"decision_snapshot_id": decision_snapshot_id}
