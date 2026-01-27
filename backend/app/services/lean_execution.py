@@ -119,7 +119,7 @@ def launch_execution(*, config_path: str) -> None:
     subprocess_run(cmd, check=False, cwd=cwd)
 
 
-def ingest_execution_events(path: str) -> None:
+def ingest_execution_events(path: str) -> dict:
     content = Path(path).read_text(encoding="utf-8")
     try:
         parsed = json.loads(content)
@@ -134,7 +134,7 @@ def ingest_execution_events(path: str) -> None:
                 events.append(json.loads(line))
             except json.JSONDecodeError:
                 continue
-    apply_execution_events(events)
+    return apply_execution_events(events)
 
 
 def _parse_event_time(value: str | None) -> datetime:
@@ -171,15 +171,17 @@ def _find_intent_for_id(session, intent_id: str) -> tuple[TradeRun | None, dict 
     return None, None
 
 
-def apply_execution_events(events: list[dict], *, session=None) -> None:
+def apply_execution_events(events: list[dict], *, session=None) -> dict:
     own_session = False
+    summary = {"processed": 0, "skipped_invalid_tag": 0, "skipped_not_found": 0}
     if session is None:
         session = SessionLocal()
         own_session = True
     try:
         for event in events or []:
             tag = str(event.get("tag") or "").strip()
-            if not tag:
+            if not tag or not tag.startswith("oi_"):
+                summary["skipped_invalid_tag"] += 1
                 continue
             intent_id = tag
             order = (
@@ -190,17 +192,21 @@ def apply_execution_events(events: list[dict], *, session=None) -> None:
             if order is None:
                 run, intent = _find_intent_for_id(session, intent_id)
                 if run is None:
+                    summary["skipped_not_found"] += 1
                     continue
                 symbol = (event.get("symbol") or intent.get("symbol") or "").strip().upper()
                 if not symbol:
+                    summary["skipped_not_found"] += 1
                     continue
                 direction = str(event.get("direction") or "").strip().upper()
                 side = "BUY" if direction in {"BUY", "LONG"} else "SELL" if direction in {"SELL", "SHORT"} else ""
                 if not side:
+                    summary["skipped_not_found"] += 1
                     continue
                 filled_qty = float(event.get("filled") or 0.0)
                 quantity = abs(filled_qty) if filled_qty else float(intent.get("quantity") or 0.0)
                 if quantity <= 0:
+                    summary["skipped_not_found"] += 1
                     continue
                 payload = {
                     "client_order_id": intent_id,
@@ -221,10 +227,12 @@ def apply_execution_events(events: list[dict], *, session=None) -> None:
             status = str(event.get("status") or "").strip().upper()
             if status == "SUBMITTED":
                 update_trade_order_status(session, order, {"status": "SUBMITTED"})
+                summary["processed"] += 1
                 continue
             if status == "FILLED":
                 filled_qty = float(event.get("filled") or 0.0)
                 if filled_qty <= 0:
+                    summary["skipped_not_found"] += 1
                     continue
                 fill_price = float(event.get("fill_price") or 0.0)
                 fill_time = _parse_event_time(event.get("time"))
@@ -235,6 +243,8 @@ def apply_execution_events(events: list[dict], *, session=None) -> None:
                     fill_price=fill_price,
                     fill_time=fill_time,
                 )
+                summary["processed"] += 1
     finally:
         if own_session:
             session.close()
+    return summary

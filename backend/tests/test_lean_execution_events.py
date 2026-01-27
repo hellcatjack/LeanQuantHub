@@ -63,3 +63,31 @@ def test_apply_execution_events_creates_and_fills_missing_order(tmp_path):
         assert order.ib_order_id == 9
     finally:
         session.close()
+
+
+def test_apply_execution_events_rejects_invalid_tag(tmp_path):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    try:
+        events = [
+            {
+                "order_id": 1,
+                "symbol": "AMD",
+                "status": "Filled",
+                "filled": 1.0,
+                "fill_price": 10.0,
+                "direction": "Buy",
+                "time": "2026-01-27T00:00:00Z",
+                "tag": "not-json",
+            }
+        ]
+
+        result = apply_execution_events(events, session=session)
+
+        assert result["skipped_invalid_tag"] == 1
+        order = session.query(TradeOrder).filter(TradeOrder.ib_order_id == 1).first()
+        assert order is None
+    finally:
+        session.close()
