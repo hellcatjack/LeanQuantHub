@@ -14,5 +14,5 @@ test("positions table supports select + batch close", async ({ page }) => {
   });
   await page.getByTestId("positions-batch-close").click();
   expect(dialogMessage).toMatch(/批量平仓|Batch Close|Confirm batch close/);
-  await expect(page.getByText(/oi_/)).toBeVisible({ timeout: 30000 });
+  await expect(page.getByText(/oi_/).first()).toBeVisible({ timeout: 30000 });
 });
