@@ -91,6 +91,8 @@
 - [ ] 数据门禁补强：`trading_day_check` 强制 `coverage_end >= 上一交易日`；PIT 周度/基本面缺失清单写入 artifacts（含文件路径）。
 - [ ] Data 页 PreTrade 摘要区拆分“数据门禁/交易门禁”状态与原因；交易门禁显示 Lean Bridge 心跳/账户/持仓/行情更新时间。
 - [ ] PreTrade 模板编辑器/步骤列表纳入 `bridge_gate`（默认开启），并与 `market_snapshot`/`trade_execute` 顺序对齐。
+- [ ] 数据同步孤儿任务回收：在 bulk_sync `syncing` 阶段评估 `running` 任务与队列状态（A+B 组合信号），满足证据则标记失败并写审计。
+- [ ] 孤儿回收配置：`data_sync_orphan_guard.json`（enabled/dry_run/evidence_required）。
 - 验收：任一门禁失败均阻断交易并给出可追溯原因；门禁通过后才允许进入下单。
 
 ---
