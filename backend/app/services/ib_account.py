@@ -5,7 +5,7 @@ from typing import Any
 
 from app.services.lean_bridge_paths import resolve_bridge_root
 from app.services.ib_settings import get_or_create_ib_settings
-from app.services.lean_bridge_reader import read_account_summary, read_positions
+from app.services.lean_bridge_reader import read_account_summary, read_positions, read_quotes
 
 
 def _resolve_bridge_root() -> Path:
@@ -44,6 +44,31 @@ def get_account_summary(session, *, mode: str, full: bool, force_refresh: bool =
 
 def get_account_positions(session, *, mode: str, force_refresh: bool = False) -> dict[str, object]:
     payload = read_positions(_resolve_bridge_root())
+    quotes_payload = read_quotes(_resolve_bridge_root())
+    quote_items = quotes_payload.get("items") if isinstance(quotes_payload.get("items"), list) else []
+    quote_prices: dict[str, float] = {}
+    for item in quote_items:
+        if not isinstance(item, dict):
+            continue
+        symbol = item.get("symbol")
+        if not symbol:
+            continue
+        price = item.get("last")
+        if price is None:
+            bid = item.get("bid")
+            ask = item.get("ask")
+            if bid is not None and ask is not None:
+                price = (float(bid) + float(ask)) / 2
+            elif bid is not None:
+                price = bid
+            elif ask is not None:
+                price = ask
+        if price is None:
+            continue
+        try:
+            quote_prices[str(symbol)] = float(price)
+        except (TypeError, ValueError):
+            continue
     raw_items = payload.get("items") if isinstance(payload.get("items"), list) else []
     items: list[dict[str, object]] = []
     for item in raw_items:
@@ -52,6 +77,35 @@ def get_account_positions(session, *, mode: str, force_refresh: bool = False) ->
         normalized = dict(item)
         if "position" not in normalized and "quantity" in normalized:
             normalized["position"] = normalized.get("quantity")
+        symbol = normalized.get("symbol")
+        position = normalized.get("position")
+        avg_cost = normalized.get("avg_cost")
+        market_price = normalized.get("market_price")
+        quote_price = quote_prices.get(str(symbol)) if symbol is not None else None
+        if (market_price is None or market_price == 0) and quote_price is not None:
+            normalized["market_price"] = quote_price
+            market_price = quote_price
+        market_value = normalized.get("market_value")
+        if (
+            (market_value is None or market_value == 0)
+            and market_price not in (None, 0, 0.0)
+            and position not in (None, 0, 0.0)
+        ):
+            try:
+                normalized["market_value"] = float(market_price) * float(position)
+            except (TypeError, ValueError):
+                pass
+        unrealized = normalized.get("unrealized_pnl")
+        if (
+            (unrealized is None or unrealized == 0)
+            and market_price not in (None, 0, 0.0)
+            and avg_cost not in (None, 0, 0.0)
+            and position not in (None, 0, 0.0)
+        ):
+            try:
+                normalized["unrealized_pnl"] = (float(market_price) - float(avg_cost)) * float(position)
+            except (TypeError, ValueError):
+                pass
         if (
             normalized.get("market_price") is None
             and normalized.get("market_value") is not None
