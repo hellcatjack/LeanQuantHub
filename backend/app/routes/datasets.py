@@ -92,6 +92,7 @@ from app.services.alpha_fetch import (
     write_alpha_fetch_config,
 )
 from app.services.bulk_auto import load_bulk_auto_config, write_bulk_auto_config
+from app.services.data_sync_orphan_guard import load_data_sync_orphan_guard_config
 from app.services.project_symbols import collect_active_project_symbols, write_symbol_list
 from app.services.trading_calendar import (
     load_trading_calendar_config,
@@ -327,6 +328,54 @@ def _bulk_job_counts(session, job: BulkSyncJob) -> tuple[int | None, int | None,
     running = base.filter(DataSyncJob.status == "running").count()
     completed = base.filter(DataSyncJob.ended_at.isnot(None)).count()
     return pending, running, completed
+
+
+def _find_sync_job_evidence(
+    data_root: Path, dataset_id: int, source_path: str | None
+) -> list[str]:
+    evidence: list[str] = []
+    prefix = f"{dataset_id}_"
+    curated_dir = data_root / "curated"
+    adjusted_dir = data_root / "curated_adjusted"
+    versions_dir = data_root / "curated_versions"
+
+    for base in (curated_dir, adjusted_dir):
+        if not base.exists():
+            continue
+        matches = list(base.glob(f"{prefix}*.csv"))
+        if matches:
+            evidence.append(str(matches[0]))
+            break
+
+    if versions_dir.exists():
+        version_dirs = [p for p in versions_dir.glob(f"{prefix}*") if p.is_dir()]
+        if version_dirs:
+            snapshots = sorted(version_dirs[0].glob("*.csv"))
+            if snapshots:
+                evidence.append(str(snapshots[-1]))
+
+    symbol = None
+    if source_path and source_path.startswith("alpha:"):
+        symbol = source_path.split(":", 1)[1].strip().lower()
+    if symbol:
+        lean_daily = (
+            data_root / "lean" / "equity" / "usa" / "daily" / f"{symbol}.zip"
+        )
+        lean_adjusted = (
+            data_root / "lean_adjusted" / "equity" / "usa" / "daily" / f"{symbol}.zip"
+        )
+        if lean_daily.exists():
+            evidence.append(str(lean_daily))
+        if lean_adjusted.exists():
+            evidence.append(str(lean_adjusted))
+
+    return evidence
+
+
+def _should_orphan_candidates(
+    *, pending: int, running_total: int, candidate_count: int
+) -> bool:
+    return pending == 0 and candidate_count > 0 and running_total == candidate_count
 
 
 def _alpha_listing_age(data_root: Path) -> tuple[int | None, str | None]:
