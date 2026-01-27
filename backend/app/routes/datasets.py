@@ -378,6 +378,81 @@ def _should_orphan_candidates(
     return pending == 0 and candidate_count > 0 and running_total == candidate_count
 
 
+def _is_sync_queue_idle(data_root: Path) -> bool:
+    if SYNC_QUEUE_RUNNING:
+        return False
+    queue_lock = JobLock("data_sync_queue", data_root)
+    if not queue_lock.acquire():
+        return False
+    queue_lock.release()
+    return True
+
+
+def _evaluate_orphaned_sync_jobs(
+    session, bulk_job: BulkSyncJob, data_root: Path
+) -> int:
+    config = load_data_sync_orphan_guard_config(data_root)
+    if not config.get("enabled", True):
+        return 0
+    window = _bulk_job_range(bulk_job)
+    if not window:
+        return 0
+    if not _is_sync_queue_idle(data_root):
+        return 0
+    pending, running_total, _ = _bulk_job_counts(session, bulk_job)
+    pending = pending or 0
+    running_total = running_total or 0
+    start, end = window
+    candidates = (
+        session.query(DataSyncJob)
+        .filter(
+            DataSyncJob.status == "running",
+            DataSyncJob.created_at >= start,
+            DataSyncJob.created_at <= end,
+        )
+        .all()
+    )
+    if not _should_orphan_candidates(
+        pending=pending,
+        running_total=running_total,
+        candidate_count=len(candidates),
+    ):
+        return 0
+
+    affected = 0
+    dry_run = bool(config.get("dry_run", False))
+    require_evidence = bool(config.get("evidence_required", True))
+    for job in candidates:
+        evidence = _find_sync_job_evidence(data_root, job.dataset_id, job.source_path)
+        if require_evidence and not evidence:
+            continue
+        record_audit(
+            session,
+            action="data.sync.orphaned",
+            resource_type="data_sync_job",
+            resource_id=job.id,
+            detail={
+                "dataset_id": job.dataset_id,
+                "source_path": job.source_path,
+                "evidence": evidence,
+                "dry_run": dry_run,
+            },
+        )
+        if dry_run:
+            continue
+        job.status = "failed"
+        suffix = "orphaned_worker"
+        if job.message:
+            job.message = f"{job.message}; {suffix}"
+        else:
+            job.message = suffix
+        job.ended_at = datetime.utcnow()
+        affected += 1
+    if affected:
+        session.commit()
+    return affected
+
+
 def _alpha_listing_age(data_root: Path) -> tuple[int | None, str | None]:
     candidate_paths = [
         data_root / "universe" / "alpha_symbol_life.csv",
@@ -883,6 +958,11 @@ def _run_bulk_sync_job(job_id: int) -> None:
                 if job.status in {"failed", "canceled"}:
                     return
                 pending, running, _ = _bulk_job_counts(session, job)
+                if pending is not None and running is not None:
+                    recovered = _evaluate_orphaned_sync_jobs(session, job, _get_data_root())
+                    if recovered:
+                        session.refresh(job)
+                        pending, running, _ = _bulk_job_counts(session, job)
                 if pending == 0 and running == 0:
                     job.status = "success"
                     job.phase = "done"
