@@ -7,7 +7,7 @@
 
 ## 判定信号（A+B 联合）
 A) bulk_job 窗口内仍存在 `DataSyncJob.status=running`，且 `pending=0`。
-B) `/api/datasets/sync-jobs/speed` 返回 `running=0`（队列无活跃执行）。
+B) 同步队列处于空闲（`SYNC_QUEUE_RUNNING=false` 且 `data_sync_queue` 锁可获取），判定队列无活跃执行。
 
 满足 A+B 后，对每个候选 job 做“落盘证据”验证：
 - `curated/{dataset_id}_*.csv` 或 `curated_adjusted/{dataset_id}_*.csv` 存在
@@ -19,7 +19,7 @@ B) `/api/datasets/sync-jobs/speed` 返回 `running=0`（队列无活跃执行）
 ## 实现流程
 1. 在 `backend/app/routes/datasets.py::_run_bulk_sync_job` 的 `syncing` 循环中，增加 `evaluate_orphaned_sync_jobs(session, job)`。
 2. 函数基于 bulk_job 窗口筛选 `status=running` 的 `DataSyncJob`。
-3. 调用现有 `sync-jobs/speed` 逻辑获取 `running` 计数，若 `running>0` 则直接返回（不回收）。
+3. 检查队列是否空闲（`SYNC_QUEUE_RUNNING` + `data_sync_queue` 锁），非空闲直接返回（不回收）。
 4. 对候选 job 执行文件证据检查，满足条件则：
    - `status=failed`，`message` 追加 `orphaned_worker`，写入 `ended_at`。
    - 写审计事件 `data.sync.orphaned`，记录 job_id/dataset_id/source_path/证据路径。
@@ -38,7 +38,7 @@ B) `/api/datasets/sync-jobs/speed` 返回 `running=0`（队列无活跃执行）
 - 回滚方式：根据审计记录手工将指定 job 标记回 `success` 或重新发起同步任务。
 
 ## 测试计划
-1. 单元/脚本验证：构造 `running` + `pending=0` + `speed.running=0` + 文件存在，验证回收；反例不回收。
+1. 单元/脚本验证：构造 `running` + `pending=0` + 队列空闲 + 文件存在，验证回收；反例不回收。
 2. 集成验证：在项目 16 的 PreTrade 中触发 `price_incremental`，制造队列空闲但 running 存在的场景，验证 bulk_job 可完成。
 
 ## 影响范围
