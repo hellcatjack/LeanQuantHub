@@ -40,11 +40,13 @@ def test_build_order_intent_writes_min_fields(tmp_path):
             snapshot_id=snapshot.id,
             items=items,
             output_dir=tmp_path,
+            run_id=7,
         )
         payload = json.loads(Path(output).read_text())
         assert payload[0]["symbol"] == "AAPL"
         assert "weight" in payload[0]
         assert "snapshot_date" in payload[0]
+        assert payload[0]["order_intent_id"].startswith("oi_7_")
     finally:
         session.close()
 
@@ -82,10 +84,12 @@ def test_build_order_intent_includes_intent_id(tmp_path):
             snapshot_id=snapshot.id,
             items=items,
             output_dir=tmp_path,
+            run_id=9,
         )
         payload = json.loads(Path(output).read_text())
         assert all("order_intent_id" in item for item in payload)
         intent_ids = {item["order_intent_id"] for item in payload}
         assert len(intent_ids) == len(payload)
+        assert all(intent_id.startswith("oi_9_") for intent_id in intent_ids)
     finally:
         session.close()

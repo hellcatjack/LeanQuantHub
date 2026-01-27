@@ -16,10 +16,10 @@ from app.models import Base, TradeOrder, TradeRun
 from app.services.lean_execution import apply_execution_events
 
 
-def _write_intent_file(path: Path) -> None:
+def _write_intent_file(path: Path, run_id: int) -> None:
     payload = [
         {
-            "order_intent_id": "oi_25_1",
+            "order_intent_id": f"oi_{run_id}_1",
             "symbol": "AMAT",
             "weight": 0.1,
             "snapshot_date": "2026-01-23",
@@ -35,10 +35,12 @@ def test_apply_execution_events_creates_and_fills_missing_order(tmp_path):
     Session = sessionmaker(bind=engine)
     session = Session()
     try:
-        intent_path = tmp_path / "order_intent.json"
-        _write_intent_file(intent_path)
-        run = TradeRun(project_id=1, decision_snapshot_id=25, status="running", params={"order_intent_path": str(intent_path)})
+        run = TradeRun(project_id=1, decision_snapshot_id=25, status="running", params={})
         session.add(run)
+        session.commit()
+        intent_path = tmp_path / "order_intent.json"
+        _write_intent_file(intent_path, run.id)
+        run.params = {"order_intent_path": str(intent_path)}
         session.commit()
 
         events = [
@@ -50,13 +52,13 @@ def test_apply_execution_events_creates_and_fills_missing_order(tmp_path):
                 "fill_price": 334.15,
                 "direction": "Buy",
                 "time": "2026-01-27T15:25:46.9105632Z",
-                "tag": "oi_25_1",
+                "tag": f"oi_{run.id}_1",
             }
         ]
 
         apply_execution_events(events, session=session)
 
-        order = session.query(TradeOrder).filter(TradeOrder.client_order_id == "oi_25_1").one()
+        order = session.query(TradeOrder).filter(TradeOrder.client_order_id == f"oi_{run.id}_1").one()
         assert order.status == "FILLED"
         assert float(order.filled_quantity) == 3.0
         assert float(order.avg_fill_price) == 334.15

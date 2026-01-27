@@ -289,6 +289,7 @@ def execute_trade_run(
                 snapshot_id=run.decision_snapshot_id,
                 items=items,
                 output_dir=ARTIFACT_ROOT / "order_intents",
+                run_id=run.id,
             )
             params["order_intent_path"] = intent_path
             run.params = dict(params)
