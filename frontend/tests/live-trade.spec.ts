@@ -180,6 +180,38 @@ test("live trade positions table uses scroll wrapper", async ({ page }) => {
   await expect(table).toBeVisible();
 });
 
+test("live trade positions show realized pnl not reported when missing", async ({ page }) => {
+  await page.route("**/api/brokerage/account/positions**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: [
+          {
+            symbol: "SPY",
+            position: 12,
+            avg_cost: 420.5,
+            market_price: 432.1,
+            market_value: 5185.2,
+            unrealized_pnl: 139.2,
+            realized_pnl: null,
+            account: "DU123456",
+            currency: "USD",
+          },
+        ],
+        refreshed_at: "2026-01-24T00:00:00Z",
+        stale: false,
+      }),
+    })
+  );
+  await page.goto("/live-trade");
+  const realizedCell = page
+    .getByTestId("account-positions-table")
+    .locator("tbody tr td")
+    .nth(7);
+  await expect(realizedCell).toHaveText(/未回传|Not reported/);
+});
+
 test("live trade positions table stays within card width", async ({ page }) => {
   await page.setViewportSize({ width: 960, height: 800 });
   await page.route("**/api/brokerage/account/positions**", (route) =>

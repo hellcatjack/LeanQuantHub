@@ -1411,6 +1411,13 @@ export default function LiveTradePage() {
     return Number(value).toFixed(digits);
   };
 
+  const formatRealizedPnl = (value?: number | null) => {
+    if (value === null || value === undefined) {
+      return t("trade.positionTable.realizedMissing");
+    }
+    return formatNumber(value);
+  };
+
   const formatPercent = (value?: number | null, digits = 2) => {
     if (value === null || value === undefined) {
       return t("common.none");
@@ -2085,7 +2092,7 @@ export default function LiveTradePage() {
                         <td>{formatNumber(row.market_price ?? null)}</td>
                         <td>{formatNumber(row.market_value ?? null)}</td>
                         <td>{formatNumber(row.unrealized_pnl ?? null)}</td>
-                        <td>{formatNumber(row.realized_pnl ?? null)}</td>
+                        <td>{formatRealizedPnl(row.realized_pnl ?? null)}</td>
                         <td>{row.account || t("common.none")}</td>
                         <td>{row.currency || t("common.none")}</td>
                         <td>
