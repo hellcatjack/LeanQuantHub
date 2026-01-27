@@ -11,6 +11,8 @@ from app.schemas import (
     TradeOrderCreate,
     TradeOrderOut,
     TradeOrderStatusUpdate,
+    TradeManualOrderCreate,
+    TradeManualRunCreate,
     TradeRunCreate,
     TradeRunDetailOut,
     TradeRunExecuteOut,
@@ -31,6 +33,8 @@ from app.services.trade_guard import evaluate_intraday_guard, get_or_create_guar
 from app.services.trade_monitor import build_trade_overview
 from app.services.trade_executor import execute_trade_run
 from app.services.trade_orders import create_trade_order, update_trade_order_status
+from app.services.trade_order_intent import write_order_intent_manual
+from app.services import trade_executor
 from app.services.trade_run_summary import build_last_update_at, build_symbol_summary, build_trade_run_detail
 
 router = APIRouter(prefix="/api/trade", tags=["trade"])
@@ -306,6 +310,59 @@ def execute_trade_run_route(run_id: int, payload: TradeRunExecuteRequest):
             },
         )
         session.commit()
+    return TradeRunExecuteOut(**result.__dict__)
+
+
+@router.post("/runs/manual", response_model=TradeRunExecuteOut)
+def create_manual_trade_run(payload: TradeManualRunCreate):
+    with get_session() as session:
+        if (payload.mode or "").lower() == "live":
+            token = (payload.live_confirm_token or "").strip().upper()
+            if token != "LIVE":
+                raise HTTPException(status_code=403, detail="live_confirm_required")
+        run = TradeRun(
+            project_id=payload.project_id,
+            decision_snapshot_id=payload.decision_snapshot_id,
+            mode=payload.mode,
+            status="queued",
+            params={"source": "manual"},
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        orders = []
+        created = 0
+        for idx, order in enumerate(payload.orders or []):
+            client_order_id = f"oi_{run.id}_{idx}"
+            order_payload = order.model_dump()
+            order_payload["client_order_id"] = client_order_id
+            try:
+                result = create_trade_order(session, order_payload, run_id=run.id)
+                if result.created:
+                    created += 1
+            except ValueError as exc:
+                run.status = "failed"
+                run.message = str(exc)
+                run.ended_at = datetime.utcnow()
+                session.commit()
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            orders.append(order_payload)
+        session.commit()
+
+        params = dict(run.params or {})
+        intent_path = write_order_intent_manual(
+            run_id=run.id,
+            orders=orders,
+            output_dir=trade_executor.ARTIFACT_ROOT / "order_intents",
+        )
+        params["order_intent_path"] = intent_path
+        params["risk_bypass"] = True
+        run.params = dict(params)
+        run.updated_at = datetime.utcnow()
+        session.commit()
+
+    result = execute_trade_run(run.id, dry_run=False, force=True)
     return TradeRunExecuteOut(**result.__dict__)
 
 
