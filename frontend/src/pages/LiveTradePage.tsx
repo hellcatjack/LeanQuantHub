@@ -2976,6 +2976,7 @@ export default function LiveTradePage() {
               <thead>
                 <tr>
                   <th>{t("trade.orderTable.id")}</th>
+                  <th>{t("trade.orderTable.clientOrderId")}</th>
                   <th>{t("trade.orderTable.symbol")}</th>
                   <th>{t("trade.orderTable.side")}</th>
                   <th>{t("trade.orderTable.qty")}</th>
@@ -2988,6 +2989,7 @@ export default function LiveTradePage() {
                   (runDetail?.orders || tradeOrders).map((order) => (
                     <tr key={order.id}>
                       <td>#{order.id}</td>
+                      <td>{order.client_order_id || t("common.none")}</td>
                       <td>{order.symbol || t("common.none")}</td>
                       <td>{formatSide(order.side)}</td>
                       <td>{order.quantity ?? t("common.none")}</td>
@@ -2997,7 +2999,7 @@ export default function LiveTradePage() {
                   ))
                 ) : (
                   <tr>
-                    <td colSpan={6} className="empty-state">
+                    <td colSpan={7} className="empty-state">
                       {t("trade.orderEmpty")}
                     </td>
                   </tr>

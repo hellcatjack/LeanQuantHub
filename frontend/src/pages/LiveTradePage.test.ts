@@ -25,4 +25,9 @@ describe("LiveTradePage", () => {
     expect(html).toContain("trade.symbolSummaryTitle");
     expect(html).toContain("trade.fillsTitle");
   });
+
+  it("renders client order id column", () => {
+    const html = ReactDOMServer.renderToString(React.createElement(LiveTradePage));
+    expect(html).toContain("trade.orderTable.clientOrderId");
+  });
 });

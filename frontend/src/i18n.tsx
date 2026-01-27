@@ -2407,6 +2407,7 @@ const messages: Record<Locale, MessageTree> = {
       orderEmpty: "暂无订单记录",
       orderTable: {
         id: "订单 ID",
+        clientOrderId: "客户端订单 ID",
         symbol: "标的",
         side: "方向",
         qty: "数量",
@@ -4848,6 +4849,7 @@ const messages: Record<Locale, MessageTree> = {
       orderEmpty: "No orders",
       orderTable: {
         id: "Order ID",
+        clientOrderId: "Client Order ID",
         symbol: "Symbol",
         side: "Side",
         qty: "Qty",
