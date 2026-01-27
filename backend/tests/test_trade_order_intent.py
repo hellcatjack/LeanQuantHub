@@ -47,3 +47,45 @@ def test_build_order_intent_writes_min_fields(tmp_path):
         assert "snapshot_date" in payload[0]
     finally:
         session.close()
+
+
+def test_build_order_intent_includes_intent_id(tmp_path):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    try:
+        snapshot = DecisionSnapshot(
+            project_id=1,
+            status="success",
+            snapshot_date="2026-01-16",
+            items_path=str(tmp_path / "items.csv"),
+        )
+        session.add(snapshot)
+        session.commit()
+        items = [
+            {
+                "symbol": "AAPL",
+                "weight": 0.1,
+                "snapshot_date": "2026-01-16",
+                "rebalance_date": "2026-01-16",
+            },
+            {
+                "symbol": "MSFT",
+                "weight": 0.2,
+                "snapshot_date": "2026-01-16",
+                "rebalance_date": "2026-01-16",
+            },
+        ]
+        output = trade_order_intent.write_order_intent(
+            session,
+            snapshot_id=snapshot.id,
+            items=items,
+            output_dir=tmp_path,
+        )
+        payload = json.loads(Path(output).read_text())
+        assert all("order_intent_id" in item for item in payload)
+        intent_ids = {item["order_intent_id"] for item in payload}
+        assert len(intent_ids) == len(payload)
+    finally:
+        session.close()
