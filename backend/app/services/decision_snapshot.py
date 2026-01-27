@@ -6,6 +6,8 @@ import os
 import subprocess
 import sys
 from datetime import datetime
+import math
+from numbers import Number
 from pathlib import Path
 from typing import Any
 
@@ -62,6 +64,29 @@ def _parse_date(value: str | None) -> str | None:
         except ValueError:
             continue
     return None
+
+
+def _resolve_pit_rebalance_end(snapshot_date: str | None) -> str | None:
+    target = _parse_date(snapshot_date)
+    if not target:
+        return None
+    pit_dir = _resolve_data_root() / "universe" / "pit_weekly"
+    pit_path = pit_dir / f"pit_{target.replace('-', '')}.csv"
+    if not pit_path.exists():
+        return None
+    rows = _read_csv_rows(pit_path)
+    if not rows:
+        return None
+    rebalance_dates: list[str] = []
+    for row in rows:
+        if _parse_date(row.get("snapshot_date")) != target:
+            continue
+        rebalance = _parse_date(row.get("rebalance_date"))
+        if rebalance:
+            rebalance_dates.append(rebalance)
+    if not rebalance_dates:
+        return None
+    return sorted(set(rebalance_dates))[-1]
 
 
 def _coerce_bool(value: Any) -> bool | None:
@@ -229,7 +254,8 @@ def _build_decision_configs(
     weights_payload["output_dir"] = str(output_dir)
     if snapshot_date:
         weights_payload["backtest_start"] = snapshot_date
-        weights_payload["backtest_end"] = snapshot_date
+        pit_rebalance_end = _resolve_pit_rebalance_end(snapshot_date)
+        weights_payload["backtest_end"] = pit_rebalance_end or snapshot_date
 
     weights_payload = _apply_algorithm_params(weights_payload, algo_params)
 
@@ -624,6 +650,22 @@ def generate_decision_snapshot(
     }
 
 
+def _sanitize_json(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _sanitize_json(val) for key, val in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_json(item) for item in value]
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, Number) and not isinstance(value, bool):
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        return numeric if math.isfinite(numeric) else None
+    return value
+
+
 def run_decision_snapshot_task(snapshot_id: int) -> None:
     from app.db import SessionLocal
 
@@ -645,8 +687,9 @@ def run_decision_snapshot_task(snapshot_id: int) -> None:
             algorithm_parameters=params.get("algorithm_parameters"),
             preview=False,
         )
+        summary = _sanitize_json(result.get("summary"))
         snapshot.status = "success"
-        snapshot.summary = result.get("summary")
+        snapshot.summary = summary
         snapshot.artifact_dir = result.get("artifact_dir")
         snapshot.summary_path = result.get("summary_path")
         snapshot.items_path = result.get("items_path")

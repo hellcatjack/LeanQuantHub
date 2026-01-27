@@ -65,7 +65,11 @@ from app.services.trading_calendar import (
     load_trading_days,
     trading_calendar_csv_path,
 )
-from app.services.project_symbols import collect_active_project_symbols, write_symbol_list
+from app.services.project_symbols import (
+    collect_active_project_symbols,
+    collect_project_symbols,
+    write_symbol_list,
+)
 from app.services.trade_executor import execute_trade_run
 
 PRETRADE_ACTIVE_STATUSES = {"queued", "running"}
@@ -121,7 +125,7 @@ def _build_snapshot_symbols(
             if symbols:
                 return _clip_symbols(symbols, max_symbols)
     config = _resolve_project_config(session, project_id)
-    return _clip_symbols(collect_active_project_symbols(config), max_symbols)
+    return _clip_symbols(collect_project_symbols(config), max_symbols)
 
 
 def _parse_timestamp(value: str | None) -> datetime | None:
@@ -248,6 +252,153 @@ def _resolve_data_root() -> Path:
     if env_root:
         return Path(env_root)
     return Path("/data/share/stock/data")
+
+
+def _fundamentals_cache_meta_path(data_root: Path) -> Path:
+    return data_root / "fundamentals" / "alpha" / "fundamentals_cache.json"
+
+
+FUNDAMENTALS_REQUIRED_FILES = (
+    "overview.json",
+    "income_statement.json",
+    "balance_sheet.json",
+    "cash_flow.json",
+)
+
+
+def _parse_date_text(value: str | None) -> date | None:
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _last_friday(today: date) -> date:
+    delta = (today.weekday() - 4) % 7
+    return today - timedelta(days=delta)
+
+
+def _fundamentals_cache_fresh(data_root: Path, today: date) -> tuple[bool, date]:
+    last_friday = _last_friday(today)
+    meta_path = _fundamentals_cache_meta_path(data_root)
+    if not meta_path.exists():
+        return False, last_friday
+    try:
+        payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return False, last_friday
+    if not isinstance(payload, dict):
+        return False, last_friday
+    cached = _parse_date_text(str(payload.get("as_of") or ""))
+    if cached and cached >= last_friday:
+        return True, last_friday
+    return False, last_friday
+
+
+def _parse_datetime_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    cleaned = text[:-1] if text.endswith("Z") else text
+    try:
+        return datetime.fromisoformat(cleaned).date()
+    except ValueError:
+        return _parse_date_text(cleaned)
+
+
+def _fundamentals_status_map(data_root: Path) -> dict[str, dict[str, str]]:
+    status_path = data_root / "fundamentals" / "alpha" / "fundamentals_status.csv"
+    if not status_path.exists():
+        return {}
+    rows: dict[str, dict[str, str]] = {}
+    with status_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            symbol = _normalize_symbol(row.get("symbol"))
+            if not symbol:
+                continue
+            rows[symbol] = {str(k): str(v or "") for k, v in row.items()}
+    return rows
+
+
+def _fundamentals_symbol_fresh(
+    data_root: Path,
+    symbol: str,
+    last_friday: date,
+    *,
+    status_map: dict[str, dict[str, str]] | None = None,
+) -> bool:
+    symbol_norm = _normalize_symbol(symbol)
+    if not symbol_norm:
+        return False
+    if status_map is None:
+        status_map = _fundamentals_status_map(data_root)
+    row = status_map.get(symbol_norm)
+    if not row:
+        return False
+    status_value = str(row.get("status") or "").strip().lower()
+    if status_value != "ok":
+        return False
+    updated_at = _parse_datetime_date(row.get("updated_at"))
+    if not updated_at or updated_at < last_friday:
+        return False
+    symbol_dir = data_root / "fundamentals" / "alpha" / symbol_norm
+    for filename in FUNDAMENTALS_REQUIRED_FILES:
+        path = symbol_dir / filename
+        if not path.exists():
+            return False
+        mtime_date = datetime.utcfromtimestamp(path.stat().st_mtime).date()
+        if mtime_date < last_friday:
+            return False
+    return True
+
+
+def _fundamentals_missing_symbols(
+    data_root: Path,
+    symbols: list[str],
+    last_friday: date,
+) -> list[str]:
+    status_map = _fundamentals_status_map(data_root)
+    missing: list[str] = []
+    seen: set[str] = set()
+    for symbol in symbols:
+        symbol_norm = _normalize_symbol(symbol)
+        if not symbol_norm or symbol_norm in seen:
+            continue
+        seen.add(symbol_norm)
+        if not _fundamentals_symbol_fresh(
+            data_root, symbol_norm, last_friday, status_map=status_map
+        ):
+            missing.append(symbol_norm)
+    return sorted(missing)
+
+
+def _write_fundamentals_cache_meta(data_root: Path, as_of: date) -> None:
+    meta_path = _fundamentals_cache_meta_path(data_root)
+    meta_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "as_of": as_of.isoformat(),
+        "updated_at": datetime.utcnow().isoformat() + "Z",
+    }
+    meta_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _write_watchlist(symbols: list[str]) -> Path:
+    path = resolve_bridge_root() / "watchlist.json"
+    payload = {
+        "symbols": sorted({_normalize_symbol(symbol) for symbol in symbols if _normalize_symbol(symbol)}),
+        "updated_at": datetime.utcnow().isoformat() + "Z",
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
 
 
 def _ensure_log_dir(run_id: int) -> Path:
@@ -633,14 +784,18 @@ def _read_progress_ratio(progress_path: Path) -> tuple[float | None, dict[str, A
 
 
 def step_fundamentals_refresh(ctx: StepContext, params: dict[str, Any]) -> StepResult:
+    data_root = _resolve_data_root()
+    today = datetime.now(ZoneInfo(settings.market_timezone)).date()
+    cache_fresh, last_friday = _fundamentals_cache_fresh(data_root, today)
     log_dir = _ensure_log_dir(ctx.run.id)
     log_path = log_dir / "fundamentals_fetch.log"
     progress_path = log_dir / "fundamentals_progress.json"
     cancel_path = log_dir / "fundamentals_cancel.flag"
-    status_path = log_dir / "fundamentals_status.csv"
+    status_path = data_root / "fundamentals" / "alpha" / "fundamentals_status.csv"
 
     settings_row = _get_or_create_settings(ctx.session)
     cmd_params = dict(params or {})
+    missing_symbols: list[str] | None = None
     if settings_row.update_project_only:
         symbols, benchmarks = collect_active_project_symbols(ctx.session)
         if not symbols:
@@ -651,10 +806,49 @@ def step_fundamentals_refresh(ctx: StepContext, params: dict[str, Any]) -> StepR
                     "symbol_whitelist_benchmarks": benchmarks,
                 },
             )
-        symbol_path = log_dir / "project_symbols.csv"
-        write_symbol_list(symbol_path, symbols)
+        missing_symbols = _fundamentals_missing_symbols(data_root, symbols, last_friday)
+        if not missing_symbols:
+            raise StepSkip(
+                "fundamentals_complete",
+                artifacts={
+                    "cache_as_of": last_friday.isoformat(),
+                    "symbol_whitelist_count": len(symbols),
+                    "symbol_whitelist_benchmarks": benchmarks,
+                    "symbol_missing_count": 0,
+                },
+            )
+        symbol_path = log_dir / "fundamentals_missing_symbols.csv"
+        write_symbol_list(symbol_path, missing_symbols)
         cmd_params["symbol_file"] = str(symbol_path)
         cmd_params["symbol_whitelist_count"] = len(symbols)
+        cmd_params["symbol_missing_count"] = len(missing_symbols)
+    else:
+        symbol_file = cmd_params.get("symbol_file")
+        if symbol_file:
+            candidate_symbols = _read_snapshot_symbols(str(symbol_file))
+            if candidate_symbols:
+                missing_symbols = _fundamentals_missing_symbols(
+                    data_root, candidate_symbols, last_friday
+                )
+                if not missing_symbols:
+                    raise StepSkip(
+                        "fundamentals_complete",
+                        artifacts={
+                            "cache_as_of": last_friday.isoformat(),
+                            "symbol_whitelist_count": len(candidate_symbols),
+                            "symbol_missing_count": 0,
+                        },
+                    )
+                symbol_path = log_dir / "fundamentals_missing_symbols.csv"
+                write_symbol_list(symbol_path, missing_symbols)
+                cmd_params["symbol_file"] = str(symbol_path)
+                cmd_params["symbol_whitelist_count"] = len(candidate_symbols)
+                cmd_params["symbol_missing_count"] = len(missing_symbols)
+        elif cache_fresh:
+            raise StepSkip(
+                "fundamentals_cache_fresh",
+                artifacts={"cache_as_of": last_friday.isoformat()},
+            )
 
     cmd = _build_fundamental_fetch_command(
         cmd_params,
@@ -675,6 +869,7 @@ def step_fundamentals_refresh(ctx: StepContext, params: dict[str, Any]) -> StepR
         code = proc.returncode
     if code != 0:
         raise RuntimeError(f"fundamentals_fetch_failed={code}")
+    _write_fundamentals_cache_meta(data_root, last_friday)
     artifacts = {
         "progress_path": str(progress_path),
         "status_path": str(status_path),
@@ -1062,6 +1257,7 @@ def step_market_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResult
             skip_artifacts["excluded_symbols"] = sorted(excluded)
         raise StepSkip(reason, artifacts=skip_artifacts)
 
+    watchlist_path = _write_watchlist(symbols)
     ok, missing, stale_symbols = _quotes_ready(symbols, ttl_seconds)
     if ok:
         return StepResult(
@@ -1072,6 +1268,7 @@ def step_market_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResult
                     "ttl_seconds": ttl_seconds,
                     "decision_snapshot_id": decision_snapshot_id,
                     "excluded_symbols": sorted(excluded),
+                    "watchlist_path": str(watchlist_path),
                 }
             }
         )

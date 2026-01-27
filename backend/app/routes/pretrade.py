@@ -37,6 +37,7 @@ from app.services.pretrade_runner import (
     _notify_telegram,
     run_pretrade_run,
 )
+from app.services.job_lock import JobLock
 
 router = APIRouter(prefix="/api/pretrade", tags=["pretrade"])
 
@@ -62,20 +63,48 @@ def _mask_token(value: str | None) -> str | None:
 PRETRADE_TERMINAL_STATUSES = {"success", "failed", "skipped", "canceled"}
 
 
+def _pretrade_lock_active() -> bool:
+    lock = JobLock("pretrade_checklist", auto_heartbeat=False)
+    try:
+        meta = lock._read_metadata()
+    except Exception:
+        return False
+    if not meta:
+        return False
+    if lock._is_stale(meta):
+        return False
+    if not lock._owner_alive(meta):
+        return False
+    return True
+
+
 def _finalize_cancel_if_possible(session, run: PreTradeRun) -> bool:
     if run.status != "cancel_requested":
         return False
-    remaining = (
+    running = (
         session.query(PreTradeStep)
         .filter(
             PreTradeStep.run_id == run.id,
-            ~PreTradeStep.status.in_(PRETRADE_TERMINAL_STATUSES),
+            PreTradeStep.status == "running",
         )
         .count()
     )
-    if remaining > 0:
-        return False
+    if running > 0:
+        if _pretrade_lock_active():
+            return False
     now = datetime.utcnow()
+    session.query(PreTradeStep).filter(
+        PreTradeStep.run_id == run.id,
+        ~PreTradeStep.status.in_(PRETRADE_TERMINAL_STATUSES),
+    ).update(
+        {
+            "status": "canceled",
+            "message": "run_canceled",
+            "ended_at": now,
+            "updated_at": now,
+        },
+        synchronize_session=False,
+    )
     run.status = "canceled"
     run.message = "canceled"
     run.ended_at = now
@@ -235,7 +264,11 @@ def list_pretrade_runs(
         query = session.query(PreTradeRun).order_by(PreTradeRun.created_at.desc())
         if project_id is not None:
             query = query.filter(PreTradeRun.project_id == project_id)
-        return query.offset(offset).limit(limit).all()
+        runs = query.offset(offset).limit(limit).all()
+        for run in runs:
+            if _finalize_cancel_if_possible(session, run):
+                session.refresh(run)
+        return runs
 
 
 @router.get("/runs/page", response_model=PreTradeRunPageOut)

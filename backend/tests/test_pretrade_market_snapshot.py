@@ -198,3 +198,99 @@ def test_pretrade_market_snapshot_uses_latest_snapshot_when_missing_artifacts(mo
         assert result.artifacts is not None
     finally:
         session.close()
+
+
+def test_build_snapshot_symbols_uses_project_config_when_no_snapshot(monkeypatch):
+    session = _make_session()
+    try:
+        project = Project(name="pretrade-config", description="")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        monkeypatch.setattr(
+            pretrade_runner,
+            "_resolve_project_config",
+            lambda *_args, **_kwargs: {"themes": [{"key": "tech", "weight": 1}]},
+        )
+
+        def _active_symbols_called(_session):
+            raise AssertionError("collect_active_project_symbols should not be called here")
+
+        monkeypatch.setattr(
+            pretrade_runner, "collect_active_project_symbols", _active_symbols_called
+        )
+        monkeypatch.setattr(
+            pretrade_runner,
+            "collect_project_symbols",
+            lambda _config: ["AAPL", "SPY"],
+            raising=False,
+        )
+
+        symbols = pretrade_runner._build_snapshot_symbols(
+            session,
+            project_id=project.id,
+            decision_snapshot_id=None,
+        )
+
+        assert symbols == ["AAPL", "SPY"]
+    finally:
+        session.close()
+
+
+def test_market_snapshot_writes_watchlist_on_missing_quotes(monkeypatch, tmp_path):
+    session = _make_session()
+    try:
+        project = Project(name="pretrade-watchlist", description="")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        items_path = tmp_path / "items.csv"
+        items_path.write_text("symbol\nAAPL\nMSFT\n", encoding="utf-8")
+        snapshot = DecisionSnapshot(project_id=project.id, items_path=str(items_path))
+        session.add(snapshot)
+        session.commit()
+        session.refresh(snapshot)
+
+        run = PreTradeRun(project_id=project.id, status="running", params={})
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        step = PreTradeStep(
+            run_id=run.id,
+            step_key="market_snapshot",
+            step_order=9,
+            status="queued",
+            artifacts={"decision_snapshot_id": snapshot.id},
+        )
+        session.add(step)
+        session.commit()
+        session.refresh(step)
+
+        monkeypatch.setattr(pretrade_runner, "read_quotes", lambda *_args, **_kwargs: {"items": []})
+        monkeypatch.setattr(
+            pretrade_runner,
+            "_resolve_project_config",
+            lambda _session, _pid: {"trade": {"market_snapshot_ttl_seconds": 30}},
+        )
+        monkeypatch.setattr(
+            pretrade_runner,
+            "resolve_bridge_root",
+            lambda: tmp_path,
+        )
+
+        try:
+            pretrade_runner.step_market_snapshot(
+                pretrade_runner.StepContext(session=session, run=run, step=step), {}
+            )
+        except RuntimeError:
+            pass
+
+        watchlist_path = tmp_path / "watchlist.json"
+        assert watchlist_path.exists()
+        payload = watchlist_path.read_text(encoding="utf-8")
+        assert "AAPL" in payload and "MSFT" in payload
+    finally:
+        session.close()
