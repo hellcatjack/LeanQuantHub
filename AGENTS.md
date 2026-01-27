@@ -72,6 +72,10 @@
    - 主文档使用中文，英文版本作为辅助。
    - 英文文档命名规则：在同名中文文档后追加 `.en.md`（例：`README.md` → `README.en.md`）。
    - PLANS/TODOLISTS 类型文档只需中文，禁止生成英文版本
+   - PLANS/TODOLISTS 归档规范：
+     - 仅在**全部 checklist 项为 [x]**时才允许归档。
+     - 任意 `.en.md`（位于 `docs/plans`/`docs/todolists`）视为过期内容，统一移动到对应 `_archive/` 目录，**不删除**。
+     - 归档路径固定为 `docs/plans/_archive/` 与 `docs/todolists/_archive/`，文件名保持不变。
 3) **编码要求：UTF-8**
    - 所有文本文件（`.md` / `.txt` / `.json` / `.yaml` / 源代码注释）必须使用 UTF-8 编码。
 4) **思考过程语言不限制**
