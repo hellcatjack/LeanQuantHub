@@ -4,6 +4,7 @@ import IdChip from "../components/IdChip";
 import { api } from "../api";
 import { useI18n } from "../i18n";
 import { getOverviewStatus } from "../utils/ibOverview";
+import { buildOrderTag } from "../utils/orderTag";
 
 interface IBSettings {
   id: number;
@@ -188,6 +189,7 @@ interface TradeRunExecuteOut {
 interface TradeOrder {
   id: number;
   run_id?: number | null;
+  client_order_id?: string | null;
   symbol: string;
   side: string;
   quantity: number;
@@ -316,6 +318,11 @@ export default function LiveTradePage() {
   const [accountPositionsUpdatedAt, setAccountPositionsUpdatedAt] = useState<string | null>(null);
   const [accountPositionsLoading, setAccountPositionsLoading] = useState(false);
   const [accountPositionsError, setAccountPositionsError] = useState("");
+  const [positionSelections, setPositionSelections] = useState<Record<string, boolean>>({});
+  const [positionQuantities, setPositionQuantities] = useState<Record<string, string>>({});
+  const [positionActionLoading, setPositionActionLoading] = useState(false);
+  const [positionActionError, setPositionActionError] = useState("");
+  const [positionActionResult, setPositionActionResult] = useState("");
   const [ibContractForm, setIbContractForm] = useState({
     symbols: "SPY",
     use_project_symbols: false,
@@ -577,6 +584,137 @@ export default function LiveTradePage() {
     } finally {
       setAccountPositionsLoading(false);
     }
+  };
+
+  const updatePositionSelection = (key: string, selected: boolean) => {
+    setPositionSelections((prev) => ({ ...prev, [key]: selected }));
+  };
+
+  const updatePositionQuantity = (key: string, value: string) => {
+    setPositionQuantities((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const toggleSelectAllPositions = () => {
+    if (allPositionsSelected) {
+      setPositionSelections({});
+      return;
+    }
+    const next: Record<string, boolean> = {};
+    accountPositions.forEach((row) => {
+      next[buildPositionKey(row)] = true;
+    });
+    setPositionSelections(next);
+  };
+
+  const resolvePositionQuantity = (row: IBAccountPosition, key: string) => {
+    const raw = positionQuantities[key];
+    if (raw != null && raw !== "") {
+      const parsed = Number(raw);
+      if (Number.isFinite(parsed) && parsed > 0) {
+        return parsed;
+      }
+      return null;
+    }
+    const fallback = Math.abs(row.position ?? 0);
+    return fallback > 0 ? fallback : 1;
+  };
+
+  const submitPositionOrders = async (orders: Array<Record<string, any>>) => {
+    if (!orders.length) {
+      setPositionActionError(t("trade.positionActionErrorNoSelection"));
+      return;
+    }
+    setPositionActionLoading(true);
+    setPositionActionError("");
+    setPositionActionResult("");
+    try {
+      await Promise.all(orders.map((payload) => api.post("/api/trade/orders", payload)));
+      setPositionActionResult(t("trade.positionActionResult", { count: orders.length }));
+      await loadTradeActivity();
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("trade.tradeError");
+      setPositionActionError(String(detail));
+    } finally {
+      setPositionActionLoading(false);
+    }
+  };
+
+  const handlePositionOrder = async (
+    row: IBAccountPosition,
+    side: "BUY" | "SELL",
+    index: number
+  ) => {
+    const key = buildPositionKey(row);
+    const quantity = resolvePositionQuantity(row, key);
+    if (!quantity) {
+      setPositionActionError(t("trade.positionActionErrorInvalidQty"));
+      return;
+    }
+    const confirmed = window.confirm(
+      t("trade.positionOrderConfirm", {
+        side,
+        symbol: row.symbol,
+        qty: formatNumber(quantity ?? null),
+      })
+    );
+    if (!confirmed) {
+      return;
+    }
+    const payload = {
+      client_order_id: buildOrderTag(selectedRunId ?? latestTradeRun?.id ?? 0, index),
+      symbol: row.symbol,
+      side,
+      quantity,
+      order_type: "MKT",
+      params: {
+        account: row.account || undefined,
+        currency: row.currency || undefined,
+      },
+    };
+    await submitPositionOrders([payload]);
+  };
+
+  const handleClosePositions = async (rows: IBAccountPosition[], skipConfirm = false) => {
+    const positions = rows.filter((row) => Math.abs(row.position ?? 0) > 0);
+    if (!positions.length) {
+      setPositionActionError(t("trade.positionActionErrorNoSelection"));
+      return;
+    }
+    if (!skipConfirm) {
+      const confirmed = window.confirm(
+        t("trade.positionBatchCloseConfirm", { count: positions.length })
+      );
+      if (!confirmed) {
+        return;
+      }
+    }
+    const baseRunId = selectedRunId ?? latestTradeRun?.id ?? 0;
+    const orders = positions.map((row, idx) => ({
+      client_order_id: buildOrderTag(baseRunId, idx),
+      symbol: row.symbol,
+      side: row.position >= 0 ? "SELL" : "BUY",
+      quantity: Math.abs(row.position ?? 0),
+      order_type: "MKT",
+      params: {
+        account: row.account || undefined,
+        currency: row.currency || undefined,
+      },
+    }));
+    await submitPositionOrders(orders);
+  };
+
+  const handleLiquidateAll = async () => {
+    if (!accountPositions.length) {
+      setPositionActionError(t("trade.positionActionErrorNoSelection"));
+      return;
+    }
+    const confirmed = window.confirm(
+      t("trade.positionLiquidateAllConfirm", { count: accountPositions.length })
+    );
+    if (!confirmed) {
+      return;
+    }
+    await handleClosePositions(accountPositions, true);
   };
 
   const loadIbState = async (silent = false) => {
@@ -1007,6 +1145,29 @@ export default function LiveTradePage() {
     };
   }, [ibSettings?.mode, ibSettingsForm.mode]);
 
+  useEffect(() => {
+    setPositionSelections((prev) => {
+      const next: Record<string, boolean> = {};
+      accountPositions.forEach((row) => {
+        const key = buildPositionKey(row);
+        if (prev[key]) {
+          next[key] = true;
+        }
+      });
+      return next;
+    });
+    setPositionQuantities((prev) => {
+      const next: Record<string, string> = {};
+      accountPositions.forEach((row) => {
+        const key = buildPositionKey(row);
+        if (prev[key] != null) {
+          next[key] = prev[key];
+        }
+      });
+      return next;
+    });
+  }, [accountPositions]);
+
   const filteredTradeRuns = useMemo(() => {
     if (!selectedProjectId) {
       return tradeRuns;
@@ -1199,6 +1360,17 @@ export default function LiveTradePage() {
     }
     return String(value).toUpperCase();
   };
+
+  const buildPositionKey = (row: IBAccountPosition) =>
+    `${row.symbol}::${row.account || ""}::${row.currency || ""}`;
+
+  const selectedPositions = useMemo(
+    () => accountPositions.filter((row) => positionSelections[buildPositionKey(row)]),
+    [accountPositions, positionSelections]
+  );
+
+  const allPositionsSelected =
+    accountPositions.length > 0 && selectedPositions.length === accountPositions.length;
 
   const accountSummaryOrder = [
     "NetLiquidation",
@@ -1783,7 +1955,11 @@ export default function LiveTradePage() {
             </details>
           </div>
 
-          <div className="card span-2" style={{ marginTop: "16px" }}>
+          <div
+            className="card span-2"
+            style={{ marginTop: "16px" }}
+            data-testid="account-positions-card"
+          >
             <div className="card-title">{t("trade.accountPositionsTitle")}</div>
             <div className="card-meta">{t("trade.accountPositionsMeta")}</div>
             {positionsStale && (
@@ -1817,10 +1993,59 @@ export default function LiveTradePage() {
                 </strong>
               </div>
             </div>
+            {positionActionError && (
+              <div className="form-hint danger" style={{ marginTop: "12px" }}>
+                {positionActionError}
+              </div>
+            )}
+            {positionActionResult && (
+              <div className="form-success" style={{ marginTop: "12px" }}>
+                {positionActionResult}
+              </div>
+            )}
+            <div
+              style={{
+                marginTop: "12px",
+                display: "flex",
+                gap: "10px",
+                flexWrap: "wrap",
+                alignItems: "center",
+              }}
+            >
+              <div className="meta-row">
+                <span>{t("trade.positionActionSelected", { count: selectedPositions.length })}</span>
+              </div>
+              <button
+                className="button-secondary"
+                data-testid="positions-batch-close"
+                disabled={positionActionLoading || selectedPositions.length === 0}
+                onClick={() => handleClosePositions(selectedPositions)}
+              >
+                {positionActionLoading
+                  ? t("common.actions.loading")
+                  : t("trade.positionActionBatchClose")}
+              </button>
+              <button
+                className="danger-button"
+                data-testid="positions-liquidate-all"
+                disabled={positionActionLoading || accountPositions.length === 0}
+                onClick={handleLiquidateAll}
+              >
+                {t("trade.positionActionLiquidateAll")}
+              </button>
+            </div>
             <div className="table-scroll" style={{ marginTop: "12px" }}>
-              <table className="table">
+              <table className="table" data-testid="account-positions-table">
                 <thead>
                   <tr>
+                    <th>
+                      <input
+                        type="checkbox"
+                        aria-label={t("trade.positionActionSelectAll")}
+                        checked={allPositionsSelected}
+                        onChange={toggleSelectAllPositions}
+                      />
+                    </th>
                     <th>{t("trade.positionTable.symbol")}</th>
                     <th>{t("trade.positionTable.position")}</th>
                     <th>{t("trade.positionTable.avgCost")}</th>
@@ -1830,12 +2055,30 @@ export default function LiveTradePage() {
                     <th>{t("trade.positionTable.realized")}</th>
                     <th>{t("trade.positionTable.account")}</th>
                     <th>{t("trade.positionTable.currency")}</th>
+                    <th>{t("trade.positionTable.actions")}</th>
                   </tr>
                 </thead>
                 <tbody>
                   {accountPositions.length ? (
-                    accountPositions.map((row) => (
-                      <tr key={`${row.symbol}-${row.account || ""}`}>
+                    accountPositions.map((row, index) => {
+                      const key = buildPositionKey(row);
+                      const qtyValue =
+                        positionQuantities[key] ??
+                        String(Math.abs(row.position ?? 0) || 1);
+                      return (
+                        <tr key={key}>
+                          <td>
+                            <input
+                              type="checkbox"
+                              aria-label={t("trade.positionActionSelectSymbol", {
+                                symbol: row.symbol,
+                              })}
+                              checked={!!positionSelections[key]}
+                              onChange={(event) =>
+                                updatePositionSelection(key, event.target.checked)
+                              }
+                            />
+                          </td>
                         <td>{row.symbol}</td>
                         <td>{formatNumber(row.position ?? null, 4)}</td>
                         <td>{formatNumber(row.avg_cost ?? null)}</td>
@@ -1845,11 +2088,48 @@ export default function LiveTradePage() {
                         <td>{formatNumber(row.realized_pnl ?? null)}</td>
                         <td>{row.account || t("common.none")}</td>
                         <td>{row.currency || t("common.none")}</td>
+                        <td>
+                          <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+                            <input
+                              className="form-input"
+                              style={{ width: "90px" }}
+                              type="number"
+                              min="0"
+                              step="1"
+                              value={qtyValue}
+                              onChange={(event) =>
+                                updatePositionQuantity(key, event.target.value)
+                              }
+                            />
+                            <button
+                              className="button-compact"
+                              onClick={() => handlePositionOrder(row, "BUY", index)}
+                              disabled={positionActionLoading}
+                            >
+                              {t("trade.positionActionBuy")}
+                            </button>
+                            <button
+                              className="button-compact"
+                              onClick={() => handlePositionOrder(row, "SELL", index)}
+                              disabled={positionActionLoading}
+                            >
+                              {t("trade.positionActionSell")}
+                            </button>
+                            <button
+                              className="button-compact"
+                              onClick={() => handleClosePositions([row])}
+                              disabled={positionActionLoading}
+                            >
+                              {t("trade.positionActionClose")}
+                            </button>
+                          </div>
+                        </td>
                       </tr>
-                    ))
+                    );
+                    })
                   ) : (
                     <tr>
-                      <td colSpan={9} className="empty-state">
+                      <td colSpan={11} className="empty-state">
                         {accountPositionsLoading
                           ? t("common.actions.loading")
                           : t("trade.accountPositionsEmpty")}
