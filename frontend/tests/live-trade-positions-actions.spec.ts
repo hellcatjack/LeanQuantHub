@@ -10,8 +10,9 @@ test("positions table supports select + batch close", async ({ page }) => {
   let dialogMessage = "";
   page.once("dialog", async (dialog) => {
     dialogMessage = dialog.message();
-    await dialog.dismiss();
+    await dialog.accept();
   });
   await page.getByTestId("positions-batch-close").click();
   expect(dialogMessage).toMatch(/批量平仓|Batch Close|Confirm batch close/);
+  await expect(page.getByText(/oi_/)).toBeVisible({ timeout: 30000 });
 });
