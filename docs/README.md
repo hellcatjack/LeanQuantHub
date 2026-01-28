@@ -13,8 +13,11 @@
 - 报告索引：`docs/reports/README.md`
 - 投资方介绍：`docs/reports/InvestorOverview.md`
 
+## 测试与环境
+- 统一 Python 环境：`/app/stocklean/.venv`
+- Lean .NET 测试（自动设置 PYTHONHOME/PYTHONPATH）：`/app/stocklean/scripts/run_lean_tests.sh`
+
 ## 规范与安全
 - 工程规范：`AGENTS.md`
 - 安全策略：`SECURITY.md`
 - 贡献指南：`CONTRIBUTING.md`
-

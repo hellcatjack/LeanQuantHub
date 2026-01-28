@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import inspect
+import os
 import subprocess
 from pathlib import Path
 
@@ -120,7 +121,15 @@ def _resolve_launcher() -> tuple[str, str | None]:
 def launch_execution(*, config_path: str) -> None:
     dll_path, cwd = _resolve_launcher()
     cmd = [settings.dotnet_path or "dotnet", dll_path, "--config", config_path]
-    kwargs: dict[str, object] = {"check": False}
+    env = os.environ.copy()
+    if settings.dotnet_root:
+        env["DOTNET_ROOT"] = settings.dotnet_root
+        env["PATH"] = f"{settings.dotnet_root}:{env.get('PATH', '')}"
+    if settings.python_dll:
+        env["PYTHONNET_PYDLL"] = settings.python_dll
+    if settings.lean_python_venv:
+        env["PYTHONHOME"] = settings.lean_python_venv
+    kwargs: dict[str, object] = {"check": False, "env": env}
     if cwd:
         try:
             sig = inspect.signature(subprocess_run)
@@ -137,7 +146,15 @@ def launch_execution(*, config_path: str) -> None:
 def launch_execution_async(*, config_path: str) -> int:
     dll_path, cwd = _resolve_launcher()
     cmd = [settings.dotnet_path or "dotnet", dll_path, "--config", config_path]
-    kwargs: dict[str, object] = {}
+    env = os.environ.copy()
+    if settings.dotnet_root:
+        env["DOTNET_ROOT"] = settings.dotnet_root
+        env["PATH"] = f"{settings.dotnet_root}:{env.get('PATH', '')}"
+    if settings.python_dll:
+        env["PYTHONNET_PYDLL"] = settings.python_dll
+    if settings.lean_python_venv:
+        env["PYTHONHOME"] = settings.lean_python_venv
+    kwargs: dict[str, object] = {"env": env}
     if cwd:
         try:
             sig = inspect.signature(subprocess.Popen)
