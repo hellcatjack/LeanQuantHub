@@ -10,7 +10,8 @@ from app.services.audit_log import record_audit
 from app.services.ib_settings import get_or_create_ib_settings, resolve_ib_api_mode
 from app.services.trade_direct_intent import build_direct_intent_items
 from app.services.trade_orders import create_trade_order
-from app.services.lean_execution import build_execution_config, launch_execution
+from app.services.ib_client_id_pool import ClientIdPoolExhausted, attach_lease_pid, lease_client_id
+from app.services.lean_execution import build_execution_config, launch_execution_async
 from app.schemas import TradeDirectOrderOut
 
 
@@ -95,18 +96,29 @@ def submit_direct_order(session, payload: dict[str, Any]) -> TradeDirectOrderOut
         encoding="utf-8",
     )
 
+    output_dir = Path(settings.data_root or "/data/share/stock/data") / "lean_bridge" / f"direct_{order.id}"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        lease = lease_client_id(session, order_id=order.id, mode=mode, output_dir=str(output_dir))
+    except ClientIdPoolExhausted as exc:
+        raise ValueError("client_id_busy") from exc
+
     config = build_execution_config(
         intent_path=str(intent_path),
         brokerage="InteractiveBrokersBrokerage",
         project_id=project_id,
         mode=mode,
+        client_id=lease.client_id,
+        lean_bridge_output_dir=str(output_dir),
     )
     exec_dir = Path(settings.artifact_root) / "lean_execution"
     exec_dir.mkdir(parents=True, exist_ok=True)
     config_path = exec_dir / f"direct_order_{order.id}_config.json"
     config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    launch_execution(config_path=str(config_path))
+    pid = launch_execution_async(config_path=str(config_path))
+    attach_lease_pid(session, lease_token=lease.lease_token or "", pid=pid)
 
     probe_path = exec_dir / f"direct_order_{order.id}.json"
     probe_path.write_text(

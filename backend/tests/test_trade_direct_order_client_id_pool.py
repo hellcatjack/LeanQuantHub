@@ -43,6 +43,7 @@ def test_submit_direct_order_allocates_client_id(monkeypatch, tmp_path):
         "side": "BUY",
         "quantity": 1,
         "order_type": "MKT",
+        "params": {"client_order_id_auto": True},
     }
     result = trade_direct_order.submit_direct_order(session, payload)
     assert result.order_id > 0

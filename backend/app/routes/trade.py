@@ -338,7 +338,7 @@ def create_direct_trade_order_route(payload: TradeDirectOrderRequest):
             detail = str(exc)
             if detail == "live_confirm_required":
                 raise HTTPException(status_code=403, detail=detail) from exc
-            if detail in {"ib_api_mode_disabled", "ib_settings_missing"}:
+            if detail in {"ib_api_mode_disabled", "ib_settings_missing", "client_id_busy"}:
                 raise HTTPException(status_code=409, detail=detail) from exc
             raise HTTPException(status_code=400, detail=detail) from exc
         return result
