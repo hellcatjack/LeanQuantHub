@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     ml_python_path: str = ""
     ib_client_id_base: int = 1000
     ib_client_id_live_offset: int = 5000
+    ib_client_id_pool_base: int = 2000
+    ib_client_id_pool_size: int = 32
+    ib_client_id_lease_ttl_seconds: int = 300
+    lean_bridge_heartbeat_timeout_seconds: int = 60
     market_timezone: str = "America/New_York"
     market_session_open: str = "09:30"
     market_session_close: str = "16:00"

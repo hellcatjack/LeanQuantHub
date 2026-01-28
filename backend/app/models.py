@@ -614,6 +614,24 @@ class IBConnectionState(Base):
     )
 
 
+class IBClientIdPool(Base):
+    __tablename__ = "ib_client_id_pool"
+
+    client_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    status: Mapped[str] = mapped_column(String(16), default="free")
+    order_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_dir: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    lease_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    acquired_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_heartbeat: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    released_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    release_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
 class IBContractCache(Base):
     __tablename__ = "ib_contract_cache"
     __table_args__ = (
