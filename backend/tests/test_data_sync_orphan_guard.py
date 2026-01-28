@@ -21,6 +21,18 @@ def test_orphan_guard_load_override(tmp_path, monkeypatch):
     assert cfg["enabled"] is False
     assert cfg["dry_run"] is True
 
+
+def test_orphan_guard_env_overrides_settings(tmp_path, monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "data_root", "/tmp/should-not-use")
+    monkeypatch.setenv("DATA_ROOT", str(tmp_path))
+    cfg_path = tmp_path / "config" / "data_sync_orphan_guard.json"
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(json.dumps({"enabled": False}), encoding="utf-8")
+    cfg = load_data_sync_orphan_guard_config()
+    assert cfg["enabled"] is False
+
 from app.routes.datasets import _find_sync_job_evidence, _should_orphan_candidates
 
 

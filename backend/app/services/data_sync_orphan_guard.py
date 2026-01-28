@@ -15,11 +15,11 @@ DEFAULT_ORPHAN_GUARD = {
 
 
 def _resolve_data_root() -> Path:
-    if settings.data_root:
-        return Path(settings.data_root)
     env_root = os.getenv("DATA_ROOT")
     if env_root:
         return Path(env_root)
+    if settings.data_root:
+        return Path(settings.data_root)
     return Path("/data/share/stock/data")
 
 
