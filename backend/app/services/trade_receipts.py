@@ -8,6 +8,8 @@ from typing import Iterable
 
 from app.core.config import settings
 from app.models import TradeFill, TradeOrder
+from app.services.ib_orders import apply_fill_to_order
+from app.services.trade_orders import update_trade_order_status
 from app.services.lean_bridge_paths import resolve_bridge_root
 
 
@@ -83,6 +85,26 @@ def _extract_direct_order_id(event_path: Path) -> int | None:
         return None
 
 
+def _extract_order_id_from_tag(tag: str | None) -> int | None:
+    text = str(tag or "").strip()
+    if not text:
+        return None
+    if text.startswith("direct:"):
+        raw = text[len("direct:") :]
+        try:
+            return int(raw)
+        except ValueError:
+            return None
+    return None
+
+
+def _resolve_order_id(event_path: Path, payload: dict) -> int | None:
+    direct_id = _extract_direct_order_id(event_path)
+    if direct_id is not None:
+        return direct_id
+    return _extract_order_id_from_tag(payload.get("tag"))
+
+
 def _lean_kind(status: str, filled: float | None) -> str:
     if filled and float(filled) > 0:
         return "fill"
@@ -103,6 +125,189 @@ def _iter_event_files(root: Path) -> Iterable[Path]:
     return root.glob("**/execution_events.jsonl")
 
 
+def _fill_exists(
+    session,
+    *,
+    order_id: int,
+    fill_qty: float,
+    fill_price: float,
+    event_time_iso: str,
+) -> bool:
+    fills = session.query(TradeFill).filter(TradeFill.order_id == order_id).all()
+    for fill in fills:
+        params = fill.params or {}
+        if event_time_iso and params.get("event_time") == event_time_iso:
+            return True
+        if float(fill.fill_quantity) == float(fill_qty) and float(fill.fill_price) == float(fill_price):
+            if event_time_iso:
+                if _to_iso(fill.fill_time or fill.created_at) == event_time_iso:
+                    return True
+            else:
+                return True
+    return False
+
+
+def _update_order_params(order: TradeOrder, payload: dict) -> None:
+    params = dict(order.params or {})
+    params.update(payload)
+    order.params = params
+
+
+def _append_warning(warnings: list[str], code: str) -> None:
+    if code not in warnings:
+        warnings.append(code)
+
+
+def _ingest_lean_events(session, warnings: list[str]) -> None:
+    bridge_root = resolve_bridge_root()
+    if not bridge_root.exists():
+        _append_warning(warnings, "lean_logs_missing")
+        return
+
+    seen_fill_keys: set[str] = set()
+
+    for event_path in _iter_event_files(bridge_root):
+        try:
+            raw_lines = event_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            _append_warning(warnings, "lean_logs_read_error")
+            continue
+        for line in raw_lines:
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError:
+                _append_warning(warnings, "lean_logs_parse_error")
+                continue
+
+            order_id = _resolve_order_id(event_path, payload)
+            if order_id is None:
+                _append_warning(warnings, "lean_event_missing_order")
+                continue
+
+            order = session.get(TradeOrder, order_id)
+            if order is None:
+                _append_warning(warnings, "lean_event_order_not_found")
+                continue
+
+            status = _normalize_status(payload.get("status"))
+            filled = payload.get("filled")
+            fill_qty = float(filled or 0.0)
+            fill_price = payload.get("fill_price")
+            fill_price_value = float(fill_price) if fill_price is not None else 0.0
+            event_time = _parse_time(payload.get("time")) or datetime.utcnow().replace(tzinfo=timezone.utc)
+            event_time_iso = _to_iso(event_time)
+            event_tag = payload.get("tag")
+            reason = payload.get("reason") or payload.get("message")
+
+            if status in {"SUBMITTED", "NEW"}:
+                if str(order.status or "").strip().upper() in {"NEW", "SUBMITTED"}:
+                    try:
+                        update_trade_order_status(
+                            session,
+                            order,
+                            {
+                                "status": "SUBMITTED",
+                                "params": {
+                                    "event_time": event_time_iso,
+                                    "event_status": status,
+                                    "event_source": "lean",
+                                    "event_tag": event_tag,
+                                },
+                            },
+                        )
+                    except ValueError:
+                        _append_warning(warnings, "lean_event_status_transition")
+                continue
+
+            if status in {"CANCELED", "CANCELLED"}:
+                if str(order.status or "").strip().upper() not in {"CANCELED", "CANCELLED", "REJECTED"}:
+                    try:
+                        update_trade_order_status(
+                            session,
+                            order,
+                            {
+                                "status": "CANCELED",
+                                "params": {
+                                    "event_time": event_time_iso,
+                                    "event_status": status,
+                                    "event_source": "lean",
+                                    "event_tag": event_tag,
+                                },
+                            },
+                        )
+                    except ValueError:
+                        _append_warning(warnings, "lean_event_status_transition")
+                continue
+
+            if status in {"REJECTED", "INVALID"}:
+                if str(order.status or "").strip().upper() != "REJECTED":
+                    try:
+                        update_payload = {
+                            "status": "REJECTED",
+                            "params": {
+                                "event_time": event_time_iso,
+                                "event_status": status,
+                                "event_source": "lean",
+                                "event_tag": event_tag,
+                            },
+                        }
+                        if reason:
+                            update_payload["params"]["reason"] = reason
+                        update_trade_order_status(session, order, update_payload)
+                    except ValueError:
+                        _append_warning(warnings, "lean_event_status_transition")
+                continue
+
+            if status in {"FILLED", "PARTIALLYFILLED", "PARTIAL"} or fill_qty > 0:
+                fill_key = f"{order_id}:{fill_qty}:{fill_price_value}:{event_time_iso}"
+                if fill_key in seen_fill_keys:
+                    continue
+                seen_fill_keys.add(fill_key)
+                if _fill_exists(
+                    session,
+                    order_id=order_id,
+                    fill_qty=fill_qty,
+                    fill_price=fill_price_value,
+                    event_time_iso=event_time_iso,
+                ):
+                    continue
+                if str(order.status or "").strip().upper() == "FILLED":
+                    _append_warning(warnings, "lean_event_duplicate_fill")
+                    continue
+                fill = apply_fill_to_order(
+                    session,
+                    order,
+                    fill_qty=fill_qty,
+                    fill_price=fill_price_value,
+                    fill_time=_ensure_aware(event_time) or datetime.utcnow().replace(tzinfo=timezone.utc),
+                )
+                fill_params = dict(fill.params or {})
+                fill_params.update(
+                    {
+                        "event_time": event_time_iso,
+                        "event_source": "lean",
+                        "event_tag": event_tag,
+                    }
+                )
+                if reason:
+                    fill_params["reason"] = reason
+                fill.params = fill_params
+                _update_order_params(
+                    order,
+                    {
+                        "event_time": event_time_iso,
+                        "event_status": status,
+                        "event_source": "lean",
+                        "event_tag": event_tag,
+                    },
+                )
+                session.commit()
+
+
+
 def list_trade_receipts(
     session,
     *,
@@ -111,6 +316,8 @@ def list_trade_receipts(
     mode: str = "all",
 ) -> TradeReceiptPage:
     warnings: list[str] = []
+
+    _ingest_lean_events(session, warnings)
 
     order_rows = session.query(TradeOrder).order_by(TradeOrder.created_at.desc()).all()
     order_map = {order.id: order for order in order_rows}
@@ -171,13 +378,13 @@ def list_trade_receipts(
 
     bridge_root = resolve_bridge_root()
     if not bridge_root.exists():
-        warnings.append("lean_logs_missing")
+        _append_warning(warnings, "lean_logs_missing")
     else:
         for event_path in _iter_event_files(bridge_root):
             try:
                 raw_lines = event_path.read_text(encoding="utf-8").splitlines()
             except OSError:
-                warnings.append("lean_logs_read_error")
+                _append_warning(warnings, "lean_logs_read_error")
                 continue
             for line in raw_lines:
                 text = line.strip()
@@ -186,13 +393,13 @@ def list_trade_receipts(
                 try:
                     payload = json.loads(text)
                 except json.JSONDecodeError:
-                    warnings.append("lean_logs_parse_error")
+                    _append_warning(warnings, "lean_logs_parse_error")
                     continue
                 status = _normalize_status(payload.get("status"))
                 filled = payload.get("filled")
                 kind = _lean_kind(status, filled)
                 event_time = _parse_time(payload.get("time"))
-                order_id = _extract_direct_order_id(event_path)
+                order_id = _resolve_order_id(event_path, payload)
                 if kind == "fill" and order_id is not None:
                     key = (
                         order_id,
