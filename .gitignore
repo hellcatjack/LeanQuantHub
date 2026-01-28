@@ -18,12 +18,14 @@ deploy/.env
 node_modules/
 frontend/node_modules/
 frontend/dist/
+frontend/test-results/
 *.tsbuildinfo
 
 # Logs & artifacts
 logs/
 artifacts/
 *.log
+LeanBridgeSmokeAlgorithm*
 
 # Data outputs
 /data/
