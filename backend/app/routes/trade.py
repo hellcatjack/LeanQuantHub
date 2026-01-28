@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 from sqlalchemy.exc import IntegrityError
 
 from app.db import get_session
@@ -314,6 +314,7 @@ def execute_trade_run_route(run_id: int, payload: TradeRunExecuteRequest):
 
 @router.get("/orders", response_model=list[TradeOrderOut])
 def list_trade_orders(
+    response: Response,
     limit: int = Query(20, ge=1, le=200),
     offset: int = Query(0, ge=0),
     run_id: int | None = None,
@@ -322,6 +323,8 @@ def list_trade_orders(
         query = session.query(TradeOrder).order_by(TradeOrder.created_at.desc())
         if run_id is not None:
             query = query.filter(TradeOrder.run_id == run_id)
+        total = query.order_by(None).count()
+        response.headers["X-Total-Count"] = str(total)
         orders = query.offset(offset).limit(limit).all()
         return [TradeOrderOut.model_validate(order, from_attributes=True) for order in orders]
 
