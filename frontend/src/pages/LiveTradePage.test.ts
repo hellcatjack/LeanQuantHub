@@ -32,6 +32,11 @@ describe("LiveTradePage", () => {
     expect(html).toContain("trade.orderTable.clientOrderId");
   });
 
+  it("renders orders pagination controls", () => {
+    const html = ReactDOMServer.renderToString(React.createElement(LiveTradePage));
+    expect(html).toContain("pagination.pageSize");
+  });
+
   it("renders translated account summary tags with i18n provider", () => {
     const html = ReactDOMServer.renderToString(
       React.createElement(

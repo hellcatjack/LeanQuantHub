@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import TopBar from "../components/TopBar";
 import IdChip from "../components/IdChip";
+import PaginationBar from "../components/PaginationBar";
 import { api } from "../api";
 import { useI18n } from "../i18n";
 import { resolveAccountSummaryLabel } from "../utils/accountSummary";
@@ -374,6 +375,9 @@ export default function LiveTradePage() {
   const [marketSnapshotError, setMarketSnapshotError] = useState("");
   const [tradeRuns, setTradeRuns] = useState<TradeRun[]>([]);
   const [tradeOrders, setTradeOrders] = useState<TradeOrder[]>([]);
+  const [ordersPage, setOrdersPage] = useState(1);
+  const [ordersPageSize, setOrdersPageSize] = useState(50);
+  const [ordersTotal, setOrdersTotal] = useState(0);
   const [guardState, setGuardState] = useState<TradeGuardState | null>(null);
   const [tradeSettings, setTradeSettings] = useState<TradeSettings | null>(null);
   const [tradeSettingsError, setTradeSettingsError] = useState("");
@@ -1001,17 +1005,24 @@ export default function LiveTradePage() {
     }
   };
 
-  const loadTradeActivity = async () => {
+  const loadTradeActivity = async (
+    page: number = ordersPage,
+    pageSize: number = ordersPageSize
+  ) => {
     setTradeError("");
     setGuardError("");
     try {
       const [runsRes, ordersRes] = await Promise.all([
         api.get<TradeRun[]>("/api/trade/runs", { params: { limit: 5, offset: 0 } }),
-        api.get<TradeOrder[]>("/api/trade/orders", { params: { limit: 5, offset: 0 } }),
+        api.get<TradeOrder[]>("/api/trade/orders", {
+          params: { limit: pageSize, offset: (page - 1) * pageSize },
+        }),
       ]);
       const runs = runsRes.data || [];
       setTradeRuns(runs);
       setTradeOrders(ordersRes.data || []);
+      const totalHeader = Number(ordersRes.headers?.["x-total-count"]);
+      setOrdersTotal(Number.isFinite(totalHeader) ? totalHeader : 0);
       const latestRun = runs[0];
       if (latestRun?.project_id) {
         await loadTradeGuard(latestRun.project_id, latestRun.mode || "paper");
@@ -1022,6 +1033,7 @@ export default function LiveTradePage() {
       setTradeError(t("trade.tradeError"));
       setTradeRuns([]);
       setTradeOrders([]);
+      setOrdersTotal(0);
       setGuardState(null);
     }
   };
@@ -1036,6 +1048,17 @@ export default function LiveTradePage() {
       setTradeSettingsError(String(detail));
       setTradeSettings(null);
     }
+  };
+
+  const handleOrdersPageChange = (page: number) => {
+    setOrdersPage(page);
+    loadTradeActivity(page, ordersPageSize);
+  };
+
+  const handleOrdersPageSizeChange = (size: number) => {
+    setOrdersPageSize(size);
+    setOrdersPage(1);
+    loadTradeActivity(1, size);
   };
 
   const loadTradeRunData = async (runId: number) => {
@@ -2999,40 +3022,50 @@ export default function LiveTradePage() {
             </button>
           </div>
           {detailTab === "orders" ? (
-            <table className="table" style={{ marginTop: "12px" }}>
-              <thead>
-                <tr>
-                  <th>{t("trade.orderTable.id")}</th>
-                  <th>{t("trade.orderTable.clientOrderId")}</th>
-                  <th>{t("trade.orderTable.symbol")}</th>
-                  <th>{t("trade.orderTable.side")}</th>
-                  <th>{t("trade.orderTable.qty")}</th>
-                  <th>{t("trade.orderTable.status")}</th>
-                  <th>{t("trade.orderTable.createdAt")}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(runDetail?.orders || tradeOrders).length ? (
-                  (runDetail?.orders || tradeOrders).map((order) => (
-                    <tr key={order.id}>
-                      <td>#{order.id}</td>
-                      <td>{order.client_order_id || t("common.none")}</td>
-                      <td>{order.symbol || t("common.none")}</td>
-                      <td>{formatSide(order.side)}</td>
-                      <td>{order.quantity ?? t("common.none")}</td>
-                      <td>{formatStatus(order.status)}</td>
-                      <td>{formatDateTime(order.created_at)}</td>
-                    </tr>
-                  ))
-                ) : (
+            <>
+              <table className="table" style={{ marginTop: "12px" }}>
+                <thead>
                   <tr>
-                    <td colSpan={7} className="empty-state">
-                      {t("trade.orderEmpty")}
-                    </td>
+                    <th>{t("trade.orderTable.id")}</th>
+                    <th>{t("trade.orderTable.clientOrderId")}</th>
+                    <th>{t("trade.orderTable.symbol")}</th>
+                    <th>{t("trade.orderTable.side")}</th>
+                    <th>{t("trade.orderTable.qty")}</th>
+                    <th>{t("trade.orderTable.status")}</th>
+                    <th>{t("trade.orderTable.createdAt")}</th>
                   </tr>
-                )}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {tradeOrders.length ? (
+                    tradeOrders.map((order) => (
+                      <tr key={order.id}>
+                        <td>#{order.id}</td>
+                        <td>{order.client_order_id || t("common.none")}</td>
+                        <td>{order.symbol || t("common.none")}</td>
+                        <td>{formatSide(order.side)}</td>
+                        <td>{order.quantity ?? t("common.none")}</td>
+                        <td>{formatStatus(order.status)}</td>
+                        <td>{formatDateTime(order.created_at)}</td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan={7} className="empty-state">
+                        {t("trade.orderEmpty")}
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+              <PaginationBar
+                page={ordersPage}
+                pageSize={ordersPageSize}
+                total={ordersTotal}
+                onPageChange={handleOrdersPageChange}
+                onPageSizeChange={handleOrdersPageSizeChange}
+                pageSizeOptions={[50, 100, 200]}
+              />
+            </>
           ) : (
             <table className="table" style={{ marginTop: "12px" }}>
               <thead>
