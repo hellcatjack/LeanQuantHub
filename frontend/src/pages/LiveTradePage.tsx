@@ -3,6 +3,7 @@ import TopBar from "../components/TopBar";
 import IdChip from "../components/IdChip";
 import { api } from "../api";
 import { useI18n } from "../i18n";
+import { resolveAccountSummaryLabel } from "../utils/accountSummary";
 import { getOverviewStatus } from "../utils/ibOverview";
 import { buildOrderTag } from "../utils/orderTag";
 
@@ -280,7 +281,7 @@ const normalizeSymbols = (raw: string) =>
     .filter((item) => item.length > 0);
 
 export default function LiveTradePage() {
-  const { t, formatDateTime } = useI18n();
+  const { t, formatDateTime, getMessage } = useI18n();
   const [ibSettings, setIbSettings] = useState<IBSettings | null>(null);
   const [ibSettingsForm, setIbSettingsForm] = useState({
     host: "127.0.0.1",
@@ -1474,6 +1475,11 @@ export default function LiveTradePage() {
     }));
   }, [accountSummary, accountSummaryOrder]);
 
+  const accountSummaryTagMap = useMemo(
+    () => getMessage("trade.accountSummaryTags"),
+    [getMessage]
+  );
+
   const accountSummaryFullItems = useMemo(() => {
     const items = accountSummaryFull?.items || {};
     return Object.entries(items).sort(([a], [b]) => a.localeCompare(b));
@@ -1901,7 +1907,9 @@ export default function LiveTradePage() {
                   key={item.key}
                   data-testid={`account-summary-${item.key}`}
                 >
-                  <div className="overview-label">{item.key}</div>
+                  <div className="overview-label">
+                    {resolveAccountSummaryLabel(item.key, accountSummaryTagMap)}
+                  </div>
                   <div
                     className="overview-value"
                     data-testid={`account-summary-${item.key}-value`}
@@ -1956,7 +1964,7 @@ export default function LiveTradePage() {
                   {accountSummaryFullItems.length ? (
                     accountSummaryFullItems.map(([key, value]) => (
                       <tr key={key}>
-                        <td>{key}</td>
+                        <td>{resolveAccountSummaryLabel(key, accountSummaryTagMap)}</td>
                         <td>{formatAccountValue(value)}</td>
                       </tr>
                     ))

@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOMServer from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import { I18nProvider } from "../i18n";
 import LiveTradePage from "./LiveTradePage";
 
 describe("LiveTradePage", () => {
@@ -29,5 +30,16 @@ describe("LiveTradePage", () => {
   it("renders client order id column", () => {
     const html = ReactDOMServer.renderToString(React.createElement(LiveTradePage));
     expect(html).toContain("trade.orderTable.clientOrderId");
+  });
+
+  it("renders translated account summary tags with i18n provider", () => {
+    const html = ReactDOMServer.renderToString(
+      React.createElement(
+        I18nProvider,
+        null,
+        React.createElement(LiveTradePage)
+      )
+    );
+    expect(html).toContain("净清算值");
   });
 });
