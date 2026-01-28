@@ -17,6 +17,8 @@ from app.schemas import (
     TradeRunExecuteRequest,
     TradeRunOut,
     TradeFillDetailOut,
+    TradeReceiptOut,
+    TradeReceiptPageOut,
     TradeSettingsOut,
     TradeSettingsUpdate,
     TradeDirectOrderRequest,
@@ -34,6 +36,7 @@ from app.services.trade_monitor import build_trade_overview
 from app.services.trade_executor import execute_trade_run
 from app.services.trade_direct_order import submit_direct_order
 from app.services.trade_orders import create_trade_order, update_trade_order_status
+from app.services.trade_receipts import list_trade_receipts as build_trade_receipts
 from app.services.trade_run_summary import build_last_update_at, build_symbol_summary, build_trade_run_detail
 
 router = APIRouter(prefix="/api/trade", tags=["trade"])
@@ -327,6 +330,26 @@ def list_trade_orders(
         response.headers["X-Total-Count"] = str(total)
         orders = query.offset(offset).limit(limit).all()
         return [TradeOrderOut.model_validate(order, from_attributes=True) for order in orders]
+
+
+@router.get("/receipts", response_model=TradeReceiptPageOut)
+def list_trade_receipts(
+    response: Response,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    mode: str = "all",
+):
+    mode_value = str(mode or "all").strip().lower()
+    if mode_value not in {"all", "orders", "fills"}:
+        raise HTTPException(status_code=422, detail="mode_invalid")
+    with get_session() as session:
+        page = build_trade_receipts(session, limit=limit, offset=offset, mode=mode_value)
+        response.headers["X-Total-Count"] = str(page.total)
+        return TradeReceiptPageOut(
+            items=[TradeReceiptOut.model_validate(item, from_attributes=True) for item in page.items],
+            total=page.total,
+            warnings=page.warnings,
+        )
 
 
 @router.post("/orders/direct", response_model=TradeDirectOrderOut)

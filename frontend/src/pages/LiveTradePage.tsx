@@ -211,6 +211,27 @@ interface TradeFillDetail {
   exchange?: string | null;
 }
 
+interface TradeReceipt {
+  time?: string | null;
+  kind: string;
+  order_id?: number | null;
+  client_order_id?: string | null;
+  symbol?: string | null;
+  side?: string | null;
+  quantity?: number | null;
+  filled_quantity?: number | null;
+  fill_price?: number | null;
+  exec_id?: string | null;
+  status?: string | null;
+  source: string;
+}
+
+interface TradeReceiptPage {
+  items: TradeReceipt[];
+  total: number;
+  warnings?: string[];
+}
+
 interface TradeRunDetail {
   run: TradeRun;
   orders: TradeOrder[];
@@ -378,6 +399,13 @@ export default function LiveTradePage() {
   const [ordersPage, setOrdersPage] = useState(1);
   const [ordersPageSize, setOrdersPageSize] = useState(50);
   const [ordersTotal, setOrdersTotal] = useState(0);
+  const [tradeReceipts, setTradeReceipts] = useState<TradeReceipt[]>([]);
+  const [receiptsPage, setReceiptsPage] = useState(1);
+  const [receiptsPageSize, setReceiptsPageSize] = useState(50);
+  const [receiptsTotal, setReceiptsTotal] = useState(0);
+  const [receiptsWarnings, setReceiptsWarnings] = useState<string[]>([]);
+  const [receiptsLoading, setReceiptsLoading] = useState(false);
+  const [receiptsError, setReceiptsError] = useState("");
   const [guardState, setGuardState] = useState<TradeGuardState | null>(null);
   const [tradeSettings, setTradeSettings] = useState<TradeSettings | null>(null);
   const [tradeSettingsError, setTradeSettingsError] = useState("");
@@ -385,7 +413,7 @@ export default function LiveTradePage() {
   const [runDetail, setRunDetail] = useState<TradeRunDetail | null>(null);
   const [symbolSummary, setSymbolSummary] = useState<TradeSymbolSummary[]>([]);
   const [symbolSummaryUpdatedAt, setSymbolSummaryUpdatedAt] = useState<string | null>(null);
-  const [detailTab, setDetailTab] = useState<"orders" | "fills">("orders");
+  const [detailTab, setDetailTab] = useState<"orders" | "fills" | "receipts">("orders");
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState("");
   const [executeForm, setExecuteForm] = useState({
@@ -1038,6 +1066,33 @@ export default function LiveTradePage() {
     }
   };
 
+  const loadTradeReceipts = async (
+    page: number = receiptsPage,
+    pageSize: number = receiptsPageSize
+  ) => {
+    setReceiptsLoading(true);
+    setReceiptsError("");
+    setReceiptsWarnings([]);
+    try {
+      const res = await api.get<TradeReceiptPage>("/api/trade/receipts", {
+        params: { limit: pageSize, offset: (page - 1) * pageSize },
+      });
+      setTradeReceipts(res.data?.items || []);
+      setReceiptsWarnings(res.data?.warnings || []);
+      const totalHeader = Number(res.headers?.["x-total-count"]);
+      const total = Number.isFinite(totalHeader) ? totalHeader : Number(res.data?.total || 0);
+      setReceiptsTotal(total);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("trade.receiptsLoadError");
+      setReceiptsError(String(detail));
+      setTradeReceipts([]);
+      setReceiptsTotal(0);
+      setReceiptsWarnings([]);
+    } finally {
+      setReceiptsLoading(false);
+    }
+  };
+
   const loadTradeSettings = async () => {
     try {
       const res = await api.get<TradeSettings>("/api/trade/settings");
@@ -1059,6 +1114,17 @@ export default function LiveTradePage() {
     setOrdersPageSize(size);
     setOrdersPage(1);
     loadTradeActivity(1, size);
+  };
+
+  const handleReceiptsPageChange = (page: number) => {
+    setReceiptsPage(page);
+    loadTradeReceipts(page, receiptsPageSize);
+  };
+
+  const handleReceiptsPageSizeChange = (size: number) => {
+    setReceiptsPageSize(size);
+    setReceiptsPage(1);
+    loadTradeReceipts(1, size);
   };
 
   const loadTradeRunData = async (runId: number) => {
@@ -1396,6 +1462,38 @@ export default function LiveTradePage() {
     }
     return String(value).toUpperCase();
   };
+
+  const formatReceiptKind = (value?: string | null) => {
+    if (!value) {
+      return t("common.none");
+    }
+    const normalized = String(value).toLowerCase();
+    const key = `trade.receiptKind.${normalized}`;
+    const translated = t(key);
+    return translated === key ? String(value).toUpperCase() : translated;
+  };
+
+  const formatReceiptSource = (value?: string | null) => {
+    if (!value) {
+      return t("common.none");
+    }
+    const normalized = String(value).toLowerCase();
+    const key = `trade.receiptSource.${normalized}`;
+    const translated = t(key);
+    return translated === key ? String(value).toUpperCase() : translated;
+  };
+
+  const receiptWarningLabels = useMemo(() => {
+    if (!receiptsWarnings.length) {
+      return [];
+    }
+    const mapping: Record<string, string> = {
+      lean_logs_missing: t("trade.receiptWarning.leanLogsMissing"),
+      lean_logs_read_error: t("trade.receiptWarning.leanLogsReadError"),
+      lean_logs_parse_error: t("trade.receiptWarning.leanLogsParseError"),
+    };
+    return receiptsWarnings.map((code) => mapping[code] || code);
+  }, [receiptsWarnings, t]);
 
   const buildPositionKey = (row: IBAccountPosition) =>
     `${row.symbol}::${row.account || ""}::${row.currency || ""}`;
@@ -3020,6 +3118,15 @@ export default function LiveTradePage() {
             >
               {t("trade.fillsTitle")}
             </button>
+            <button
+              className={detailTab === "receipts" ? "button-primary" : "button-secondary"}
+              onClick={() => {
+                setDetailTab("receipts");
+                loadTradeReceipts();
+              }}
+            >
+              {t("trade.receiptsTitle")}
+            </button>
           </div>
           {detailTab === "orders" ? (
             <>
@@ -3066,7 +3173,7 @@ export default function LiveTradePage() {
                 pageSizeOptions={[50, 100, 200]}
               />
             </>
-          ) : (
+          ) : detailTab === "fills" ? (
             <table className="table" style={{ marginTop: "12px" }}>
               <thead>
                 <tr>
@@ -3101,6 +3208,69 @@ export default function LiveTradePage() {
                 )}
               </tbody>
             </table>
+          ) : (
+            <>
+              {receiptsError && <div className="form-hint">{receiptsError}</div>}
+              {receiptWarningLabels.map((label, index) => (
+                <div key={`${label}-${index}`} className="form-hint">
+                  {label}
+                </div>
+              ))}
+              <table
+                className="table"
+                style={{ marginTop: "12px" }}
+                data-testid="trade-receipts-table"
+              >
+                <thead>
+                  <tr>
+                    <th>{t("trade.receiptTable.time")}</th>
+                    <th>{t("trade.receiptTable.kind")}</th>
+                    <th>{t("trade.receiptTable.orderId")}</th>
+                    <th>{t("trade.receiptTable.clientOrderId")}</th>
+                    <th>{t("trade.receiptTable.symbol")}</th>
+                    <th>{t("trade.receiptTable.side")}</th>
+                    <th>{t("trade.receiptTable.qty")}</th>
+                    <th>{t("trade.receiptTable.filledQty")}</th>
+                    <th>{t("trade.receiptTable.fillPrice")}</th>
+                    <th>{t("trade.receiptTable.status")}</th>
+                    <th>{t("trade.receiptTable.source")}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {tradeReceipts.length ? (
+                    tradeReceipts.map((receipt, index) => (
+                      <tr key={`${receipt.source}-${receipt.order_id || "na"}-${index}`}>
+                        <td>{receipt.time ? formatDateTime(receipt.time) : t("common.none")}</td>
+                        <td>{formatReceiptKind(receipt.kind)}</td>
+                        <td>{receipt.order_id ? `#${receipt.order_id}` : t("common.none")}</td>
+                        <td>{receipt.client_order_id || t("common.none")}</td>
+                        <td>{receipt.symbol || t("common.none")}</td>
+                        <td>{formatSide(receipt.side)}</td>
+                        <td>{formatNumber(receipt.quantity ?? null)}</td>
+                        <td>{formatNumber(receipt.filled_quantity ?? null)}</td>
+                        <td>{formatNumber(receipt.fill_price ?? null)}</td>
+                        <td>{receipt.status ? formatStatus(receipt.status) : t("common.none")}</td>
+                        <td>{formatReceiptSource(receipt.source)}</td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan={11} className="empty-state">
+                        {receiptsLoading ? t("common.actions.loading") : t("trade.receiptsEmpty")}
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+              <PaginationBar
+                page={receiptsPage}
+                pageSize={receiptsPageSize}
+                total={receiptsTotal}
+                onPageChange={handleReceiptsPageChange}
+                onPageSizeChange={handleReceiptsPageSizeChange}
+                pageSizeOptions={[50, 100, 200]}
+              />
+            </>
           )}
         </div>
       </div>

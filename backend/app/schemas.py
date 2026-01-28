@@ -1831,6 +1831,30 @@ class TradeFillDetailOut(BaseModel):
         from_attributes = True
 
 
+class TradeReceiptOut(BaseModel):
+    time: datetime | None = None
+    kind: str
+    order_id: int | None = None
+    client_order_id: str | None = None
+    symbol: str | None = None
+    side: str | None = None
+    quantity: float | None = None
+    filled_quantity: float | None = None
+    fill_price: float | None = None
+    exec_id: str | None = None
+    status: str | None = None
+    source: str
+
+    class Config:
+        from_attributes = True
+
+
+class TradeReceiptPageOut(BaseModel):
+    items: list[TradeReceiptOut]
+    total: int
+    warnings: list[str] = []
+
+
 class TradeRunDetailOut(BaseModel):
     run: TradeRunOut
     orders: list[TradeOrderOut]
