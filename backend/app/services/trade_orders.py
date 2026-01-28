@@ -35,6 +35,25 @@ def _normalize_order_type(value: str) -> str:
     return str(value or "").strip().upper()
 
 
+def _base36(value: int) -> str:
+    if value < 0:
+        raise ValueError("base36_negative")
+    digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    if value == 0:
+        return "0"
+    result = []
+    num = value
+    while num > 0:
+        num, rem = divmod(num, 36)
+        result.append(digits[rem])
+    return "".join(reversed(result))
+
+
+def build_manual_client_order_id(base: str, seq_id: int) -> str:
+    suffix = _base36(int(seq_id))
+    return f"{base}-{suffix}"
+
+
 def validate_transition(current: str, target: str) -> None:
     if current == target:
         return
