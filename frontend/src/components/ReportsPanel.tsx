@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { api } from "../api";
+import { api, apiBaseUrl } from "../api";
 import PaginationBar from "./PaginationBar";
 import BacktestChartPanel from "./BacktestChartPanel";
 import { useI18n } from "../i18n";
@@ -24,8 +24,6 @@ interface CompareItem {
 }
 
 type ChartPoint = { x: number; y: number };
-
-const apiBase = import.meta.env.VITE_API_BASE_URL || "http://localhost:8021";
 
 const extractSeries = (data: any, chartName: string, seriesName: string): ChartPoint[] => {
   const charts = data?.charts || {};
@@ -204,7 +202,7 @@ export default function ReportsPanel() {
         setDrawdownPoints([]);
         return;
       }
-      const fileRes = await fetch(`${apiBase}/api/reports/${resultReport.id}/file`);
+      const fileRes = await fetch(`${apiBaseUrl}/api/reports/${resultReport.id}/file`);
       const payload = await fileRes.json();
       const equity = extractSeries(payload, "Strategy Equity", "Equity");
       const drawdown = extractSeries(payload, "Drawdown", "Equity Drawdown");
@@ -424,7 +422,7 @@ export default function ReportsPanel() {
                 <span style={{ margin: "0 6px", color: "#c1c7d0" }}>|</span>
                 {report.report_type === "html" ? (
                   <a
-                    href={`${apiBase}/api/reports/${report.id}/file`}
+                    href={`${apiBaseUrl}/api/reports/${report.id}/file`}
                     target="_blank"
                     rel="noreferrer"
                     style={{ color: "#0f62fe", fontWeight: 600 }}
@@ -433,7 +431,7 @@ export default function ReportsPanel() {
                   </a>
                 ) : (
                   <a
-                    href={`${apiBase}/api/reports/${report.id}/file?download=1`}
+                    href={`${apiBaseUrl}/api/reports/${report.id}/file?download=1`}
                     download
                     style={{ color: "#0f62fe", fontWeight: 600 }}
                   >
@@ -464,7 +462,7 @@ export default function ReportsPanel() {
           <>
             <div className="preview-toolbar">
               <a
-                href={`${apiBase}/api/reports/${previewReportId}/file`}
+                href={`${apiBaseUrl}/api/reports/${previewReportId}/file`}
                 target="_blank"
                 rel="noreferrer"
                 className="link-button"
@@ -474,7 +472,7 @@ export default function ReportsPanel() {
             </div>
               <iframe
                 title="report-preview"
-                src={`${apiBase}/api/reports/${previewReportId}/file`}
+                src={`${apiBaseUrl}/api/reports/${previewReportId}/file`}
                 className="preview-frame"
               />
             </>
@@ -489,7 +487,7 @@ export default function ReportsPanel() {
               <div className="report-drawer-title">{t("reports.preview.title")}</div>
               <div className="report-drawer-actions">
                 <a
-                  href={`${apiBase}/api/reports/${previewReportId}/file`}
+                  href={`${apiBaseUrl}/api/reports/${previewReportId}/file`}
                   target="_blank"
                   rel="noreferrer"
                   className="link-button"
@@ -507,7 +505,7 @@ export default function ReportsPanel() {
             </div>
             <iframe
               title="report-drawer-preview"
-              src={`${apiBase}/api/reports/${previewReportId}/file`}
+              src={`${apiBaseUrl}/api/reports/${previewReportId}/file`}
               className="report-drawer-frame"
             />
           </div>

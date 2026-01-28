@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { api } from "../api";
+import { api, apiBaseUrl } from "../api";
 import IdChip from "../components/IdChip";
 import BacktestInlinePreview from "../components/BacktestInlinePreview";
 import PaginationBar from "../components/PaginationBar";
@@ -26,8 +26,6 @@ interface BacktestProgress {
   progress?: number | null;
   as_of?: string | null;
 }
-
-const apiBase = import.meta.env.VITE_API_BASE_URL || "http://localhost:8021";
 
 export default function BacktestsPage() {
   const { t, formatDateTime } = useI18n();
@@ -379,7 +377,7 @@ export default function BacktestsPage() {
             <>
               <div className="preview-toolbar">
                 <a
-                  href={`${apiBase}/api/reports/${previewReportId}/file`}
+                  href={`${apiBaseUrl}/api/reports/${previewReportId}/file`}
                   target="_blank"
                   rel="noreferrer"
                   className="link-button"
@@ -389,7 +387,7 @@ export default function BacktestsPage() {
               </div>
               <iframe
                 title="backtest-report-preview"
-                src={`${apiBase}/api/reports/${previewReportId}/file`}
+                src={`${apiBaseUrl}/api/reports/${previewReportId}/file`}
                 className="preview-frame"
               />
             </>

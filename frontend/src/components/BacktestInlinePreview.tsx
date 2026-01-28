@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api } from "../api";
+import { api, apiBaseUrl } from "../api";
 import BacktestChartPanel from "./BacktestChartPanel";
 import BacktestPerformanceChart from "./BacktestPerformanceChart";
 import { useI18n } from "../i18n";
@@ -10,8 +10,6 @@ interface ReportItem {
 }
 
 type ChartPoint = { time: number; value: number };
-
-const apiBase = import.meta.env.VITE_API_BASE_URL || "http://localhost:8021";
 
 const extractSeries = (data: any, chartName: string, seriesName: string): ChartPoint[] => {
   const charts = data?.charts || {};
@@ -102,7 +100,7 @@ export default function BacktestInlinePreview({
           setErrorKey("reports.charts.errorNotFound");
           return;
         }
-        const fileRes = await fetch(`${apiBase}/api/reports/${resultReport.id}/file`);
+        const fileRes = await fetch(`${apiBaseUrl}/api/reports/${resultReport.id}/file`);
         const payload = await fileRes.json();
         const nextEquity = extractSeries(payload, "Strategy Equity", "Equity");
         const nextDrawdown = extractSeries(payload, "Drawdown", "Equity Drawdown");
@@ -202,7 +200,7 @@ export default function BacktestInlinePreview({
           {reportHtmlId && (
             <a
               className="link-button"
-              href={`${apiBase}/api/reports/${reportHtmlId}/file`}
+              href={`${apiBaseUrl}/api/reports/${reportHtmlId}/file`}
               target="_blank"
               rel="noreferrer"
             >

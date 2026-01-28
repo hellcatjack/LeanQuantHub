@@ -1,20 +1,19 @@
-﻿import axios from "axios";
+import axios from "axios";
 
-const resolveBaseURL = () => {
+export const resolveApiBaseUrl = () => {
   const envBase = import.meta.env.VITE_API_BASE_URL;
   if (envBase && String(envBase).trim()) {
-    return envBase;
+    return String(envBase).trim();
   }
   if (typeof window !== "undefined" && window.location) {
-    const { protocol, hostname } = window.location;
-    return `${protocol}//${hostname}:8021`;
+    return window.location.origin || `${window.location.protocol}//${window.location.host}`;
   }
   return "http://localhost:8021";
 };
 
-const baseURL = resolveBaseURL();
+export const apiBaseUrl = resolveApiBaseUrl();
 
 export const api = axios.create({
-  baseURL,
+  baseURL: apiBaseUrl,
   timeout: 10000,
 });
