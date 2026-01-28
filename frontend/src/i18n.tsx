@@ -2253,6 +2253,20 @@ const messages: Record<Locale, MessageTree> = {
       accountSummaryTag: "标签",
       accountSummaryValue: "数值",
       accountSummaryError: "账户摘要加载失败",
+      accountSummaryTags: {
+        NetLiquidation: "净清算值",
+        TotalCashValue: "现金总额",
+        AvailableFunds: "可用资金",
+        BuyingPower: "购买力",
+        GrossPositionValue: "持仓总值",
+        EquityWithLoanValue: "含借贷权益",
+        UnrealizedPnL: "未实现盈亏",
+        RealizedPnL: "已实现盈亏",
+        InitMarginReq: "初始保证金",
+        MaintMarginReq: "维持保证金",
+        AccruedCash: "应计现金",
+        CashBalance: "现金余额",
+      },
       accountPositionsTitle: "当前持仓",
       accountPositionsMeta: "Lean bridge 持仓快照",
       accountPositionsUpdatedAt: "最近刷新",
@@ -4697,6 +4711,20 @@ const messages: Record<Locale, MessageTree> = {
       accountSummaryTag: "Tag",
       accountSummaryValue: "Value",
       accountSummaryError: "Failed to load account summary",
+      accountSummaryTags: {
+        NetLiquidation: "Net Liquidation",
+        TotalCashValue: "Total Cash Value",
+        AvailableFunds: "Available Funds",
+        BuyingPower: "Buying Power",
+        GrossPositionValue: "Gross Position Value",
+        EquityWithLoanValue: "Equity with Loan Value",
+        UnrealizedPnL: "Unrealized PnL",
+        RealizedPnL: "Realized PnL",
+        InitMarginReq: "Initial Margin Requirement",
+        MaintMarginReq: "Maintenance Margin Requirement",
+        AccruedCash: "Accrued Cash",
+        CashBalance: "Cash Balance",
+      },
       accountPositionsTitle: "Positions",
       accountPositionsMeta: "Lean bridge position snapshot",
       accountPositionsUpdatedAt: "Last updated",
@@ -4896,6 +4924,7 @@ type I18nContextValue = {
   timeZone: TimeZone;
   setTimeZone: (zone: TimeZone) => void;
   t: (key: string, vars?: Record<string, string | number>) => string;
+  getMessage: (key: string) => MessageTree | string | undefined;
   formatDateTime: (value?: string | number | Date | null) => string;
 };
 
@@ -4905,10 +4934,14 @@ const I18nContext = createContext<I18nContextValue>({
   timeZone: "America/New_York",
   setTimeZone: () => undefined,
   t: (key) => key,
+  getMessage: () => undefined,
   formatDateTime: (value) => String(value ?? ""),
 });
 
-const resolveMessage = (obj: MessageTree, key: string): string | undefined => {
+const resolveMessageNode = (
+  obj: MessageTree,
+  key: string
+): MessageTree | string | undefined => {
   const parts = key.split(".");
   let current: MessageTree | string | undefined = obj;
   for (const part of parts) {
@@ -4917,7 +4950,12 @@ const resolveMessage = (obj: MessageTree, key: string): string | undefined => {
     }
     current = current[part];
   }
-  return typeof current === "string" ? current : undefined;
+  return current;
+};
+
+const resolveMessage = (obj: MessageTree, key: string): string | undefined => {
+  const resolved = resolveMessageNode(obj, key);
+  return typeof resolved === "string" ? resolved : undefined;
 };
 
 const applyVars = (text: string, vars?: Record<string, string | number>): string => {
@@ -4985,6 +5023,7 @@ export const I18nProvider = ({ children }: { children: React.ReactNode }) => {
       const text = resolveMessage(messages[locale], key) || key;
       return applyVars(text, vars);
     };
+    const getMessage = (key: string) => resolveMessageNode(messages[locale], key);
     const formatDateTime = (value?: string | number | Date | null) => {
       if (!value) {
         return t("common.none");
@@ -5029,7 +5068,7 @@ export const I18nProvider = ({ children }: { children: React.ReactNode }) => {
         return date.toLocaleString(localeTag, { timeZone });
       }
     };
-    return { locale, setLocale, timeZone, setTimeZone, t, formatDateTime };
+    return { locale, setLocale, timeZone, setTimeZone, t, getMessage, formatDateTime };
   }, [locale, timeZone]);
 
   return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
