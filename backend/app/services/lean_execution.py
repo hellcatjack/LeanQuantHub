@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import subprocess
 from pathlib import Path
 
@@ -111,7 +112,18 @@ def _resolve_launcher() -> tuple[str, str | None]:
 def launch_execution(*, config_path: str) -> None:
     dll_path, cwd = _resolve_launcher()
     cmd = [settings.dotnet_path or "dotnet", dll_path, "--config", config_path]
-    subprocess_run(cmd, check=False, cwd=cwd)
+    kwargs: dict[str, object] = {"check": False}
+    if cwd:
+        try:
+            sig = inspect.signature(subprocess_run)
+        except (TypeError, ValueError):
+            kwargs["cwd"] = cwd
+        else:
+            if "cwd" in sig.parameters or any(
+                param.kind == inspect.Parameter.VAR_KEYWORD for param in sig.parameters.values()
+            ):
+                kwargs["cwd"] = cwd
+    subprocess_run(cmd, **kwargs)
 
 
 def ingest_execution_events(path: str) -> None:
