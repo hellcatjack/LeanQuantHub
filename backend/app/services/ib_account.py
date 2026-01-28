@@ -62,7 +62,7 @@ def iter_account_client_ids(base: int, *, attempts: int = 3):
 
 def get_account_summary(session, *, mode: str, full: bool, force_refresh: bool = False) -> dict[str, object]:
     payload = read_account_summary(_resolve_bridge_root())
-    items = _filter_summary(_normalize_items(payload.get("items")), full=full)
+    items = _normalize_items(payload.get("items"))
     refreshed_at = payload.get("updated_at") or payload.get("refreshed_at")
     stale = bool(payload.get("stale", True))
     source = payload.get("source") or "lean_bridge"
