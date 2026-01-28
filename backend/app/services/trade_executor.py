@@ -148,10 +148,12 @@ def execute_trade_run(
     force: bool = False,
 ) -> TradeExecutionResult:
     session = SessionLocal()
-    lock = JobLock("trade_execution", Path(settings.data_root) if settings.data_root else None)
-    if not lock.acquire():
-        session.close()
-        raise RuntimeError("trade_execution_lock_busy")
+    lock = None
+    if not dry_run:
+        lock = JobLock("trade_execution", Path(settings.data_root) if settings.data_root else None)
+        if not lock.acquire():
+            session.close()
+            raise RuntimeError("trade_execution_lock_busy")
     run: TradeRun | None = None
     try:
         run = session.get(TradeRun, run_id)
@@ -554,5 +556,6 @@ def execute_trade_run(
             session.commit()
         raise
     finally:
-        lock.release()
+        if lock is not None:
+            lock.release()
         session.close()
