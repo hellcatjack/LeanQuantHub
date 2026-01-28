@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from sqlalchemy import text
+
 from app.models import TradeOrder
 
 
@@ -15,6 +17,8 @@ ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     "CANCELED": set(),
     "REJECTED": set(),
 }
+
+CLIENT_ORDER_ID_MAX_LEN = 64
 
 
 @dataclass
@@ -54,6 +58,44 @@ def build_manual_client_order_id(base: str, seq_id: int) -> str:
     return f"{base}-{suffix}"
 
 
+def get_client_order_id_seq(session) -> int:
+    result = session.execute(text("INSERT INTO trade_order_client_id_seq () VALUES ()"))
+    seq_id = result.lastrowid
+    if not seq_id:
+        raise ValueError("client_order_id_seq_failed")
+    return int(seq_id)
+
+
+def _should_apply_manual_client_order_id(payload: dict[str, Any], run_id: int | None) -> bool:
+    if run_id is not None:
+        return False
+    params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+    if params.get("client_order_id_auto") is True:
+        return False
+    source = str(params.get("source") or "").strip()
+    if source == "decision_snapshot":
+        return False
+    return True
+
+
+def apply_manual_client_order_id(payload: dict[str, Any], *, seq_id: int) -> dict[str, Any]:
+    base = str(payload.get("client_order_id") or "").strip()
+    suffix = _base36(int(seq_id))
+    suffix_token = f"-{suffix}"
+    max_base_len = CLIENT_ORDER_ID_MAX_LEN - len(suffix_token)
+    if max_base_len > 0:
+        truncated = base if len(base) <= max_base_len else base[:max_base_len]
+        client_order_id = f"{truncated}{suffix_token}" if truncated else suffix
+    else:
+        client_order_id = suffix
+    params = dict(payload.get("params") or {})
+    params.setdefault("original_client_order_id", base)
+    updated = dict(payload)
+    updated["client_order_id"] = client_order_id
+    updated["params"] = params
+    return updated
+
+
 def validate_transition(current: str, target: str) -> None:
     if current == target:
         return
@@ -85,13 +127,17 @@ def _validate_order_payload(payload: dict[str, Any]) -> None:
 
 
 def create_trade_order(session, payload: dict[str, Any], run_id: int | None = None) -> OrderCreateResult:
-    _validate_order_payload(payload)
-    client_order_id = str(payload["client_order_id"]).strip()
-    symbol = str(payload["symbol"]).strip().upper()
-    side = _normalize_side(payload["side"])
-    order_type = _normalize_order_type(payload.get("order_type") or "MKT")
-    limit_price = payload.get("limit_price")
-    quantity = float(payload["quantity"])
+    working_payload = dict(payload)
+    if _should_apply_manual_client_order_id(working_payload, run_id):
+        seq_id = get_client_order_id_seq(session)
+        working_payload = apply_manual_client_order_id(working_payload, seq_id=seq_id)
+    _validate_order_payload(working_payload)
+    client_order_id = str(working_payload["client_order_id"]).strip()
+    symbol = str(working_payload["symbol"]).strip().upper()
+    side = _normalize_side(working_payload["side"])
+    order_type = _normalize_order_type(working_payload.get("order_type") or "MKT")
+    limit_price = working_payload.get("limit_price")
+    quantity = float(working_payload["quantity"])
     for pending in session.new:
         if isinstance(pending, TradeOrder) and pending.client_order_id == client_order_id:
             mismatch = (
@@ -129,7 +175,7 @@ def create_trade_order(session, payload: dict[str, Any], run_id: int | None = No
         order_type=order_type,
         limit_price=limit_price,
         status="NEW",
-        params=payload.get("params"),
+        params=working_payload.get("params"),
     )
     session.add(order)
     return OrderCreateResult(order=order, created=True)
