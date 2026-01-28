@@ -50,6 +50,19 @@ def test_execution_config_includes_ib_client_id():
     assert cfg["ib-client-id"] == 1016
 
 
+def test_execution_config_overrides_client_id_and_output_dir():
+    cfg = lean_execution.build_execution_config(
+        intent_path="/tmp/intent.json",
+        brokerage="InteractiveBrokersBrokerage",
+        project_id=16,
+        mode="paper",
+        client_id=2222,
+        lean_bridge_output_dir="/tmp/bridge",
+    )
+    assert cfg["ib-client-id"] == 2222
+    assert cfg["lean-bridge-output-dir"] == "/tmp/bridge"
+
+
 def test_build_execution_config_merges_template(monkeypatch, tmp_path):
     template = tmp_path / "template.json"
     template.write_text(
