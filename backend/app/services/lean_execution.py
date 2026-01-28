@@ -115,7 +115,28 @@ def launch_execution(*, config_path: str) -> None:
 
 
 def ingest_execution_events(path: str) -> None:
-    events = json.loads(Path(path).read_text(encoding="utf-8"))
+    text = Path(path).read_text(encoding="utf-8")
+    cleaned = text.strip()
+    if not cleaned:
+        apply_execution_events([])
+        return
+    if cleaned.startswith("["):
+        events = json.loads(cleaned)
+        if isinstance(events, dict):
+            events = [events]
+        apply_execution_events(events)
+        return
+    events: list[dict] = []
+    for line in text.splitlines():
+        raw = line.strip()
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            events.append(payload)
     apply_execution_events(events)
 
 
