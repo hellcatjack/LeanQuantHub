@@ -1704,6 +1704,27 @@ class TradeOrderCreate(BaseModel):
     params: dict | None = None
 
 
+class TradeDirectOrderRequest(BaseModel):
+    project_id: int
+    mode: str = "paper"
+    live_confirm_token: str | None = None
+    client_order_id: str
+    symbol: str
+    side: str
+    quantity: float
+    order_type: str = "MKT"
+    limit_price: float | None = None
+    params: dict | None = None
+
+
+class TradeDirectOrderOut(BaseModel):
+    order_id: int
+    status: str
+    execution_status: str
+    intent_path: str | None = None
+    config_path: str | None = None
+
+
 class TradeOrderStatusUpdate(BaseModel):
     status: str
     filled_quantity: float | None = None

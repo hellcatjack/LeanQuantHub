@@ -19,6 +19,8 @@ from app.schemas import (
     TradeFillDetailOut,
     TradeSettingsOut,
     TradeSettingsUpdate,
+    TradeDirectOrderRequest,
+    TradeDirectOrderOut,
     TradeGuardEvaluateOut,
     TradeGuardEvaluateRequest,
     TradeGuardStateOut,
@@ -30,6 +32,7 @@ from app.services.ib_market import check_market_health
 from app.services.trade_guard import evaluate_intraday_guard, get_or_create_guard_state
 from app.services.trade_monitor import build_trade_overview
 from app.services.trade_executor import execute_trade_run
+from app.services.trade_direct_order import submit_direct_order
 from app.services.trade_orders import create_trade_order, update_trade_order_status
 from app.services.trade_run_summary import build_last_update_at, build_symbol_summary, build_trade_run_detail
 
@@ -321,6 +324,21 @@ def list_trade_orders(
             query = query.filter(TradeOrder.run_id == run_id)
         orders = query.offset(offset).limit(limit).all()
         return [TradeOrderOut.model_validate(order, from_attributes=True) for order in orders]
+
+
+@router.post("/orders/direct", response_model=TradeDirectOrderOut)
+def create_direct_trade_order_route(payload: TradeDirectOrderRequest):
+    with get_session() as session:
+        try:
+            result = submit_direct_order(session, payload.model_dump())
+        except ValueError as exc:
+            detail = str(exc)
+            if detail == "live_confirm_required":
+                raise HTTPException(status_code=403, detail=detail) from exc
+            if detail in {"ib_api_mode_disabled", "ib_settings_missing"}:
+                raise HTTPException(status_code=409, detail=detail) from exc
+            raise HTTPException(status_code=400, detail=detail) from exc
+        return result
 
 
 @router.get("/orders/{order_id}", response_model=TradeOrderOut)
