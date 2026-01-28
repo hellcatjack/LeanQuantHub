@@ -339,6 +339,7 @@ export default function LiveTradePage() {
   const [accountSummaryFullError, setAccountSummaryFullError] = useState("");
   const [accountPositions, setAccountPositions] = useState<IBAccountPosition[]>([]);
   const [accountPositionsUpdatedAt, setAccountPositionsUpdatedAt] = useState<string | null>(null);
+  const [accountPositionsStale, setAccountPositionsStale] = useState(false);
   const [accountPositionsLoading, setAccountPositionsLoading] = useState(false);
   const [accountPositionsError, setAccountPositionsError] = useState("");
   const [positionSelections, setPositionSelections] = useState<Record<string, boolean>>({});
@@ -609,11 +610,13 @@ export default function LiveTradePage() {
       });
       setAccountPositions(res.data.items || []);
       setAccountPositionsUpdatedAt(res.data.refreshed_at || null);
+      setAccountPositionsStale(Boolean(res.data.stale));
     } catch (err: any) {
       const detail = err?.response?.data?.detail || t("trade.accountPositionsError");
       setAccountPositionsError(String(detail));
       setAccountPositions([]);
       setAccountPositionsUpdatedAt(null);
+      setAccountPositionsStale(false);
     } finally {
       setAccountPositionsLoading(false);
     }
@@ -1389,8 +1392,11 @@ export default function LiveTradePage() {
   ]);
 
   const positionsStale = useMemo(() => {
+    if (accountPositionsStale) {
+      return true;
+    }
     return !accountPositionsLoading && accountPositions.length === 0 && bridgeIsStale;
-  }, [accountPositions.length, accountPositionsLoading, bridgeIsStale]);
+  }, [accountPositions.length, accountPositionsLoading, accountPositionsStale, bridgeIsStale]);
 
   const selectedProject = useMemo(() => {
     if (!selectedProjectId) {

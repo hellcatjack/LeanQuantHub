@@ -77,6 +77,15 @@ def get_account_summary(session, *, mode: str, full: bool, force_refresh: bool =
 
 def get_account_positions(session, *, mode: str, force_refresh: bool = False) -> dict[str, object]:
     payload = read_positions(_resolve_bridge_root())
+    source_detail = payload.get("source_detail") if isinstance(payload, dict) else None
+    refreshed_at = payload.get("updated_at") or payload.get("refreshed_at")
+    if source_detail != "ib_holdings":
+        return {
+            "items": [],
+            "refreshed_at": refreshed_at,
+            "stale": True,
+            "source_detail": source_detail,
+        }
     quotes_payload = read_quotes(_resolve_bridge_root())
     quote_items = quotes_payload.get("items") if isinstance(quotes_payload.get("items"), list) else []
     quote_prices: dict[str, float] = {}
@@ -151,9 +160,13 @@ def get_account_positions(session, *, mode: str, force_refresh: bool = False) ->
             except (TypeError, ValueError, ZeroDivisionError):
                 pass
         items.append(normalized)
-    refreshed_at = payload.get("updated_at") or payload.get("refreshed_at")
     stale = bool(payload.get("stale", True))
-    return {"items": items, "refreshed_at": refreshed_at, "stale": stale}
+    return {
+        "items": items,
+        "refreshed_at": refreshed_at,
+        "stale": stale,
+        "source_detail": source_detail,
+    }
 
 
 def fetch_account_summary(session) -> dict[str, float | str | None]:
