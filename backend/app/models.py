@@ -680,6 +680,13 @@ class TradeRun(Base):
     )
 
 
+class TradeOrderClientIdSeq(Base):
+    __tablename__ = "trade_order_client_id_seq"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class TradeOrder(Base):
     __tablename__ = "trade_orders"
     __table_args__ = (

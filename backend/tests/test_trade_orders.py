@@ -28,6 +28,7 @@ def test_client_order_id_idempotent_without_commit():
             "side": "BUY",
             "quantity": 10,
             "order_type": "MKT",
+            "params": {"client_order_id_auto": True},
         }
         first = create_trade_order(session, payload)
         second = create_trade_order(session, payload)

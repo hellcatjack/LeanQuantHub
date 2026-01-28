@@ -4,9 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import text
-
-from app.models import TradeOrder
+from app.models import TradeOrder, TradeOrderClientIdSeq
 
 
 ALLOWED_TRANSITIONS: dict[str, set[str]] = {
@@ -59,11 +57,12 @@ def build_manual_client_order_id(base: str, seq_id: int) -> str:
 
 
 def get_client_order_id_seq(session) -> int:
-    result = session.execute(text("INSERT INTO trade_order_client_id_seq () VALUES ()"))
-    seq_id = result.lastrowid
-    if not seq_id:
+    seq_row = TradeOrderClientIdSeq()
+    session.add(seq_row)
+    session.flush()
+    if not seq_row.id:
         raise ValueError("client_order_id_seq_failed")
-    return int(seq_id)
+    return int(seq_row.id)
 
 
 def _should_apply_manual_client_order_id(payload: dict[str, Any], run_id: int | None) -> bool:
