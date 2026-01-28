@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import json
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
 from app.core.config import settings
+from app.db import SessionLocal
+from app.models import TradeOrder
+from app.services.ib_orders import apply_fill_to_order
 from app.services.ib_settings import derive_client_id
+from app.services.trade_orders import update_trade_order_status
 
 subprocess_run = subprocess.run
 
@@ -141,5 +146,80 @@ def ingest_execution_events(path: str) -> None:
 
 
 def apply_execution_events(events: list[dict]) -> None:
-    # TODO: update trade_orders / trade_fills in DB
+    if not events:
+        return None
+
+    def _normalize_status(value: str | None) -> str:
+        return str(value or "").strip().upper()
+
+    def _parse_time(value: str | None) -> datetime | None:
+        if not value:
+            return None
+        cleaned = str(value).strip()
+        if cleaned.endswith("Z"):
+            cleaned = cleaned[:-1]
+        try:
+            return datetime.fromisoformat(cleaned)
+        except ValueError:
+            return None
+
+    session = SessionLocal()
+    try:
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            tag = str(event.get("tag") or "").strip()
+            if not tag:
+                continue
+            order = (
+                session.query(TradeOrder)
+                .filter(TradeOrder.client_order_id == tag)
+                .one_or_none()
+            )
+            if not order:
+                continue
+            status = _normalize_status(event.get("status"))
+            event_time = _parse_time(event.get("time"))
+            if event_time and order.last_status_ts and event_time <= order.last_status_ts:
+                continue
+            if event.get("order_id") is not None and order.ib_order_id is None:
+                try:
+                    order.ib_order_id = int(event.get("order_id"))
+                except (TypeError, ValueError):
+                    pass
+            if event.get("perm_id") is not None and order.ib_perm_id is None:
+                try:
+                    order.ib_perm_id = int(event.get("perm_id"))
+                except (TypeError, ValueError):
+                    pass
+
+            if status in {"SUBMITTED", "NEW"}:
+                update_trade_order_status(session, order, {"status": "SUBMITTED"})
+            elif status in {"FILLED", "PARTIAL"}:
+                fill_qty = float(event.get("filled") or 0.0)
+                fill_price = float(event.get("fill_price") or 0.0)
+                if fill_qty > 0 and fill_price > 0:
+                    apply_fill_to_order(
+                        session,
+                        order,
+                        fill_qty=fill_qty,
+                        fill_price=fill_price,
+                        fill_time=event_time or datetime.utcnow(),
+                        exec_id=str(event.get("exec_id") or "") or None,
+                    )
+                else:
+                    update_trade_order_status(
+                        session,
+                        order,
+                        {"status": "FILLED" if status == "FILLED" else "PARTIAL"},
+                    )
+            elif status in {"CANCELED", "CANCELLED"}:
+                update_trade_order_status(session, order, {"status": "CANCELED"})
+            elif status == "REJECTED":
+                update_trade_order_status(session, order, {"status": "REJECTED"})
+            if event_time:
+                order.last_status_ts = event_time
+            session.commit()
+    finally:
+        session.close()
     return None
