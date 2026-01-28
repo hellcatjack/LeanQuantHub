@@ -624,11 +624,23 @@ export default function LiveTradePage() {
       setPositionActionError(t("trade.positionActionErrorNoSelection"));
       return;
     }
+    const projectId = Number(selectedProjectId) || latestTradeRun?.project_id || 0;
+    if (!projectId) {
+      setPositionActionError(t("trade.directOrderProjectRequired"));
+      return;
+    }
+    const mode = (ibSettings?.mode || ibSettingsForm.mode || "paper").toLowerCase();
+    const basePayload: Record<string, any> = { project_id: projectId, mode };
+    if (mode === "live" && executeForm.live_confirm_token) {
+      basePayload.live_confirm_token = executeForm.live_confirm_token;
+    }
     setPositionActionLoading(true);
     setPositionActionError("");
     setPositionActionResult("");
     try {
-      await Promise.all(orders.map((payload) => api.post("/api/trade/orders", payload)));
+      await Promise.all(
+        orders.map((payload) => api.post("/api/trade/orders/direct", { ...basePayload, ...payload }))
+      );
       setPositionActionResult(t("trade.positionActionResult", { count: orders.length }));
       await loadTradeActivity();
     } catch (err: any) {
