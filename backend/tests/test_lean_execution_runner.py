@@ -20,3 +20,15 @@ def test_launch_execution_calls_subprocess(monkeypatch, tmp_path):
         config_path=str(tmp_path / "lean-config.json"),
     )
     assert "lean-config.json" in " ".join(calls["cmd"])
+
+
+def test_launch_execution_async_returns_pid(monkeypatch, tmp_path):
+    class _FakeProc:
+        pid = 123
+
+    def _fake_popen(cmd, cwd=None):
+        return _FakeProc()
+
+    monkeypatch.setattr(lean_execution.subprocess, "Popen", _fake_popen)
+    pid = lean_execution.launch_execution_async(config_path=str(tmp_path / "exec.json"))
+    assert pid == 123
