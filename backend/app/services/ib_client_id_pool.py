@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import signal
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -66,9 +66,18 @@ def _parse_iso(ts: str | None) -> datetime | None:
         return None
     text = ts.replace("Z", "+00:00")
     try:
-        return datetime.fromisoformat(text)
+        parsed = datetime.fromisoformat(text)
     except ValueError:
         return None
+    return _to_naive_utc(parsed)
+
+
+def _to_naive_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 def _read_bridge_heartbeat(output_dir: str | None) -> datetime | None:
@@ -87,7 +96,7 @@ def _read_bridge_heartbeat(output_dir: str | None) -> datetime | None:
 
 
 def reap_stale_leases(session, *, mode: str, now: datetime | None = None) -> int:
-    now = now or datetime.utcnow()
+    now = _to_naive_utc(now or datetime.utcnow())
     base = _pool_base(mode)
     upper = base + settings.ib_client_id_pool_size
     ttl = timedelta(seconds=settings.ib_client_id_lease_ttl_seconds)
@@ -106,10 +115,10 @@ def reap_stale_leases(session, *, mode: str, now: datetime | None = None) -> int
     )
     released = 0
     for lease in leases:
-        heartbeat = _read_bridge_heartbeat(lease.output_dir)
+        heartbeat = _to_naive_utc(_read_bridge_heartbeat(lease.output_dir))
         lease.last_heartbeat = heartbeat
 
-        acquired = lease.acquired_at or now
+        acquired = _to_naive_utc(lease.acquired_at) or now
         pid_dead = lease.pid is not None and not _pid_alive(lease.pid)
         heartbeat_stale = False
         if heartbeat is None:
