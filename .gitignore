@@ -25,6 +25,7 @@ frontend/test-results/
 logs/
 artifacts/
 *.log
+log.txt
 LeanBridgeSmokeAlgorithm*
 
 # Data outputs
