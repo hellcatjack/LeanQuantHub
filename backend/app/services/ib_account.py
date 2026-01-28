@@ -4,8 +4,16 @@ from pathlib import Path
 from typing import Any
 
 from app.services.lean_bridge_paths import resolve_bridge_root
-from app.services.ib_settings import get_or_create_ib_settings
+from app.services.ib_settings import ensure_ib_client_id, get_or_create_ib_settings
 from app.services.lean_bridge_reader import read_account_summary, read_positions, read_quotes
+
+
+CORE_TAGS = (
+    "NetLiquidation",
+    "TotalCashValue",
+    "AvailableFunds",
+    "CashBalance",
+)
 
 
 def _resolve_bridge_root() -> Path:
@@ -27,9 +35,34 @@ def _normalize_items(raw_items: Any) -> dict[str, object]:
     return items
 
 
+def _filter_summary(raw: Any, *, full: bool) -> dict[str, object]:
+    if not isinstance(raw, dict):
+        return {}
+    if full:
+        return dict(raw)
+    return {key: value for key, value in raw.items() if key in CORE_TAGS}
+
+
+def build_account_summary_tags(*, full: bool) -> str:
+    if full:
+        return "All"
+    return ",".join(CORE_TAGS)
+
+
+def resolve_ib_account_settings(session):
+    return get_or_create_ib_settings(session)
+
+
+def iter_account_client_ids(base: int, *, attempts: int = 3):
+    base_id = int(base)
+    count = max(int(attempts), 0)
+    for offset in range(count):
+        yield base_id + offset
+
+
 def get_account_summary(session, *, mode: str, full: bool, force_refresh: bool = False) -> dict[str, object]:
     payload = read_account_summary(_resolve_bridge_root())
-    items = _normalize_items(payload.get("items"))
+    items = _filter_summary(_normalize_items(payload.get("items")), full=full)
     refreshed_at = payload.get("updated_at") or payload.get("refreshed_at")
     stale = bool(payload.get("stale", True))
     source = payload.get("source") or "lean_bridge"
