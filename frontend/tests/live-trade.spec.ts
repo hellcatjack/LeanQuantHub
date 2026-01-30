@@ -7,6 +7,65 @@ test("live trade page shows connection state", async ({ page }) => {
   ).toBeVisible();
 });
 
+test("live trade shows single refresh control and auto toggle", async ({ page }) => {
+  await page.goto("/live-trade");
+  await expect(page.getByTestId("live-trade-refresh-all")).toBeVisible();
+  await expect(page.getByTestId("live-trade-auto-toggle")).toBeVisible();
+  const count = await page.locator("[data-testid^=card-refresh-next]").count();
+  expect(count).toBeGreaterThanOrEqual(5);
+});
+
+test("live trade cards show refresh interval and next time", async ({ page }) => {
+  await page.goto("/live-trade");
+  await expect(page.getByTestId("card-refresh-interval-account")).toBeVisible();
+  await expect(page.getByTestId("card-refresh-next-account")).toBeVisible();
+});
+
+test("live trade has single refresh button", async ({ page }) => {
+  await page.goto("/live-trade");
+  await expect(page.getByRole("button", { name: /刷新全部|Refresh All/i })).toHaveCount(1);
+});
+
+test("refresh all triggers manual health and contract checks", async ({ page }) => {
+  let healthHits = 0;
+  let contractHits = 0;
+  await page.route("**/api/brokerage/market/health", (route) => {
+    healthHits += 1;
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        status: "ok",
+        total: 0,
+        success: 0,
+        missing_symbols: [],
+        errors: [],
+      }),
+    });
+  });
+  await page.route("**/api/brokerage/contracts/refresh", (route) => {
+    contractHits += 1;
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        total: 0,
+        updated: 0,
+        skipped: 0,
+        errors: [],
+        duration_sec: 0.1,
+      }),
+    });
+  });
+  await page.goto("/live-trade");
+  await page.getByTestId("live-trade-auto-toggle").click();
+  healthHits = 0;
+  contractHits = 0;
+  await page.getByTestId("live-trade-refresh-all").click();
+  await expect.poll(() => healthHits).toBeGreaterThan(0);
+  await expect.poll(() => contractHits).toBeGreaterThan(0);
+});
+
 test("live trade page shows bridge status card", async ({ page }) => {
   await page.route("**/api/brokerage/settings", (route) =>
     route.fulfill({
