@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import os
-import socket
 from datetime import datetime
 
 from app.models import IBConnectionState, IBSettings
 from app.core.config import settings
+from app.services.lean_bridge_paths import resolve_bridge_root
+from app.services.lean_bridge_reader import read_bridge_status
 
 
 MAX_CLIENT_ID = 2_147_483_647
@@ -115,20 +116,31 @@ def probe_ib_connection(session, *, timeout_seconds: float = 2.0) -> IBConnectio
             message="mock mode enabled",
             heartbeat=True,
         )
-    host = settings.host
-    port = settings.port
-    try:
-        with socket.create_connection((host, port), timeout=timeout_seconds):
-            return update_ib_state(
-                session,
-                status="connected",
-                message=f"tcp ok {host}:{port}",
-                heartbeat=True,
-            )
-    except OSError as exc:
+    status_payload = read_bridge_status(resolve_bridge_root())
+    stale = bool(status_payload.get("stale", True))
+    raw_status = str(status_payload.get("status") or "unknown").strip().lower()
+    last_error = status_payload.get("last_error")
+
+    if stale or raw_status == "missing":
         return update_ib_state(
             session,
             status="disconnected",
-            message=f"tcp failed {host}:{port} ({exc.__class__.__name__})",
+            message="lean bridge stale",
             heartbeat=True,
         )
+
+    if raw_status in {"ok", "connected"}:
+        return update_ib_state(
+            session,
+            status="connected",
+            message="lean bridge ok",
+            heartbeat=True,
+        )
+
+    message = str(last_error or f"lean bridge {raw_status}")
+    return update_ib_state(
+        session,
+        status="degraded",
+        message=message,
+        heartbeat=True,
+    )

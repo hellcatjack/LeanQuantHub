@@ -54,23 +54,11 @@ def test_probe_ib_connection_uses_bridge_only(monkeypatch):
 
         monkeypatch.setattr(
             ib_settings,
-            "_probe_ib_api",
-            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("probe")),
-            raising=False,
-        )
-        monkeypatch.setattr(
-            ib_settings,
-            "_probe_ib_account_session",
-            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("probe")),
-            raising=False,
-        )
-        monkeypatch.setattr(
-            ib_settings.socket,
-            "create_connection",
-            lambda *args, **kwargs: (_ for _ in ()).throw(OSError("blocked")),
+            "read_bridge_status",
+            lambda *args, **kwargs: {"status": "ok", "stale": False, "last_error": None},
         )
 
         state = ib_settings.probe_ib_connection(session, timeout_seconds=0.1)
-        assert state.status == "disconnected"
+        assert state.status == "connected"
     finally:
         session.close()
