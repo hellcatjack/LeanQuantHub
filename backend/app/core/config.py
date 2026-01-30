@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     ib_client_id_pool_size: int = 32
     ib_client_id_lease_ttl_seconds: int = 300
     lean_bridge_heartbeat_timeout_seconds: int = 60
+    lean_pool_size: int = 10
+    lean_pool_max_active_connections: int = 10
+    lean_pool_heartbeat_ttl_seconds: int = 20
+    lean_pool_leader_restart_limit: int = 3
     market_timezone: str = "America/New_York"
     market_session_open: str = "09:30"
     market_session_close: str = "16:00"
