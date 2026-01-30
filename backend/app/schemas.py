@@ -1757,6 +1757,8 @@ class TradeDirectOrderOut(BaseModel):
     execution_status: str
     intent_path: str | None = None
     config_path: str | None = None
+    bridge_status: IBBridgeStatusOut | None = None
+    refresh_result: str | None = None
 
 
 class TradeOrderStatusUpdate(BaseModel):

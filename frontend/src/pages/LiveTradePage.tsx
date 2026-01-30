@@ -83,6 +83,22 @@ interface IBStreamStatus {
   market_data_type?: string | null;
 }
 
+interface IBBridgeStatusOut {
+  status?: string | null;
+  stale?: boolean;
+  last_heartbeat?: string | null;
+  updated_at?: string | null;
+  last_error?: string | null;
+  last_refresh_at?: string | null;
+  last_refresh_result?: string | null;
+  last_refresh_reason?: string | null;
+  last_refresh_message?: string | null;
+}
+
+interface IBBridgeRefreshOut {
+  bridge_status: IBBridgeStatusOut;
+}
+
 interface IBAccountSummary {
   items: Record<string, any>;
   refreshed_at?: string | null;
@@ -187,6 +203,14 @@ interface TradeReceiptPage {
   items: TradeReceipt[];
   total: number;
   warnings?: string[];
+}
+
+interface TradeDirectOrderOut {
+  order_id: number;
+  status: string;
+  execution_status: string;
+  bridge_status?: IBBridgeStatusOut | null;
+  refresh_result?: string | null;
 }
 
 interface TradeRunDetail {
@@ -301,6 +325,7 @@ export default function LiveTradePage() {
   const [positionActionLoading, setPositionActionLoading] = useState(false);
   const [positionActionError, setPositionActionError] = useState("");
   const [positionActionResult, setPositionActionResult] = useState("");
+  const [positionActionWarning, setPositionActionWarning] = useState("");
   const [ibContractForm, setIbContractForm] = useState({
     symbols: "SPY",
     use_project_symbols: false,
@@ -346,6 +371,11 @@ export default function LiveTradePage() {
   const [ibStreamLoading, setIbStreamLoading] = useState(false);
   const [ibStreamActionLoading, setIbStreamActionLoading] = useState(false);
   const [ibStreamError, setIbStreamError] = useState("");
+  const [bridgeStatus, setBridgeStatus] = useState<IBBridgeStatusOut | null>(null);
+  const [bridgeStatusLoading, setBridgeStatusLoading] = useState(false);
+  const [bridgeStatusError, setBridgeStatusError] = useState("");
+  const [bridgeAutoRefresh, setBridgeAutoRefresh] = useState(true);
+  const [bridgeRefreshLoading, setBridgeRefreshLoading] = useState(false);
   const [marketSnapshot, setMarketSnapshot] = useState<IBMarketSnapshotItem | null>(null);
   const [marketSnapshotSymbol, setMarketSnapshotSymbol] = useState("");
   const [marketSnapshotLoading, setMarketSnapshotLoading] = useState(false);
@@ -616,10 +646,35 @@ export default function LiveTradePage() {
     setPositionActionLoading(true);
     setPositionActionError("");
     setPositionActionResult("");
+    setPositionActionWarning("");
     try {
-      await Promise.all(
-        orders.map((payload) => api.post("/api/trade/orders/direct", { ...basePayload, ...payload }))
+      const responses = await Promise.all(
+        orders.map((payload) =>
+          api.post<TradeDirectOrderOut>("/api/trade/orders/direct", {
+            ...basePayload,
+            ...payload,
+          })
+        )
       );
+      const warnings = new Set<string>();
+      responses.forEach((res) => {
+        const status = res.data?.bridge_status;
+        if (status?.stale) {
+          warnings.add(t("trade.bridgeOrderWarningStale"));
+        }
+        const refreshResult = status?.last_refresh_result || res.data?.refresh_result;
+        if (refreshResult && refreshResult !== "success") {
+          warnings.add(
+            t("trade.bridgeOrderWarningRefresh", {
+              result: formatBridgeRefreshResult(refreshResult),
+              reason: formatBridgeRefreshReason(status?.last_refresh_reason),
+            })
+          );
+        }
+      });
+      if (warnings.size) {
+        setPositionActionWarning(Array.from(warnings).join(" "));
+      }
       setPositionActionResult(t("trade.positionActionResult", { count: orders.length }));
       await loadTradeActivity();
     } catch (err: any) {
@@ -892,6 +947,46 @@ export default function LiveTradePage() {
     }
   };
 
+  const loadBridgeStatus = async (silent = false) => {
+    if (!silent) {
+      setBridgeStatusLoading(true);
+      setBridgeStatusError("");
+    }
+    try {
+      const res = await api.get<IBBridgeStatusOut>("/api/brokerage/bridge/status");
+      setBridgeStatus(res.data);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("trade.bridgeStatusLoadError");
+      setBridgeStatusError(String(detail));
+      setBridgeStatus(null);
+    } finally {
+      if (!silent) {
+        setBridgeStatusLoading(false);
+      }
+    }
+  };
+
+  const refreshBridgeStatus = async (reason: string, force: boolean) => {
+    setBridgeRefreshLoading(true);
+    setBridgeStatusError("");
+    try {
+      const mode = (ibSettings?.mode || ibSettingsForm.mode || "paper").toLowerCase();
+      const res = await api.post<IBBridgeRefreshOut>(
+        "/api/brokerage/bridge/refresh",
+        null,
+        {
+          params: { mode, reason, force },
+        }
+      );
+      setBridgeStatus(res.data?.bridge_status || null);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("trade.bridgeRefreshError");
+      setBridgeStatusError(String(detail));
+    } finally {
+      setBridgeRefreshLoading(false);
+    }
+  };
+
   const loadMarketSnapshot = async (symbol?: string) => {
     const target =
       symbol || ibStreamStatus?.subscribed_symbols?.[0] || marketSnapshotSymbol || "";
@@ -1139,6 +1234,7 @@ export default function LiveTradePage() {
       loadIbSettings(),
       loadIbState(true),
       loadIbStreamStatus(true),
+      loadBridgeStatus(true),
       loadIbHistoryJobs(),
       loadAccountSummary(false),
       loadAccountPositions(),
@@ -1175,6 +1271,20 @@ export default function LiveTradePage() {
       window.clearInterval(timer);
     };
   }, []);
+
+  useEffect(() => {
+    const refresh = () => {
+      if (bridgeAutoRefresh) {
+        refreshBridgeStatus("auto", false);
+      } else {
+        loadBridgeStatus(true);
+      }
+    };
+    const timer = window.setInterval(refresh, LIVE_TRADE_REFRESH_MS.bridge);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [bridgeAutoRefresh, ibSettings?.mode, ibSettingsForm.mode]);
 
   useEffect(() => {
     const refresh = () => {
@@ -1291,6 +1401,9 @@ export default function LiveTradePage() {
   }, [ibSettings]);
 
   const bridgeIsStale = useMemo(() => {
+    if (bridgeStatus?.stale !== undefined) {
+      return Boolean(bridgeStatus.stale);
+    }
     if (accountSummary?.stale === true) {
       return true;
     }
@@ -1301,17 +1414,17 @@ export default function LiveTradePage() {
       return true;
     }
     return false;
-  }, [accountSummary?.stale, accountPositionsStale, ibStreamStatus?.status]);
+  }, [accountSummary?.stale, accountPositionsStale, bridgeStatus?.stale, ibStreamStatus?.status]);
 
   const bridgeStatusLabel = useMemo(() => {
     if (bridgeIsStale) {
       return t("trade.bridgeStatus.stale");
     }
-    if (ibStreamStatus?.status || accountSummary?.refreshed_at) {
+    if (bridgeStatus?.status || ibStreamStatus?.status || accountSummary?.refreshed_at) {
       return t("trade.bridgeStatus.ok");
     }
     return t("trade.bridgeStatus.unknown");
-  }, [bridgeIsStale, ibStreamStatus?.status, accountSummary?.refreshed_at, t]);
+  }, [bridgeIsStale, bridgeStatus?.status, ibStreamStatus?.status, accountSummary?.refreshed_at, t]);
 
   const bridgeSource = useMemo(() => {
     return accountSummary?.source || "lean_bridge";
@@ -1319,12 +1432,20 @@ export default function LiveTradePage() {
 
   const bridgeUpdatedAt = useMemo(() => {
     return (
+      bridgeStatus?.last_heartbeat ||
+      bridgeStatus?.updated_at ||
       ibStreamStatus?.last_heartbeat ||
       accountPositionsUpdatedAt ||
       accountSummary?.refreshed_at ||
       null
     );
-  }, [ibStreamStatus?.last_heartbeat, accountPositionsUpdatedAt, accountSummary?.refreshed_at]);
+  }, [
+    bridgeStatus?.last_heartbeat,
+    bridgeStatus?.updated_at,
+    ibStreamStatus?.last_heartbeat,
+    accountPositionsUpdatedAt,
+    accountSummary?.refreshed_at,
+  ]);
 
   const positionsStale = useMemo(() => {
     if (accountPositionsStale) {
@@ -1379,6 +1500,24 @@ export default function LiveTradePage() {
       return t("common.none");
     }
     const key = `common.status.${String(value)}`;
+    const translated = t(key);
+    return translated === key ? String(value) : translated;
+  };
+
+  const formatBridgeRefreshResult = (value?: string | null) => {
+    if (!value) {
+      return t("common.none");
+    }
+    const key = `trade.bridgeRefreshResult.${String(value)}`;
+    const translated = t(key);
+    return translated === key ? String(value) : translated;
+  };
+
+  const formatBridgeRefreshReason = (value?: string | null) => {
+    if (!value) {
+      return t("common.none");
+    }
+    const key = `trade.bridgeRefreshReason.${String(value)}`;
     const translated = t(key);
     return translated === key ? String(value) : translated;
   };
@@ -1730,6 +1869,76 @@ export default function LiveTradePage() {
         </div>
       </div>
     ),
+    bridge: (
+      <div className="card">
+        <div className="card-title">{t("trade.bridgeStatusTitle")}</div>
+        <div className="card-meta">{t("trade.bridgeStatusMeta")}</div>
+        {bridgeStatusLoading && <div className="form-hint">{t("common.actions.loading")}</div>}
+        {bridgeStatusError && <div className="form-hint">{bridgeStatusError}</div>}
+        <div className="meta-list" style={{ marginTop: "12px" }}>
+          <div className="meta-row">
+            <span>{t("trade.bridgeStatusLabel")}</span>
+            <strong>
+              {bridgeStatus?.status ? formatStatus(bridgeStatus.status) : t("common.none")}
+            </strong>
+          </div>
+          <div className="meta-row">
+            <span>{t("trade.bridgeHeartbeatAt")}</span>
+            <strong>{formatDateTime(bridgeStatus?.last_heartbeat)}</strong>
+          </div>
+          <div className="meta-row">
+            <span>{t("trade.bridgeStaleLabel")}</span>
+            <strong>
+              {bridgeStatus?.stale === undefined
+                ? t("common.none")
+                : bridgeStatus.stale
+                  ? t("common.boolean.true")
+                  : t("common.boolean.false")}
+            </strong>
+          </div>
+          <div className="meta-row">
+            <span>{t("trade.bridgeLastRefreshAt")}</span>
+            <strong>{formatDateTime(bridgeStatus?.last_refresh_at)}</strong>
+          </div>
+          <div className="meta-row">
+            <span>{t("trade.bridgeRefreshResultLabel")}</span>
+            <strong>{formatBridgeRefreshResult(bridgeStatus?.last_refresh_result)}</strong>
+          </div>
+          <div className="meta-row">
+            <span>{t("trade.bridgeRefreshReasonLabel")}</span>
+            <strong>{formatBridgeRefreshReason(bridgeStatus?.last_refresh_reason)}</strong>
+          </div>
+          {bridgeStatus?.last_refresh_message && (
+            <div className="meta-row">
+              <span>{t("trade.bridgeRefreshMessageLabel")}</span>
+              <strong>{bridgeStatus.last_refresh_message}</strong>
+            </div>
+          )}
+          {bridgeStatus?.last_error && (
+            <div className="meta-row">
+              <span>{t("trade.bridgeLastError")}</span>
+              <strong>{bridgeStatus.last_error}</strong>
+            </div>
+          )}
+        </div>
+        <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+          <button
+            className="button-secondary"
+            onClick={() => refreshBridgeStatus("manual", true)}
+            disabled={bridgeRefreshLoading}
+          >
+            {bridgeRefreshLoading ? t("trade.bridgeRefreshRunning") : t("trade.bridgeRefreshButton")}
+          </button>
+          <button
+            className={bridgeAutoRefresh ? "button-primary" : "button-secondary"}
+            onClick={() => setBridgeAutoRefresh((prev) => !prev)}
+            disabled={bridgeRefreshLoading}
+          >
+            {bridgeAutoRefresh ? t("trade.bridgeAutoRefreshOn") : t("trade.bridgeAutoRefreshOff")}
+          </button>
+        </div>
+      </div>
+    ),
     project: (
       <div className="card">
         <div className="card-title">{t("trade.projectBindingTitle")}</div>
@@ -1909,6 +2118,11 @@ export default function LiveTradePage() {
         {positionActionError && (
           <div className="form-hint danger" style={{ marginTop: "12px" }}>
             {positionActionError}
+          </div>
+        )}
+        {positionActionWarning && (
+          <div className="form-hint warn" style={{ marginTop: "12px" }}>
+            {positionActionWarning}
           </div>
         )}
         {positionActionResult && (
