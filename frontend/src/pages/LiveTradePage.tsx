@@ -1,4 +1,12 @@
-import { Fragment, useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import TopBar from "../components/TopBar";
 import IdChip from "../components/IdChip";
 import PaginationBar from "../components/PaginationBar";
@@ -6,11 +14,14 @@ import { api } from "../api";
 import { useI18n } from "../i18n";
 import { resolveAccountSummaryLabel } from "../utils/accountSummary";
 import { buildOrderTag } from "../utils/orderTag";
+import { getLiveTradeSections, type LiveTradeSectionKey } from "../utils/liveTradeLayout";
 import {
-  getLiveTradeSections,
-  LIVE_TRADE_REFRESH_MS,
-  type LiveTradeSectionKey,
-} from "../utils/liveTradeLayout";
+  REFRESH_INTERVALS,
+  MANUAL_REFRESH_KEYS,
+  isAutoRefreshKey,
+  type AutoRefreshKey,
+  type RefreshKey,
+} from "../utils/liveTradeRefreshScheduler";
 
 interface IBSettings {
   id: number;
@@ -388,6 +399,25 @@ export default function LiveTradePage() {
   const [guardError, setGuardError] = useState("");
   const [tradeError, setTradeError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(true);
+  const [refreshMeta, setRefreshMeta] = useState<
+    Record<RefreshKey, { intervalMs: number | null; lastAt: string | null; nextAt: string | null }>
+  >(() => {
+    const now = Date.now();
+    const entries: [RefreshKey, { intervalMs: number | null; lastAt: string | null; nextAt: string | null }][] =
+      (Object.keys(REFRESH_INTERVALS) as AutoRefreshKey[]).map((key) => {
+        const intervalMs = REFRESH_INTERVALS[key];
+        const nextAt = new Date(now + intervalMs).toISOString();
+        return [key, { intervalMs, lastAt: null, nextAt }];
+      });
+    MANUAL_REFRESH_KEYS.forEach((key) => {
+      entries.push([key, { intervalMs: null, lastAt: null, nextAt: null }]);
+    });
+    return Object.fromEntries(entries) as Record<
+      RefreshKey,
+      { intervalMs: number | null; lastAt: string | null; nextAt: string | null }
+    >;
+  });
 
   const updateIbSettingsForm = (key: keyof typeof ibSettingsForm, value: string | boolean) => {
     setIbSettingsForm((prev) => ({ ...prev, [key]: value }));
@@ -412,6 +442,63 @@ export default function LiveTradePage() {
   const updateExecuteForm = (key: keyof typeof executeForm, value: string) => {
     setExecuteForm((prev) => ({ ...prev, [key]: value }));
   };
+
+  const refreshTimersRef = useRef<Record<AutoRefreshKey, number>>({});
+
+  const formatIntervalLabel = useCallback(
+    (intervalMs: number | null) => {
+      if (!intervalMs) {
+        return t("trade.refreshManual");
+      }
+      if (intervalMs % 60000 === 0) {
+        return `${intervalMs / 60000}m`;
+      }
+      return `${intervalMs / 1000}s`;
+    },
+    [t]
+  );
+
+  const formatNextRefresh = useCallback(
+    (meta: { intervalMs: number | null; nextAt: string | null } | undefined) => {
+      if (!meta) {
+        return t("common.none");
+      }
+      if (!meta.intervalMs) {
+        return t("trade.refreshManual");
+      }
+      if (!autoRefreshEnabled) {
+        return t("trade.autoUpdateOff");
+      }
+      if (!meta.nextAt) {
+        return t("common.none");
+      }
+      return formatDateTime(meta.nextAt);
+    },
+    [autoRefreshEnabled, formatDateTime, t]
+  );
+
+  const markRefreshed = useCallback(
+    (key: RefreshKey) => {
+      setRefreshMeta((prev) => {
+        const intervalMs =
+          prev[key]?.intervalMs ?? (isAutoRefreshKey(key) ? REFRESH_INTERVALS[key] : null);
+        const lastAt = new Date().toISOString();
+        const nextAt =
+          isAutoRefreshKey(key) && autoRefreshEnabled && intervalMs
+            ? new Date(Date.now() + intervalMs).toISOString()
+            : null;
+        return {
+          ...prev,
+          [key]: {
+            intervalMs,
+            lastAt,
+            nextAt,
+          },
+        };
+      });
+    },
+    [autoRefreshEnabled]
+  );
 
   const createTradeRun = async () => {
     if (!selectedProjectId) {
@@ -789,6 +876,7 @@ export default function LiveTradePage() {
       const detail = err?.response?.data?.detail || t("data.ib.contractsError");
       setIbContractError(String(detail));
     } finally {
+      markRefreshed("contracts");
       setIbContractLoading(false);
     }
   };
@@ -815,6 +903,7 @@ export default function LiveTradePage() {
       setIbMarketHealthError(String(detail));
     } finally {
       setMarketHealthUpdatedAt(new Date().toISOString());
+      markRefreshed("health");
       setIbMarketHealthLoading(false);
     }
   };
@@ -1133,19 +1222,81 @@ export default function LiveTradePage() {
     }
   };
 
+  const refreshHandlers = useMemo<Partial<Record<RefreshKey, () => Promise<void>>>>(
+    () => ({
+      connection: async () => {
+        await Promise.all([loadIbSettings(), loadIbState(true), loadIbStreamStatus(true)]);
+      },
+      project: async () => {
+        await loadProjects();
+        if (selectedProjectId) {
+          await loadLatestSnapshot(selectedProjectId);
+        }
+      },
+      account: async () => {
+        await Promise.all([loadAccountSummary(false), loadAccountSummary(true)]);
+      },
+      positions: async () => {
+        await loadAccountPositions();
+      },
+      monitor: async () => {
+        await Promise.all([
+          loadTradeActivity(ordersPage, ordersPageSize),
+          loadTradeReceipts(receiptsPage, receiptsPageSize),
+          loadIbHistoryJobs(),
+        ]);
+      },
+      snapshot: async () => {
+        await loadMarketSnapshot(ibStreamStatus?.subscribed_symbols?.[0]);
+      },
+      execution: async () => {
+        await loadTradeSettings();
+        if (selectedRunId) {
+          await loadTradeRunData(selectedRunId);
+        }
+      },
+      health: async () => {
+        await checkIbMarketHealth();
+      },
+      contracts: async () => {
+        await refreshIbContracts();
+      },
+    }),
+    [
+      ibStreamStatus?.subscribed_symbols,
+      ordersPage,
+      ordersPageSize,
+      receiptsPage,
+      receiptsPageSize,
+      selectedProjectId,
+      selectedRunId,
+    ]
+  );
+
+  const triggerRefresh = useCallback(
+    async (key: RefreshKey) => {
+      const handler = refreshHandlers[key];
+      if (!handler) {
+        return;
+      }
+      try {
+        await handler();
+      } finally {
+        markRefreshed(key);
+      }
+    },
+    [markRefreshed, refreshHandlers]
+  );
+
   const refreshAll = async () => {
     setLoading(true);
-    await Promise.all([
-      loadIbSettings(),
-      loadIbState(true),
-      loadIbStreamStatus(true),
-      loadIbHistoryJobs(),
-      loadAccountSummary(false),
-      loadAccountPositions(),
-      loadTradeSettings(),
-      loadTradeActivity(),
-    ]);
-    setLoading(false);
+    try {
+      await Promise.all(
+        (Object.keys(refreshHandlers) as RefreshKey[]).map((key) => triggerRefresh(key))
+      );
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {
@@ -1166,40 +1317,53 @@ export default function LiveTradePage() {
   }, [selectedProjectId]);
 
   useEffect(() => {
-    const refresh = async () => {
-      await loadIbState(true);
-      await loadIbStreamStatus(true);
-    };
-    const timer = window.setInterval(refresh, LIVE_TRADE_REFRESH_MS.connection);
-    return () => {
-      window.clearInterval(timer);
-    };
-  }, []);
+    if (!autoRefreshEnabled) {
+      return undefined;
+    }
+    setRefreshMeta((prev) => {
+      const now = Date.now();
+      const nextMeta: typeof prev = { ...prev };
+      (Object.keys(REFRESH_INTERVALS) as AutoRefreshKey[]).forEach((key) => {
+        const intervalMs = REFRESH_INTERVALS[key];
+        if (!intervalMs || intervalMs <= 0) {
+          return;
+        }
+        nextMeta[key] = {
+          ...nextMeta[key],
+          intervalMs,
+          nextAt: new Date(now + intervalMs).toISOString(),
+        };
+      });
+      return nextMeta;
+    });
+    return undefined;
+  }, [autoRefreshEnabled]);
 
   useEffect(() => {
-    const refresh = () => {
-      loadAccountSummary(false);
-      loadAccountPositions();
-    };
-    const timer = window.setInterval(refresh, LIVE_TRADE_REFRESH_MS.account);
-    return () => {
+    Object.values(refreshTimersRef.current).forEach((timer) => {
       window.clearInterval(timer);
-    };
-  }, [ibSettings?.mode, ibSettingsForm.mode]);
-
-  useEffect(() => {
-    const refresh = () => {
-      if (detailTab === "receipts") {
-        loadTradeReceipts();
-      } else {
-        loadTradeActivity(ordersPage, ordersPageSize);
+    });
+    refreshTimersRef.current = {};
+    if (!autoRefreshEnabled) {
+      return undefined;
+    }
+    (Object.keys(REFRESH_INTERVALS) as AutoRefreshKey[]).forEach((key) => {
+      const intervalMs = REFRESH_INTERVALS[key];
+      if (!intervalMs || intervalMs <= 0) {
+        return;
       }
-    };
-    const timer = window.setInterval(refresh, LIVE_TRADE_REFRESH_MS.monitor);
+      const timer = window.setInterval(() => {
+        triggerRefresh(key);
+      }, intervalMs);
+      refreshTimersRef.current[key] = timer;
+    });
     return () => {
-      window.clearInterval(timer);
+      Object.values(refreshTimersRef.current).forEach((timer) => {
+        window.clearInterval(timer);
+      });
+      refreshTimersRef.current = {};
     };
-  }, [detailTab, ordersPage, ordersPageSize, receiptsPage, receiptsPageSize]);
+  }, [autoRefreshEnabled, triggerRefresh]);
 
   useEffect(() => {
     setPositionSelections((prev) => {
@@ -1424,6 +1588,39 @@ export default function LiveTradePage() {
     return translated === key ? String(value).toUpperCase() : translated;
   };
 
+  const renderRefreshSchedule = useCallback(
+    (key: RefreshKey, testIdSuffix?: string) => {
+      const meta = refreshMeta[key];
+      if (!meta) {
+        return null;
+      }
+      const suffix = testIdSuffix || key;
+      return (
+        <div className="meta-list" style={{ marginTop: "8px" }}>
+          <div className="meta-row">
+            <span>{t("trade.refreshInterval")}</span>
+            <strong data-testid={`card-refresh-interval-${suffix}`}>
+              {formatIntervalLabel(meta.intervalMs)}
+            </strong>
+          </div>
+          <div className="meta-row">
+            <span>{t("trade.refreshNext")}</span>
+            <strong data-testid={`card-refresh-next-${suffix}`}>
+              {formatNextRefresh(meta)}
+            </strong>
+          </div>
+          <div className="meta-row">
+            <span>{t("trade.refreshLast")}</span>
+            <strong data-testid={`card-refresh-last-${suffix}`}>
+              {meta.lastAt ? formatDateTime(meta.lastAt) : t("common.none")}
+            </strong>
+          </div>
+        </div>
+      );
+    },
+    [formatIntervalLabel, formatNextRefresh, formatDateTime, refreshMeta, t]
+  );
+
   const marketHealthStatusLabel = useMemo(() => {
     if (ibMarketHealthResult?.status) {
       return formatStatus(ibMarketHealthResult.status);
@@ -1636,6 +1833,7 @@ export default function LiveTradePage() {
       <div className="card">
         <div className="card-title">{t("trade.statusTitle")}</div>
         <div className="card-meta">{t("trade.statusMeta")}</div>
+        {renderRefreshSchedule("connection", "connection")}
         {ibSettings?.mode === "live" && (
           <div className="form-error" style={{ marginTop: "8px" }}>
             {t("trade.liveWarning")}
@@ -1707,23 +1905,6 @@ export default function LiveTradePage() {
         {ibStateResult && <div className="form-success">{ibStateResult}</div>}
         {ibStateError && <div className="form-error">{ibStateError}</div>}
         <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
-          <button
-            className="button-secondary"
-            onClick={() => loadIbState(false)}
-            disabled={ibStateLoading}
-          >
-            {ibStateLoading ? t("common.actions.loading") : t("common.actions.refresh")}
-          </button>
-          <button
-            className="button-secondary"
-            onClick={probeIbState}
-            disabled={ibStateLoading}
-          >
-            {ibStateLoading ? t("common.actions.loading") : t("data.ib.probe")}
-          </button>
-          <button className="button-secondary" onClick={refreshAll} disabled={loading}>
-            {loading ? t("common.actions.loading") : t("trade.refresh")}
-          </button>
           <a className="button-secondary" href="/data">
             {t("trade.openData")}
           </a>
@@ -1734,6 +1915,7 @@ export default function LiveTradePage() {
       <div className="card">
         <div className="card-title">{t("trade.projectBindingTitle")}</div>
         <div className="card-meta">{t("trade.projectBindingMeta")}</div>
+        {renderRefreshSchedule("project", "project")}
         {projectError && <div className="form-hint">{projectError}</div>}
         <div className="form-grid two-col" style={{ marginTop: "12px" }}>
           <div className="form-row">
@@ -1793,6 +1975,7 @@ export default function LiveTradePage() {
       <div className="card">
         <div className="card-title">{t("trade.accountSummaryTitle")}</div>
         <div className="card-meta">{t("trade.accountSummaryMeta")}</div>
+        {renderRefreshSchedule("account", "account")}
         {accountSummaryError && <div className="form-hint">{accountSummaryError}</div>}
         <div className="overview-grid" style={{ marginTop: "12px" }}>
           {accountSummaryItems.map((item) => (
@@ -1830,17 +2013,6 @@ export default function LiveTradePage() {
             </div>
           )}
         </div>
-        <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
-          <button
-            className="button-secondary"
-            onClick={() => loadAccountSummary(true)}
-            disabled={accountSummaryFullLoading}
-          >
-            {accountSummaryFullLoading
-              ? t("common.actions.loading")
-              : t("trade.accountSummaryRefresh")}
-          </button>
-        </div>
         {accountSummaryFullError && <div className="form-hint">{accountSummaryFullError}</div>}
         <details style={{ marginTop: "12px" }}>
           <summary>{t("trade.accountSummaryFullTitle")}</summary>
@@ -1877,21 +2049,13 @@ export default function LiveTradePage() {
       <div className="card span-2" data-testid="account-positions-card">
         <div className="card-title">{t("trade.accountPositionsTitle")}</div>
         <div className="card-meta">{t("trade.accountPositionsMeta")}</div>
+        {renderRefreshSchedule("positions", "positions")}
         {positionsStale && (
           <div className="form-hint warn" style={{ marginTop: "8px" }}>
             <div>{t("trade.accountPositionsStaleHint")}</div>
             <div className="meta-row" style={{ marginTop: "6px" }}>
               <span>{t("trade.accountPositionsStaleUpdatedAt")}</span>
               <strong>{bridgeUpdatedAt ? formatDateTime(bridgeUpdatedAt) : t("common.none")}</strong>
-              <button
-                className="button-compact"
-                onClick={loadAccountPositions}
-                disabled={accountPositionsLoading}
-              >
-                {accountPositionsLoading
-                  ? t("common.actions.loading")
-                  : t("trade.accountPositionsRefresh")}
-              </button>
             </div>
           </div>
         )}
@@ -2055,6 +2219,7 @@ export default function LiveTradePage() {
       <div className="card span-2">
         <div className="card-title">{t("trade.monitorTitle")}</div>
         <div className="card-meta">{t("trade.monitorMeta")}</div>
+        {renderRefreshSchedule("monitor", "monitor")}
         {tradeError && <div className="form-hint">{tradeError}</div>}
         <div className="meta-list" style={{ marginTop: "12px" }}>
           <div className="meta-row">
@@ -2235,6 +2400,7 @@ export default function LiveTradePage() {
       <div className="card">
         <div className="card-title">{t("trade.configTitle")}</div>
         <div className="card-meta">{t("trade.configMeta")}</div>
+        {renderRefreshSchedule("connection", "config")}
         <div className="overview-grid" style={{ marginTop: "12px" }}>
           <div className="overview-card">
             <div className="overview-label">{t("trade.host")}</div>
@@ -2376,6 +2542,7 @@ export default function LiveTradePage() {
         <div className="card">
           <div className="card-title">{t("data.ib.streamTitle")}</div>
           <div className="card-meta">{t("data.ib.streamMeta")}</div>
+          {renderRefreshSchedule("connection", "stream")}
           <div className="overview-grid" style={{ marginTop: "12px" }}>
             <div className="overview-card">
               <div className="overview-label">{t("data.ib.streamStatus")}</div>
@@ -2470,18 +2637,12 @@ export default function LiveTradePage() {
             >
               {ibStreamActionLoading ? t("common.actions.loading") : t("data.ib.streamStop")}
             </button>
-            <button
-              className="button-secondary"
-              onClick={() => loadIbStreamStatus(false)}
-              disabled={ibStreamLoading}
-            >
-              {ibStreamLoading ? t("common.actions.loading") : t("data.ib.streamRefresh")}
-            </button>
           </div>
         </div>
         <div className="card">
           <div className="card-title">{t("trade.snapshotTitle")}</div>
           <div className="card-meta">{t("trade.snapshotMeta")}</div>
+          {renderRefreshSchedule("snapshot", "snapshot")}
           <div className="snapshot-hero" style={{ marginTop: "12px" }}>
             <div className="snapshot-symbol">{marketSnapshotSymbol || t("trade.snapshotEmpty")}</div>
             <div className="snapshot-price">
@@ -2508,18 +2669,10 @@ export default function LiveTradePage() {
             </div>
           </div>
           {marketSnapshotError && <div className="form-error">{marketSnapshotError}</div>}
-          <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
-            <button
-              className="button-secondary"
-              onClick={() => loadMarketSnapshot()}
-              disabled={marketSnapshotLoading}
-            >
-              {marketSnapshotLoading ? t("common.actions.loading") : t("trade.snapshotRefresh")}
-            </button>
-          </div>
         </div>
         <div className="card">
           <div className="card-title">{t("data.ib.healthTitle")}</div>
+          {renderRefreshSchedule("health", "health")}
           <div className="form-grid">
             <div className="form-row full">
               <label className="form-label">{t("data.ib.healthSymbols")}</label>
@@ -2635,6 +2788,7 @@ export default function LiveTradePage() {
     contracts: (
       <div className="card">
         <div className="card-title">{t("data.ib.contractsTitle")}</div>
+        {renderRefreshSchedule("contracts", "contracts")}
         <div className="form-grid">
           <div className="form-row full">
             <label className="form-label">{t("data.ib.contractsSymbols")}</label>
@@ -2676,13 +2830,14 @@ export default function LiveTradePage() {
           onClick={refreshIbContracts}
           disabled={ibContractLoading}
         >
-          {ibContractLoading ? t("common.actions.loading") : t("data.ib.contractsRefresh")}
+          {ibContractLoading ? t("common.actions.loading") : t("data.ib.contractsSync")}
         </button>
       </div>
     ),
     history: (
       <div className="card">
         <div className="card-title">{t("data.ib.historyTitle")}</div>
+        {renderRefreshSchedule("monitor", "history")}
         <div className="form-grid">
           <div className="form-row full">
             <label className="form-label">{t("data.ib.historySymbols")}</label>
@@ -2779,13 +2934,6 @@ export default function LiveTradePage() {
           >
             {ibHistoryActionLoading ? t("common.actions.loading") : t("data.ib.historyStart")}
           </button>
-          <button
-            className="button-secondary"
-            onClick={loadIbHistoryJobs}
-            disabled={ibHistoryLoading}
-          >
-            {ibHistoryLoading ? t("common.actions.loading") : t("common.actions.refresh")}
-          </button>
         </div>
         {ibHistoryJobs.length > 0 ? (
           <table className="table" style={{ marginTop: "12px" }}>
@@ -2842,6 +2990,7 @@ export default function LiveTradePage() {
       <div className="card">
         <div className="card-title">{t("trade.guardTitle")}</div>
         <div className="card-meta">{t("trade.guardMeta")}</div>
+        {renderRefreshSchedule("monitor", "guard")}
         {guardError && <div className="form-error">{guardError}</div>}
         <div className="overview-grid" style={{ marginTop: "12px" }}>
           <div className="overview-card">
@@ -2908,6 +3057,7 @@ export default function LiveTradePage() {
       <div className="card">
         <div className="card-title">{t("trade.executionTitle")}</div>
         <div className="card-meta">{t("trade.executionMeta")}</div>
+        {renderRefreshSchedule("execution", "execution")}
         <div className="overview-grid" style={{ marginTop: "12px" }}>
           <div className="overview-card">
             <div className="overview-label">{t("trade.latestRun")}</div>
@@ -3088,6 +3238,7 @@ export default function LiveTradePage() {
       <div className="card span-2">
         <div className="card-title">{t("trade.symbolSummaryTitle")}</div>
         <div className="card-meta">{t("trade.symbolSummaryMeta")}</div>
+        {renderRefreshSchedule("execution", "symbol-summary")}
         {detailError && <div className="form-hint">{detailError}</div>}
         <div className="meta-list" style={{ marginTop: "12px" }}>
           <div className="meta-row">
@@ -3098,13 +3249,6 @@ export default function LiveTradePage() {
           </div>
         </div>
         <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
-          <button
-            className="button-secondary"
-            disabled={detailLoading || !selectedRunId}
-            onClick={() => selectedRunId && loadTradeRunData(selectedRunId)}
-          >
-            {detailLoading ? t("common.actions.loading") : t("trade.detailRefresh")}
-          </button>
         </div>
         <table className="table" style={{ marginTop: "12px" }}>
           <thead>
@@ -3156,6 +3300,31 @@ export default function LiveTradePage() {
       <TopBar title={t("trade.title")} />
       <div className="content">
         <div className="section-title">{t("trade.mainSectionTitle")}</div>
+        <div style={{ display: "flex", gap: "16px", flexWrap: "wrap", alignItems: "center" }}>
+          <button
+            className="button-primary"
+            data-testid="live-trade-refresh-all"
+            onClick={refreshAll}
+            disabled={loading}
+          >
+            {loading ? t("common.actions.loading") : t("trade.refreshAll")}
+          </button>
+          <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
+            <span>{t("trade.autoUpdateLabel")}</span>
+            <label className="switch">
+              <input
+                type="checkbox"
+                checked={autoRefreshEnabled}
+                onChange={(event) => setAutoRefreshEnabled(event.target.checked)}
+                data-testid="live-trade-auto-toggle"
+              />
+              <span className="slider" />
+            </label>
+            <strong data-testid="auto-refresh-status">
+              {autoRefreshEnabled ? t("trade.autoUpdateOn") : t("trade.autoUpdateOff")}
+            </strong>
+          </div>
+        </div>
         <div className="grid-2">
           {sections.main.map((key) => (
             <Fragment key={key}>{sectionCards[key]}</Fragment>
