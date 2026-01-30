@@ -230,3 +230,52 @@ def test_receipts_ingest_marks_filled_when_event_filled(monkeypatch, tmp_path: P
     assert refreshed.status == "FILLED"
 
     session.close()
+
+
+def test_receipts_ingest_updates_status_when_fill_exists(monkeypatch, tmp_path: Path) -> None:
+    session = _make_session()
+    monkeypatch.setattr(settings, "data_root", str(tmp_path))
+
+    result = create_trade_order(
+        session,
+        {
+            "client_order_id": "manual-5",
+            "symbol": "AAPL",
+            "side": "BUY",
+            "quantity": 3,
+            "order_type": "MKT",
+            "params": {"client_order_id_auto": True},
+        },
+    )
+    session.commit()
+    order = result.order
+
+    fill = TradeFill(
+        order_id=order.id,
+        fill_quantity=2,
+        fill_price=200.0,
+        fill_time=datetime(2026, 1, 30, 20, 34, 1, tzinfo=timezone.utc),
+        params={"event_time": "2026-01-30T20:34:01Z"},
+    )
+    session.add(fill)
+    order.status = "PARTIAL"
+    order.filled_quantity = 2
+    session.commit()
+
+    bridge_dir = tmp_path / "lean_bridge" / f"direct_{order.id}"
+    bridge_dir.mkdir(parents=True, exist_ok=True)
+    events_path = bridge_dir / "execution_events.jsonl"
+    _write_events(
+        events_path,
+        [
+            f'{{"order_id":1,"symbol":"AAPL","status":"Filled","filled":2,"fill_price":200.0,"direction":"Buy","time":"2026-01-30T20:34:01Z","tag":"direct:{order.id}"}}',
+        ],
+    )
+
+    list_trade_receipts(session, limit=50, offset=0, mode="all")
+
+    refreshed = session.get(TradeOrder, order.id)
+    assert refreshed is not None
+    assert refreshed.status == "FILLED"
+
+    session.close()
