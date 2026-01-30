@@ -51,6 +51,22 @@ def test_build_leader_watchlist_dedupes_benchmark(monkeypatch):
     assert "MSFT" in result
 
 
+def test_build_leader_watchlist_prioritizes_snapshot_symbols(monkeypatch):
+    projects = [
+        {"id": 1, "benchmark": "SPY", "symbols": ["A", "B"], "snapshot_symbols": ["X", "Y"]},
+        {"id": 2, "benchmark": "QQQ", "symbols": ["C"], "snapshot_symbols": ["Z"]},
+    ]
+
+    def _fake_collect_active(_session):
+        return projects
+
+    monkeypatch.setattr(project_symbols, "_collect_active_project_watchlist_inputs", _fake_collect_active)
+
+    result = project_symbols.build_leader_watchlist(None, max_symbols=5)
+
+    assert result == ["SPY", "QQQ", "X", "Z", "Y"]
+
+
 def test_refresh_leader_watchlist_skips_write_on_same_symbols(tmp_path, monkeypatch):
     from app.services import lean_bridge_watchlist
 

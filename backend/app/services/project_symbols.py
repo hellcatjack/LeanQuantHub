@@ -5,7 +5,7 @@ from collections import deque
 from pathlib import Path
 from typing import Iterable
 
-from app.models import Project
+from app.models import Project, DecisionSnapshot
 from app.routes.projects import (
     _build_symbol_type_index,
     _build_theme_index,
@@ -150,15 +150,44 @@ def _collect_active_project_watchlist_inputs(session) -> list[dict]:
     for project in projects:
         config = _resolve_project_config(session, project.id)
         symbols = collect_project_symbols(config)
+        snapshot_symbols = _collect_latest_snapshot_symbols(session, project.id)
         benchmark = str(config.get("benchmark") or "SPY").strip().upper()
         items.append(
             {
                 "id": project.id,
                 "benchmark": benchmark,
                 "symbols": symbols,
+                "snapshot_symbols": snapshot_symbols,
             }
         )
     return items
+
+
+def _collect_latest_snapshot_symbols(session, project_id: int) -> list[str]:
+    if session is None:
+        return []
+    snapshot = (
+        session.query(DecisionSnapshot)
+        .filter(DecisionSnapshot.project_id == project_id)
+        .order_by(DecisionSnapshot.created_at.desc())
+        .first()
+    )
+    if not snapshot or not snapshot.items_path:
+        return []
+    rows = _safe_read_csv(Path(snapshot.items_path))
+    symbols: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        symbol = ""
+        for key, value in row.items():
+            if str(key).strip().lower() == "symbol":
+                symbol = str(value or "")
+                break
+        symbol = symbol.strip().upper()
+        if symbol:
+            symbols.add(symbol)
+    return sorted(symbols)
 
 
 def build_leader_watchlist(session, *, max_symbols: int = 200) -> list[str]:
@@ -179,6 +208,34 @@ def build_leader_watchlist(session, *, max_symbols: int = 200) -> list[str]:
             if len(ordered) >= limit:
                 return ordered
 
+    def _drain_round_robin(queues: list[deque[str]]) -> None:
+        nonlocal ordered, seen, limit
+        while len(ordered) < limit:
+            progressed = False
+            for queue in queues:
+                while queue:
+                    symbol = queue.popleft()
+                    if symbol and symbol not in seen:
+                        ordered.append(symbol)
+                        seen.add(symbol)
+                        progressed = True
+                        break
+                if len(ordered) >= limit:
+                    break
+            if not progressed:
+                break
+
+    snapshot_queues: list[deque[str]] = []
+    for item in items:
+        snapshot_symbols = item.get("snapshot_symbols") or []
+        normalized = {
+            str(symbol).strip().upper()
+            for symbol in snapshot_symbols
+            if str(symbol).strip()
+        }
+        snapshot_queues.append(deque(sorted(normalized)))
+    _drain_round_robin(snapshot_queues)
+
     queues: list[deque[str]] = []
     for item in items:
         symbols = item.get("symbols") or []
@@ -188,21 +245,7 @@ def build_leader_watchlist(session, *, max_symbols: int = 200) -> list[str]:
             if str(symbol).strip()
         }
         queues.append(deque(sorted(normalized)))
-
-    while len(ordered) < limit:
-        progressed = False
-        for queue in queues:
-            while queue:
-                symbol = queue.popleft()
-                if symbol and symbol not in seen:
-                    ordered.append(symbol)
-                    seen.add(symbol)
-                    progressed = True
-                    break
-            if len(ordered) >= limit:
-                break
-        if not progressed:
-            break
+    _drain_round_robin(queues)
 
     if not ordered:
         return ["SPY"]
