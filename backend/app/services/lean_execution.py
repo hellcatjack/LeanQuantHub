@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 import subprocess
 import os
 from pathlib import Path
 
 from app.core.config import settings
+from app.db import SessionLocal
+from app.models import TradeOrder, TradeRun
+from app.services.ib_orders import apply_fill_to_order
+from app.services.trade_orders import create_trade_order, update_trade_order_status
 from app.services.ib_settings import derive_client_id
 
 subprocess_run = subprocess.run
@@ -180,11 +185,132 @@ def launch_execution_async(*, config_path: str) -> int:
     return int(proc.pid)
 
 
-def ingest_execution_events(path: str) -> None:
-    events = json.loads(Path(path).read_text(encoding="utf-8"))
-    apply_execution_events(events)
+def ingest_execution_events(path: str) -> dict:
+    content = Path(path).read_text(encoding="utf-8")
+    try:
+        parsed = json.loads(content)
+        events = parsed if isinstance(parsed, list) else []
+    except json.JSONDecodeError:
+        events = []
+        for line in content.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return apply_execution_events(events)
 
 
-def apply_execution_events(events: list[dict]) -> None:
-    # TODO: update trade_orders / trade_fills in DB
-    return None
+def _parse_event_time(value: str | None) -> datetime:
+    if not value:
+        return datetime.now(timezone.utc)
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.now(timezone.utc)
+
+
+def _load_intent_items(path: str) -> list[dict]:
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    return []
+
+
+def _find_intent_for_id(session, intent_id: str) -> tuple[TradeRun | None, dict | None]:
+    if not intent_id:
+        return None, None
+    runs = session.query(TradeRun).all()
+    for run in runs:
+        params = run.params or {}
+        intent_path = params.get("order_intent_path")
+        if not intent_path:
+            continue
+        for item in _load_intent_items(intent_path):
+            if str(item.get("order_intent_id") or "").strip() == intent_id:
+                return run, item
+    return None, None
+
+
+def apply_execution_events(events: list[dict], *, session=None) -> dict:
+    own_session = False
+    summary = {"processed": 0, "skipped_invalid_tag": 0, "skipped_not_found": 0}
+    if session is None:
+        session = SessionLocal()
+        own_session = True
+    try:
+        for event in events or []:
+            tag = str(event.get("tag") or "").strip()
+            if not tag or not tag.startswith("oi_"):
+                summary["skipped_invalid_tag"] += 1
+                continue
+            intent_id = tag
+            order = (
+                session.query(TradeOrder)
+                .filter(TradeOrder.client_order_id == intent_id)
+                .one_or_none()
+            )
+            if order is None:
+                run, intent = _find_intent_for_id(session, intent_id)
+                if run is None:
+                    summary["skipped_not_found"] += 1
+                    continue
+                symbol = (event.get("symbol") or intent.get("symbol") or "").strip().upper()
+                if not symbol:
+                    summary["skipped_not_found"] += 1
+                    continue
+                direction = str(event.get("direction") or "").strip().upper()
+                side = "BUY" if direction in {"BUY", "LONG"} else "SELL" if direction in {"SELL", "SHORT"} else ""
+                if not side:
+                    summary["skipped_not_found"] += 1
+                    continue
+                filled_qty = float(event.get("filled") or 0.0)
+                quantity = abs(filled_qty) if filled_qty else float(intent.get("quantity") or 0.0)
+                if quantity <= 0:
+                    summary["skipped_not_found"] += 1
+                    continue
+                payload = {
+                    "client_order_id": intent_id,
+                    "symbol": symbol,
+                    "side": side,
+                    "quantity": quantity,
+                    "order_type": "MKT",
+                    "params": {"source": "lean_bridge"},
+                }
+                result = create_trade_order(session, payload, run_id=run.id)
+                session.commit()
+                order = result.order
+            order_id = event.get("order_id")
+            if order_id is not None and order.ib_order_id is None:
+                order.ib_order_id = int(order_id)
+                session.commit()
+                session.refresh(order)
+            status = str(event.get("status") or "").strip().upper()
+            if status == "SUBMITTED":
+                update_trade_order_status(session, order, {"status": "SUBMITTED"})
+                summary["processed"] += 1
+                continue
+            if status == "FILLED":
+                filled_qty = float(event.get("filled") or 0.0)
+                if filled_qty <= 0:
+                    summary["skipped_not_found"] += 1
+                    continue
+                fill_price = float(event.get("fill_price") or 0.0)
+                fill_time = _parse_event_time(event.get("time"))
+                apply_fill_to_order(
+                    session,
+                    order,
+                    fill_qty=filled_qty,
+                    fill_price=fill_price,
+                    fill_time=fill_time,
+                )
+                summary["processed"] += 1
+    finally:
+        if own_session:
+            session.close()
+    return summary

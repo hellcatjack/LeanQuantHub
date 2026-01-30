@@ -16,6 +16,15 @@ def test_write_order_intent_adds_ids(tmp_path: Path) -> None:
         assert entry.get("order_intent_id")
 
 
+def test_write_order_intent_uses_run_id_prefix(tmp_path: Path) -> None:
+    items = [
+        {"symbol": "AAPL", "weight": 0.1, "snapshot_date": "2026-01-16", "rebalance_date": "2026-01-16"},
+    ]
+    path = write_order_intent(None, snapshot_id=46, items=items, output_dir=tmp_path, run_id=7)
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    assert payload[0]["order_intent_id"].startswith("oi_7_")
+
+
 def test_ensure_order_intent_ids_rewrites_missing(tmp_path: Path) -> None:
     path = tmp_path / "intent.json"
     payload = [
