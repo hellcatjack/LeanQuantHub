@@ -57,3 +57,26 @@ def test_ib_status_overview_stream_from_bridge(monkeypatch):
         session.close()
     assert data["stream"]["status"] == "connected"
     assert data["stream"]["ib_error_count"] == 2
+
+
+def test_ib_status_overview_refreshes_watchlist(monkeypatch):
+    called = {"value": False}
+
+    def _refresh(_session, max_symbols=200):
+        called["value"] = True
+        return {"symbols": [], "updated_at": "2026-01-01T00:00:00Z"}
+
+    monkeypatch.setattr(
+        ib_status_overview,
+        "refresh_leader_watchlist",
+        _refresh,
+        raising=False,
+    )
+
+    session = SessionLocal()
+    try:
+        ib_status_overview.build_ib_status_overview(session)
+    finally:
+        session.close()
+
+    assert called["value"] is True
