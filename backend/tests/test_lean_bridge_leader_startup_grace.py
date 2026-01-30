@@ -41,3 +41,19 @@ def test_should_restart_after_grace(monkeypatch):
     )
 
     assert should_restart is True
+
+
+def test_write_watchlist_uses_refresh(monkeypatch, tmp_path):
+    calls: dict = {}
+
+    def _fake_refresh(session, max_symbols=200, bridge_root=None):
+        calls["bridge_root"] = bridge_root
+        return {"symbols": ["SPY"], "updated_at": "2026-01-01T00:00:00Z"}
+
+    monkeypatch.setattr(lean_bridge_leader, "_bridge_root", lambda: tmp_path)
+    monkeypatch.setattr(lean_bridge_leader, "refresh_leader_watchlist", _fake_refresh)
+
+    path = lean_bridge_leader._write_watchlist(None)
+
+    assert calls.get("bridge_root") == tmp_path
+    assert path == tmp_path / "watchlist.json"

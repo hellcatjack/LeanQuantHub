@@ -14,7 +14,7 @@ from app.models import LeanExecutorPool
 from app.services.job_lock import JobLock
 from app.services.lean_bridge_paths import resolve_bridge_root
 from app.services.lean_bridge_reader import parse_bridge_timestamp, read_bridge_status
-from app.services.project_symbols import build_leader_watchlist
+from app.services.lean_bridge_watchlist import refresh_leader_watchlist
 _DEFAULT_LAUNCHER_DIR = Path("/app/stocklean/Lean_git/Launcher/bin/Release")
 
 
@@ -162,27 +162,9 @@ def _should_restart(status: dict, state: dict | None, *, timeout_seconds: int, n
 
 
 def _write_watchlist(session) -> Path:
-    symbols = build_leader_watchlist(session, max_symbols=200)
-    path = _bridge_root() / "watchlist.json"
-    normalized = sorted({str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()})
-    existing: dict | None = None
-    if path.exists():
-        try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            existing = None
-    if isinstance(existing, dict):
-        existing_symbols = existing.get("symbols") if isinstance(existing.get("symbols"), list) else []
-        existing_norm = sorted({str(symbol).strip().upper() for symbol in existing_symbols if str(symbol).strip()})
-        if existing_norm == normalized:
-            return path
-    payload = {
-        "symbols": normalized,
-        "updated_at": datetime.utcnow().isoformat() + "Z",
-    }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    return path
+    root = _bridge_root()
+    refresh_leader_watchlist(session, max_symbols=200, bridge_root=root)
+    return root / "watchlist.json"
 
 
 def _load_template_config(mode: str) -> dict:

@@ -1,3 +1,15 @@
+import json
+from pathlib import Path
+import sys
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
+
+from app.models import Base, TradeRun
 from app.services import project_symbols
 
 
@@ -104,3 +116,84 @@ def test_refresh_leader_watchlist_writes_when_changed(tmp_path, monkeypatch):
 
     assert payload.get("symbols") == ["MSFT"]
     assert payload.get("updated_at")
+
+
+def _make_session():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    return sessionmaker(bind=engine)()
+
+
+def test_refresh_leader_watchlist_merges_positions_and_intents(tmp_path, monkeypatch):
+    from app.services import lean_bridge_watchlist
+
+    session = _make_session()
+    try:
+        intent_path = tmp_path / "intent.json"
+        intent_path.write_text(
+            json.dumps([{"symbol": "MSFT"}, {"symbol": "AAPL"}]),
+            encoding="utf-8",
+        )
+        run = TradeRun(
+            project_id=1,
+            mode="paper",
+            status="running",
+            params={"order_intent_path": str(intent_path)},
+        )
+        session.add(run)
+        session.commit()
+
+        (tmp_path / "positions.json").write_text(
+            json.dumps({"items": [{"symbol": "AAPL"}]}),
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(
+            lean_bridge_watchlist,
+            "build_leader_watchlist",
+            lambda *_args, **_kwargs: ["SPY"],
+        )
+
+        payload = lean_bridge_watchlist.refresh_leader_watchlist(
+            session, max_symbols=200, bridge_root=tmp_path
+        )
+    finally:
+        session.close()
+
+    assert payload.get("symbols") == ["AAPL", "MSFT", "SPY"]
+
+
+def test_refresh_leader_watchlist_prioritizes_positions(tmp_path, monkeypatch):
+    from app.services import lean_bridge_watchlist
+
+    session = _make_session()
+    try:
+        intent_path = tmp_path / "intent.json"
+        intent_path.write_text(json.dumps([{"symbol": "MSFT"}]), encoding="utf-8")
+        run = TradeRun(
+            project_id=1,
+            mode="paper",
+            status="running",
+            params={"order_intent_path": str(intent_path)},
+        )
+        session.add(run)
+        session.commit()
+
+        (tmp_path / "positions.json").write_text(
+            json.dumps({"items": [{"symbol": "AAPL"}]}),
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(
+            lean_bridge_watchlist,
+            "build_leader_watchlist",
+            lambda *_args, **_kwargs: ["SPY"],
+        )
+
+        payload = lean_bridge_watchlist.refresh_leader_watchlist(
+            session, max_symbols=1, bridge_root=tmp_path
+        )
+    finally:
+        session.close()
+
+    assert payload.get("symbols") == ["AAPL"]
