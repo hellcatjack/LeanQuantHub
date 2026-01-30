@@ -8,6 +8,10 @@
 - 数据源（逻辑一致）：**研究/回测/信号**使用 Alpha（PIT），**执行/成交/账户/行情**由 Lean IB Brokerage 输出桥接文件提供（系统不直连 IB）；允许成交价偏差但需可解释。
 - 周期：周一开盘调仓（与现有 PreTrade checklist 对齐）。
 
+## 当前进度（MVP 里程碑）
+- ✅ 已完成：订单回报采集（IBRequestSession）、live 下单闭环（submit_orders_live）、交易执行器接入 live 分支。
+- ⏳ 未完成：风控/告警/调度/对账/复盘等完整闭环。
+
 ## 菜单与入口（对齐最新主菜单布局）
 > 最新主菜单：项目 → 数据 → 回测&报告 → 主题库 → 系统审计  
 > 实盘交易需新增一级入口并与上述布局融合。
@@ -77,7 +81,10 @@
 ### 1.2 行情/账户读取与缓存
 - [x] 后端读取 bridge 文件并提供统一 API（`/api/brokerage/*`）。
 - [ ] 前端展示更新时间、数据来源、是否降级（stale/degraded）。
-- 验收：UI/日志可查看 bridge 更新状态。
+- [x] IB L1 订阅（bid/ask/last/volume）。
+- [x] 行情缓存落地到 `data/ib/stream/`（或统一 data_root/ib）。
+- [x] 订阅速率与连接状态监控（基础版本：心跳/错误计数）。
+- 验收：UI/日志可查看 bridge 更新状态与实时行情刷新。
 
 ### 1.3 数据源策略（逻辑一致）
 - [x] 执行/账户/行情/成交来自 Lean bridge。
@@ -101,7 +108,8 @@
 ### 2.1 订单状态机
 - [ ] NEW → SUBMITTED → PARTIAL → FILLED/CANCELED/REJECTED（来源为 Lean OrderEvent）。
 - [ ] clientOrderId 幂等（重试不重复下单）。
-- [ ] 成交回报回写 DB（从 bridge 事件流解析）。
+- [x] 成交回报回写 DB（MVP，来自 bridge 事件流解析）。
+- [x] 实盘下单 MVP：submit_orders_live + 订单回报聚合（MVP）。
 - 验收：重复触发不会产生重复订单。
 
 ### 2.2 订单拆分与下单规则
