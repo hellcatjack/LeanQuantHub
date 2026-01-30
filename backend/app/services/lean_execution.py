@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -116,16 +117,28 @@ def _resolve_launcher() -> tuple[str, str | None]:
     return str(dll_path), str(_DEFAULT_LAUNCHER_DIR)
 
 
+def _build_launch_env() -> dict[str, str]:
+    env = os.environ.copy()
+    if settings.dotnet_root:
+        env["DOTNET_ROOT"] = settings.dotnet_root
+        env["PATH"] = f"{settings.dotnet_root}:{env.get('PATH', '')}"
+    if settings.python_dll:
+        env["PYTHONNET_PYDLL"] = settings.python_dll
+    if settings.lean_python_venv:
+        env["PYTHONHOME"] = settings.lean_python_venv
+    return env
+
+
 def launch_execution(*, config_path: str) -> None:
     dll_path, cwd = _resolve_launcher()
     cmd = [settings.dotnet_path or "dotnet", dll_path, "--config", config_path]
-    subprocess_run(cmd, check=False, cwd=cwd)
+    subprocess_run(cmd, check=False, cwd=cwd, env=_build_launch_env())
 
 
 def launch_execution_async(*, config_path: str) -> int:
     dll_path, cwd = _resolve_launcher()
     cmd = [settings.dotnet_path or "dotnet", dll_path, "--config", config_path]
-    proc = subprocess.Popen(cmd, cwd=cwd)
+    proc = subprocess.Popen(cmd, cwd=cwd, env=_build_launch_env())
     return proc.pid
 
 

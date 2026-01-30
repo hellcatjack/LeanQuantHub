@@ -92,7 +92,7 @@ def test_build_execution_config_merges_template(monkeypatch, tmp_path):
 def test_launch_execution_uses_launcher_path(monkeypatch, tmp_path):
     calls = {}
 
-    def _fake_run(cmd, check=False, cwd=None):
+    def _fake_run(cmd, check=False, cwd=None, env=None):
         calls["cmd"] = cmd
         calls["cwd"] = cwd
         return None
@@ -108,7 +108,7 @@ def test_launch_execution_uses_launcher_path(monkeypatch, tmp_path):
 def test_launch_execution_handles_launcher_path_file(monkeypatch, tmp_path):
     calls = {}
 
-    def _fake_run(cmd, check=False, cwd=None):
+    def _fake_run(cmd, check=False, cwd=None, env=None):
         calls["cmd"] = cmd
         calls["cwd"] = cwd
         return None
@@ -194,7 +194,7 @@ def test_execution_config_forces_csharp_for_execution_algorithm(monkeypatch, tmp
 def test_launch_execution_prefers_bin_release_dll(monkeypatch, tmp_path):
     calls = {}
 
-    def _fake_run(cmd, check=False, cwd=None):
+    def _fake_run(cmd, check=False, cwd=None, env=None):
         calls["cmd"] = cmd
         calls["cwd"] = cwd
         return None
