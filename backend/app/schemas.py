@@ -1751,6 +1751,15 @@ class TradeDirectOrderRequest(BaseModel):
     params: dict | None = None
 
 
+class TradeManualOrderCreate(BaseModel):
+    symbol: str
+    side: str
+    quantity: float
+    order_type: str = "MKT"
+    limit_price: float | None = None
+    params: dict | None = None
+
+
 class TradeDirectOrderOut(BaseModel):
     order_id: int
     status: str
@@ -1759,6 +1768,14 @@ class TradeDirectOrderOut(BaseModel):
     config_path: str | None = None
     bridge_status: IBBridgeStatusOut | None = None
     refresh_result: str | None = None
+
+
+class TradeManualRunCreate(BaseModel):
+    project_id: int
+    decision_snapshot_id: int | None = None
+    mode: str = "paper"
+    orders: list[TradeManualOrderCreate] = []
+    live_confirm_token: str | None = None
 
 
 class TradeOrderStatusUpdate(BaseModel):

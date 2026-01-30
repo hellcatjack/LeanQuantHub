@@ -496,49 +496,55 @@ def execute_trade_run(
         cash_available = risk_params.get("cash_available") or params.get("cash_available")
         portfolio_value = risk_params.get("portfolio_value") or params.get("portfolio_value")
 
-        risk_orders = []
-        for order in orders:
-            price = price_map.get(order.symbol)
-            risk_orders.append(
-                {
-                    "symbol": order.symbol,
-                    "side": order.side,
-                    "quantity": order.quantity,
-                    "price": price or 0.0,
-                }
+        risk_bypass = bool(params.get("risk_bypass"))
+        if not risk_bypass:
+            risk_orders = []
+            for order in orders:
+                price = price_map.get(order.symbol)
+                risk_orders.append(
+                    {
+                        "symbol": order.symbol,
+                        "side": order.side,
+                        "quantity": order.quantity,
+                        "price": price or 0.0,
+                    }
+                )
+            ok, blocked_orders, reasons = evaluate_orders(
+                risk_orders,
+                max_order_notional=max_order_notional,
+                max_position_ratio=max_position_ratio,
+                portfolio_value=portfolio_value,
+                max_total_notional=max_total_notional,
+                max_symbols=max_symbols,
+                cash_available=cash_available,
+                min_cash_buffer_ratio=min_cash_buffer_ratio,
             )
-        ok, blocked_orders, reasons = evaluate_orders(
-            risk_orders,
-            max_order_notional=max_order_notional,
-            max_position_ratio=max_position_ratio,
-            portfolio_value=portfolio_value,
-            max_total_notional=max_total_notional,
-            max_symbols=max_symbols,
-            cash_available=cash_available,
-            min_cash_buffer_ratio=min_cash_buffer_ratio,
-        )
-        if not ok:
-            run.status = "blocked"
-            run.message = reasons[0] if reasons else "risk_blocked"
-            params["risk_blocked"] = {
-                "reasons": reasons,
-                "count": len(blocked_orders),
-                "risk_effective": risk_params,
-            }
+            if not ok:
+                run.status = "blocked"
+                run.message = reasons[0] if reasons else "risk_blocked"
+                params["risk_blocked"] = {
+                    "reasons": reasons,
+                    "count": len(blocked_orders),
+                    "risk_effective": risk_params,
+                }
+                run.params = dict(params)
+                run.ended_at = datetime.utcnow()
+                run.updated_at = datetime.utcnow()
+                session.commit()
+                return TradeExecutionResult(
+                    run_id=run.id,
+                    status=run.status,
+                    filled=0,
+                    cancelled=0,
+                    rejected=0,
+                    skipped=0,
+                    message=run.message,
+                    dry_run=dry_run,
+                )
+        else:
             run.params = dict(params)
-            run.ended_at = datetime.utcnow()
             run.updated_at = datetime.utcnow()
             session.commit()
-            return TradeExecutionResult(
-                run_id=run.id,
-                status=run.status,
-                filled=0,
-                cancelled=0,
-                rejected=0,
-                skipped=0,
-                message=run.message,
-                dry_run=dry_run,
-            )
 
         run.status = "running"
         run.started_at = datetime.utcnow()
