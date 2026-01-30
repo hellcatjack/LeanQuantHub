@@ -23,7 +23,7 @@ from app.services.trade_orders import create_trade_order
 from app.services.trade_risk_engine import evaluate_orders
 from app.services.trade_alerts import notify_trade_alert
 from app.services.ib_account import fetch_account_summary
-from app.services.trade_order_intent import write_order_intent
+from app.services.trade_order_intent import write_order_intent, ensure_order_intent_ids
 from app.services.lean_bridge_paths import resolve_bridge_root
 from app.services.lean_bridge_reader import read_bridge_status, read_quotes
 from app.services.lean_execution import build_execution_config, launch_execution
@@ -583,6 +583,7 @@ def execute_trade_run(
                 message=run.message,
                 dry_run=dry_run,
             )
+        ensure_order_intent_ids(intent_path, snapshot_id=run.decision_snapshot_id)
 
         config = build_execution_config(
             intent_path=intent_path,
