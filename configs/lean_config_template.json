@@ -42,8 +42,10 @@
       "history-provider": [
         "QuantConnect.Lean.Engine.HistoricalData.SubscriptionDataReaderHistoryProvider"
       ],
-      "transaction-handler": "QuantConnect.Lean.Engine.TransactionHandlers.BrokerageTransactionHandler"
+  "transaction-handler": "QuantConnect.Lean.Engine.TransactionHandlers.BrokerageTransactionHandler"
     }
   },
-  "lean-bridge-output-dir": "/data/share/stock/data/lean_bridge"
+  "lean-bridge-output-dir": "/data/share/stock/data/lean_bridge",
+  "lean-bridge-watchlist-path": "/data/share/stock/data/lean_bridge/watchlist.json",
+  "lean-bridge-watchlist-refresh-seconds": "5"
 }

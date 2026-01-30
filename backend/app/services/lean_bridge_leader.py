@@ -14,7 +14,7 @@ from app.models import LeanExecutorPool
 from app.services.job_lock import JobLock
 from app.services.lean_bridge_paths import resolve_bridge_root
 from app.services.lean_bridge_reader import parse_bridge_timestamp, read_bridge_status
-from app.services.project_symbols import collect_active_project_symbols
+from app.services.project_symbols import build_leader_watchlist
 _DEFAULT_LAUNCHER_DIR = Path("/app/stocklean/Lean_git/Launcher/bin/Release")
 
 
@@ -129,10 +129,40 @@ def _heartbeat_stale(payload: dict, *, timeout_seconds: int) -> bool:
     return now - heartbeat > timedelta(seconds=timeout_seconds)
 
 
+def _parse_started_at(state: dict | None) -> datetime | None:
+    if not isinstance(state, dict):
+        return None
+    return parse_bridge_timestamp(state, ["started_at"])
+
+
+def _within_startup_grace(state: dict | None, *, now: datetime | None, timeout_seconds: int) -> bool:
+    started_at = _parse_started_at(state)
+    if started_at is None:
+        return False
+    if now is None:
+        now = datetime.now(timezone.utc)
+    return now - started_at <= timedelta(seconds=timeout_seconds)
+
+
+def _should_restart(status: dict, state: dict | None, *, timeout_seconds: int, now: datetime | None) -> bool:
+    pid = 0
+    if isinstance(state, dict):
+        try:
+            pid = int(state.get("pid") or 0)
+        except (TypeError, ValueError):
+            pid = 0
+    if not _pid_alive(pid):
+        return True
+    stale = _heartbeat_stale(status, timeout_seconds=timeout_seconds)
+    if not stale:
+        return False
+    if _within_startup_grace(state, now=now, timeout_seconds=timeout_seconds):
+        return False
+    return True
+
+
 def _write_watchlist(session) -> Path:
-    symbols, _benchmarks = collect_active_project_symbols(session)
-    if not symbols:
-        symbols = ["SPY"]
+    symbols = build_leader_watchlist(session, max_symbols=200)
     path = _bridge_root() / "watchlist.json"
     normalized = sorted({str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()})
     existing: dict | None = None
@@ -244,12 +274,18 @@ def ensure_lean_bridge_leader(session, *, mode: str, force: bool = False) -> dic
     root = _bridge_root()
     status = read_bridge_status(root)
     timeout = int(settings.lean_bridge_heartbeat_timeout_seconds)
-    stale = force or _heartbeat_stale(status, timeout_seconds=timeout)
-
     state = _read_state()
     pid = int(state.get("pid") or 0)
-    if not stale and _pid_alive(pid):
-        _upsert_leader_pool(session, mode=mode, client_id=int(state.get("client_id") or 0), pid=pid, status_payload=status)
+    now = datetime.now(timezone.utc)
+    restart = force or _should_restart(status, state, timeout_seconds=timeout, now=now)
+    if not restart and _pid_alive(pid):
+        _upsert_leader_pool(
+            session,
+            mode=mode,
+            client_id=int(state.get("client_id") or 0),
+            pid=pid,
+            status_payload=status,
+        )
         return status
 
     lock = JobLock(_LEADER_LOCK_KEY, data_root=root)
@@ -257,10 +293,11 @@ def ensure_lean_bridge_leader(session, *, mode: str, force: bool = False) -> dic
         return status
     try:
         status = read_bridge_status(root)
-        stale = force or _heartbeat_stale(status, timeout_seconds=timeout)
         state = _read_state()
         pid = int(state.get("pid") or 0)
-        if not stale and _pid_alive(pid):
+        now = datetime.now(timezone.utc)
+        restart = force or _should_restart(status, state, timeout_seconds=timeout, now=now)
+        if not restart and _pid_alive(pid):
             _upsert_leader_pool(
                 session,
                 mode=mode,

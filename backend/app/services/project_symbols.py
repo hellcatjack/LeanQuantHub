@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from collections import deque
 from pathlib import Path
 from typing import Iterable
 
@@ -134,3 +135,75 @@ def write_symbol_list(path: Path, symbols: Iterable[str]) -> None:
             if symbol:
                 writer.writerow([symbol])
     tmp_path.replace(path)
+
+
+def _collect_active_project_watchlist_inputs(session) -> list[dict]:
+    if session is None:
+        return []
+    projects = (
+        session.query(Project)
+        .filter(Project.is_archived.is_(False))
+        .order_by(Project.id.asc())
+        .all()
+    )
+    items: list[dict] = []
+    for project in projects:
+        config = _resolve_project_config(session, project.id)
+        symbols = collect_project_symbols(config)
+        benchmark = str(config.get("benchmark") or "SPY").strip().upper()
+        items.append(
+            {
+                "id": project.id,
+                "benchmark": benchmark,
+                "symbols": symbols,
+            }
+        )
+    return items
+
+
+def build_leader_watchlist(session, *, max_symbols: int = 200) -> list[str]:
+    limit = int(max_symbols or 0)
+    if limit <= 0:
+        limit = 1
+    items = _collect_active_project_watchlist_inputs(session)
+    if not items:
+        return ["SPY"]
+
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        benchmark = str(item.get("benchmark") or "SPY").strip().upper()
+        if benchmark and benchmark not in seen:
+            ordered.append(benchmark)
+            seen.add(benchmark)
+            if len(ordered) >= limit:
+                return ordered
+
+    queues: list[deque[str]] = []
+    for item in items:
+        symbols = item.get("symbols") or []
+        normalized = {
+            str(symbol).strip().upper()
+            for symbol in symbols
+            if str(symbol).strip()
+        }
+        queues.append(deque(sorted(normalized)))
+
+    while len(ordered) < limit:
+        progressed = False
+        for queue in queues:
+            while queue:
+                symbol = queue.popleft()
+                if symbol and symbol not in seen:
+                    ordered.append(symbol)
+                    seen.add(symbol)
+                    progressed = True
+                    break
+            if len(ordered) >= limit:
+                break
+        if not progressed:
+            break
+
+    if not ordered:
+        return ["SPY"]
+    return ordered

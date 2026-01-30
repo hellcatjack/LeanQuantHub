@@ -9,6 +9,7 @@ from sqlalchemy import or_
 from app.models import AuditLog, TradeFill, TradeOrder
 from app.services.lean_bridge_paths import resolve_bridge_root
 from app.services.lean_bridge_reader import read_bridge_status, read_quotes
+from app.services.lean_bridge_watchlist import refresh_leader_watchlist
 from app.services.ib_settings import get_or_create_ib_settings, get_or_create_ib_state
 
 _SNAPSHOT_FRESH_SECONDS = 300
@@ -144,6 +145,10 @@ def _read_section(name: str, fn, errors: list[str], partial: dict[str, bool]) ->
 
 
 def build_ib_status_overview(session) -> dict[str, Any]:
+    try:
+        refresh_leader_watchlist(session, max_symbols=200)
+    except Exception:
+        pass
     errors: list[str] = []
     partial = {"value": False}
     connection = _read_section("connection", lambda: _read_connection(session), errors, partial)

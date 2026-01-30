@@ -16,6 +16,8 @@
   "data-aggregator": "QuantConnect.Lean.Engine.DataFeeds.AggregationManager",
   "force-exchange-always-open": true,
   "lean-bridge-output-dir": "/data/share/stock/data/lean_bridge",
+  "lean-bridge-watchlist-path": "/data/share/stock/data/lean_bridge/watchlist.json",
+  "lean-bridge-watchlist-refresh-seconds": "5",
   "lean-bridge-snapshot-seconds": "2",
   "lean-bridge-heartbeat-seconds": "2",
   "ib-host": "192.168.1.31",
