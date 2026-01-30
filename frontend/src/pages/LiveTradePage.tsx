@@ -1,12 +1,16 @@
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState, type ReactNode } from "react";
 import TopBar from "../components/TopBar";
 import IdChip from "../components/IdChip";
 import PaginationBar from "../components/PaginationBar";
 import { api } from "../api";
 import { useI18n } from "../i18n";
 import { resolveAccountSummaryLabel } from "../utils/accountSummary";
-import { getOverviewStatus } from "../utils/ibOverview";
 import { buildOrderTag } from "../utils/orderTag";
+import {
+  getLiveTradeSections,
+  LIVE_TRADE_REFRESH_MS,
+  type LiveTradeSectionKey,
+} from "../utils/liveTradeLayout";
 
 interface IBSettings {
   id: number;
@@ -103,53 +107,6 @@ interface IBAccountPositionsOut {
   items: IBAccountPosition[];
   refreshed_at?: string | null;
   stale: boolean;
-}
-
-interface IBStatusOverview {
-  connection?: {
-    status?: string | null;
-    message?: string | null;
-    last_heartbeat?: string | null;
-    updated_at?: string | null;
-  };
-  config?: {
-    host?: string | null;
-    port?: number | null;
-    client_id?: number | null;
-    account_id?: string | null;
-    mode?: string | null;
-    market_data_type?: string | null;
-    api_mode?: string | null;
-    use_regulatory_snapshot?: boolean | null;
-  };
-  stream?: {
-    status?: string | null;
-    subscribed_count?: number | null;
-    last_heartbeat?: string | null;
-    ib_error_count?: number | null;
-    last_error?: string | null;
-    market_data_type?: string | null;
-  };
-  snapshot_cache?: {
-    status?: string | null;
-    last_snapshot_at?: string | null;
-    symbol_sample_count?: number | null;
-  };
-  orders?: {
-    latest_order_id?: number | null;
-    latest_order_status?: string | null;
-    latest_order_at?: string | null;
-    latest_fill_id?: number | null;
-    latest_fill_at?: string | null;
-  };
-  alerts?: {
-    latest_alert_id?: number | null;
-    latest_alert_at?: string | null;
-    latest_alert_title?: string | null;
-  };
-  partial?: boolean;
-  errors?: string[];
-  refreshed_at?: string | null;
 }
 
 interface ProjectSummary {
@@ -322,9 +279,6 @@ export default function LiveTradePage() {
   const [ibStateLoading, setIbStateLoading] = useState(false);
   const [ibStateResult, setIbStateResult] = useState("");
   const [ibStateError, setIbStateError] = useState("");
-  const [ibOverview, setIbOverview] = useState<IBStatusOverview | null>(null);
-  const [ibOverviewLoading, setIbOverviewLoading] = useState(false);
-  const [ibOverviewError, setIbOverviewError] = useState("");
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [projectError, setProjectError] = useState("");
   const [selectedProjectId, setSelectedProjectId] = useState("");
@@ -368,6 +322,7 @@ export default function LiveTradePage() {
   const [ibMarketHealthResult, setIbMarketHealthResult] =
     useState<IBMarketHealthResult | null>(null);
   const [ibMarketHealthError, setIbMarketHealthError] = useState("");
+  const [marketHealthUpdatedAt, setMarketHealthUpdatedAt] = useState<string | null>(null);
   const [ibHistoryForm, setIbHistoryForm] = useState({
     symbols: "SPY",
     use_project_symbols: false,
@@ -504,20 +459,6 @@ export default function LiveTradePage() {
       const detail = err?.response?.data?.detail || t("data.ib.loadError");
       setIbSettingsError(String(detail));
       setIbSettings(null);
-    }
-  };
-
-  const loadIbOverview = async () => {
-    setIbOverviewLoading(true);
-    try {
-      const res = await api.get<IBStatusOverview>("/api/brokerage/status/overview");
-      setIbOverview(res.data);
-      setIbOverviewError("");
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail || t("trade.overviewError");
-      setIbOverviewError(String(detail));
-    } finally {
-      setIbOverviewLoading(false);
     }
   };
 
@@ -871,6 +812,7 @@ export default function LiveTradePage() {
       const detail = err?.response?.data?.detail || t("data.ib.healthError");
       setIbMarketHealthError(String(detail));
     } finally {
+      setMarketHealthUpdatedAt(new Date().toISOString());
       setIbMarketHealthLoading(false);
     }
   };
@@ -1190,7 +1132,6 @@ export default function LiveTradePage() {
     setLoading(true);
     await Promise.all([
       loadIbSettings(),
-      loadIbOverview(),
       loadIbState(true),
       loadIbStreamStatus(true),
       loadIbHistoryJobs(),
@@ -1224,16 +1165,7 @@ export default function LiveTradePage() {
       await loadIbState(true);
       await loadIbStreamStatus(true);
     };
-    const timer = window.setInterval(refresh, 10000);
-    return () => {
-      window.clearInterval(timer);
-    };
-  }, []);
-
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      loadIbOverview();
-    }, 5000);
+    const timer = window.setInterval(refresh, LIVE_TRADE_REFRESH_MS.connection);
     return () => {
       window.clearInterval(timer);
     };
@@ -1244,11 +1176,25 @@ export default function LiveTradePage() {
       loadAccountSummary(false);
       loadAccountPositions();
     };
-    const timer = window.setInterval(refresh, 60000);
+    const timer = window.setInterval(refresh, LIVE_TRADE_REFRESH_MS.account);
     return () => {
       window.clearInterval(timer);
     };
   }, [ibSettings?.mode, ibSettingsForm.mode]);
+
+  useEffect(() => {
+    const refresh = () => {
+      if (detailTab === "receipts") {
+        loadTradeReceipts();
+      } else {
+        loadTradeActivity(ordersPage, ordersPageSize);
+      }
+    };
+    const timer = window.setInterval(refresh, LIVE_TRADE_REFRESH_MS.monitor);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [detailTab, ordersPage, ordersPageSize, receiptsPage, receiptsPageSize]);
 
   useEffect(() => {
     setPositionSelections((prev) => {
@@ -1339,40 +1285,28 @@ export default function LiveTradePage() {
     return Boolean(ibSettings.host && ibSettings.port);
   }, [ibSettings]);
 
-  const overviewStatus = useMemo(() => getOverviewStatus(ibOverview), [ibOverview]);
-
-  const overviewStatusLabel = useMemo(() => {
-    if (overviewStatus === "ok") {
-      return t("trade.overview.status.ok");
-    }
-    if (overviewStatus === "down") {
-      return t("trade.overview.status.down");
-    }
-    if (overviewStatus === "partial") {
-      return t("trade.overview.status.partial");
-    }
-    return t("trade.overview.status.unknown");
-  }, [overviewStatus, t]);
-
   const bridgeIsStale = useMemo(() => {
-    const snapshotStatus = ibOverview?.snapshot_cache?.status;
-    const streamStatus = ibOverview?.stream?.status;
-    return (
-      accountSummary?.stale === true || snapshotStatus === "stale" || streamStatus === "degraded"
-    );
-  }, [accountSummary?.stale, ibOverview?.snapshot_cache?.status, ibOverview?.stream?.status]);
+    if (accountSummary?.stale === true) {
+      return true;
+    }
+    if (accountPositionsStale) {
+      return true;
+    }
+    if (ibStreamStatus?.status && ibStreamStatus.status !== "connected") {
+      return true;
+    }
+    return false;
+  }, [accountSummary?.stale, accountPositionsStale, ibStreamStatus?.status]);
 
   const bridgeStatusLabel = useMemo(() => {
-    const snapshotStatus = ibOverview?.snapshot_cache?.status;
-    const streamStatus = ibOverview?.stream?.status;
     if (bridgeIsStale) {
       return t("trade.bridgeStatus.stale");
     }
-    if (snapshotStatus || streamStatus) {
+    if (ibStreamStatus?.status || accountSummary?.refreshed_at) {
       return t("trade.bridgeStatus.ok");
     }
     return t("trade.bridgeStatus.unknown");
-  }, [bridgeIsStale, ibOverview?.snapshot_cache?.status, ibOverview?.stream?.status, t]);
+  }, [bridgeIsStale, ibStreamStatus?.status, accountSummary?.refreshed_at, t]);
 
   const bridgeSource = useMemo(() => {
     return accountSummary?.source || "lean_bridge";
@@ -1380,16 +1314,12 @@ export default function LiveTradePage() {
 
   const bridgeUpdatedAt = useMemo(() => {
     return (
-      ibOverview?.stream?.last_heartbeat ||
-      ibOverview?.snapshot_cache?.last_snapshot_at ||
+      ibStreamStatus?.last_heartbeat ||
+      accountPositionsUpdatedAt ||
       accountSummary?.refreshed_at ||
       null
     );
-  }, [
-    accountSummary?.refreshed_at,
-    ibOverview?.snapshot_cache?.last_snapshot_at,
-    ibOverview?.stream?.last_heartbeat,
-  ]);
+  }, [ibStreamStatus?.last_heartbeat, accountPositionsUpdatedAt, accountSummary?.refreshed_at]);
 
   const positionsStale = useMemo(() => {
     if (accountPositionsStale) {
@@ -1488,6 +1418,25 @@ export default function LiveTradePage() {
     const translated = t(key);
     return translated === key ? String(value).toUpperCase() : translated;
   };
+
+  const marketHealthStatusLabel = useMemo(() => {
+    if (ibMarketHealthResult?.status) {
+      return formatStatus(ibMarketHealthResult.status);
+    }
+    if (ibStreamStatus?.status) {
+      return formatStatus(ibStreamStatus.status);
+    }
+    return t("common.none");
+  }, [ibMarketHealthResult?.status, ibStreamStatus?.status, t]);
+
+  const marketHealthUpdatedLabel = useMemo(() => {
+    return (
+      marketHealthUpdatedAt ||
+      ibStreamStatus?.last_heartbeat ||
+      marketSnapshot?.data?.timestamp ||
+      null
+    );
+  }, [marketHealthUpdatedAt, ibStreamStatus?.last_heartbeat, marketSnapshot?.data?.timestamp]);
 
   const receiptWarningLabels = useMemo(() => {
     if (!receiptsWarnings.length) {
@@ -1667,637 +1616,746 @@ export default function LiveTradePage() {
     return Number.isFinite(volume) ? volume : null;
   }, [snapshotData]);
 
-  return (
-    <div className="main">
-      <TopBar title={t("trade.title")} />
-      <div className="content">
-        <div className="grid-2">
-          <div className="card">
-            <div className="card-title">{t("trade.overviewTitle")}</div>
-            <div className="card-meta">{t("trade.overviewMeta")}</div>
-            {ibOverview?.partial && (
-              <div className="form-hint" style={{ marginTop: "8px" }}>
-                {t("trade.overviewPartial")}
-              </div>
-            )}
-            <div className="overview-grid" style={{ marginTop: "12px" }}>
-              <div className="overview-card">
-                <div className="overview-label">{t("trade.overviewStatusLabel")}</div>
-                <div className="overview-value">{overviewStatusLabel}</div>
-                <div className="overview-sub">
-                  {t("trade.overviewRefreshedAt")} {formatDateTime(ibOverview?.refreshed_at)}
-                </div>
-              </div>
-              <div className="overview-card">
-                <div className="overview-label">{t("trade.overviewStreamLabel")}</div>
-                <div className="overview-value">
-                  {formatStatus(ibOverview?.stream?.status || "unknown")}
-                </div>
-                <div className="overview-sub">
-                  {t("trade.overviewStreamCount")}: {ibOverview?.stream?.subscribed_count ?? 0}
-                </div>
-              </div>
-              <div className="overview-card">
-                <div className="overview-label">{t("trade.overviewSnapshotLabel")}</div>
-                <div className="overview-value">
-                  {ibOverview?.snapshot_cache?.status || t("common.none")}
-                </div>
-                <div className="overview-sub">
-                  {t("trade.overviewSnapshotAt")}{" "}
-                  {formatDateTime(ibOverview?.snapshot_cache?.last_snapshot_at)}
-                </div>
-              </div>
-              <div className="overview-card">
-                <div className="overview-label">{t("trade.bridgeLabel")}</div>
-                <div className="overview-value">{bridgeStatusLabel}</div>
-                <div className="overview-sub">
-                  {t("trade.bridgeSource")} {bridgeSource || t("common.none")}
-                </div>
-                <div className="overview-sub">
-                  {t("trade.bridgeUpdatedAt")} {formatDateTime(bridgeUpdatedAt)}
-                </div>
-              </div>
-              <div className="overview-card">
-                <div className="overview-label">{t("trade.overviewOrderLabel")}</div>
-                <div className="overview-value">
-                  {ibOverview?.orders?.latest_order_status || t("common.none")}
-                </div>
-                <div className="overview-sub">
-                  {t("trade.overviewOrderAt")}{" "}
-                  {formatDateTime(ibOverview?.orders?.latest_order_at)}
-                </div>
-              </div>
-            </div>
-            <div className="meta-list" style={{ marginTop: "12px" }}>
-              <div className="meta-row">
-                <span>{t("trade.overviewAlertLabel")}</span>
-                <strong>{ibOverview?.alerts?.latest_alert_title || t("common.none")}</strong>
-              </div>
-              <div className="meta-row">
-                <span>{t("trade.overviewAlertAt")}</span>
-                <strong>{formatDateTime(ibOverview?.alerts?.latest_alert_at)}</strong>
-              </div>
-            </div>
-            {ibOverviewError && <div className="form-error">{ibOverviewError}</div>}
-            <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
-              <button
-                className="button-secondary"
-                onClick={loadIbOverview}
-                disabled={ibOverviewLoading}
-              >
-                {ibOverviewLoading ? t("common.actions.loading") : t("trade.overviewRefresh")}
-              </button>
+
+  const sections = getLiveTradeSections();
+
+  const sectionCards: Record<LiveTradeSectionKey, ReactNode> = {
+    connection: (
+      <div className="card">
+        <div className="card-title">{t("trade.statusTitle")}</div>
+        <div className="card-meta">{t("trade.statusMeta")}</div>
+        {ibSettings?.mode === "live" && (
+          <div className="form-error" style={{ marginTop: "8px" }}>
+            {t("trade.liveWarning")}
+          </div>
+        )}
+        <div className="overview-grid" style={{ marginTop: "12px" }}>
+          <div className="overview-card">
+            <div className="overview-label">{t("trade.statusLabel")}</div>
+            <div className="overview-value">{statusLabel}</div>
+            <div className="overview-sub">
+              {t("trade.connectionUpdatedAt")} {formatDateTime(ibState?.updated_at)}
             </div>
           </div>
-
-          <div className="card">
-            <div className="card-title">{t("trade.statusTitle")}</div>
-            <div className="card-meta">{t("trade.statusMeta")}</div>
-            {ibSettings?.mode === "live" && (
-              <div className="form-error" style={{ marginTop: "8px" }}>
-                {t("trade.liveWarning")}
-              </div>
-            )}
-            <div className="overview-grid" style={{ marginTop: "12px" }}>
-              <div className="overview-card">
-                <div className="overview-label">{t("trade.statusLabel")}</div>
-                <div className="overview-value">{statusLabel}</div>
-                <div className="overview-sub">
-                  {t("trade.connectionUpdatedAt")} {formatDateTime(ibState?.updated_at)}
-                </div>
-              </div>
-              <div className="overview-card">
-                <div className="overview-label">{t("trade.modeLabel")}</div>
-                <div className="overview-value">{modeLabel}</div>
-                <div className="overview-sub">
-                  {t("trade.marketDataType")}: {ibSettings?.market_data_type || t("common.none")}
-                </div>
-              </div>
-            </div>
-            {ibState && (
-              <div className="meta-list" style={{ marginTop: "12px" }}>
-                <div className="meta-row">
-                  <span>{t("data.ib.status")}</span>
-                  <strong>{formatStatus(ibState.status || "unknown")}</strong>
-                </div>
-                {ibSettings?.api_mode && (
-                  <div className="meta-row">
-                    <span>{t("data.ib.apiMode")}</span>
-                    <strong>
-                      {ibSettings.api_mode === "mock"
-                        ? t("data.ib.apiModeMock")
-                        : t("data.ib.apiModeIb")}
-                    </strong>
-                  </div>
-                )}
-                <div className="meta-row">
-                  <span>{t("data.ib.lastHeartbeat")}</span>
-                  <strong>
-                    {ibState.last_heartbeat ? formatDateTime(ibState.last_heartbeat) : "-"}
-                  </strong>
-                </div>
-                <div className="meta-row">
-                  <span>{t("data.ib.stateUpdated")}</span>
-                  <strong>{ibState.updated_at ? formatDateTime(ibState.updated_at) : "-"}</strong>
-                </div>
-                {ibState.message && (
-                  <div className="meta-row">
-                    <span>{t("data.ib.message")}</span>
-                    <strong>{ibState.message}</strong>
-                  </div>
-                )}
-              </div>
-            )}
-            {ibStateResult && <div className="form-success">{ibStateResult}</div>}
-            {ibStateError && <div className="form-error">{ibStateError}</div>}
-            <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
-              <button
-                className="button-secondary"
-                onClick={() => loadIbState(false)}
-                disabled={ibStateLoading}
-              >
-                {ibStateLoading ? t("common.actions.loading") : t("common.actions.refresh")}
-              </button>
-              <button
-                className="button-secondary"
-                onClick={probeIbState}
-                disabled={ibStateLoading}
-              >
-                {ibStateLoading ? t("common.actions.loading") : t("data.ib.probe")}
-              </button>
-              <button className="button-secondary" onClick={refreshAll} disabled={loading}>
-                {loading ? t("common.actions.loading") : t("trade.refresh")}
-              </button>
-              <a className="button-secondary" href="/data">
-                {t("trade.openData")}
-              </a>
+          <div className="overview-card">
+            <div className="overview-label">{t("trade.bridgeLabel")}</div>
+            <div className="overview-value">{bridgeStatusLabel}</div>
+            <div className="overview-sub">
+              {t("trade.bridgeUpdatedAt")} {formatDateTime(bridgeUpdatedAt)}
             </div>
           </div>
-
-          <div className="card">
-            <div className="card-title">{t("trade.snapshotTitle")}</div>
-            <div className="card-meta">{t("trade.snapshotMeta")}</div>
-            <div className="snapshot-hero" style={{ marginTop: "12px" }}>
-              <div className="snapshot-symbol">
-                {marketSnapshotSymbol || t("trade.snapshotEmpty")}
-              </div>
-              <div className="snapshot-price">
-                {snapshotPrice == null ? "--" : snapshotPrice.toFixed(2)}
-              </div>
-              <div
-                className={`snapshot-change ${
-                  snapshotChange != null && snapshotChange >= 0 ? "up" : "down"
-                }`}
-              >
-                {snapshotChange == null || snapshotChangePct == null
-                  ? "--"
-                  : `${snapshotChange >= 0 ? "+" : ""}${snapshotChange.toFixed(2)} (${snapshotChangePct.toFixed(2)}%)`}
-              </div>
-            </div>
-            <div className="meta-list" style={{ marginTop: "12px" }}>
-              <div className="meta-row">
-                <span>{t("trade.snapshotVolume")}</span>
-                <strong>{snapshotVolume == null ? "-" : snapshotVolume.toLocaleString()}</strong>
-              </div>
-              <div className="meta-row">
-                <span>{t("trade.snapshotUpdatedAt")}</span>
-                <strong>{formatDateTime(snapshotData.timestamp)}</strong>
-              </div>
-            </div>
-            {marketSnapshotError && <div className="form-error">{marketSnapshotError}</div>}
-            <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
-              <button
-                className="button-secondary"
-                onClick={() => loadMarketSnapshot()}
-                disabled={marketSnapshotLoading}
-              >
-                {marketSnapshotLoading ? t("common.actions.loading") : t("trade.snapshotRefresh")}
-              </button>
-            </div>
-          </div>
-
-          <div className="card">
-            <div className="card-title">{t("trade.configTitle")}</div>
-            <div className="card-meta">{t("trade.configMeta")}</div>
-            <div className="overview-grid" style={{ marginTop: "12px" }}>
-              <div className="overview-card">
-                <div className="overview-label">{t("trade.host")}</div>
-                <div className="overview-value">{ibSettings?.host || t("common.none")}</div>
-                <div className="overview-sub">
-                  {t("trade.port")}: {ibSettings?.port ?? t("common.none")}
-                </div>
-              </div>
-              <div className="overview-card">
-                <div className="overview-label">{t("trade.account")}</div>
-                <div className="overview-value">
-                  {maskAccount(ibSettings?.account_id) || t("common.none")}
-                </div>
-                <div className="overview-sub">
-                  {t("trade.apiMode")}: {ibSettings?.api_mode || t("common.none")}
-                </div>
-              </div>
-              <div className="overview-card">
-                <div className="overview-label">{t("trade.regulatorySnapshot")}</div>
-                <div className="overview-value">
-                  {ibSettings?.use_regulatory_snapshot
-                    ? t("common.boolean.true")
-                    : t("common.boolean.false")}
-                </div>
-                <div className="overview-sub">
-                  {t("common.labels.updatedAt")} {formatDateTime(ibSettings?.updated_at)}
-                </div>
-              </div>
-            </div>
-            {!isConfigured && (
-              <div className="form-hint" style={{ marginTop: "8px" }}>
-                {t("trade.statusHint")}
-              </div>
-            )}
-            <div className="section-title">{t("data.ib.settingsTitle")}</div>
-            <div className="form-grid">
-              <div className="form-row">
-                <label className="form-label">{t("data.ib.host")}</label>
-                <input
-                  type="text"
-                  className="form-input"
-                  value={ibSettingsForm.host}
-                  onChange={(e) => updateIbSettingsForm("host", e.target.value)}
-                />
-                <div className="form-hint">{t("data.ib.hostHint")}</div>
-              </div>
-              <div className="form-row">
-                <label className="form-label">{t("data.ib.port")}</label>
-                <input
-                  type="number"
-                  className="form-input"
-                  value={ibSettingsForm.port}
-                  onChange={(e) => updateIbSettingsForm("port", e.target.value)}
-                />
-                <div className="form-hint">{t("data.ib.portHint")}</div>
-              </div>
-              <div className="form-row">
-                <label className="form-label">{t("data.ib.clientId")}</label>
-                <input
-                  type="number"
-                  className="form-input"
-                  value={ibSettingsForm.client_id}
-                  onChange={(e) => updateIbSettingsForm("client_id", e.target.value)}
-                />
-                <div className="form-hint">{t("data.ib.clientIdHint")}</div>
-              </div>
-              <div className="form-row">
-                <label className="form-label">{t("data.ib.accountId")}</label>
-                <input
-                  type="text"
-                  className="form-input"
-                  value={ibSettingsForm.account_id}
-                  onChange={(e) => updateIbSettingsForm("account_id", e.target.value)}
-                  placeholder={t("data.ib.accountIdPlaceholder")}
-                />
-                {ibSettings?.account_id && (
-                  <div className="form-hint">
-                    {t("data.ib.accountIdHint", { account: ibSettings.account_id })}
-                  </div>
-                )}
-              </div>
-              <div className="form-row">
-                <label className="form-label">{t("data.ib.apiMode")}</label>
-                <select
-                  className="form-select"
-                  value={ibSettingsForm.api_mode}
-                  onChange={(e) => updateIbSettingsForm("api_mode", e.target.value)}
-                >
-                  <option value="ib">{t("data.ib.apiModeIb")}</option>
-                  <option value="mock">{t("data.ib.apiModeMock")}</option>
-                </select>
-                <div className="form-hint">{t("data.ib.apiModeHint")}</div>
-              </div>
-              <div className="form-row">
-                <label className="form-label">{t("data.ib.mode")}</label>
-                <select
-                  className="form-select"
-                  value={ibSettingsForm.mode}
-                  onChange={(e) => updateIbSettingsForm("mode", e.target.value)}
-                >
-                  <option value="paper">{t("data.ib.modePaper")}</option>
-                  <option value="live">{t("data.ib.modeLive")}</option>
-                </select>
-                <div className="form-hint">{t("data.ib.modeHint")}</div>
-              </div>
-              <div className="form-row">
-                <label className="form-label">{t("data.ib.marketDataType")}</label>
-                <select
-                  className="form-select"
-                  value={ibSettingsForm.market_data_type}
-                  onChange={(e) => updateIbSettingsForm("market_data_type", e.target.value)}
-                >
-                  <option value="realtime">{t("data.ib.marketDataRealtime")}</option>
-                  <option value="frozen">{t("data.ib.marketDataFrozen")}</option>
-                  <option value="delayed">{t("data.ib.marketDataDelayed")}</option>
-                </select>
-                <div className="form-hint">{t("data.ib.marketDataTypeHint")}</div>
-              </div>
-              <div className="form-row">
-                <label className="form-label">{t("data.ib.regulatorySnapshot")}</label>
-                <label className="switch">
-                  <input
-                    type="checkbox"
-                    checked={ibSettingsForm.use_regulatory_snapshot}
-                    onChange={(e) =>
-                      updateIbSettingsForm("use_regulatory_snapshot", e.target.checked)
-                    }
-                  />
-                  <span className="slider" />
-                </label>
-                <div className="form-hint">{t("data.ib.regulatorySnapshotHint")}</div>
-              </div>
-            </div>
-            {ibSettingsResult && <div className="form-success">{ibSettingsResult}</div>}
-            {ibSettingsError && <div className="form-error">{ibSettingsError}</div>}
-            <button
-              className="button-secondary"
-              onClick={saveIbSettings}
-              disabled={ibSettingsSaving}
-            >
-              {ibSettingsSaving ? t("common.actions.loading") : t("common.actions.save")}
-            </button>
-          </div>
-
-          <div className="card" style={{ marginTop: "16px" }}>
-            <div className="card-title">{t("trade.accountSummaryTitle")}</div>
-            <div className="card-meta">{t("trade.accountSummaryMeta")}</div>
-            {accountSummaryError && <div className="form-hint">{accountSummaryError}</div>}
-            <div className="overview-grid" style={{ marginTop: "12px" }}>
-              {accountSummaryItems.map((item) => (
-                <div
-                  className="overview-card"
-                  key={item.key}
-                  data-testid={`account-summary-${item.key}`}
-                >
-                  <div className="overview-label">
-                    {resolveAccountSummaryLabel(item.key, accountSummaryTagMap)}
-                  </div>
-                  <div
-                    className="overview-value"
-                    data-testid={`account-summary-${item.key}-value`}
-                  >
-                    {formatAccountValue(item.value)}
-                  </div>
-                </div>
-              ))}
-            </div>
-            <div className="meta-list" style={{ marginTop: "12px" }}>
-              <div className="meta-row">
-                <span>{t("trade.accountSummaryUpdatedAt")}</span>
-                <strong>
-                  {accountSummary?.refreshed_at
-                    ? formatDateTime(accountSummary.refreshed_at)
-                    : t("common.none")}
-                </strong>
-              </div>
-              <div className="meta-row">
-                <span>{t("trade.accountSummarySource")}</span>
-                <strong>{accountSummary?.source || t("common.none")}</strong>
-              </div>
-              {accountSummary?.stale && (
-                <div className="meta-row">
-                  <span>{t("trade.accountSummaryStale")}</span>
-                  <strong>{t("common.boolean.true")}</strong>
-                </div>
-              )}
-            </div>
-            <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
-              <button
-                className="button-secondary"
-                onClick={() => loadAccountSummary(true)}
-                disabled={accountSummaryFullLoading}
-              >
-                {accountSummaryFullLoading
-                  ? t("common.actions.loading")
-                  : t("trade.accountSummaryRefresh")}
-              </button>
-            </div>
-            {accountSummaryFullError && <div className="form-hint">{accountSummaryFullError}</div>}
-            <details style={{ marginTop: "12px" }}>
-              <summary>{t("trade.accountSummaryFullTitle")}</summary>
-              <table className="table" style={{ marginTop: "8px" }}>
-                <thead>
-                  <tr>
-                    <th>{t("trade.accountSummaryTag")}</th>
-                    <th>{t("trade.accountSummaryValue")}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {accountSummaryFullItems.length ? (
-                    accountSummaryFullItems.map(([key, value]) => (
-                      <tr key={key}>
-                        <td>{resolveAccountSummaryLabel(key, accountSummaryTagMap)}</td>
-                        <td>{formatAccountValue(value)}</td>
-                      </tr>
-                    ))
-                  ) : (
-                    <tr>
-                      <td colSpan={2} className="empty-state">
-                        {accountSummaryFullLoading
-                          ? t("common.actions.loading")
-                          : t("trade.accountSummaryFullEmpty")}
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </details>
-          </div>
-
-          <div
-            className="card span-2"
-            style={{ marginTop: "16px" }}
-            data-testid="account-positions-card"
-          >
-            <div className="card-title">{t("trade.accountPositionsTitle")}</div>
-            <div className="card-meta">{t("trade.accountPositionsMeta")}</div>
-            {positionsStale && (
-              <div className="form-hint warn" style={{ marginTop: "8px" }}>
-                <div>{t("trade.accountPositionsStaleHint")}</div>
-                <div className="meta-row" style={{ marginTop: "6px" }}>
-                  <span>{t("trade.accountPositionsStaleUpdatedAt")}</span>
-                  <strong>
-                    {bridgeUpdatedAt ? formatDateTime(bridgeUpdatedAt) : t("common.none")}
-                  </strong>
-                  <button
-                    className="button-compact"
-                    onClick={loadAccountPositions}
-                    disabled={accountPositionsLoading}
-                  >
-                    {accountPositionsLoading
-                      ? t("common.actions.loading")
-                      : t("trade.accountPositionsRefresh")}
-                  </button>
-                </div>
-              </div>
-            )}
-            {accountPositionsError && <div className="form-hint">{accountPositionsError}</div>}
-            <div className="meta-list" style={{ marginTop: "12px" }}>
-              <div className="meta-row">
-                <span>{t("trade.accountPositionsUpdatedAt")}</span>
-                <strong>
-                  {accountPositionsUpdatedAt
-                    ? formatDateTime(accountPositionsUpdatedAt)
-                    : t("common.none")}
-                </strong>
-              </div>
-            </div>
-            {positionActionError && (
-              <div className="form-hint danger" style={{ marginTop: "12px" }}>
-                {positionActionError}
-              </div>
-            )}
-            {positionActionResult && (
-              <div className="form-success" style={{ marginTop: "12px" }}>
-                {positionActionResult}
-              </div>
-            )}
-            <div
-              style={{
-                marginTop: "12px",
-                display: "flex",
-                gap: "10px",
-                flexWrap: "wrap",
-                alignItems: "center",
-              }}
-            >
-              <div className="meta-row">
-                <span>{t("trade.positionActionSelected", { count: selectedPositions.length })}</span>
-              </div>
-              <button
-                className="button-secondary"
-                data-testid="positions-batch-close"
-                disabled={positionActionLoading || selectedPositions.length === 0}
-                onClick={() => handleClosePositions(selectedPositions)}
-              >
-                {positionActionLoading
-                  ? t("common.actions.loading")
-                  : t("trade.positionActionBatchClose")}
-              </button>
-              <button
-                className="danger-button"
-                data-testid="positions-liquidate-all"
-                disabled={positionActionLoading || accountPositions.length === 0}
-                onClick={handleLiquidateAll}
-              >
-                {t("trade.positionActionLiquidateAll")}
-              </button>
-            </div>
-            <div className="table-scroll" style={{ marginTop: "12px" }}>
-              <table className="table" data-testid="account-positions-table">
-                <thead>
-                  <tr>
-                    <th>
-                      <input
-                        type="checkbox"
-                        aria-label={t("trade.positionActionSelectAll")}
-                        checked={allPositionsSelected}
-                        onChange={toggleSelectAllPositions}
-                      />
-                    </th>
-                    <th>{t("trade.positionTable.symbol")}</th>
-                    <th>{t("trade.positionTable.position")}</th>
-                    <th>{t("trade.positionTable.avgCost")}</th>
-                    <th>{t("trade.positionTable.marketPrice")}</th>
-                    <th>{t("trade.positionTable.marketValue")}</th>
-                    <th>{t("trade.positionTable.unrealized")}</th>
-                    <th>{t("trade.positionTable.realized")}</th>
-                    <th>{t("trade.positionTable.account")}</th>
-                    <th>{t("trade.positionTable.currency")}</th>
-                    <th>{t("trade.positionTable.actions")}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {accountPositions.length ? (
-                    accountPositions.map((row, index) => {
-                      const key = buildPositionKey(row);
-                      const qtyValue =
-                        positionQuantities[key] ??
-                        String(Math.abs(row.position ?? 0) || 1);
-                      return (
-                        <tr key={key}>
-                          <td>
-                            <input
-                              type="checkbox"
-                              aria-label={t("trade.positionActionSelectSymbol", {
-                                symbol: row.symbol,
-                              })}
-                              checked={!!positionSelections[key]}
-                              onChange={(event) =>
-                                updatePositionSelection(key, event.target.checked)
-                              }
-                            />
-                          </td>
-                        <td>{row.symbol}</td>
-                        <td>{formatNumber(row.position ?? null, 4)}</td>
-                        <td>{formatNumber(row.avg_cost ?? null)}</td>
-                        <td>{formatNumber(row.market_price ?? null)}</td>
-                        <td>{formatNumber(row.market_value ?? null)}</td>
-                        <td>{formatNumber(row.unrealized_pnl ?? null)}</td>
-                        <td>{formatRealizedPnl(row.realized_pnl ?? null)}</td>
-                        <td>{row.account || t("common.none")}</td>
-                        <td>{row.currency || t("common.none")}</td>
-                        <td>
-                          <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
-                            <input
-                              className="form-input"
-                              style={{ width: "90px" }}
-                              type="number"
-                              min="0"
-                              step="1"
-                              value={qtyValue}
-                              onChange={(event) =>
-                                updatePositionQuantity(key, event.target.value)
-                              }
-                            />
-                            <button
-                              className="button-compact"
-                              onClick={() => handlePositionOrder(row, "BUY", index)}
-                              disabled={positionActionLoading}
-                            >
-                              {t("trade.positionActionBuy")}
-                            </button>
-                            <button
-                              className="button-compact"
-                              onClick={() => handlePositionOrder(row, "SELL", index)}
-                              disabled={positionActionLoading}
-                            >
-                              {t("trade.positionActionSell")}
-                            </button>
-                            <button
-                              className="button-compact"
-                              onClick={() => handleClosePositions([row])}
-                              disabled={positionActionLoading}
-                            >
-                              {t("trade.positionActionClose")}
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                    })
-                  ) : (
-                    <tr>
-                      <td colSpan={11} className="empty-state">
-                        {accountPositionsLoading
-                          ? t("common.actions.loading")
-                          : t("trade.accountPositionsEmpty")}
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
+          <div className="overview-card">
+            <div className="overview-label">{t("trade.marketHealthTitle")}</div>
+            <div className="overview-value">{marketHealthStatusLabel}</div>
+            <div className="overview-sub">
+              {t("trade.marketHealthUpdatedAt")} {formatDateTime(marketHealthUpdatedLabel)}
             </div>
           </div>
         </div>
-
-        <div className="grid-2" style={{ marginTop: "16px" }}>
-        <div className="card" style={{ marginTop: "16px" }}>
+        <div className="meta-list" style={{ marginTop: "12px" }}>
+          <div className="meta-row">
+            <span>{t("trade.modeLabel")}</span>
+            <strong>{modeLabel}</strong>
+          </div>
+          <div className="meta-row">
+            <span>{t("trade.marketDataType")}</span>
+            <strong>{ibSettings?.market_data_type || t("common.none")}</strong>
+          </div>
+          <div className="meta-row">
+            <span>{t("trade.bridgeSource")}</span>
+            <strong>{bridgeSource || t("common.none")}</strong>
+          </div>
+          {ibSettings?.api_mode && (
+            <div className="meta-row">
+              <span>{t("data.ib.apiMode")}</span>
+              <strong>
+                {ibSettings.api_mode === "mock"
+                  ? t("data.ib.apiModeMock")
+                  : t("data.ib.apiModeIb")}
+              </strong>
+            </div>
+          )}
+          <div className="meta-row">
+            <span>{t("data.ib.lastHeartbeat")}</span>
+            <strong>
+              {ibState?.last_heartbeat ? formatDateTime(ibState.last_heartbeat) : "-"}
+            </strong>
+          </div>
+          <div className="meta-row">
+            <span>{t("data.ib.stateUpdated")}</span>
+            <strong>{ibState?.updated_at ? formatDateTime(ibState.updated_at) : "-"}</strong>
+          </div>
+          {ibState?.message && (
+            <div className="meta-row">
+              <span>{t("data.ib.message")}</span>
+              <strong>{ibState.message}</strong>
+            </div>
+          )}
+        </div>
+        {ibStateResult && <div className="form-success">{ibStateResult}</div>}
+        {ibStateError && <div className="form-error">{ibStateError}</div>}
+        <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+          <button
+            className="button-secondary"
+            onClick={() => loadIbState(false)}
+            disabled={ibStateLoading}
+          >
+            {ibStateLoading ? t("common.actions.loading") : t("common.actions.refresh")}
+          </button>
+          <button
+            className="button-secondary"
+            onClick={probeIbState}
+            disabled={ibStateLoading}
+          >
+            {ibStateLoading ? t("common.actions.loading") : t("data.ib.probe")}
+          </button>
+          <button className="button-secondary" onClick={refreshAll} disabled={loading}>
+            {loading ? t("common.actions.loading") : t("trade.refresh")}
+          </button>
+          <a className="button-secondary" href="/data">
+            {t("trade.openData")}
+          </a>
+        </div>
+      </div>
+    ),
+    project: (
+      <div className="card">
+        <div className="card-title">{t("trade.projectBindingTitle")}</div>
+        <div className="card-meta">{t("trade.projectBindingMeta")}</div>
+        {projectError && <div className="form-hint">{projectError}</div>}
+        <div className="form-grid two-col" style={{ marginTop: "12px" }}>
+          <div className="form-row">
+            <label className="form-label">{t("trade.projectSelect")}</label>
+            <select
+              className="form-select"
+              value={selectedProjectId}
+              onChange={(event) => setSelectedProjectId(event.target.value)}
+              data-testid="live-trade-project-select"
+            >
+              <option value="">{t("trade.projectSelectPlaceholder")}</option>
+              {projects.map((project) => (
+                <option key={project.id} value={project.id}>
+                  #{project.id} · {project.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+        {!selectedProjectId && <div className="form-hint">{t("trade.projectSelectHint")}</div>}
+        <div className="meta-list" style={{ marginTop: "12px" }}>
+          <div className="meta-row">
+            <span>{t("trade.snapshotStatus")}</span>
+            <strong data-testid="live-trade-snapshot-status">
+              {snapshotLoading
+                ? t("common.actions.loading")
+                : snapshotReady
+                  ? t("trade.snapshotReady")
+                  : t("trade.snapshotMissing")}
+            </strong>
+          </div>
+          <div className="meta-row">
+            <span>{t("trade.snapshotDate")}</span>
+            <strong data-testid="live-trade-snapshot-date">
+              {snapshot?.snapshot_date || t("common.none")}
+            </strong>
+          </div>
+          <div className="meta-row">
+            <span>{t("trade.snapshotId")}</span>
+            <strong data-testid="live-trade-snapshot-id">
+              {snapshot?.id ? `#${snapshot.id}` : t("common.none")}
+            </strong>
+          </div>
+        </div>
+        {selectedProject && (
+          <div className="form-hint" style={{ marginTop: "8px" }}>
+            {t("trade.projectBindingSelected", {
+              id: selectedProject.id,
+              name: selectedProject.name,
+            })}
+          </div>
+        )}
+        {snapshotError && <div className="form-hint">{snapshotError}</div>}
+      </div>
+    ),
+    account: (
+      <div className="card">
+        <div className="card-title">{t("trade.accountSummaryTitle")}</div>
+        <div className="card-meta">{t("trade.accountSummaryMeta")}</div>
+        {accountSummaryError && <div className="form-hint">{accountSummaryError}</div>}
+        <div className="overview-grid" style={{ marginTop: "12px" }}>
+          {accountSummaryItems.map((item) => (
+            <div
+              className="overview-card"
+              key={item.key}
+              data-testid={`account-summary-${item.key}`}
+            >
+              <div className="overview-label">
+                {resolveAccountSummaryLabel(item.key, accountSummaryTagMap)}
+              </div>
+              <div className="overview-value" data-testid={`account-summary-${item.key}-value`}>
+                {formatAccountValue(item.value)}
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="meta-list" style={{ marginTop: "12px" }}>
+          <div className="meta-row">
+            <span>{t("trade.accountSummaryUpdatedAt")}</span>
+            <strong>
+              {accountSummary?.refreshed_at
+                ? formatDateTime(accountSummary.refreshed_at)
+                : t("common.none")}
+            </strong>
+          </div>
+          <div className="meta-row">
+            <span>{t("trade.accountSummarySource")}</span>
+            <strong>{accountSummary?.source || t("common.none")}</strong>
+          </div>
+          {accountSummary?.stale && (
+            <div className="meta-row">
+              <span>{t("trade.accountSummaryStale")}</span>
+              <strong>{t("common.boolean.true")}</strong>
+            </div>
+          )}
+        </div>
+        <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+          <button
+            className="button-secondary"
+            onClick={() => loadAccountSummary(true)}
+            disabled={accountSummaryFullLoading}
+          >
+            {accountSummaryFullLoading
+              ? t("common.actions.loading")
+              : t("trade.accountSummaryRefresh")}
+          </button>
+        </div>
+        {accountSummaryFullError && <div className="form-hint">{accountSummaryFullError}</div>}
+        <details style={{ marginTop: "12px" }}>
+          <summary>{t("trade.accountSummaryFullTitle")}</summary>
+          <table className="table" style={{ marginTop: "8px" }}>
+            <thead>
+              <tr>
+                <th>{t("trade.accountSummaryTag")}</th>
+                <th>{t("trade.accountSummaryValue")}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {accountSummaryFullItems.length ? (
+                accountSummaryFullItems.map(([key, value]) => (
+                  <tr key={key}>
+                    <td>{resolveAccountSummaryLabel(key, accountSummaryTagMap)}</td>
+                    <td>{formatAccountValue(value)}</td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td colSpan={2} className="empty-state">
+                    {accountSummaryFullLoading
+                      ? t("common.actions.loading")
+                      : t("trade.accountSummaryFullEmpty")}
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </details>
+      </div>
+    ),
+    positions: (
+      <div className="card span-2" data-testid="account-positions-card">
+        <div className="card-title">{t("trade.accountPositionsTitle")}</div>
+        <div className="card-meta">{t("trade.accountPositionsMeta")}</div>
+        {positionsStale && (
+          <div className="form-hint warn" style={{ marginTop: "8px" }}>
+            <div>{t("trade.accountPositionsStaleHint")}</div>
+            <div className="meta-row" style={{ marginTop: "6px" }}>
+              <span>{t("trade.accountPositionsStaleUpdatedAt")}</span>
+              <strong>{bridgeUpdatedAt ? formatDateTime(bridgeUpdatedAt) : t("common.none")}</strong>
+              <button
+                className="button-compact"
+                onClick={loadAccountPositions}
+                disabled={accountPositionsLoading}
+              >
+                {accountPositionsLoading
+                  ? t("common.actions.loading")
+                  : t("trade.accountPositionsRefresh")}
+              </button>
+            </div>
+          </div>
+        )}
+        {accountPositionsError && <div className="form-hint">{accountPositionsError}</div>}
+        <div className="meta-list" style={{ marginTop: "12px" }}>
+          <div className="meta-row">
+            <span>{t("trade.accountPositionsUpdatedAt")}</span>
+            <strong>
+              {accountPositionsUpdatedAt
+                ? formatDateTime(accountPositionsUpdatedAt)
+                : t("common.none")}
+            </strong>
+          </div>
+        </div>
+        {positionActionError && (
+          <div className="form-hint danger" style={{ marginTop: "12px" }}>
+            {positionActionError}
+          </div>
+        )}
+        {positionActionResult && (
+          <div className="form-success" style={{ marginTop: "12px" }}>
+            {positionActionResult}
+          </div>
+        )}
+        <div
+          style={{
+            marginTop: "12px",
+            display: "flex",
+            gap: "10px",
+            flexWrap: "wrap",
+            alignItems: "center",
+          }}
+        >
+          <div className="meta-row">
+            <span>{t("trade.positionActionSelected", { count: selectedPositions.length })}</span>
+          </div>
+          <button
+            className="button-secondary"
+            data-testid="positions-batch-close"
+            disabled={positionActionLoading || selectedPositions.length === 0}
+            onClick={() => handleClosePositions(selectedPositions)}
+          >
+            {positionActionLoading
+              ? t("common.actions.loading")
+              : t("trade.positionActionBatchClose")}
+          </button>
+          <button
+            className="danger-button"
+            data-testid="positions-liquidate-all"
+            disabled={positionActionLoading || accountPositions.length === 0}
+            onClick={handleLiquidateAll}
+          >
+            {t("trade.positionActionLiquidateAll")}
+          </button>
+        </div>
+        <div className="table-scroll" style={{ marginTop: "12px" }}>
+          <table className="table" data-testid="account-positions-table">
+            <thead>
+              <tr>
+                <th>
+                  <input
+                    type="checkbox"
+                    aria-label={t("trade.positionActionSelectAll")}
+                    checked={allPositionsSelected}
+                    onChange={toggleSelectAllPositions}
+                  />
+                </th>
+                <th>{t("trade.positionTable.symbol")}</th>
+                <th>{t("trade.positionTable.position")}</th>
+                <th>{t("trade.positionTable.avgCost")}</th>
+                <th>{t("trade.positionTable.marketPrice")}</th>
+                <th>{t("trade.positionTable.marketValue")}</th>
+                <th>{t("trade.positionTable.unrealized")}</th>
+                <th>{t("trade.positionTable.realized")}</th>
+                <th>{t("trade.positionTable.account")}</th>
+                <th>{t("trade.positionTable.currency")}</th>
+                <th>{t("trade.positionTable.actions")}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {accountPositions.length ? (
+                accountPositions.map((row, index) => {
+                  const key = buildPositionKey(row);
+                  const qtyValue =
+                    positionQuantities[key] ?? String(Math.abs(row.position ?? 0) || 1);
+                  return (
+                    <tr key={key}>
+                      <td>
+                        <input
+                          type="checkbox"
+                          aria-label={t("trade.positionActionSelectSymbol", {
+                            symbol: row.symbol,
+                          })}
+                          checked={!!positionSelections[key]}
+                          onChange={(event) => updatePositionSelection(key, event.target.checked)}
+                        />
+                      </td>
+                      <td>{row.symbol}</td>
+                      <td>{formatNumber(row.position ?? null, 4)}</td>
+                      <td>{formatNumber(row.avg_cost ?? null)}</td>
+                      <td>{formatNumber(row.market_price ?? null)}</td>
+                      <td>{formatNumber(row.market_value ?? null)}</td>
+                      <td>{formatNumber(row.unrealized_pnl ?? null)}</td>
+                      <td>{formatRealizedPnl(row.realized_pnl ?? null)}</td>
+                      <td>{row.account || t("common.none")}</td>
+                      <td>{row.currency || t("common.none")}</td>
+                      <td>
+                        <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+                          <input
+                            className="form-input"
+                            style={{ width: "90px" }}
+                            type="number"
+                            min="0"
+                            step="1"
+                            value={qtyValue}
+                            onChange={(event) =>
+                              updatePositionQuantity(key, event.target.value)
+                            }
+                          />
+                          <button
+                            className="button-compact"
+                            onClick={() => handlePositionOrder(row, "BUY", index)}
+                            disabled={positionActionLoading}
+                          >
+                            {t("trade.positionActionBuy")}
+                          </button>
+                          <button
+                            className="button-compact"
+                            onClick={() => handlePositionOrder(row, "SELL", index)}
+                            disabled={positionActionLoading}
+                          >
+                            {t("trade.positionActionSell")}
+                          </button>
+                          <button
+                            className="button-compact"
+                            onClick={() => handleClosePositions([row])}
+                            disabled={positionActionLoading}
+                          >
+                            {t("trade.positionActionClose")}
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              ) : (
+                <tr>
+                  <td colSpan={11} className="empty-state">
+                    {accountPositionsLoading
+                      ? t("common.actions.loading")
+                      : t("trade.accountPositionsEmpty")}
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    ),
+    monitor: (
+      <div className="card span-2">
+        <div className="card-title">{t("trade.monitorTitle")}</div>
+        <div className="card-meta">{t("trade.monitorMeta")}</div>
+        {tradeError && <div className="form-hint">{tradeError}</div>}
+        <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+          <button
+            className={detailTab === "orders" ? "button-primary" : "button-secondary"}
+            onClick={() => setDetailTab("orders")}
+          >
+            {t("trade.ordersTitle")}
+          </button>
+          <button
+            className={detailTab === "fills" ? "button-primary" : "button-secondary"}
+            onClick={() => setDetailTab("fills")}
+          >
+            {t("trade.fillsTitle")}
+          </button>
+          <button
+            className={detailTab === "receipts" ? "button-primary" : "button-secondary"}
+            onClick={() => {
+              setDetailTab("receipts");
+              loadTradeReceipts();
+            }}
+          >
+            {t("trade.receiptsTitle")}
+          </button>
+        </div>
+        {detailTab === "orders" ? (
+          <>
+            <table className="table" style={{ marginTop: "12px" }}>
+              <thead>
+                <tr>
+                  <th>{t("trade.orderTable.id")}</th>
+                  <th>{t("trade.orderTable.clientOrderId")}</th>
+                  <th>{t("trade.orderTable.symbol")}</th>
+                  <th>{t("trade.orderTable.side")}</th>
+                  <th>{t("trade.orderTable.qty")}</th>
+                  <th>{t("trade.orderTable.status")}</th>
+                  <th>{t("trade.orderTable.createdAt")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {tradeOrders.length ? (
+                  tradeOrders.map((order) => (
+                    <tr key={order.id}>
+                      <td>#{order.id}</td>
+                      <td>{order.client_order_id || t("common.none")}</td>
+                      <td>{order.symbol || t("common.none")}</td>
+                      <td>{formatSide(order.side)}</td>
+                      <td>{order.quantity ?? t("common.none")}</td>
+                      <td>{formatStatus(order.status)}</td>
+                      <td>{formatDateTime(order.created_at)}</td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={7} className="empty-state">
+                      {t("trade.orderEmpty")}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+            <PaginationBar
+              page={ordersPage}
+              pageSize={ordersPageSize}
+              total={ordersTotal}
+              onPageChange={handleOrdersPageChange}
+              onPageSizeChange={handleOrdersPageSizeChange}
+              pageSizeOptions={[50, 100, 200]}
+            />
+          </>
+        ) : detailTab === "fills" ? (
+          <table className="table" style={{ marginTop: "12px" }}>
+            <thead>
+              <tr>
+                <th>{t("trade.fillTable.orderId")}</th>
+                <th>{t("trade.fillTable.execId")}</th>
+                <th>{t("trade.fillTable.qty")}</th>
+                <th>{t("trade.fillTable.price")}</th>
+                <th>{t("trade.fillTable.commission")}</th>
+                <th>{t("trade.fillTable.exchange")}</th>
+                <th>{t("trade.fillTable.time")}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {runDetail?.fills?.length ? (
+                runDetail.fills.map((fill) => (
+                  <tr key={fill.id}>
+                    <td>#{fill.order_id}</td>
+                    <td>{fill.exec_id || t("common.none")}</td>
+                    <td>{formatNumber(fill.fill_quantity, 2)}</td>
+                    <td>{formatNumber(fill.fill_price, 4)}</td>
+                    <td>{formatNumber(fill.commission ?? null, 4)}</td>
+                    <td>{fill.exchange || t("common.none")}</td>
+                    <td>{fill.fill_time ? formatDateTime(fill.fill_time) : t("common.none")}</td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td colSpan={7} className="empty-state">
+                    {t("trade.fillsEmpty")}
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        ) : (
+          <>
+            {receiptsError && <div className="form-hint">{receiptsError}</div>}
+            {receiptWarningLabels.map((label, index) => (
+              <div key={`${label}-${index}`} className="form-hint">
+                {label}
+              </div>
+            ))}
+            <table
+              className="table"
+              style={{ marginTop: "12px" }}
+              data-testid="trade-receipts-table"
+            >
+              <thead>
+                <tr>
+                  <th>{t("trade.receiptTable.time")}</th>
+                  <th>{t("trade.receiptTable.kind")}</th>
+                  <th>{t("trade.receiptTable.orderId")}</th>
+                  <th>{t("trade.receiptTable.clientOrderId")}</th>
+                  <th>{t("trade.receiptTable.symbol")}</th>
+                  <th>{t("trade.receiptTable.side")}</th>
+                  <th>{t("trade.receiptTable.qty")}</th>
+                  <th>{t("trade.receiptTable.filledQty")}</th>
+                  <th>{t("trade.receiptTable.fillPrice")}</th>
+                  <th>{t("trade.receiptTable.status")}</th>
+                  <th>{t("trade.receiptTable.source")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {tradeReceipts.length ? (
+                  tradeReceipts.map((receipt, index) => (
+                    <tr key={`${receipt.source}-${receipt.order_id || "na"}-${index}`}>
+                      <td>{receipt.time ? formatDateTime(receipt.time) : t("common.none")}</td>
+                      <td>{formatReceiptKind(receipt.kind)}</td>
+                      <td>{receipt.order_id ? `#${receipt.order_id}` : t("common.none")}</td>
+                      <td>{receipt.client_order_id || t("common.none")}</td>
+                      <td>{receipt.symbol || t("common.none")}</td>
+                      <td>{formatSide(receipt.side)}</td>
+                      <td>{formatNumber(receipt.quantity ?? null)}</td>
+                      <td>{formatNumber(receipt.filled_quantity ?? null)}</td>
+                      <td>{formatNumber(receipt.fill_price ?? null)}</td>
+                      <td>{receipt.status ? formatStatus(receipt.status) : t("common.none")}</td>
+                      <td>{formatReceiptSource(receipt.source)}</td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={11} className="empty-state">
+                      {receiptsLoading ? t("common.actions.loading") : t("trade.receiptsEmpty")}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+            <PaginationBar
+              page={receiptsPage}
+              pageSize={receiptsPageSize}
+              total={receiptsTotal}
+              onPageChange={handleReceiptsPageChange}
+              onPageSizeChange={handleReceiptsPageSizeChange}
+              pageSizeOptions={[50, 100, 200]}
+            />
+          </>
+        )}
+      </div>
+    ),
+    config: (
+      <div className="card">
+        <div className="card-title">{t("trade.configTitle")}</div>
+        <div className="card-meta">{t("trade.configMeta")}</div>
+        <div className="overview-grid" style={{ marginTop: "12px" }}>
+          <div className="overview-card">
+            <div className="overview-label">{t("trade.host")}</div>
+            <div className="overview-value">{ibSettings?.host || t("common.none")}</div>
+            <div className="overview-sub">
+              {t("trade.port")}: {ibSettings?.port ?? t("common.none")}
+            </div>
+          </div>
+          <div className="overview-card">
+            <div className="overview-label">{t("trade.account")}</div>
+            <div className="overview-value">{maskAccount(ibSettings?.account_id) || t("common.none")}</div>
+            <div className="overview-sub">
+              {t("trade.apiMode")}: {ibSettings?.api_mode || t("common.none")}
+            </div>
+          </div>
+          <div className="overview-card">
+            <div className="overview-label">{t("trade.regulatorySnapshot")}</div>
+            <div className="overview-value">
+              {ibSettings?.use_regulatory_snapshot
+                ? t("common.boolean.true")
+                : t("common.boolean.false")}
+            </div>
+            <div className="overview-sub">
+              {t("common.labels.updatedAt")} {formatDateTime(ibSettings?.updated_at)}
+            </div>
+          </div>
+        </div>
+        {!isConfigured && (
+          <div className="form-hint" style={{ marginTop: "8px" }}>
+            {t("trade.statusHint")}
+          </div>
+        )}
+        <div className="section-title">{t("data.ib.settingsTitle")}</div>
+        <div className="form-grid">
+          <div className="form-row">
+            <label className="form-label">{t("data.ib.host")}</label>
+            <input
+              type="text"
+              className="form-input"
+              value={ibSettingsForm.host}
+              onChange={(e) => updateIbSettingsForm("host", e.target.value)}
+            />
+            <div className="form-hint">{t("data.ib.hostHint")}</div>
+          </div>
+          <div className="form-row">
+            <label className="form-label">{t("data.ib.port")}</label>
+            <input
+              type="number"
+              className="form-input"
+              value={ibSettingsForm.port}
+              onChange={(e) => updateIbSettingsForm("port", e.target.value)}
+            />
+            <div className="form-hint">{t("data.ib.portHint")}</div>
+          </div>
+          <div className="form-row">
+            <label className="form-label">{t("data.ib.clientId")}</label>
+            <input
+              type="number"
+              className="form-input"
+              value={ibSettingsForm.client_id}
+              onChange={(e) => updateIbSettingsForm("client_id", e.target.value)}
+            />
+            <div className="form-hint">{t("data.ib.clientIdHint")}</div>
+          </div>
+          <div className="form-row">
+            <label className="form-label">{t("data.ib.accountId")}</label>
+            <input
+              type="text"
+              className="form-input"
+              value={ibSettingsForm.account_id}
+              onChange={(e) => updateIbSettingsForm("account_id", e.target.value)}
+              placeholder={t("data.ib.accountIdPlaceholder")}
+            />
+            {ibSettings?.account_id && (
+              <div className="form-hint">
+                {t("data.ib.accountIdHint", { account: ibSettings.account_id })}
+              </div>
+            )}
+          </div>
+          <div className="form-row">
+            <label className="form-label">{t("data.ib.apiMode")}</label>
+            <select
+              className="form-select"
+              value={ibSettingsForm.api_mode}
+              onChange={(e) => updateIbSettingsForm("api_mode", e.target.value)}
+            >
+              <option value="ib">{t("data.ib.apiModeIb")}</option>
+              <option value="mock">{t("data.ib.apiModeMock")}</option>
+            </select>
+            <div className="form-hint">{t("data.ib.apiModeHint")}</div>
+          </div>
+          <div className="form-row">
+            <label className="form-label">{t("data.ib.mode")}</label>
+            <select
+              className="form-select"
+              value={ibSettingsForm.mode}
+              onChange={(e) => updateIbSettingsForm("mode", e.target.value)}
+            >
+              <option value="paper">{t("data.ib.modePaper")}</option>
+              <option value="live">{t("data.ib.modeLive")}</option>
+            </select>
+            <div className="form-hint">{t("data.ib.modeHint")}</div>
+          </div>
+          <div className="form-row">
+            <label className="form-label">{t("data.ib.marketDataType")}</label>
+            <select
+              className="form-select"
+              value={ibSettingsForm.market_data_type}
+              onChange={(e) => updateIbSettingsForm("market_data_type", e.target.value)}
+            >
+              <option value="realtime">{t("data.ib.marketDataRealtime")}</option>
+              <option value="frozen">{t("data.ib.marketDataFrozen")}</option>
+              <option value="delayed">{t("data.ib.marketDataDelayed")}</option>
+            </select>
+            <div className="form-hint">{t("data.ib.marketDataTypeHint")}</div>
+          </div>
+          <div className="form-row">
+            <label className="form-label">{t("data.ib.regulatorySnapshot")}</label>
+            <label className="switch">
+              <input
+                type="checkbox"
+                checked={ibSettingsForm.use_regulatory_snapshot}
+                onChange={(e) => updateIbSettingsForm("use_regulatory_snapshot", e.target.checked)}
+              />
+              <span className="slider" />
+            </label>
+            <div className="form-hint">{t("data.ib.regulatorySnapshotHint")}</div>
+          </div>
+        </div>
+        {ibSettingsResult && <div className="form-success">{ibSettingsResult}</div>}
+        {ibSettingsError && <div className="form-error">{ibSettingsError}</div>}
+        <button className="button-secondary" onClick={saveIbSettings} disabled={ibSettingsSaving}>
+          {ibSettingsSaving ? t("common.actions.loading") : t("common.actions.save")}
+        </button>
+      </div>
+    ),
+    marketHealth: (
+      <>
+        <div className="card">
           <div className="card-title">{t("data.ib.streamTitle")}</div>
           <div className="card-meta">{t("data.ib.streamMeta")}</div>
           <div className="overview-grid" style={{ marginTop: "12px" }}>
@@ -2403,882 +2461,696 @@ export default function LiveTradePage() {
             </button>
           </div>
         </div>
-
         <div className="card">
-          <div className="card-title">{t("data.ib.contractsTitle")}</div>
-            <div className="form-grid">
-              <div className="form-row full">
-                <label className="form-label">{t("data.ib.contractsSymbols")}</label>
-                <input
-                  type="text"
-                  className="form-input"
-                  value={ibContractForm.symbols}
-                  onChange={(e) => updateIbContractForm("symbols", e.target.value)}
-                  placeholder={t("data.ib.contractsSymbolsPlaceholder")}
-                />
-                <div className="form-hint">{t("data.ib.contractsSymbolsHint")}</div>
-              </div>
-              <div className="form-row">
-                <label className="form-label">{t("data.ib.contractsProjectOnly")}</label>
-                <label className="switch">
-                  <input
-                    type="checkbox"
-                    checked={ibContractForm.use_project_symbols}
-                    onChange={(e) => updateIbContractForm("use_project_symbols", e.target.checked)}
-                  />
-                  <span className="slider" />
-                </label>
-                <div className="form-hint">{t("data.ib.contractsProjectOnlyHint")}</div>
-              </div>
+          <div className="card-title">{t("trade.snapshotTitle")}</div>
+          <div className="card-meta">{t("trade.snapshotMeta")}</div>
+          <div className="snapshot-hero" style={{ marginTop: "12px" }}>
+            <div className="snapshot-symbol">{marketSnapshotSymbol || t("trade.snapshotEmpty")}</div>
+            <div className="snapshot-price">
+              {snapshotPrice == null ? "--" : snapshotPrice.toFixed(2)}
             </div>
-            {ibContractResult && (
-              <div className="form-success">
-                {t("data.ib.contractsResult", {
-                  total: ibContractResult.total,
-                  updated: ibContractResult.updated,
-                  skipped: ibContractResult.skipped,
-                  duration: ibContractResult.duration_sec.toFixed(2),
-                })}
-              </div>
-            )}
-            {ibContractError && <div className="form-error">{ibContractError}</div>}
-            <button
-              className="button-secondary"
-              onClick={refreshIbContracts}
-              disabled={ibContractLoading}
+            <div
+              className={`snapshot-change ${
+                snapshotChange != null && snapshotChange >= 0 ? "up" : "down"
+              }`}
             >
-              {ibContractLoading ? t("common.actions.loading") : t("data.ib.contractsRefresh")}
-            </button>
+              {snapshotChange == null || snapshotChangePct == null
+                ? "--"
+                : `${snapshotChange >= 0 ? "+" : ""}${snapshotChange.toFixed(2)} (${snapshotChangePct.toFixed(2)}%)`}
+            </div>
           </div>
-
-          <div className="card">
-            <div className="card-title">{t("data.ib.healthTitle")}</div>
-            <div className="form-grid">
-              <div className="form-row full">
-                <label className="form-label">{t("data.ib.healthSymbols")}</label>
-                <input
-                  type="text"
-                  className="form-input"
-                  value={ibMarketHealthForm.symbols}
-                  onChange={(e) => updateIbMarketHealthForm("symbols", e.target.value)}
-                  placeholder={t("data.ib.healthSymbolsPlaceholder")}
-                />
-                <div className="form-hint">{t("data.ib.healthSymbolsHint")}</div>
-              </div>
-              <div className="form-row">
-                <label className="form-label">{t("data.ib.healthProjectOnly")}</label>
-                <label className="switch">
-                  <input
-                    type="checkbox"
-                    checked={ibMarketHealthForm.use_project_symbols}
-                    onChange={(e) =>
-                      updateIbMarketHealthForm("use_project_symbols", e.target.checked)
-                    }
-                  />
-                  <span className="slider" />
-                </label>
-                <div className="form-hint">{t("data.ib.healthProjectOnlyHint")}</div>
-              </div>
-              <div className="form-row">
-                <label className="form-label">{t("data.ib.healthMinRatio")}</label>
-                <input
-                  type="number"
-                  step="0.05"
-                  min="0"
-                  max="1"
-                  className="form-input"
-                  value={ibMarketHealthForm.min_success_ratio}
-                  onChange={(e) => updateIbMarketHealthForm("min_success_ratio", e.target.value)}
-                />
-                <div className="form-hint">{t("data.ib.healthMinRatioHint")}</div>
-              </div>
-              <div className="form-row">
-                <label className="form-label">{t("data.ib.healthFallback")}</label>
-                <label className="switch">
-                  <input
-                    type="checkbox"
-                    checked={ibMarketHealthForm.fallback_history}
-                    onChange={(e) =>
-                      updateIbMarketHealthForm("fallback_history", e.target.checked)
-                    }
-                  />
-                  <span className="slider" />
-                </label>
-                <div className="form-hint">{t("data.ib.healthFallbackHint")}</div>
-              </div>
-              <div className="form-row">
-                <label className="form-label">{t("data.ib.healthDuration")}</label>
-                <select
-                  className="form-select"
-                  value={ibMarketHealthForm.history_duration}
-                  onChange={(e) => updateIbMarketHealthForm("history_duration", e.target.value)}
-                >
-                  <option value="5 D">{t("data.ib.healthDuration5d")}</option>
-                  <option value="30 D">{t("data.ib.healthDuration30d")}</option>
-                  <option value="90 D">{t("data.ib.healthDuration90d")}</option>
-                </select>
-                <div className="form-hint">{t("data.ib.healthDurationHint")}</div>
-              </div>
-              <div className="form-row">
-                <label className="form-label">{t("data.ib.healthBarSize")}</label>
-                <select
-                  className="form-select"
-                  value={ibMarketHealthForm.history_bar_size}
-                  onChange={(e) => updateIbMarketHealthForm("history_bar_size", e.target.value)}
-                >
-                  <option value="1 day">{t("data.ib.healthBarDay")}</option>
-                  <option value="1 hour">{t("data.ib.healthBarHour")}</option>
-                </select>
-                <div className="form-hint">{t("data.ib.healthBarSizeHint")}</div>
-              </div>
-              <div className="form-row">
-                <label className="form-label">{t("data.ib.healthUseRth")}</label>
-                <label className="switch">
-                  <input
-                    type="checkbox"
-                    checked={ibMarketHealthForm.history_use_rth}
-                    onChange={(e) =>
-                      updateIbMarketHealthForm("history_use_rth", e.target.checked)
-                    }
-                  />
-                  <span className="slider" />
-                </label>
-                <div className="form-hint">{t("data.ib.healthUseRthHint")}</div>
-              </div>
+          <div className="meta-list" style={{ marginTop: "12px" }}>
+            <div className="meta-row">
+              <span>{t("trade.snapshotVolume")}</span>
+              <strong>{snapshotVolume == null ? "-" : snapshotVolume.toLocaleString()}</strong>
             </div>
-            {ibMarketHealthResult && (
-              <div className="form-success">
-                {t("data.ib.healthResult", {
-                  status: ibMarketHealthResult.status,
-                  success: ibMarketHealthResult.success,
-                  total: ibMarketHealthResult.total,
-                })}
-                {ibMarketHealthResult.errors.length > 0 && (
-                  <div className="form-note">
-                    {ibMarketHealthResult.errors.slice(0, 5).join(" | ")}
-                  </div>
-                )}
-              </div>
-            )}
-            {ibMarketHealthError && <div className="form-error">{ibMarketHealthError}</div>}
+            <div className="meta-row">
+              <span>{t("trade.snapshotUpdatedAt")}</span>
+              <strong>{formatDateTime(snapshotData.timestamp)}</strong>
+            </div>
+          </div>
+          {marketSnapshotError && <div className="form-error">{marketSnapshotError}</div>}
+          <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
             <button
               className="button-secondary"
-              onClick={checkIbMarketHealth}
-              disabled={ibMarketHealthLoading}
+              onClick={() => loadMarketSnapshot()}
+              disabled={marketSnapshotLoading}
             >
-              {ibMarketHealthLoading ? t("common.actions.loading") : t("data.ib.healthCheck")}
+              {marketSnapshotLoading ? t("common.actions.loading") : t("trade.snapshotRefresh")}
             </button>
           </div>
         </div>
-
-        <div className="card" style={{ marginTop: "16px" }}>
-          <div className="card-title">{t("data.ib.historyTitle")}</div>
+        <div className="card">
+          <div className="card-title">{t("data.ib.healthTitle")}</div>
           <div className="form-grid">
             <div className="form-row full">
-              <label className="form-label">{t("data.ib.historySymbols")}</label>
+              <label className="form-label">{t("data.ib.healthSymbols")}</label>
               <input
                 type="text"
                 className="form-input"
-                value={ibHistoryForm.symbols}
-                onChange={(e) => updateIbHistoryForm("symbols", e.target.value)}
-                placeholder={t("data.ib.historySymbolsPlaceholder")}
+                value={ibMarketHealthForm.symbols}
+                onChange={(e) => updateIbMarketHealthForm("symbols", e.target.value)}
+                placeholder={t("data.ib.healthSymbolsPlaceholder")}
               />
-              <div className="form-hint">{t("data.ib.historySymbolsHint")}</div>
+              <div className="form-hint">{t("data.ib.healthSymbolsHint")}</div>
             </div>
             <div className="form-row">
-              <label className="form-label">{t("data.ib.historyProjectOnly")}</label>
+              <label className="form-label">{t("data.ib.healthProjectOnly")}</label>
               <label className="switch">
                 <input
                   type="checkbox"
-                  checked={ibHistoryForm.use_project_symbols}
-                  onChange={(e) => updateIbHistoryForm("use_project_symbols", e.target.checked)}
+                  checked={ibMarketHealthForm.use_project_symbols}
+                  onChange={(e) => updateIbMarketHealthForm("use_project_symbols", e.target.checked)}
                 />
                 <span className="slider" />
               </label>
-              <div className="form-hint">{t("data.ib.historyProjectOnlyHint")}</div>
+              <div className="form-hint">{t("data.ib.healthProjectOnlyHint")}</div>
             </div>
             <div className="form-row">
-              <label className="form-label">{t("data.ib.historyDuration")}</label>
-              <select
-                className="form-select"
-                value={ibHistoryForm.duration}
-                onChange={(e) => updateIbHistoryForm("duration", e.target.value)}
-              >
-                <option value="5 D">{t("data.ib.historyDuration5d")}</option>
-                <option value="30 D">{t("data.ib.historyDuration30d")}</option>
-                <option value="90 D">{t("data.ib.historyDuration90d")}</option>
-                <option value="1 Y">{t("data.ib.historyDuration1y")}</option>
-              </select>
-              <div className="form-hint">{t("data.ib.historyDurationHint")}</div>
-            </div>
-            <div className="form-row">
-              <label className="form-label">{t("data.ib.historyBarSize")}</label>
-              <select
-                className="form-select"
-                value={ibHistoryForm.bar_size}
-                onChange={(e) => updateIbHistoryForm("bar_size", e.target.value)}
-              >
-                <option value="1 day">{t("data.ib.historyBarDay")}</option>
-                <option value="1 hour">{t("data.ib.historyBarHour")}</option>
-              </select>
-              <div className="form-hint">{t("data.ib.historyBarSizeHint")}</div>
-            </div>
-            <div className="form-row">
-              <label className="form-label">{t("data.ib.historyUseRth")}</label>
-              <label className="switch">
-                <input
-                  type="checkbox"
-                  checked={ibHistoryForm.use_rth}
-                  onChange={(e) => updateIbHistoryForm("use_rth", e.target.checked)}
-                />
-                <span className="slider" />
-              </label>
-              <div className="form-hint">{t("data.ib.historyUseRthHint")}</div>
-            </div>
-            <div className="form-row">
-              <label className="form-label">{t("data.ib.historyStore")}</label>
-              <label className="switch">
-                <input
-                  type="checkbox"
-                  checked={ibHistoryForm.store}
-                  onChange={(e) => updateIbHistoryForm("store", e.target.checked)}
-                />
-                <span className="slider" />
-              </label>
-              <div className="form-hint">{t("data.ib.historyStoreHint")}</div>
-            </div>
-            <div className="form-row">
-              <label className="form-label">{t("data.ib.historyDelay")}</label>
+              <label className="form-label">{t("data.ib.healthMinRatio")}</label>
               <input
                 type="number"
-                min="0"
                 step="0.05"
+                min="0"
+                max="1"
                 className="form-input"
-                value={ibHistoryForm.min_delay_seconds}
-                onChange={(e) => updateIbHistoryForm("min_delay_seconds", e.target.value)}
+                value={ibMarketHealthForm.min_success_ratio}
+                onChange={(e) => updateIbMarketHealthForm("min_success_ratio", e.target.value)}
               />
-              <div className="form-hint">{t("data.ib.historyDelayHint")}</div>
+              <div className="form-hint">{t("data.ib.healthMinRatioHint")}</div>
             </div>
-          </div>
-          {ibHistoryError && <div className="form-error">{ibHistoryError}</div>}
-          <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
-            <button
-              className="button-secondary"
-              onClick={createIbHistoryJob}
-              disabled={ibHistoryActionLoading}
-            >
-              {ibHistoryActionLoading ? t("common.actions.loading") : t("data.ib.historyStart")}
-            </button>
-            <button
-              className="button-secondary"
-              onClick={loadIbHistoryJobs}
-              disabled={ibHistoryLoading}
-            >
-              {ibHistoryLoading ? t("common.actions.loading") : t("common.actions.refresh")}
-            </button>
-          </div>
-          {ibHistoryJobs.length > 0 ? (
-            <table className="table" style={{ marginTop: "12px" }}>
-              <thead>
-                <tr>
-                  <th>{t("common.labels.id")}</th>
-                  <th>{t("common.labels.status")}</th>
-                  <th>{t("data.ib.historyProgress")}</th>
-                  <th>{t("data.ib.historySuccess")}</th>
-                  <th>{t("common.labels.createdAt")}</th>
-                  <th>{t("common.labels.actions")}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {ibHistoryJobs.map((job) => {
-                  const total = job.total_symbols ?? 0;
-                  const processed = job.processed_symbols ?? 0;
-                  const success = job.success_symbols ?? 0;
-                  const failed = job.failed_symbols ?? 0;
-                  const canCancel = ["queued", "running"].includes(job.status);
-                  return (
-                    <tr key={job.id}>
-                      <td>{job.id}</td>
-                      <td>{formatStatus(job.status)}</td>
-                      <td>
-                        {processed}/{total}
-                      </td>
-                      <td>
-                        {success}/{failed}
-                      </td>
-                      <td>{formatDateTime(job.created_at)}</td>
-                      <td>
-                        <div className="table-actions">
-                          <button
-                            className="button-link"
-                            disabled={!canCancel || ibHistoryActionLoading}
-                            onClick={() => cancelIbHistoryJob(job.id)}
-                          >
-                            {t("data.ib.historyCancel")}
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          ) : (
-            <div className="empty-state">{t("data.ib.historyEmpty")}</div>
-          )}
-        </div>
-
-        <div className="card" style={{ marginTop: "16px" }}>
-          <div className="card-title">{t("trade.projectBindingTitle")}</div>
-          <div className="card-meta">{t("trade.projectBindingMeta")}</div>
-          {projectError && <div className="form-hint">{projectError}</div>}
-          <div className="form-grid two-col" style={{ marginTop: "12px" }}>
             <div className="form-row">
-              <label className="form-label">{t("trade.projectSelect")}</label>
+              <label className="form-label">{t("data.ib.healthFallback")}</label>
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={ibMarketHealthForm.fallback_history}
+                  onChange={(e) => updateIbMarketHealthForm("fallback_history", e.target.checked)}
+                />
+                <span className="slider" />
+              </label>
+              <div className="form-hint">{t("data.ib.healthFallbackHint")}</div>
+            </div>
+            <div className="form-row">
+              <label className="form-label">{t("data.ib.healthDuration")}</label>
               <select
                 className="form-select"
-                value={selectedProjectId}
-                onChange={(event) => setSelectedProjectId(event.target.value)}
-                data-testid="live-trade-project-select"
+                value={ibMarketHealthForm.history_duration}
+                onChange={(e) => updateIbMarketHealthForm("history_duration", e.target.value)}
               >
-                <option value="">{t("trade.projectSelectPlaceholder")}</option>
-                {projects.map((project) => (
-                  <option key={project.id} value={project.id}>
-                    #{project.id} · {project.name}
-                  </option>
-                ))}
+                <option value="5 D">{t("data.ib.healthDuration5d")}</option>
+                <option value="30 D">{t("data.ib.healthDuration30d")}</option>
+                <option value="90 D">{t("data.ib.healthDuration90d")}</option>
               </select>
+              <div className="form-hint">{t("data.ib.healthDurationHint")}</div>
+            </div>
+            <div className="form-row">
+              <label className="form-label">{t("data.ib.healthBarSize")}</label>
+              <select
+                className="form-select"
+                value={ibMarketHealthForm.history_bar_size}
+                onChange={(e) => updateIbMarketHealthForm("history_bar_size", e.target.value)}
+              >
+                <option value="1 day">{t("data.ib.healthBarDay")}</option>
+                <option value="1 hour">{t("data.ib.healthBarHour")}</option>
+              </select>
+              <div className="form-hint">{t("data.ib.healthBarSizeHint")}</div>
+            </div>
+            <div className="form-row">
+              <label className="form-label">{t("data.ib.healthUseRth")}</label>
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={ibMarketHealthForm.history_use_rth}
+                  onChange={(e) => updateIbMarketHealthForm("history_use_rth", e.target.checked)}
+                />
+                <span className="slider" />
+              </label>
+              <div className="form-hint">{t("data.ib.healthUseRthHint")}</div>
             </div>
           </div>
-          {!selectedProjectId && (
-            <div className="form-hint">{t("trade.projectSelectHint")}</div>
-          )}
-          <div className="meta-list" style={{ marginTop: "12px" }}>
-            <div className="meta-row">
-              <span>{t("trade.snapshotStatus")}</span>
-              <strong data-testid="live-trade-snapshot-status">
-                {snapshotLoading
-                  ? t("common.actions.loading")
-                  : snapshotReady
-                    ? t("trade.snapshotReady")
-                    : t("trade.snapshotMissing")}
-              </strong>
-            </div>
-            <div className="meta-row">
-              <span>{t("trade.snapshotDate")}</span>
-              <strong data-testid="live-trade-snapshot-date">
-                {snapshot?.snapshot_date || t("common.none")}
-              </strong>
-            </div>
-            <div className="meta-row">
-              <span>{t("trade.snapshotId")}</span>
-              <strong data-testid="live-trade-snapshot-id">
-                {snapshot?.id ? `#${snapshot.id}` : t("common.none")}
-              </strong>
-            </div>
-          </div>
-          {selectedProject && (
-            <div className="form-hint" style={{ marginTop: "8px" }}>
-              {t("trade.projectBindingSelected", {
-                id: selectedProject.id,
-                name: selectedProject.name,
+          {ibMarketHealthResult && (
+            <div className="form-success">
+              {t("data.ib.healthResult", {
+                status: ibMarketHealthResult.status,
+                success: ibMarketHealthResult.success,
+                total: ibMarketHealthResult.total,
               })}
+              {ibMarketHealthResult.errors.length > 0 && (
+                <div className="form-note">
+                  {ibMarketHealthResult.errors.slice(0, 5).join(" | ")}
+                </div>
+              )}
             </div>
           )}
-          {snapshotError && <div className="form-hint">{snapshotError}</div>}
+          {ibMarketHealthError && <div className="form-error">{ibMarketHealthError}</div>}
+          <button
+            className="button-secondary"
+            onClick={checkIbMarketHealth}
+            disabled={ibMarketHealthLoading}
+          >
+            {ibMarketHealthLoading ? t("common.actions.loading") : t("data.ib.healthCheck")}
+          </button>
         </div>
-
-        <div className="grid-2" style={{ marginTop: "16px" }}>
-          <div className="card">
-            <div className="card-title">{t("trade.guardTitle")}</div>
-            <div className="card-meta">{t("trade.guardMeta")}</div>
-            {guardError && <div className="form-error">{guardError}</div>}
-            <div className="overview-grid" style={{ marginTop: "12px" }}>
-              <div className="overview-card">
-                <div className="overview-label">{t("trade.guardStatus")}</div>
-                <div className="overview-value">
-                  {guardLoading
-                    ? t("common.actions.loading")
-                    : guardState
-                      ? formatStatus(guardState.status)
-                      : t("trade.guardEmpty")}
-                </div>
-                <div className="overview-sub">
-                  {guardState
-                    ? `${t("trade.guardValuationSource")}: ${
-                        guardState.valuation_source || t("common.none")
-                      } · ${t("trade.guardValuationTime")}: ${
-                        guardState.last_valuation_ts
-                          ? formatDateTime(guardState.last_valuation_ts)
-                          : t("common.none")
-                      }`
-                    : t("common.none")}
-                </div>
-              </div>
-              <div className="overview-card">
-                <div className="overview-label">{t("trade.guardEquity")}</div>
-                <div className="overview-value">
-                  {guardEquity !== null ? formatNumber(guardEquity) : t("common.none")}
-                </div>
-                <div className="overview-sub">
-                  {t("trade.guardDrawdown")}:{" "}
-                  {guardDrawdown !== null
-                    ? `${(guardDrawdown * 100).toFixed(2)}%`
-                    : t("common.none")}
-                </div>
-              </div>
-              <div className="overview-card">
-                <div className="overview-label">{t("trade.guardOrderFailures")}</div>
-                <div className="overview-value">
-                  {guardState ? guardState.order_failures : t("common.none")}
-                </div>
-                <div className="overview-sub">
-                  {t("trade.guardMarketErrors")}:{" "}
-                  {guardState ? guardState.market_data_errors : t("common.none")}
-                </div>
-              </div>
-              <div className="overview-card">
-                <div className="overview-label">{t("trade.guardRiskTriggers")}</div>
-                <div className="overview-value">
-                  {guardState ? guardState.risk_triggers : t("common.none")}
-                </div>
-                <div className="overview-sub">
-                  {t("trade.guardCooldown")}:{" "}
-                  {guardState?.cooldown_until
-                    ? formatDateTime(guardState.cooldown_until)
-                    : t("common.none")}
-                </div>
-              </div>
-            </div>
-            {guardState?.halt_reason ? (
-              <div className="form-hint" style={{ marginTop: "8px" }}>
-                {t("trade.guardReason")}: {guardReason}
-              </div>
-            ) : null}
+      </>
+    ),
+    contracts: (
+      <div className="card">
+        <div className="card-title">{t("data.ib.contractsTitle")}</div>
+        <div className="form-grid">
+          <div className="form-row full">
+            <label className="form-label">{t("data.ib.contractsSymbols")}</label>
+            <input
+              type="text"
+              className="form-input"
+              value={ibContractForm.symbols}
+              onChange={(e) => updateIbContractForm("symbols", e.target.value)}
+              placeholder={t("data.ib.contractsSymbolsPlaceholder")}
+            />
+            <div className="form-hint">{t("data.ib.contractsSymbolsHint")}</div>
           </div>
-          <div className="card">
-            <div className="card-title">{t("trade.executionTitle")}</div>
-            <div className="card-meta">{t("trade.executionMeta")}</div>
-            <div className="overview-grid" style={{ marginTop: "12px" }}>
-              <div className="overview-card">
-                <div className="overview-label">{t("trade.latestRun")}</div>
-              <div className="overview-value">
-                  {latestTradeRun ? (
-                    <IdChip label={t("trade.id.run")} value={latestTradeRun.id} />
-                  ) : (
-                    t("common.none")
-                  )}
-                </div>
-                <div className="overview-sub">
-                  <span
-                    data-testid="paper-trade-status"
-                    data-status={latestTradeRun?.status || ""}
-                  >
-                    {latestTradeRun
-                      ? `${formatStatus(latestTradeRun.status)} · ${formatDateTime(
-                          latestTradeRun.created_at
-                        )}`
-                      : t("trade.runEmpty")}
-                  </span>
-                </div>
-              </div>
-              <div className="overview-card">
-                <div className="overview-label">{t("trade.runMode")}</div>
-                <div className="overview-value">
-                  {latestTradeRun ? formatRunMode(latestTradeRun.mode) : t("common.none")}
-                </div>
-                <div className="overview-sub">
-                  {t("trade.runProject")}
-                  {latestTradeRun ? ` #${latestTradeRun.project_id}` : ` ${t("common.none")}`}
-                </div>
-              </div>
-              <div className="overview-card">
-                <div className="overview-label">{t("trade.executionDataSource")}</div>
-                <div className="overview-value">
-                  {tradeSettings?.execution_data_source
-                    ? tradeSettings.execution_data_source.toUpperCase()
-                    : t("common.none")}
-                </div>
-                <div className="overview-sub">
-                  {t("trade.signalDataSource")}: {t("trade.signalDataSourceValue")}
-                </div>
-              </div>
-            </div>
-            {tradeSettingsError && <div className="form-hint">{tradeSettingsError}</div>}
-            {tradeError && <div className="form-hint">{tradeError}</div>}
-            <table className="table" style={{ marginTop: "12px" }}>
-              <thead>
-                <tr>
-                  <th>{t("trade.runTable.id")}</th>
-                  <th>{t("trade.runTable.status")}</th>
-                  <th>{t("trade.runTable.mode")}</th>
-                  <th>{t("trade.runTable.snapshot")}</th>
-                  <th>{t("trade.runTable.createdAt")}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredTradeRuns.length ? (
-                  filteredTradeRuns.map((run) => (
-                    <tr key={run.id}>
-                      <td>
-                        <IdChip label={t("trade.id.run")} value={run.id} />
-                      </td>
-                      <td>{formatStatus(run.status)}</td>
-                      <td>{formatRunMode(run.mode)}</td>
-                      <td>
-                        {run.decision_snapshot_id ? (
-                          <IdChip
-                            label={t("trade.id.snapshot")}
-                            value={run.decision_snapshot_id}
-                          />
-                        ) : (
-                          t("common.none")
-                        )}
-                      </td>
-                      <td>{formatDateTime(run.created_at)}</td>
-                    </tr>
-                  ))
-                ) : (
-                  <tr>
-                    <td colSpan={5} className="empty-state">
-                      {t("trade.runEmpty")}
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-            <div style={{ display: "flex", gap: "10px", flexWrap: "wrap", marginTop: "12px" }}>
-              <button
-                className="button-secondary"
-                onClick={createTradeRun}
-                disabled={createRunLoading || !selectedProjectId}
-                data-testid="paper-trade-create"
-              >
-                {createRunLoading ? t("common.actions.loading") : t("trade.createRun")}
-              </button>
-            </div>
-            {createRunError && <div className="form-hint">{createRunError}</div>}
-            {createRunResult && <div className="form-hint">{createRunResult}</div>}
-            <div className="form-grid" style={{ marginTop: "12px" }}>
-              <div className="form-row">
-                <label className="form-label">{t("trade.runSelect")}</label>
-                <select
-                  className="form-select"
-                  value={selectedRunId ?? ""}
-                  onChange={(event) => {
-                    const next = Number(event.target.value);
-                    setSelectedRunId(Number.isNaN(next) || !next ? null : next);
-                  }}
-                >
-                  <option value="">{t("common.noneText")}</option>
-                {filteredTradeRuns.map((run) => (
-                  <option key={run.id} value={run.id}>
-                    #{run.id} · {formatStatus(run.status)}
-                  </option>
-                ))}
-                </select>
-                <div className="form-hint">{t("trade.runSelectHint")}</div>
-              </div>
-            </div>
-            <div className="meta-list" style={{ marginTop: "12px" }}>
-              <div className="meta-row" style={{ alignItems: "flex-start" }}>
-                <span>{t("trade.executeContext")}</span>
-                <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-                  <IdChip label={t("trade.id.project")} value={selectedProjectId || null} />
-                  <IdChip label={t("trade.id.snapshot")} value={snapshot?.id} />
-                  <IdChip label={t("trade.id.run")} value={latestTradeRun?.id} />
-                </div>
-              </div>
-            </div>
-            <div className="form-grid" style={{ marginTop: "12px" }}>
-              <div className="form-row">
-                <label className="form-label">{t("trade.executeRunId")}</label>
-                <input
-                  type="number"
-                  className="form-input"
-                  value={executeForm.run_id}
-                  onChange={(event) => updateExecuteForm("run_id", event.target.value)}
-                  data-testid="paper-trade-run-id"
-                />
-                <div className="form-hint">{t("trade.executeRunIdHint")}</div>
-              </div>
-              <div className="form-row">
-                <label className="form-label">{t("trade.executeToken")}</label>
-                <input
-                  type="text"
-                  className="form-input"
-                  value={executeForm.live_confirm_token}
-                  placeholder={t("trade.executeTokenHint")}
-                  onChange={(event) => updateExecuteForm("live_confirm_token", event.target.value)}
-                />
-                <div className="form-hint">{t("trade.executeTokenHint")}</div>
-              </div>
-            </div>
-            <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
-              <button
-                className="button-primary"
-                onClick={executeTradeRun}
-                disabled={executeLoading || !canExecute}
-                data-testid="paper-trade-execute"
-              >
-                {executeLoading ? t("common.actions.loading") : t("trade.executeSubmit")}
-              </button>
-            </div>
-            {!canExecute && selectedProjectId && !snapshotError && (
-              <div className="form-hint" style={{ marginTop: "8px" }}>
-                {t("trade.executeBlockedSnapshot")}
-              </div>
-            )}
-            {executeError && (
-              <div className="form-hint" data-testid="paper-trade-error">
-                {executeError}
-              </div>
-            )}
-            {executeResult && (
-              <div className="form-hint" data-testid="paper-trade-result">
-                {executeResult}
-              </div>
-            )}
+          <div className="form-row">
+            <label className="form-label">{t("data.ib.contractsProjectOnly")}</label>
+            <label className="switch">
+              <input
+                type="checkbox"
+                checked={ibContractForm.use_project_symbols}
+                onChange={(e) => updateIbContractForm("use_project_symbols", e.target.checked)}
+              />
+              <span className="slider" />
+            </label>
+            <div className="form-hint">{t("data.ib.contractsProjectOnlyHint")}</div>
           </div>
         </div>
-
-        <div className="card" style={{ marginTop: "16px" }}>
-          <div className="card-title">{t("trade.symbolSummaryTitle")}</div>
-          <div className="card-meta">{t("trade.symbolSummaryMeta")}</div>
-          {detailError && <div className="form-hint">{detailError}</div>}
-          <div className="meta-list" style={{ marginTop: "12px" }}>
-            <div className="meta-row">
-              <span>{t("trade.symbolSummaryUpdatedAt")}</span>
-              <strong>
-                {symbolSummaryUpdatedAt ? formatDateTime(symbolSummaryUpdatedAt) : t("common.none")}
-              </strong>
-            </div>
+        {ibContractResult && (
+          <div className="form-success">
+            {t("data.ib.contractsResult", {
+              total: ibContractResult.total,
+              updated: ibContractResult.updated,
+              skipped: ibContractResult.skipped,
+              duration: ibContractResult.duration_sec.toFixed(2),
+            })}
           </div>
-          <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
-            <button
-              className="button-secondary"
-              disabled={detailLoading || !selectedRunId}
-              onClick={() => selectedRunId && loadTradeRunData(selectedRunId)}
+        )}
+        {ibContractError && <div className="form-error">{ibContractError}</div>}
+        <button
+          className="button-secondary"
+          onClick={refreshIbContracts}
+          disabled={ibContractLoading}
+        >
+          {ibContractLoading ? t("common.actions.loading") : t("data.ib.contractsRefresh")}
+        </button>
+      </div>
+    ),
+    history: (
+      <div className="card">
+        <div className="card-title">{t("data.ib.historyTitle")}</div>
+        <div className="form-grid">
+          <div className="form-row full">
+            <label className="form-label">{t("data.ib.historySymbols")}</label>
+            <input
+              type="text"
+              className="form-input"
+              value={ibHistoryForm.symbols}
+              onChange={(e) => updateIbHistoryForm("symbols", e.target.value)}
+              placeholder={t("data.ib.historySymbolsPlaceholder")}
+            />
+            <div className="form-hint">{t("data.ib.historySymbolsHint")}</div>
+          </div>
+          <div className="form-row">
+            <label className="form-label">{t("data.ib.historyProjectOnly")}</label>
+            <label className="switch">
+              <input
+                type="checkbox"
+                checked={ibHistoryForm.use_project_symbols}
+                onChange={(e) => updateIbHistoryForm("use_project_symbols", e.target.checked)}
+              />
+              <span className="slider" />
+            </label>
+            <div className="form-hint">{t("data.ib.historyProjectOnlyHint")}</div>
+          </div>
+          <div className="form-row">
+            <label className="form-label">{t("data.ib.historyDuration")}</label>
+            <select
+              className="form-select"
+              value={ibHistoryForm.duration}
+              onChange={(e) => updateIbHistoryForm("duration", e.target.value)}
             >
-              {detailLoading ? t("common.actions.loading") : t("trade.detailRefresh")}
-            </button>
+              <option value="5 D">{t("data.ib.historyDuration5d")}</option>
+              <option value="30 D">{t("data.ib.historyDuration30d")}</option>
+              <option value="90 D">{t("data.ib.historyDuration90d")}</option>
+              <option value="1 Y">{t("data.ib.historyDuration1y")}</option>
+            </select>
+            <div className="form-hint">{t("data.ib.historyDurationHint")}</div>
           </div>
+          <div className="form-row">
+            <label className="form-label">{t("data.ib.historyBarSize")}</label>
+            <select
+              className="form-select"
+              value={ibHistoryForm.bar_size}
+              onChange={(e) => updateIbHistoryForm("bar_size", e.target.value)}
+            >
+              <option value="1 day">{t("data.ib.historyBarDay")}</option>
+              <option value="1 hour">{t("data.ib.historyBarHour")}</option>
+            </select>
+            <div className="form-hint">{t("data.ib.historyBarSizeHint")}</div>
+          </div>
+          <div className="form-row">
+            <label className="form-label">{t("data.ib.historyUseRth")}</label>
+            <label className="switch">
+              <input
+                type="checkbox"
+                checked={ibHistoryForm.use_rth}
+                onChange={(e) => updateIbHistoryForm("use_rth", e.target.checked)}
+              />
+              <span className="slider" />
+            </label>
+            <div className="form-hint">{t("data.ib.historyUseRthHint")}</div>
+          </div>
+          <div className="form-row">
+            <label className="form-label">{t("data.ib.historyStore")}</label>
+            <label className="switch">
+              <input
+                type="checkbox"
+                checked={ibHistoryForm.store}
+                onChange={(e) => updateIbHistoryForm("store", e.target.checked)}
+              />
+              <span className="slider" />
+            </label>
+            <div className="form-hint">{t("data.ib.historyStoreHint")}</div>
+          </div>
+          <div className="form-row">
+            <label className="form-label">{t("data.ib.historyDelay")}</label>
+            <input
+              type="number"
+              min="0"
+              step="0.05"
+              className="form-input"
+              value={ibHistoryForm.min_delay_seconds}
+              onChange={(e) => updateIbHistoryForm("min_delay_seconds", e.target.value)}
+            />
+            <div className="form-hint">{t("data.ib.historyDelayHint")}</div>
+          </div>
+        </div>
+        {ibHistoryError && <div className="form-error">{ibHistoryError}</div>}
+        <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+          <button
+            className="button-secondary"
+            onClick={createIbHistoryJob}
+            disabled={ibHistoryActionLoading}
+          >
+            {ibHistoryActionLoading ? t("common.actions.loading") : t("data.ib.historyStart")}
+          </button>
+          <button
+            className="button-secondary"
+            onClick={loadIbHistoryJobs}
+            disabled={ibHistoryLoading}
+          >
+            {ibHistoryLoading ? t("common.actions.loading") : t("common.actions.refresh")}
+          </button>
+        </div>
+        {ibHistoryJobs.length > 0 ? (
           <table className="table" style={{ marginTop: "12px" }}>
             <thead>
               <tr>
-                <th>{t("trade.symbolTable.symbol")}</th>
-                <th>{t("trade.symbolTable.targetWeight")}</th>
-                <th>{t("trade.symbolTable.targetValue")}</th>
-                <th>{t("trade.symbolTable.filledQty")}</th>
-                <th>{t("trade.symbolTable.avgPrice")}</th>
-                <th>{t("trade.symbolTable.filledValue")}</th>
-                <th>{t("trade.symbolTable.pendingQty")}</th>
-                <th>{t("trade.symbolTable.deltaValue")}</th>
-                <th>{t("trade.symbolTable.deltaWeight")}</th>
-                <th>{t("trade.symbolTable.fillRatio")}</th>
-                <th>{t("trade.symbolTable.status")}</th>
+                <th>{t("common.labels.id")}</th>
+                <th>{t("common.labels.status")}</th>
+                <th>{t("data.ib.historyProgress")}</th>
+                <th>{t("data.ib.historySuccess")}</th>
+                <th>{t("common.labels.createdAt")}</th>
+                <th>{t("common.labels.actions")}</th>
               </tr>
             </thead>
             <tbody>
-              {symbolSummary.length ? (
-                symbolSummary.map((row) => (
-                  <tr key={row.symbol}>
-                    <td>{row.symbol}</td>
-                    <td>{formatPercent(row.target_weight ?? null)}</td>
-                    <td>{formatNumber(row.target_value ?? null)}</td>
-                    <td>{formatNumber(row.filled_qty ?? 0, 2)}</td>
-                    <td>{formatNumber(row.avg_fill_price ?? null)}</td>
-                    <td>{formatNumber(row.filled_value ?? 0)}</td>
-                    <td>{formatNumber(row.pending_qty ?? 0, 2)}</td>
-                    <td>{formatNumber(row.delta_value ?? null)}</td>
-                    <td>{formatPercent(row.delta_weight ?? null)}</td>
-                    <td>{formatPercent(row.fill_ratio ?? null)}</td>
-                    <td>{row.last_status ? formatStatus(row.last_status) : t("common.none")}</td>
-                  </tr>
-                ))
-              ) : (
-                <tr>
-                  <td colSpan={11} className="empty-state">
-                    {detailLoading ? t("common.actions.loading") : t("trade.symbolSummaryEmpty")}
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-
-        <div className="card" style={{ marginTop: "16px" }}>
-          <div className="card-title">{t("trade.monitorTitle")}</div>
-          <div className="card-meta">{t("trade.monitorMeta")}</div>
-          {tradeError && <div className="form-hint">{tradeError}</div>}
-          <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
-            <button
-              className={detailTab === "orders" ? "button-primary" : "button-secondary"}
-              onClick={() => setDetailTab("orders")}
-            >
-              {t("trade.ordersTitle")}
-            </button>
-            <button
-              className={detailTab === "fills" ? "button-primary" : "button-secondary"}
-              onClick={() => setDetailTab("fills")}
-            >
-              {t("trade.fillsTitle")}
-            </button>
-            <button
-              className={detailTab === "receipts" ? "button-primary" : "button-secondary"}
-              onClick={() => {
-                setDetailTab("receipts");
-                loadTradeReceipts();
-              }}
-            >
-              {t("trade.receiptsTitle")}
-            </button>
-          </div>
-          {detailTab === "orders" ? (
-            <>
-              <table className="table" style={{ marginTop: "12px" }}>
-                <thead>
-                  <tr>
-                    <th>{t("trade.orderTable.id")}</th>
-                    <th>{t("trade.orderTable.clientOrderId")}</th>
-                    <th>{t("trade.orderTable.symbol")}</th>
-                    <th>{t("trade.orderTable.side")}</th>
-                    <th>{t("trade.orderTable.qty")}</th>
-                    <th>{t("trade.orderTable.status")}</th>
-                    <th>{t("trade.orderTable.createdAt")}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {tradeOrders.length ? (
-                    tradeOrders.map((order) => (
-                      <tr key={order.id}>
-                        <td>#{order.id}</td>
-                        <td>{order.client_order_id || t("common.none")}</td>
-                        <td>{order.symbol || t("common.none")}</td>
-                        <td>{formatSide(order.side)}</td>
-                        <td>{order.quantity ?? t("common.none")}</td>
-                        <td>{formatStatus(order.status)}</td>
-                        <td>{formatDateTime(order.created_at)}</td>
-                      </tr>
-                    ))
-                  ) : (
-                    <tr>
-                      <td colSpan={7} className="empty-state">
-                        {t("trade.orderEmpty")}
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-              <PaginationBar
-                page={ordersPage}
-                pageSize={ordersPageSize}
-                total={ordersTotal}
-                onPageChange={handleOrdersPageChange}
-                onPageSizeChange={handleOrdersPageSizeChange}
-                pageSizeOptions={[50, 100, 200]}
-              />
-            </>
-          ) : detailTab === "fills" ? (
-            <table className="table" style={{ marginTop: "12px" }}>
-              <thead>
-                <tr>
-                  <th>{t("trade.fillTable.orderId")}</th>
-                  <th>{t("trade.fillTable.execId")}</th>
-                  <th>{t("trade.fillTable.qty")}</th>
-                  <th>{t("trade.fillTable.price")}</th>
-                  <th>{t("trade.fillTable.commission")}</th>
-                  <th>{t("trade.fillTable.exchange")}</th>
-                  <th>{t("trade.fillTable.time")}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {runDetail?.fills?.length ? (
-                  runDetail.fills.map((fill) => (
-                    <tr key={fill.id}>
-                      <td>#{fill.order_id}</td>
-                      <td>{fill.exec_id || t("common.none")}</td>
-                      <td>{formatNumber(fill.fill_quantity, 2)}</td>
-                      <td>{formatNumber(fill.fill_price, 4)}</td>
-                      <td>{formatNumber(fill.commission ?? null, 4)}</td>
-                      <td>{fill.exchange || t("common.none")}</td>
-                      <td>{fill.fill_time ? formatDateTime(fill.fill_time) : t("common.none")}</td>
-                    </tr>
-                  ))
-                ) : (
-                  <tr>
-                    <td colSpan={7} className="empty-state">
-                      {t("trade.fillsEmpty")}
+              {ibHistoryJobs.map((job) => {
+                const total = job.total_symbols ?? 0;
+                const processed = job.processed_symbols ?? 0;
+                const success = job.success_symbols ?? 0;
+                const failed = job.failed_symbols ?? 0;
+                const canCancel = ["queued", "running"].includes(job.status);
+                return (
+                  <tr key={job.id}>
+                    <td>{job.id}</td>
+                    <td>{formatStatus(job.status)}</td>
+                    <td>
+                      {processed}/{total}
+                    </td>
+                    <td>
+                      {success}/{failed}
+                    </td>
+                    <td>{formatDateTime(job.created_at)}</td>
+                    <td>
+                      <div className="table-actions">
+                        <button
+                          className="button-link"
+                          disabled={!canCancel || ibHistoryActionLoading}
+                          onClick={() => cancelIbHistoryJob(job.id)}
+                        >
+                          {t("data.ib.historyCancel")}
+                        </button>
+                      </div>
                     </td>
                   </tr>
-                )}
-              </tbody>
-            </table>
-          ) : (
-            <>
-              {receiptsError && <div className="form-hint">{receiptsError}</div>}
-              {receiptWarningLabels.map((label, index) => (
-                <div key={`${label}-${index}`} className="form-hint">
-                  {label}
-                </div>
-              ))}
-              <table
-                className="table"
-                style={{ marginTop: "12px" }}
-                data-testid="trade-receipts-table"
-              >
-                <thead>
-                  <tr>
-                    <th>{t("trade.receiptTable.time")}</th>
-                    <th>{t("trade.receiptTable.kind")}</th>
-                    <th>{t("trade.receiptTable.orderId")}</th>
-                    <th>{t("trade.receiptTable.clientOrderId")}</th>
-                    <th>{t("trade.receiptTable.symbol")}</th>
-                    <th>{t("trade.receiptTable.side")}</th>
-                    <th>{t("trade.receiptTable.qty")}</th>
-                    <th>{t("trade.receiptTable.filledQty")}</th>
-                    <th>{t("trade.receiptTable.fillPrice")}</th>
-                    <th>{t("trade.receiptTable.status")}</th>
-                    <th>{t("trade.receiptTable.source")}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {tradeReceipts.length ? (
-                    tradeReceipts.map((receipt, index) => (
-                      <tr key={`${receipt.source}-${receipt.order_id || "na"}-${index}`}>
-                        <td>{receipt.time ? formatDateTime(receipt.time) : t("common.none")}</td>
-                        <td>{formatReceiptKind(receipt.kind)}</td>
-                        <td>{receipt.order_id ? `#${receipt.order_id}` : t("common.none")}</td>
-                        <td>{receipt.client_order_id || t("common.none")}</td>
-                        <td>{receipt.symbol || t("common.none")}</td>
-                        <td>{formatSide(receipt.side)}</td>
-                        <td>{formatNumber(receipt.quantity ?? null)}</td>
-                        <td>{formatNumber(receipt.filled_quantity ?? null)}</td>
-                        <td>{formatNumber(receipt.fill_price ?? null)}</td>
-                        <td>{receipt.status ? formatStatus(receipt.status) : t("common.none")}</td>
-                        <td>{formatReceiptSource(receipt.source)}</td>
-                      </tr>
-                    ))
-                  ) : (
-                    <tr>
-                      <td colSpan={11} className="empty-state">
-                        {receiptsLoading ? t("common.actions.loading") : t("trade.receiptsEmpty")}
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-              <PaginationBar
-                page={receiptsPage}
-                pageSize={receiptsPageSize}
-                total={receiptsTotal}
-                onPageChange={handleReceiptsPageChange}
-                onPageSizeChange={handleReceiptsPageSizeChange}
-                pageSizeOptions={[50, 100, 200]}
-              />
-            </>
-          )}
+                );
+              })}
+            </tbody>
+          </table>
+        ) : (
+          <div className="empty-state">{t("data.ib.historyEmpty")}</div>
+        )}
+      </div>
+    ),
+    guard: (
+      <div className="card">
+        <div className="card-title">{t("trade.guardTitle")}</div>
+        <div className="card-meta">{t("trade.guardMeta")}</div>
+        {guardError && <div className="form-error">{guardError}</div>}
+        <div className="overview-grid" style={{ marginTop: "12px" }}>
+          <div className="overview-card">
+            <div className="overview-label">{t("trade.guardStatus")}</div>
+            <div className="overview-value">
+              {guardLoading
+                ? t("common.actions.loading")
+                : guardState
+                  ? formatStatus(guardState.status)
+                  : t("trade.guardEmpty")}
+            </div>
+            <div className="overview-sub">
+              {guardState
+                ? `${t("trade.guardValuationSource")}: ${
+                    guardState.valuation_source || t("common.none")
+                  } · ${t("trade.guardValuationTime")}: ${
+                    guardState.last_valuation_ts
+                      ? formatDateTime(guardState.last_valuation_ts)
+                      : t("common.none")
+                  }`
+                : t("common.none")}
+            </div>
+          </div>
+          <div className="overview-card">
+            <div className="overview-label">{t("trade.guardEquity")}</div>
+            <div className="overview-value">
+              {guardEquity !== null ? formatNumber(guardEquity) : t("common.none")}
+            </div>
+            <div className="overview-sub">
+              {t("trade.guardDrawdown")}: {
+                guardDrawdown !== null ? `${(guardDrawdown * 100).toFixed(2)}%` : t("common.none")
+              }
+            </div>
+          </div>
+          <div className="overview-card">
+            <div className="overview-label">{t("trade.guardOrderFailures")}</div>
+            <div className="overview-value">
+              {guardState ? guardState.order_failures : t("common.none")}
+            </div>
+            <div className="overview-sub">
+              {t("trade.guardMarketErrors")}: {guardState ? guardState.market_data_errors : t("common.none")}
+            </div>
+          </div>
+          <div className="overview-card">
+            <div className="overview-label">{t("trade.guardRiskTriggers")}</div>
+            <div className="overview-value">
+              {guardState ? guardState.risk_triggers : t("common.none")}
+            </div>
+            <div className="overview-sub">
+              {t("trade.guardCooldown")}: {
+                guardState?.cooldown_until ? formatDateTime(guardState.cooldown_until) : t("common.none")
+              }
+            </div>
+          </div>
         </div>
+        {guardState?.halt_reason ? (
+          <div className="form-hint" style={{ marginTop: "8px" }}>
+            {t("trade.guardReason")}: {guardReason}
+          </div>
+        ) : null}
+      </div>
+    ),
+    execution: (
+      <div className="card">
+        <div className="card-title">{t("trade.executionTitle")}</div>
+        <div className="card-meta">{t("trade.executionMeta")}</div>
+        <div className="overview-grid" style={{ marginTop: "12px" }}>
+          <div className="overview-card">
+            <div className="overview-label">{t("trade.latestRun")}</div>
+            <div className="overview-value">
+              {latestTradeRun ? (
+                <IdChip label={t("trade.id.run")} value={latestTradeRun.id} />
+              ) : (
+                t("common.none")
+              )}
+            </div>
+            <div className="overview-sub">
+              <span data-testid="paper-trade-status" data-status={latestTradeRun?.status || ""}>
+                {latestTradeRun
+                  ? `${formatStatus(latestTradeRun.status)} · ${formatDateTime(
+                      latestTradeRun.created_at
+                    )}`
+                  : t("trade.runEmpty")}
+              </span>
+            </div>
+          </div>
+          <div className="overview-card">
+            <div className="overview-label">{t("trade.runMode")}</div>
+            <div className="overview-value">
+              {latestTradeRun ? formatRunMode(latestTradeRun.mode) : t("common.none")}
+            </div>
+            <div className="overview-sub">
+              {t("trade.runProject")}
+              {latestTradeRun ? ` #${latestTradeRun.project_id}` : ` ${t("common.none")}`}
+            </div>
+          </div>
+          <div className="overview-card">
+            <div className="overview-label">{t("trade.executionDataSource")}</div>
+            <div className="overview-value">
+              {tradeSettings?.execution_data_source
+                ? tradeSettings.execution_data_source.toUpperCase()
+                : t("common.none")}
+            </div>
+            <div className="overview-sub">
+              {t("trade.signalDataSource")}: {t("trade.signalDataSourceValue")}
+            </div>
+          </div>
+        </div>
+        {tradeSettingsError && <div className="form-hint">{tradeSettingsError}</div>}
+        {tradeError && <div className="form-hint">{tradeError}</div>}
+        <table className="table" style={{ marginTop: "12px" }}>
+          <thead>
+            <tr>
+              <th>{t("trade.runTable.id")}</th>
+              <th>{t("trade.runTable.status")}</th>
+              <th>{t("trade.runTable.mode")}</th>
+              <th>{t("trade.runTable.snapshot")}</th>
+              <th>{t("trade.runTable.createdAt")}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filteredTradeRuns.length ? (
+              filteredTradeRuns.map((run) => (
+                <tr key={run.id}>
+                  <td>
+                    <IdChip label={t("trade.id.run")} value={run.id} />
+                  </td>
+                  <td>{formatStatus(run.status)}</td>
+                  <td>{formatRunMode(run.mode)}</td>
+                  <td>
+                    {run.decision_snapshot_id ? (
+                      <IdChip label={t("trade.id.snapshot")} value={run.decision_snapshot_id} />
+                    ) : (
+                      t("common.none")
+                    )}
+                  </td>
+                  <td>{formatDateTime(run.created_at)}</td>
+                </tr>
+              ))
+            ) : (
+              <tr>
+                <td colSpan={5} className="empty-state">
+                  {t("trade.runEmpty")}
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+        <div style={{ display: "flex", gap: "10px", flexWrap: "wrap", marginTop: "12px" }}>
+          <button
+            className="button-secondary"
+            onClick={createTradeRun}
+            disabled={createRunLoading || !selectedProjectId}
+            data-testid="paper-trade-create"
+          >
+            {createRunLoading ? t("common.actions.loading") : t("trade.createRun")}
+          </button>
+        </div>
+        {createRunError && <div className="form-hint">{createRunError}</div>}
+        {createRunResult && <div className="form-hint">{createRunResult}</div>}
+        <div className="form-grid" style={{ marginTop: "12px" }}>
+          <div className="form-row">
+            <label className="form-label">{t("trade.runSelect")}</label>
+            <select
+              className="form-select"
+              value={selectedRunId ?? ""}
+              onChange={(event) => {
+                const next = Number(event.target.value);
+                setSelectedRunId(Number.isNaN(next) || !next ? null : next);
+              }}
+            >
+              <option value="">{t("common.noneText")}</option>
+              {filteredTradeRuns.map((run) => (
+                <option key={run.id} value={run.id}>
+                  #{run.id} · {formatStatus(run.status)}
+                </option>
+              ))}
+            </select>
+            <div className="form-hint">{t("trade.runSelectHint")}</div>
+          </div>
+        </div>
+        <div className="meta-list" style={{ marginTop: "12px" }}>
+          <div className="meta-row" style={{ alignItems: "flex-start" }}>
+            <span>{t("trade.executeContext")}</span>
+            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+              <IdChip label={t("trade.id.project")} value={selectedProjectId || null} />
+              <IdChip label={t("trade.id.snapshot")} value={snapshot?.id} />
+              <IdChip label={t("trade.id.run")} value={latestTradeRun?.id} />
+            </div>
+          </div>
+        </div>
+        <div className="form-grid" style={{ marginTop: "12px" }}>
+          <div className="form-row">
+            <label className="form-label">{t("trade.executeRunId")}</label>
+            <input
+              type="number"
+              className="form-input"
+              value={executeForm.run_id}
+              onChange={(event) => updateExecuteForm("run_id", event.target.value)}
+              data-testid="paper-trade-run-id"
+            />
+            <div className="form-hint">{t("trade.executeRunIdHint")}</div>
+          </div>
+          <div className="form-row">
+            <label className="form-label">{t("trade.executeToken")}</label>
+            <input
+              type="text"
+              className="form-input"
+              value={executeForm.live_confirm_token}
+              placeholder={t("trade.executeTokenHint")}
+              onChange={(event) => updateExecuteForm("live_confirm_token", event.target.value)}
+            />
+            <div className="form-hint">{t("trade.executeTokenHint")}</div>
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+          <button
+            className="button-primary"
+            onClick={executeTradeRun}
+            disabled={executeLoading || !canExecute}
+            data-testid="paper-trade-execute"
+          >
+            {executeLoading ? t("common.actions.loading") : t("trade.executeSubmit")}
+          </button>
+        </div>
+        {!canExecute && selectedProjectId && !snapshotError && (
+          <div className="form-hint" style={{ marginTop: "8px" }}>
+            {t("trade.executeBlockedSnapshot")}
+          </div>
+        )}
+        {executeError && (
+          <div className="form-hint" data-testid="paper-trade-error">
+            {executeError}
+          </div>
+        )}
+        {executeResult && (
+          <div className="form-hint" data-testid="paper-trade-result">
+            {executeResult}
+          </div>
+        )}
+      </div>
+    ),
+    symbolSummary: (
+      <div className="card span-2">
+        <div className="card-title">{t("trade.symbolSummaryTitle")}</div>
+        <div className="card-meta">{t("trade.symbolSummaryMeta")}</div>
+        {detailError && <div className="form-hint">{detailError}</div>}
+        <div className="meta-list" style={{ marginTop: "12px" }}>
+          <div className="meta-row">
+            <span>{t("trade.symbolSummaryUpdatedAt")}</span>
+            <strong>
+              {symbolSummaryUpdatedAt ? formatDateTime(symbolSummaryUpdatedAt) : t("common.none")}
+            </strong>
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+          <button
+            className="button-secondary"
+            disabled={detailLoading || !selectedRunId}
+            onClick={() => selectedRunId && loadTradeRunData(selectedRunId)}
+          >
+            {detailLoading ? t("common.actions.loading") : t("trade.detailRefresh")}
+          </button>
+        </div>
+        <table className="table" style={{ marginTop: "12px" }}>
+          <thead>
+            <tr>
+              <th>{t("trade.symbolTable.symbol")}</th>
+              <th>{t("trade.symbolTable.targetWeight")}</th>
+              <th>{t("trade.symbolTable.targetValue")}</th>
+              <th>{t("trade.symbolTable.filledQty")}</th>
+              <th>{t("trade.symbolTable.avgPrice")}</th>
+              <th>{t("trade.symbolTable.filledValue")}</th>
+              <th>{t("trade.symbolTable.pendingQty")}</th>
+              <th>{t("trade.symbolTable.deltaValue")}</th>
+              <th>{t("trade.symbolTable.deltaWeight")}</th>
+              <th>{t("trade.symbolTable.fillRatio")}</th>
+              <th>{t("trade.symbolTable.status")}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {symbolSummary.length ? (
+              symbolSummary.map((row) => (
+                <tr key={row.symbol}>
+                  <td>{row.symbol}</td>
+                  <td>{formatPercent(row.target_weight ?? null)}</td>
+                  <td>{formatNumber(row.target_value ?? null)}</td>
+                  <td>{formatNumber(row.filled_qty ?? 0, 2)}</td>
+                  <td>{formatNumber(row.avg_fill_price ?? null)}</td>
+                  <td>{formatNumber(row.filled_value ?? 0)}</td>
+                  <td>{formatNumber(row.pending_qty ?? 0, 2)}</td>
+                  <td>{formatNumber(row.delta_value ?? null)}</td>
+                  <td>{formatPercent(row.delta_weight ?? null)}</td>
+                  <td>{formatPercent(row.fill_ratio ?? null)}</td>
+                  <td>{row.last_status ? formatStatus(row.last_status) : t("common.none")}</td>
+                </tr>
+              ))
+            ) : (
+              <tr>
+                <td colSpan={11} className="empty-state">
+                  {detailLoading ? t("common.actions.loading") : t("trade.symbolSummaryEmpty")}
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    ),
+  };
+  return (
+    <div className="main">
+      <TopBar title={t("trade.title")} />
+      <div className="content">
+        <div className="section-title">{t("trade.mainSectionTitle")}</div>
+        <div className="grid-2">
+          {sections.main.map((key) => (
+            <Fragment key={key}>{sectionCards[key]}</Fragment>
+          ))}
+        </div>
+        <details className="algo-advanced" style={{ marginTop: "16px" }}>
+          <summary>{t("trade.advancedSectionTitle")}</summary>
+          <div className="grid-2" style={{ marginTop: "12px" }}>
+            {sections.advanced.map((key) => (
+              <Fragment key={key}>{sectionCards[key]}</Fragment>
+            ))}
+          </div>
+        </details>
       </div>
     </div>
   );

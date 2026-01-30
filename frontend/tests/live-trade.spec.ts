@@ -3,43 +3,11 @@ import { test, expect } from "@playwright/test";
 test("live trade page shows connection state", async ({ page }) => {
   await page.goto("/live-trade");
   await expect(
-    page.locator(".overview-label", { hasText: /连接状态|Connection status/i })
+    page.locator(".card-title", { hasText: /交易状态|Trading Status/i })
   ).toBeVisible();
 });
 
 test("live trade page shows bridge status card", async ({ page }) => {
-  await page.route("**/api/brokerage/status/overview", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        connection: {
-          status: "connected",
-          message: "ok",
-          last_heartbeat: "2026-01-24T00:00:00Z",
-          updated_at: "2026-01-24T00:00:00Z",
-        },
-        stream: {
-          status: "connected",
-          subscribed_count: 1,
-          last_heartbeat: "2026-01-24T00:00:00Z",
-          ib_error_count: 0,
-          last_error: null,
-          market_data_type: "delayed",
-        },
-        snapshot_cache: {
-          status: "fresh",
-          last_snapshot_at: "2026-01-24T00:00:00Z",
-          symbol_sample_count: 1,
-        },
-        orders: {},
-        alerts: {},
-        partial: false,
-        errors: [],
-        refreshed_at: "2026-01-24T00:00:00Z",
-      }),
-    })
-  );
   await page.route("**/api/brokerage/settings", (route) =>
     route.fulfill({
       status: 200,
@@ -94,6 +62,7 @@ test("live trade page shows bridge status card", async ({ page }) => {
 
 test("live trade run table shows decision snapshot column", async ({ page }) => {
   await page.goto("/live-trade");
+  await page.getByRole("button", { name: /高级|Advanced/i }).click();
   await expect(
     page.getByRole("columnheader", { name: /决策快照|Decision Snapshot/i })
   ).toBeVisible();
@@ -101,15 +70,10 @@ test("live trade run table shows decision snapshot column", async ({ page }) => 
 
 test("live trade page shows ib stream card", async ({ page }) => {
   await page.goto("/live-trade");
-  const streamTitle = page.locator(".card-title", { hasText: /行情订阅|Market Stream/i });
-  const streamCard = streamTitle.first().locator("..");
-  await expect(streamCard).toBeVisible();
-  await expect(
-    streamCard.locator(".overview-label", { hasText: /行情类型|Market data type/i })
-  ).toBeVisible();
-  await expect(
-    streamCard.locator(".meta-row span", { hasText: /最后错误|Last error/i })
-  ).toBeVisible();
+  const healthLabel = page.locator(".overview-label", {
+    hasText: /行情源健康|Market Data Health/i,
+  });
+  await expect(healthLabel.first()).toBeVisible();
 });
 
 test("live trade page shows live warning in live mode", async ({ page }) => {
