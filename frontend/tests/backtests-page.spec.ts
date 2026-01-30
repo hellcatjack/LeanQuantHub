@@ -9,7 +9,7 @@ test("backtests page shows id chips for run and project", async ({ page }) => {
         items: [
           {
             id: 101,
-            project_id: 16,
+            project_id: 18,
             status: "success",
             created_at: "2026-01-25T00:00:00Z",
             ended_at: "2026-01-25T00:10:00Z",
@@ -29,6 +29,6 @@ test("backtests page shows id chips for run and project", async ({ page }) => {
     page.locator(".id-chip-text", { hasText: /ID#101/i })
   ).toBeVisible();
   await expect(
-    page.locator(".id-chip-text", { hasText: /项目#16|Project#16/i })
+    page.locator(".id-chip-text", { hasText: /项目#18|Project#18/i })
   ).toBeVisible();
 });

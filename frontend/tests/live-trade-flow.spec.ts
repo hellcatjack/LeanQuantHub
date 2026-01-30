@@ -47,10 +47,10 @@ const attachArtifacts = async (
   });
 };
 
-test("paper flow for project 16", async ({ page }, testInfo) => {
+test("paper flow for project 18", async ({ page }, testInfo) => {
   test.skip(!shouldRun, "requires PLAYWRIGHT_LIVE_TRADE=1 and live env");
 
-  const projectId = "16";
+  const projectId = "18";
   const attachmentBaseline = testInfo.attachments.length;
   const consoleLines: string[] = [];
   page.on("console", (msg) => {

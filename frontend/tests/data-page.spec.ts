@@ -37,7 +37,7 @@ test("data page shows id chips for pretrade runs", async ({ page }) => {
     }
     if (path === "/api/projects/page") {
       return json({
-        items: [{ id: 16, name: "Project 16" }],
+        items: [{ id: 18, name: "Project 18" }],
         total: 1,
         page: 1,
         page_size: 200,
@@ -45,7 +45,7 @@ test("data page shows id chips for pretrade runs", async ({ page }) => {
     }
     if (path === "/api/pretrade/settings") {
       return json({
-        project_id: 16,
+        project_id: 18,
         window_start: "",
         window_end: "",
         template_id: null,
@@ -64,7 +64,7 @@ test("data page shows id chips for pretrade runs", async ({ page }) => {
       return json([
         {
           id: 2001,
-          project_id: 16,
+          project_id: 18,
           name: "Template A",
           is_active: true,
           params: null,
@@ -77,7 +77,7 @@ test("data page shows id chips for pretrade runs", async ({ page }) => {
         items: [
           {
             id: 1001,
-            project_id: 16,
+            project_id: 18,
             status: "finished",
             created_at: "2026-01-25T00:00:00Z",
             updated_at: "2026-01-25T00:00:00Z",
@@ -98,7 +98,7 @@ test("data page shows id chips for pretrade runs", async ({ page }) => {
       return json({
         run: {
           id: 1001,
-          project_id: 16,
+          project_id: 18,
           status: "finished",
           created_at: "2026-01-25T00:00:00Z",
           updated_at: "2026-01-25T00:00:00Z",

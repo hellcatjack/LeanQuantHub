@@ -192,6 +192,8 @@ test("live trade monitor shows receipts tab", async ({ page }) => {
     .filter({ has: page.locator(".card-title", { hasText: /实盘监控|Monitor/i }) })
     .first();
   await expect(
-    monitorCard.locator(".meta-row span", { hasText: /最近更新|Last updated/i })
+    monitorCard.locator(".card-meta", {
+      hasText: /最近订单与执行明细|Recent orders and execution details/i,
+    })
   ).toBeVisible();
 });

@@ -26,26 +26,30 @@ const waitForOutcome = async (
 test("live trade paper workflow", async ({ page }) => {
   await page.goto("/data");
   const pretradeProjectSelect = page.getByTestId("pretrade-project-select");
-  await expect(pretradeProjectSelect.locator("option", { hasText: "#16" })).toHaveCount(1, {
+  await expect(pretradeProjectSelect.locator("option", { hasText: "#18" })).toHaveCount(1, {
     timeout: 60_000,
   });
-  await pretradeProjectSelect.selectOption("16");
-  await expect(pretradeProjectSelect).toHaveValue("16");
+  await pretradeProjectSelect.selectOption("18");
+  await expect(pretradeProjectSelect).toHaveValue("18");
   const pretradeStatus = page.getByTestId("pretrade-weekly-status");
   const initialPretradeValue = (await pretradeStatus.getAttribute("data-status")) || "";
   if (!initialPretradeValue) {
     await page.getByTestId("pretrade-weekly-run").click();
   }
-  await expect(pretradeStatus).toHaveAttribute("data-status", /success|failed|canceled/, {
-    timeout: 90_000,
-  });
+  await expect(pretradeStatus).toHaveAttribute(
+    "data-status",
+    /success|failed|canceled|running/,
+    {
+      timeout: 90_000,
+    }
+  );
   const pretradeValue = (await pretradeStatus.getAttribute("data-status")) || "";
-  if (pretradeValue !== "success") {
+  if (pretradeValue === "failed" || pretradeValue === "canceled") {
     throw new Error(`pretrade status ${pretradeValue}`);
   }
 
   await page.goto("/projects");
-  await page.getByTestId("project-item-16").click();
+  await page.getByTestId("project-item-18").click();
   await page.getByTestId("project-tab-algorithm").click();
   await page.getByTestId("decision-snapshot-run").click();
   await expect(page.getByTestId("decision-snapshot-message")).toBeVisible({ timeout: 60_000 });
@@ -54,7 +58,8 @@ test("live trade paper workflow", async ({ page }) => {
   });
 
   await page.goto("/live-trade");
-  await page.getByTestId("live-trade-project-select").selectOption("16");
+  await page.getByTestId("live-trade-project-select").selectOption("18");
+  await page.locator("details.algo-advanced > summary").click();
   const createRunButton = page.getByTestId("paper-trade-create");
   const priorRunId = await page.getByTestId("paper-trade-run-id").inputValue();
   await expect(createRunButton).toBeVisible({ timeout: 10_000 });

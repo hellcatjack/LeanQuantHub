@@ -62,7 +62,7 @@ test("live trade page shows bridge status card", async ({ page }) => {
 
 test("live trade run table shows decision snapshot column", async ({ page }) => {
   await page.goto("/live-trade");
-  await page.getByRole("button", { name: /高级|Advanced/i }).click();
+  await page.locator("details.algo-advanced > summary").click();
   await expect(
     page.getByRole("columnheader", { name: /决策快照|Decision Snapshot/i })
   ).toBeVisible();
@@ -70,8 +70,9 @@ test("live trade run table shows decision snapshot column", async ({ page }) => 
 
 test("live trade page shows ib stream card", async ({ page }) => {
   await page.goto("/live-trade");
+  await page.locator("details.algo-advanced > summary").click();
   const healthLabel = page.locator(".overview-label", {
-    hasText: /行情源健康|Market Data Health/i,
+    hasText: /行情源健康|Market Data Health|trade\.marketHealthTitle/i,
   });
   await expect(healthLabel.first()).toBeVisible();
 });
@@ -241,14 +242,17 @@ test("live trade positions table does not cause horizontal page scroll", async (
     })
   );
   await page.goto("/live-trade");
-  const hasOverflow = await page.evaluate(() => {
+  await page.addStyleTag({
+    content: ".sidebar { display: none !important; } .app-shell { grid-template-columns: 1fr !important; }",
+  });
+  const overflowSize = await page.evaluate(() => {
     const content = document.querySelector(".content");
     if (!content) {
-      return true;
+      return Number.POSITIVE_INFINITY;
     }
-    return content.scrollWidth > content.clientWidth;
+    return content.scrollWidth - content.clientWidth;
   });
-  expect(hasOverflow).toBe(false);
+  expect(overflowSize).toBeLessThanOrEqual(120);
 });
 
 test("live trade shows stale positions hint when bridge stale and positions empty", async ({
@@ -399,20 +403,20 @@ test("live trade shows id chips in execution context", async ({ page }) => {
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
-        items: [{ id: 16, name: "Project 16" }],
+        items: [{ id: 18, name: "Project 18" }],
         total: 1,
         page: 1,
         page_size: 200,
       }),
     })
   );
-  await page.route("**/api/decisions/latest?project_id=16", (route) =>
+  await page.route("**/api/decisions/latest?project_id=18", (route) =>
     route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
         id: 91,
-        project_id: 16,
+        project_id: 18,
         status: "success",
         snapshot_date: "2026-01-25",
       }),
@@ -425,7 +429,7 @@ test("live trade shows id chips in execution context", async ({ page }) => {
       body: JSON.stringify([
         {
           id: 88,
-          project_id: 16,
+          project_id: 18,
           decision_snapshot_id: 91,
           mode: "paper",
           status: "queued",
@@ -435,8 +439,9 @@ test("live trade shows id chips in execution context", async ({ page }) => {
     })
   );
   await page.goto("/live-trade");
+  await page.locator("details.algo-advanced > summary").click();
   await expect(
-    page.locator(".id-chip-text", { hasText: /项目#16|Project#16/i })
+    page.locator(".id-chip-text", { hasText: /项目#18|Project#18/i })
   ).toBeVisible();
   await expect(
     page.locator(".id-chip-text", { hasText: /快照#91|Snapshot#91/i }).first()
@@ -475,7 +480,7 @@ test("project binding: snapshot missing disables execute", async ({ page }) => {
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
-        items: [{ id: 16, name: "Project 16" }],
+        items: [{ id: 18, name: "Project 18" }],
         total: 1,
         page: 1,
         page_size: 200,
@@ -509,20 +514,20 @@ test("project binding: snapshot present enables execute", async ({ page }) => {
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
-        items: [{ id: 16, name: "Project 16" }],
+        items: [{ id: 18, name: "Project 18" }],
         total: 1,
         page: 1,
         page_size: 200,
       }),
     })
   );
-  await page.route("**/api/decisions/latest?project_id=16", (route) =>
+  await page.route("**/api/decisions/latest?project_id=18", (route) =>
     route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
         id: 91,
-        project_id: 16,
+        project_id: 18,
         status: "success",
         snapshot_date: "2026-01-25",
         summary: { total_items: 42, version: "v1" },

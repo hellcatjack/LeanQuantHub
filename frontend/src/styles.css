@@ -3165,6 +3165,10 @@ a {
   .sidebar {
     flex-direction: row;
     align-items: center;
+    flex-wrap: wrap;
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
     overflow-x: auto;
     overflow-y: visible;
     position: static;
@@ -3174,5 +3178,6 @@ a {
   .nav-group {
     flex-direction: row;
     gap: 8px;
+    flex-wrap: wrap;
   }
 }

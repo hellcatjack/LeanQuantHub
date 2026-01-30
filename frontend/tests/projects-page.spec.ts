@@ -15,8 +15,8 @@ test("projects page shows project id chip", async ({ page }) => {
       return json({
         items: [
           {
-            id: 16,
-            name: "Project 16",
+            id: 18,
+            name: "Project 18",
             description: "",
             is_archived: false,
             created_at: "2026-01-25T00:00:00Z",
@@ -27,10 +27,10 @@ test("projects page shows project id chip", async ({ page }) => {
         page_size: 200,
       });
     }
-    if (path === "/api/projects/16/versions/page") {
+    if (path === "/api/projects/18/versions/page") {
       return json({ items: [], total: 0, page: 1, page_size: 20 });
     }
-    if (path === "/api/projects/16/versions") {
+    if (path === "/api/projects/18/versions") {
       return json([]);
     }
     if (path === "/api/system-themes") {
@@ -48,12 +48,12 @@ test("projects page shows project id chip", async ({ page }) => {
     if (path === "/api/ml/pipelines") {
       return json([]);
     }
-    if (path === "/api/projects/16/backtests") {
+    if (path === "/api/projects/18/backtests") {
       return json([]);
     }
-    if (path === "/api/projects/16/data-status") {
+    if (path === "/api/projects/18/data-status") {
       return json({
-        project_id: 16,
+        project_id: 18,
         data_root: "/data/share/stock/data",
         membership: { records: 0, symbols: 0 },
         universe: { records: 0, sp500_count: 0, theme_count: 0 },
@@ -63,17 +63,17 @@ test("projects page shows project id chip", async ({ page }) => {
         backtest: { updated_at: null, summary: null },
       });
     }
-    if (path === "/api/projects/16/config") {
+    if (path === "/api/projects/18/config") {
       return json({
-        project_id: 16,
+        project_id: 18,
         config: {},
         source: "default",
         updated_at: "2026-01-25T00:00:00Z",
       });
     }
-    if (path === "/api/projects/16/themes/summary") {
+    if (path === "/api/projects/18/themes/summary") {
       return json({
-        project_id: 16,
+        project_id: 18,
         themes: [],
         updated_at: "2026-01-25T00:00:00Z",
       });
@@ -91,9 +91,9 @@ test("projects page shows project id chip", async ({ page }) => {
 
   await page.goto("/projects");
   await expect(
-    page.locator(".project-item-title", { hasText: "Project 16" })
+    page.locator(".project-item-title", { hasText: "Project 18" })
   ).toBeVisible();
   const chip = page.locator(".project-item-meta .id-chip-text");
   await expect(chip).toBeVisible();
-  await expect(chip).toContainText(/#16/i);
+  await expect(chip).toContainText(/#18/i);
 });
