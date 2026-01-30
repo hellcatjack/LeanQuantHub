@@ -187,4 +187,11 @@ test("live trade monitor shows receipts tab", async ({ page }) => {
   await expect(table.locator("tbody tr")).toHaveCount(2);
   await expect(table).toContainText("AAPL");
   await expect(table).toContainText("manual-1");
+  const monitorCard = page
+    .locator(".card")
+    .filter({ has: page.locator(".card-title", { hasText: /实盘监控|Monitor/i }) })
+    .first();
+  await expect(
+    monitorCard.locator(".meta-row span", { hasText: /最近更新|Last updated/i })
+  ).toBeVisible();
 });

@@ -2459,7 +2459,7 @@ const messages: Record<Locale, MessageTree> = {
       executeError: "执行请求失败",
       executeRunRequired: "请输入有效的交易批次 ID",
       monitorTitle: "实盘监控",
-      monitorMeta: "最近订单与执行明细",
+      monitorMeta: "订单提交/成交回执在此展示",
       orderEmpty: "暂无订单记录",
       orderTable: {
         id: "订单 ID",
@@ -4957,7 +4957,7 @@ const messages: Record<Locale, MessageTree> = {
       executeError: "Execution request failed",
       executeRunRequired: "Please enter a valid trade run ID",
       monitorTitle: "Live Monitor",
-      monitorMeta: "Recent orders and execution details",
+      monitorMeta: "Order submits, fills, and receipts are shown here",
       orderEmpty: "No orders",
       orderTable: {
         id: "Order ID",

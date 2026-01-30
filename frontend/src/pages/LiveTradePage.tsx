@@ -355,10 +355,12 @@ export default function LiveTradePage() {
   const [ordersPage, setOrdersPage] = useState(1);
   const [ordersPageSize, setOrdersPageSize] = useState(50);
   const [ordersTotal, setOrdersTotal] = useState(0);
+  const [tradeActivityUpdatedAt, setTradeActivityUpdatedAt] = useState<string | null>(null);
   const [tradeReceipts, setTradeReceipts] = useState<TradeReceipt[]>([]);
   const [receiptsPage, setReceiptsPage] = useState(1);
   const [receiptsPageSize, setReceiptsPageSize] = useState(50);
   const [receiptsTotal, setReceiptsTotal] = useState(0);
+  const [receiptsUpdatedAt, setReceiptsUpdatedAt] = useState<string | null>(null);
   const [receiptsWarnings, setReceiptsWarnings] = useState<string[]>([]);
   const [receiptsLoading, setReceiptsLoading] = useState(false);
   const [receiptsError, setReceiptsError] = useState("");
@@ -1008,6 +1010,8 @@ export default function LiveTradePage() {
       setTradeOrders([]);
       setOrdersTotal(0);
       setGuardState(null);
+    } finally {
+      setTradeActivityUpdatedAt(new Date().toISOString());
     }
   };
 
@@ -1034,6 +1038,7 @@ export default function LiveTradePage() {
       setReceiptsTotal(0);
       setReceiptsWarnings([]);
     } finally {
+      setReceiptsUpdatedAt(new Date().toISOString());
       setReceiptsLoading(false);
     }
   };
@@ -1449,6 +1454,13 @@ export default function LiveTradePage() {
     };
     return receiptsWarnings.map((code) => mapping[code] || code);
   }, [receiptsWarnings, t]);
+
+  const monitorUpdatedAt = useMemo(() => {
+    if (detailTab === "receipts") {
+      return receiptsUpdatedAt;
+    }
+    return tradeActivityUpdatedAt;
+  }, [detailTab, receiptsUpdatedAt, tradeActivityUpdatedAt]);
 
   const buildPositionKey = (row: IBAccountPosition) =>
     `${row.symbol}::${row.account || ""}::${row.currency || ""}`;
@@ -2044,6 +2056,12 @@ export default function LiveTradePage() {
         <div className="card-title">{t("trade.monitorTitle")}</div>
         <div className="card-meta">{t("trade.monitorMeta")}</div>
         {tradeError && <div className="form-hint">{tradeError}</div>}
+        <div className="meta-list" style={{ marginTop: "12px" }}>
+          <div className="meta-row">
+            <span>{t("trade.sectionUpdatedAt")}</span>
+            <strong>{formatDateTime(monitorUpdatedAt)}</strong>
+          </div>
+        </div>
         <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
           <button
             className={detailTab === "orders" ? "button-primary" : "button-secondary"}
