@@ -9,6 +9,7 @@ from app.core.config import settings
 from app.services.job_lock import JobLock
 from app.services.lean_bridge_paths import resolve_bridge_root
 from app.services.lean_bridge_reader import parse_bridge_timestamp, read_bridge_status
+from app.services.lean_bridge_leader import ensure_lean_bridge_leader
 
 logger = logging.getLogger(__name__)
 
@@ -55,17 +56,4 @@ def ensure_lean_bridge_live(session, *, mode: str, force: bool = False) -> dict[
     if not force and not _is_stale(status, _DEFAULT_STALE_SECONDS):
         return status
 
-    script = _resolve_runner_script(mode)
-    if script is None:
-        logger.warning("Lean bridge refresh script missing for mode=%s", mode)
-        return status
-
-    lock = JobLock(_REFRESH_LOCK_KEY, data_root=root)
-    if not lock.acquire():
-        return status
-    try:
-        _run_bridge_once(script, _DEFAULT_REFRESH_SECONDS)
-    finally:
-        lock.release()
-
-    return read_bridge_status(root)
+    return ensure_lean_bridge_leader(session, mode=mode, force=force)

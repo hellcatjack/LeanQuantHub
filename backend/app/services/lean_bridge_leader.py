@@ -1,0 +1,311 @@
+from __future__ import annotations
+
+import json
+import os
+import signal
+import subprocess
+import threading
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Iterable
+
+from app.core.config import settings
+from app.models import LeanExecutorPool
+from app.services.job_lock import JobLock
+from app.services.lean_bridge_paths import resolve_bridge_root
+from app.services.lean_bridge_reader import parse_bridge_timestamp, read_bridge_status
+from app.services.project_symbols import collect_active_project_symbols
+_DEFAULT_LAUNCHER_DIR = Path("/app/stocklean/Lean_git/Launcher/bin/Release")
+
+
+def _resolve_launcher() -> tuple[str, str | None]:
+    dll_setting = str(settings.lean_launcher_dll or "").strip()
+    launcher_path = str(settings.lean_launcher_path or "").strip()
+
+    launcher_dir: Path | None = None
+    if launcher_path:
+        launcher_candidate = Path(launcher_path)
+        if launcher_candidate.exists() and launcher_candidate.is_file():
+            launcher_dir = launcher_candidate.parent
+        else:
+            launcher_dir = launcher_candidate
+
+    if dll_setting:
+        dll_path = Path(dll_setting)
+        if not dll_path.is_absolute() and launcher_dir is not None:
+            dll_path = launcher_dir / dll_path
+        cwd = str(dll_path.parent) if dll_path.is_absolute() else (str(launcher_dir) if launcher_dir is not None else None)
+        return str(dll_path), cwd
+
+    if launcher_dir is not None:
+        dll_path = launcher_dir / "QuantConnect.Lean.Launcher.dll"
+        if not dll_path.exists():
+            candidate = launcher_dir / "bin" / "Release" / "QuantConnect.Lean.Launcher.dll"
+            if candidate.exists():
+                return str(candidate), str(candidate.parent)
+        return str(dll_path), str(launcher_dir)
+
+    dll_path = _DEFAULT_LAUNCHER_DIR / "QuantConnect.Lean.Launcher.dll"
+    return str(dll_path), str(_DEFAULT_LAUNCHER_DIR)
+
+
+def _build_launch_env() -> dict[str, str]:
+    env = os.environ.copy()
+    if settings.dotnet_root:
+        env["DOTNET_ROOT"] = settings.dotnet_root
+        env["PATH"] = f"{settings.dotnet_root}:{env.get('PATH', '')}"
+    if settings.python_dll:
+        env["PYTHONNET_PYDLL"] = settings.python_dll
+    if settings.lean_python_venv:
+        env["PYTHONHOME"] = settings.lean_python_venv
+    return env
+
+_LEADER_LOCK_KEY = "lean_bridge_leader"
+_LEADER_THREAD: threading.Thread | None = None
+_LEADER_STOP = threading.Event()
+_LEADER_CHECK_SECONDS = 5
+
+
+def _bridge_root() -> Path:
+    return resolve_bridge_root()
+
+
+def _state_path() -> Path:
+    return _bridge_root() / "bridge_process.json"
+
+
+def _read_state() -> dict:
+    path = _state_path()
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _write_state(*, pid: int, config_path: Path, mode: str, client_id: int) -> None:
+    payload = {
+        "pid": int(pid),
+        "config_path": str(config_path),
+        "mode": mode,
+        "client_id": client_id,
+        "started_at": datetime.utcnow().isoformat() + "Z",
+    }
+    path = _state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _pid_alive(pid: int | None) -> bool:
+    if not pid or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _terminate_pid(pid: int | None) -> None:
+    if not pid or pid <= 0:
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+
+
+def _heartbeat_stale(payload: dict, *, timeout_seconds: int) -> bool:
+    if payload.get("status") == "missing":
+        return True
+    heartbeat = parse_bridge_timestamp(payload, ["last_heartbeat", "updated_at"])
+    if heartbeat is None:
+        return True
+    now = datetime.now(timezone.utc)
+    return now - heartbeat > timedelta(seconds=timeout_seconds)
+
+
+def _write_watchlist(session) -> Path:
+    symbols, _benchmarks = collect_active_project_symbols(session)
+    if not symbols:
+        symbols = ["SPY"]
+    path = _bridge_root() / "watchlist.json"
+    normalized = sorted({str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()})
+    existing: dict | None = None
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            existing = None
+    if isinstance(existing, dict):
+        existing_symbols = existing.get("symbols") if isinstance(existing.get("symbols"), list) else []
+        existing_norm = sorted({str(symbol).strip().upper() for symbol in existing_symbols if str(symbol).strip()})
+        if existing_norm == normalized:
+            return path
+    payload = {
+        "symbols": normalized,
+        "updated_at": datetime.utcnow().isoformat() + "Z",
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def _load_template_config(mode: str) -> dict:
+    template = Path("/app/stocklean/Lean_git/Launcher/config-lean-bridge-live-paper.json")
+    if template.exists():
+        try:
+            payload = json.loads(template.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+        if isinstance(payload, dict):
+            return payload
+    return {
+        "algorithm-language": "CSharp",
+        "algorithm-type-name": "LeanBridgeSmokeAlgorithm",
+        "environment": "live-interactive",
+        "brokerage": "InteractiveBrokersBrokerage",
+    }
+
+
+def _resolve_leader_client_id(settings_row, *, mode: str) -> int:
+    if settings_row and getattr(settings_row, "client_id", None):
+        try:
+            return int(settings_row.client_id)
+        except (TypeError, ValueError):
+            pass
+    base = settings.ib_client_id_pool_base
+    if str(mode).lower() == "live":
+        base += settings.ib_client_id_live_offset
+    return base
+
+
+def _build_leader_config(session, *, mode: str, watchlist_path: Path) -> tuple[dict, int]:
+    from app.services.ib_settings import get_or_create_ib_settings
+
+    settings_row = get_or_create_ib_settings(session)
+    payload = dict(_load_template_config(mode))
+    client_id = _resolve_leader_client_id(settings_row, mode=mode)
+    payload["algorithm-type-name"] = "LeanBridgeSmokeAlgorithm"
+    payload["brokerage"] = "InteractiveBrokersBrokerage"
+    payload.setdefault("data-folder", "/data/share/stock/data/lean")
+    payload["ib-host"] = settings_row.host
+    payload["ib-port"] = int(settings_row.port)
+    payload["ib-client-id"] = client_id
+    payload["ib-trading-mode"] = mode
+    payload["lean-bridge-output-dir"] = str(_bridge_root())
+    payload["lean-bridge-watchlist-path"] = str(watchlist_path)
+    payload.setdefault("lean-bridge-heartbeat-seconds", "2")
+    payload.setdefault("lean-bridge-watchlist-refresh-seconds", "5")
+    payload.setdefault("lean-bridge-snapshot-seconds", "2")
+    return payload, client_id
+
+
+def _launch_leader(config_path: Path) -> int:
+    dll_path, cwd = _resolve_launcher()
+    cmd = [settings.dotnet_path or "dotnet", dll_path, "--config", str(config_path)]
+    proc = subprocess.Popen(cmd, cwd=cwd, env=_build_launch_env())
+    return int(proc.pid)
+
+
+def _upsert_leader_pool(
+    session,
+    *,
+    mode: str,
+    client_id: int,
+    pid: int | None,
+    status_payload: dict,
+) -> None:
+    if session is None:
+        return
+    row = (
+        session.query(LeanExecutorPool)
+        .filter(LeanExecutorPool.mode == mode, LeanExecutorPool.role == "leader")
+        .first()
+    )
+    if row is None:
+        row = LeanExecutorPool(mode=mode, role="leader", client_id=client_id)
+        session.add(row)
+    row.client_id = client_id
+    row.pid = pid
+    row.status = str(status_payload.get("status") or "unknown")
+    row.output_dir = str(_bridge_root())
+    row.last_error = status_payload.get("last_error")
+    row.last_heartbeat = parse_bridge_timestamp(status_payload, ["last_heartbeat", "updated_at"])
+    session.commit()
+
+
+def ensure_lean_bridge_leader(session, *, mode: str, force: bool = False) -> dict:
+    mode = str(mode or "paper").strip().lower() or "paper"
+    root = _bridge_root()
+    status = read_bridge_status(root)
+    timeout = int(settings.lean_bridge_heartbeat_timeout_seconds)
+    stale = force or _heartbeat_stale(status, timeout_seconds=timeout)
+
+    state = _read_state()
+    pid = int(state.get("pid") or 0)
+    if not stale and _pid_alive(pid):
+        _upsert_leader_pool(session, mode=mode, client_id=int(state.get("client_id") or 0), pid=pid, status_payload=status)
+        return status
+
+    lock = JobLock(_LEADER_LOCK_KEY, data_root=root)
+    if not lock.acquire():
+        return status
+    try:
+        status = read_bridge_status(root)
+        stale = force or _heartbeat_stale(status, timeout_seconds=timeout)
+        state = _read_state()
+        pid = int(state.get("pid") or 0)
+        if not stale and _pid_alive(pid):
+            _upsert_leader_pool(
+                session,
+                mode=mode,
+                client_id=int(state.get("client_id") or 0),
+                pid=pid,
+                status_payload=status,
+            )
+            return status
+
+        if _pid_alive(pid):
+            _terminate_pid(pid)
+
+        watchlist_path = _write_watchlist(session)
+        payload, client_id = _build_leader_config(session, mode=mode, watchlist_path=watchlist_path)
+        config_dir = Path(settings.artifact_root) / "lean_bridge"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        config_path = config_dir / f"lean_bridge_{mode}.json"
+        config_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        pid = _launch_leader(config_path)
+        _write_state(pid=pid, config_path=config_path, mode=mode, client_id=client_id)
+        status = read_bridge_status(root)
+        _upsert_leader_pool(session, mode=mode, client_id=client_id, pid=pid, status_payload=status)
+        return status
+    finally:
+        lock.release()
+
+
+def start_leader_watchdog(session_factory) -> None:
+    global _LEADER_THREAD
+    if _LEADER_THREAD and _LEADER_THREAD.is_alive():
+        return
+    _LEADER_STOP.clear()
+
+    def _runner() -> None:
+        from app.services.ib_settings import get_or_create_ib_settings
+
+        while not _LEADER_STOP.wait(_LEADER_CHECK_SECONDS):
+            try:
+                with session_factory() as session:
+                    settings_row = get_or_create_ib_settings(session)
+                    mode = str(settings_row.mode or "paper").strip().lower() or "paper"
+                    ensure_lean_bridge_leader(session, mode=mode)
+            except Exception:
+                continue
+
+    _LEADER_THREAD = threading.Thread(target=_runner, daemon=True)
+    _LEADER_THREAD.start()

@@ -28,6 +28,7 @@ from app.routes import (
     trade,
     universe,
 )
+from app.services.lean_bridge_leader import start_leader_watchdog
 
 app = FastAPI(title="StockLean Platform API")
 logger = logging.getLogger(__name__)
@@ -59,6 +60,7 @@ def on_startup() -> None:
     except Exception:
         logger.exception("Failed to ensure system themes on startup")
     datasets.resume_bulk_sync_jobs()
+    start_leader_watchdog(get_session)
 
 
 app.include_router(projects.router)

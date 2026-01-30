@@ -50,6 +50,7 @@ from app.services.ib_account import get_account_summary, get_account_positions
 from app.services.project_symbols import collect_active_project_symbols
 from app.services.lean_bridge_paths import resolve_bridge_root
 from app.services.lean_bridge_reader import read_bridge_status, read_quotes
+from app.services.lean_bridge_leader import ensure_lean_bridge_leader
 from app.models import IBContractCache, IBHistoryJob, LeanExecutorPool
 
 router = APIRouter(prefix="/api/brokerage", tags=["brokerage"])
@@ -151,7 +152,7 @@ def update_ib_settings(payload: IBSettingsUpdate):
 @router.get("/state", response_model=IBConnectionStateOut)
 def get_ib_state():
     with get_session() as session:
-        state = update_ib_state(session, heartbeat=False)
+        state = probe_ib_connection(session)
         return IBConnectionStateOut.model_validate(state, from_attributes=True)
 
 
@@ -470,6 +471,7 @@ def cancel_ib_history_job_route(job_id: int):
 def get_lean_pool_status(mode: str = Query("paper")):
     mode = str(mode or "paper").strip().lower() or "paper"
     with get_session() as session:
+        ensure_lean_bridge_leader(session, mode=mode, force=False)
         items = _fetch_lean_pool_status(session, mode=mode)
     return {"mode": mode, "count": len(items), "items": items}
 
@@ -477,16 +479,22 @@ def get_lean_pool_status(mode: str = Query("paper")):
 @router.post("/lean/pool/restart")
 def restart_lean_pool(mode: str = Query("paper")):
     mode = str(mode or "paper").strip().lower() or "paper"
+    with get_session() as session:
+        ensure_lean_bridge_leader(session, mode=mode, force=True)
     return _pool_action_response(action="restart", mode=mode)
 
 
 @router.post("/lean/pool/leader/switch")
 def switch_lean_pool_leader(mode: str = Query("paper")):
     mode = str(mode or "paper").strip().lower() or "paper"
+    with get_session() as session:
+        ensure_lean_bridge_leader(session, mode=mode, force=True)
     return _pool_action_response(action="leader_switch", mode=mode)
 
 
 @router.post("/lean/pool/reset")
 def reset_lean_pool(mode: str = Query("paper")):
     mode = str(mode or "paper").strip().lower() or "paper"
+    with get_session() as session:
+        ensure_lean_bridge_leader(session, mode=mode, force=True)
     return _pool_action_response(action="reset", mode=mode)
