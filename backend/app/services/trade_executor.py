@@ -5,6 +5,8 @@ from datetime import datetime
 from typing import Any
 import csv
 import json
+import os
+import re
 
 from app.core.config import settings
 from app.db import SessionLocal
@@ -59,6 +61,15 @@ def _resolve_bridge_root() -> Path:
     return resolve_bridge_root()
 
 
+def _resolve_data_root() -> Path:
+    if settings.data_root:
+        return Path(settings.data_root)
+    env_root = os.getenv("DATA_ROOT")
+    if env_root:
+        return Path(env_root)
+    return Path("/data/share/stock/data")
+
+
 def _bridge_connection_ok() -> bool:
     status = read_bridge_status(_resolve_bridge_root())
     state = str(status.get("status") or "").lower()
@@ -70,6 +81,54 @@ def _bridge_connection_ok() -> bool:
 def _quote_price(item: dict[str, Any]) -> float | None:
     payload = item.get("data") if isinstance(item.get("data"), dict) else item
     return _pick_price(payload if isinstance(payload, dict) else None)
+
+
+def _normalize_symbol_for_filename(symbol: str) -> str:
+    cleaned = re.sub(r"[^A-Z0-9]+", "_", symbol.upper())
+    return cleaned.strip("_")
+
+
+def _find_latest_price_file(root: Path, symbol: str) -> Path | None:
+    if not root.exists():
+        return None
+    normalized = _normalize_symbol_for_filename(symbol)
+    if not normalized:
+        return None
+    matches = sorted(root.glob(f"*_{normalized}_Daily.csv"))
+    if not matches:
+        return None
+    return matches[-1]
+
+
+def _read_latest_close(path: Path) -> float | None:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            last_row: dict[str, Any] | None = None
+            for row in reader:
+                last_row = row
+        if not last_row:
+            return None
+        close_value = last_row.get("close")
+        if close_value is None or close_value == "":
+            return None
+        return float(close_value)
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _load_fallback_prices(symbols: list[str]) -> dict[str, float]:
+    root = _resolve_data_root() / "curated_adjusted"
+    prices: dict[str, float] = {}
+    for symbol in symbols:
+        path = _find_latest_price_file(root, symbol)
+        if not path:
+            continue
+        price = _read_latest_close(path)
+        if price is None or price <= 0:
+            continue
+        prices[symbol] = price
+    return prices
 
 
 def _build_price_map(symbols: list[str]) -> dict[str, float]:
@@ -84,8 +143,11 @@ def _build_price_map(symbols: list[str]) -> dict[str, float]:
         if not symbol or symbol not in symbol_set:
             continue
         price = _quote_price(item)
-        if price is not None:
+        if price is not None and price > 0:
             prices[symbol] = price
+    missing = sorted(symbol_set - set(prices.keys()))
+    if missing:
+        prices.update(_load_fallback_prices(missing))
     return prices
 
 

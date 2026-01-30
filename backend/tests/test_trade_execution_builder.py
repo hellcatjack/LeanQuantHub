@@ -34,6 +34,24 @@ def _write_items(path: Path):
         writer.writerow({"symbol": "BBB", "weight": "0.1", "score": "0.9", "rank": "2"})
 
 
+def _write_price_file(path: Path, symbol: str, close_price: float) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["date", "open", "high", "low", "close", "volume", "symbol"])
+        writer.writeheader()
+        writer.writerow(
+            {
+                "date": "2026-01-29",
+                "open": close_price,
+                "high": close_price,
+                "low": close_price,
+                "close": close_price,
+                "volume": 100,
+                "symbol": symbol,
+            }
+        )
+
+
 def test_execute_builds_orders_from_snapshot(tmp_path, monkeypatch):
     Session = _make_session_factory()
     monkeypatch.setattr(trade_executor, "SessionLocal", Session)
@@ -141,6 +159,65 @@ def test_execute_blocks_when_execution_source_not_lean(tmp_path, monkeypatch):
         result = trade_executor.execute_trade_run(run.id, dry_run=True)
         assert result.status == "blocked"
         assert result.message == "execution_data_source_mismatch"
+    finally:
+        session.close()
+
+
+def test_execute_builds_orders_with_fallback_prices(tmp_path, monkeypatch):
+    Session = _make_session_factory()
+    monkeypatch.setattr(trade_executor, "SessionLocal", Session)
+    monkeypatch.setattr(trade_executor, "_bridge_connection_ok", lambda *_a, **_k: True, raising=False)
+    monkeypatch.setattr(
+        trade_executor,
+        "read_quotes",
+        lambda _root: {
+            "items": [
+                {"symbol": "AAA", "last": 0.0},
+                {"symbol": "BBB", "last": 0.0},
+            ],
+            "stale": False,
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(trade_executor.settings, "data_root", str(tmp_path))
+
+    adjusted_dir = tmp_path / "curated_adjusted"
+    _write_price_file(adjusted_dir / "1_Alpha_AAA_Daily.csv", "AAA", 50)
+    _write_price_file(adjusted_dir / "2_Alpha_BBB_Daily.csv", "BBB", 25)
+
+    session = Session()
+    try:
+        project = Project(name="p", description="")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        items_path = tmp_path / "decision_items.csv"
+        _write_items(items_path)
+        snapshot = DecisionSnapshot(
+            project_id=project.id,
+            status="success",
+            items_path=str(items_path),
+        )
+        session.add(snapshot)
+        session.commit()
+        session.refresh(snapshot)
+
+        run = TradeRun(
+            project_id=project.id,
+            decision_snapshot_id=snapshot.id,
+            status="queued",
+            mode="paper",
+            params={"portfolio_value": 10000},
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        result = trade_executor.execute_trade_run(run.id, dry_run=True)
+        assert result.status in {"done", "running", "blocked", "failed", "queued"}
+        orders = session.query(TradeOrder).filter_by(run_id=run.id).all()
+        assert len(orders) == 2
     finally:
         session.close()
 
