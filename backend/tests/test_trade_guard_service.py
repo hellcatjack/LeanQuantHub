@@ -35,7 +35,7 @@ def _seed_position(session):
     )
     session.add(order)
     session.flush()
-    fill = TradeFill(order_id=order.id, fill_quantity=10, fill_price=100)
+    fill = TradeFill(order_id=order.id, exec_id="E1", fill_quantity=10, fill_price=100)
     session.add(fill)
     session.commit()
     return run
