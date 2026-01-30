@@ -62,7 +62,15 @@ def _resolve_environment(brokerage: str, mode: str) -> str:
     return "live"
 
 
-def build_execution_config(*, intent_path: str, brokerage: str, project_id: int, mode: str) -> dict:
+def build_execution_config(
+    *,
+    intent_path: str,
+    brokerage: str,
+    project_id: int,
+    mode: str,
+    client_id: int | None = None,
+    lean_bridge_output_dir: str | None = None,
+) -> dict:
     payload = dict(_load_template_config())
     payload["environment"] = _resolve_environment(brokerage, mode)
     payload["algorithm-type-name"] = "LeanBridgeExecutionAlgorithm"
@@ -72,8 +80,8 @@ def build_execution_config(*, intent_path: str, brokerage: str, project_id: int,
     payload["brokerage"] = brokerage
     payload["execution-intent-path"] = intent_path
     payload["result-handler"] = "QuantConnect.Lean.Engine.Results.LeanBridgeResultHandler"
-    payload["lean-bridge-output-dir"] = _bridge_output_dir()
-    payload["ib-client-id"] = derive_client_id(project_id=project_id, mode=mode)
+    payload["lean-bridge-output-dir"] = lean_bridge_output_dir or _bridge_output_dir()
+    payload["ib-client-id"] = client_id or derive_client_id(project_id=project_id, mode=mode)
     return payload
 
 
@@ -112,6 +120,13 @@ def launch_execution(*, config_path: str) -> None:
     dll_path, cwd = _resolve_launcher()
     cmd = [settings.dotnet_path or "dotnet", dll_path, "--config", config_path]
     subprocess_run(cmd, check=False, cwd=cwd)
+
+
+def launch_execution_async(*, config_path: str) -> int:
+    dll_path, cwd = _resolve_launcher()
+    cmd = [settings.dotnet_path or "dotnet", dll_path, "--config", config_path]
+    proc = subprocess.Popen(cmd, cwd=cwd)
+    return proc.pid
 
 
 def ingest_execution_events(path: str) -> None:
