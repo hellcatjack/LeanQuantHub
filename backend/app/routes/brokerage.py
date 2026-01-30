@@ -222,12 +222,18 @@ def get_ib_stream_status():
             if isinstance(item, dict) and str(item.get("symbol") or "").strip()
         }
     )
-    status = str(bridge_status.get("status") or "unknown")
+    raw_status = str(bridge_status.get("status") or "unknown")
     last_heartbeat = bridge_status.get("last_heartbeat")
     last_error = bridge_status.get("last_error")
     stale = bool(bridge_status.get("stale", False))
+    if stale:
+        status = "degraded"
+    elif raw_status.lower() in {"ok", "connected"}:
+        status = "connected"
+    else:
+        status = raw_status
     return IBStreamStatusOut(
-        status=status if not stale else "degraded",
+        status=status,
         last_heartbeat=last_heartbeat,
         subscribed_symbols=subscribed,
         ib_error_count=1 if stale else 0,
