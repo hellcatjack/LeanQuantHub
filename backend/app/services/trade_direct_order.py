@@ -17,6 +17,7 @@ from app.services.ib_client_id_pool import (
     select_worker_client_id,
 )
 from app.services.lean_execution import build_execution_config, launch_execution_async
+from app.services.lean_bridge_watchdog import refresh_bridge
 from app.schemas import TradeDirectOrderOut
 
 
@@ -163,10 +164,15 @@ def submit_direct_order(session, payload: dict[str, Any]) -> TradeDirectOrderOut
     )
     session.commit()
 
+    bridge_status = refresh_bridge(session, mode=mode, reason="order_submit", force=False)
+    refresh_result = bridge_status.get("last_refresh_result")
+
     return TradeDirectOrderOut(
         order_id=order.id,
         status=order.status or "NEW",
         execution_status="submitted_lean",
         intent_path=str(intent_path),
         config_path=str(config_path),
+        bridge_status=bridge_status,
+        refresh_result=refresh_result if isinstance(refresh_result, str) else None,
     )

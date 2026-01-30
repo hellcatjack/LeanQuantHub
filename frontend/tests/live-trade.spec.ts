@@ -1,5 +1,33 @@
 import { test, expect } from "@playwright/test";
 
+test.beforeEach(async ({ page }) => {
+  const bridgePayload = {
+    status: "ok",
+    stale: false,
+    last_heartbeat: "2026-01-24T00:00:00Z",
+    updated_at: "2026-01-24T00:00:00Z",
+    last_refresh_at: "2026-01-24T00:00:00Z",
+    last_refresh_result: "success",
+    last_refresh_reason: "auto",
+    last_refresh_message: null,
+    last_error: null,
+  };
+  await page.route("**/api/brokerage/bridge/status", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(bridgePayload),
+    })
+  );
+  await page.route("**/api/brokerage/bridge/refresh**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ bridge_status: bridgePayload }),
+    })
+  );
+});
+
 test("live trade page shows connection state", async ({ page }) => {
   await page.goto("/live-trade");
   await expect(
@@ -115,7 +143,7 @@ test("live trade page shows bridge status card", async ({ page }) => {
   );
   await page.goto("/live-trade");
   await expect(
-    page.locator(".overview-label", { hasText: /Lean Bridge/i })
+    page.locator(".card-title", { hasText: /Lean Bridge 状态|Lean Bridge Status/i })
   ).toBeVisible();
 });
 
@@ -605,4 +633,104 @@ test("project binding: snapshot present enables execute", async ({ page }) => {
     page.locator(".meta-row", { hasText: /快照日期|Snapshot date/i })
   ).toBeVisible();
   await expect(page.locator("button", { hasText: /执行交易|Execute/i })).not.toBeDisabled();
+});
+
+test("live trade order submission uses direct order endpoint", async ({ page }) => {
+  await page.route("**/api/projects/page**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: [{ id: 1, name: "Demo", description: "" }],
+        total: 1,
+        page: 1,
+        page_size: 200,
+      }),
+    })
+  );
+  await page.route("**/api/brokerage/settings", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        id: 1,
+        host: "127.0.0.1",
+        port: 7497,
+        client_id: 1,
+        account_id: "DU123456",
+        mode: "paper",
+        market_data_type: "delayed",
+        api_mode: "ib",
+        use_regulatory_snapshot: false,
+        created_at: "2026-01-24T00:00:00Z",
+        updated_at: "2026-01-24T00:00:00Z",
+      }),
+    })
+  );
+  await page.route("**/api/brokerage/account/positions**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: [
+          {
+            symbol: "AAPL",
+            position: 1,
+            avg_cost: 150,
+            market_price: 151.2,
+            market_value: 151.2,
+            unrealized_pnl: 1.2,
+            realized_pnl: 0,
+            account: "DU123456",
+            currency: "USD",
+          },
+        ],
+        refreshed_at: "2026-01-24T00:00:00Z",
+        stale: false,
+      }),
+    })
+  );
+  await page.route("**/api/trade/runs**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([]),
+    })
+  );
+  await page.route("**/api/trade/orders**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([]),
+      headers: { "x-total-count": "0" },
+    })
+  );
+  let submittedPayload: Record<string, any> | null = null;
+  await page.route("**/api/trade/orders/direct", async (route) => {
+    submittedPayload = route.request().postDataJSON() as Record<string, any>;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        order_id: 1,
+        status: "NEW",
+        execution_status: "submitted_lean",
+        bridge_status: {
+          status: "ok",
+          stale: true,
+          last_refresh_result: "failed",
+          last_refresh_reason: "rate_limited",
+        },
+        refresh_result: "failed",
+      }),
+    });
+  });
+  page.on("dialog", (dialog) => dialog.accept());
+  await page.goto("/live-trade");
+  const buyButton = page.getByRole("button", { name: /买入|Buy/i }).first();
+  await expect(buyButton).toBeVisible();
+  await buyButton.click();
+  await expect(page.locator(".form-success")).toBeVisible();
+  await expect(page.locator(".form-hint.warn")).toContainText(/Lean Bridge/i);
+  expect(submittedPayload?.symbol).toBe("AAPL");
 });

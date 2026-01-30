@@ -1465,6 +1465,22 @@ class IBStreamSnapshotOut(BaseModel):
     error: str | None = None
 
 
+class IBBridgeStatusOut(BaseModel):
+    status: str | None = None
+    stale: bool = False
+    last_heartbeat: str | None = None
+    updated_at: str | None = None
+    last_error: str | None = None
+    last_refresh_at: str | None = None
+    last_refresh_result: str | None = None
+    last_refresh_reason: str | None = None
+    last_refresh_message: str | None = None
+
+
+class IBBridgeRefreshOut(BaseModel):
+    bridge_status: IBBridgeStatusOut
+
+
 class IBAccountSummaryOut(BaseModel):
     items: dict[str, float | str | None] = Field(default_factory=dict)
     refreshed_at: datetime | None = None
@@ -1741,6 +1757,8 @@ class TradeDirectOrderOut(BaseModel):
     execution_status: str
     intent_path: str | None = None
     config_path: str | None = None
+    bridge_status: IBBridgeStatusOut | None = None
+    refresh_result: str | None = None
 
 
 class TradeOrderStatusUpdate(BaseModel):

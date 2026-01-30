@@ -30,6 +30,8 @@ from app.schemas import (
     IBStreamStartRequest,
     IBStreamStatusOut,
     IBStreamSnapshotOut,
+    IBBridgeStatusOut,
+    IBBridgeRefreshOut,
     IBStatusOverviewOut,
 )
 from app.services.audit_log import record_audit
@@ -51,6 +53,7 @@ from app.services.project_symbols import collect_active_project_symbols
 from app.services.lean_bridge_paths import resolve_bridge_root
 from app.services.lean_bridge_reader import read_bridge_status, read_quotes
 from app.services.lean_bridge_leader import ensure_lean_bridge_leader
+from app.services.lean_bridge_watchdog import build_bridge_status, refresh_bridge
 from app.models import IBContractCache, IBHistoryJob, LeanExecutorPool
 
 router = APIRouter(prefix="/api/brokerage", tags=["brokerage"])
@@ -269,6 +272,23 @@ def start_ib_stream(payload: IBStreamStartRequest):
 @router.post("/stream/stop", response_model=IBStreamStatusOut)
 def stop_ib_stream():
     return get_ib_stream_status()
+
+
+@router.get("/bridge/status", response_model=IBBridgeStatusOut)
+def get_bridge_status():
+    status = build_bridge_status(_resolve_bridge_root())
+    return IBBridgeStatusOut(**status)
+
+
+@router.post("/bridge/refresh", response_model=IBBridgeRefreshOut)
+def refresh_bridge_status(
+    mode: str = "paper",
+    reason: str = "manual",
+    force: bool = False,
+):
+    with get_session() as session:
+        status = refresh_bridge(session, mode=mode, reason=reason, force=force)
+    return IBBridgeRefreshOut(bridge_status=IBBridgeStatusOut(**status))
 
 
 @router.get("/contracts", response_model=list[IBContractCacheOut])
