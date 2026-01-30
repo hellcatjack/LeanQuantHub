@@ -574,6 +574,18 @@ class TradeSettings(Base):
     )
 
 
+class BacktestSettings(Base):
+    __tablename__ = "backtest_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    default_initial_cash: Mapped[float] = mapped_column(Float, default=30000)
+    default_fee_bps: Mapped[float] = mapped_column(Float, default=10.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
 class TradeGuardState(Base):
     __tablename__ = "trade_guard_state"
     __table_args__ = (

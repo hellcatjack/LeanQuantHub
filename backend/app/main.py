@@ -13,6 +13,7 @@ from app.routes import (
     automation,
     audit_logs,
     backtests,
+    backtest_settings,
     datasets,
     decisions,
     factor_scores,
@@ -63,6 +64,7 @@ def on_startup() -> None:
 app.include_router(projects.router)
 app.include_router(algorithms.router)
 app.include_router(backtests.router)
+app.include_router(backtest_settings.router)
 app.include_router(reports.router)
 app.include_router(datasets.router)
 app.include_router(audit_logs.router)

@@ -364,6 +364,14 @@ interface PreTradeSettings {
   updated_at: string;
 }
 
+interface BacktestSettings {
+  id: number;
+  default_initial_cash: number;
+  default_fee_bps: number;
+  created_at: string;
+  updated_at: string;
+}
+
 interface PreTradeTemplate {
   id: number;
   project_id?: number | null;
@@ -656,6 +664,16 @@ export default function DataPage() {
   const [pretradeSettingsSaving, setPretradeSettingsSaving] = useState(false);
   const [pretradeSettingsResult, setPretradeSettingsResult] = useState("");
   const [pretradeSettingsError, setPretradeSettingsError] = useState("");
+  const [backtestSettings, setBacktestSettings] = useState<BacktestSettings | null>(
+    null
+  );
+  const [backtestSettingsForm, setBacktestSettingsForm] = useState({
+    default_initial_cash: "",
+    default_fee_bps: "",
+  });
+  const [backtestSettingsSaving, setBacktestSettingsSaving] = useState(false);
+  const [backtestSettingsResult, setBacktestSettingsResult] = useState("");
+  const [backtestSettingsError, setBacktestSettingsError] = useState("");
   const [pretradeTelegramTesting, setPretradeTelegramTesting] = useState(false);
   const [pretradeRuns, setPretradeRuns] = useState<PreTradeRun[]>([]);
   const [pretradeRunsError, setPretradeRunsError] = useState("");
@@ -873,6 +891,22 @@ export default function DataPage() {
     }
   };
 
+  const loadBacktestSettings = async () => {
+    try {
+      const res = await api.get<BacktestSettings>("/api/backtest/settings");
+      setBacktestSettings(res.data);
+      setBacktestSettingsForm({
+        default_initial_cash: String(res.data.default_initial_cash ?? ""),
+        default_fee_bps: String(res.data.default_fee_bps ?? ""),
+      });
+      setBacktestSettingsError("");
+    } catch (err: any) {
+      const detail =
+        err?.response?.data?.detail || t("data.backtest.settings.settingsLoadError");
+      setBacktestSettingsError(String(detail));
+    }
+  };
+
   const loadPretradeTemplates = async (projectId: string) => {
     if (!projectId) {
       setPretradeTemplates([]);
@@ -978,6 +1012,37 @@ export default function DataPage() {
       setPretradeSettingsError(String(detail));
     } finally {
       setPretradeSettingsSaving(false);
+    }
+  };
+
+  const saveBacktestSettings = async () => {
+    setBacktestSettingsSaving(true);
+    setBacktestSettingsResult("");
+    setBacktestSettingsError("");
+    try {
+      const initialCash = Number(backtestSettingsForm.default_initial_cash);
+      if (!Number.isFinite(initialCash) || initialCash <= 0) {
+        setBacktestSettingsError(t("data.backtest.settings.settingsInvalidCash"));
+        return;
+      }
+      const feeBps = Number(backtestSettingsForm.default_fee_bps);
+      if (!Number.isFinite(feeBps) || feeBps < 0) {
+        setBacktestSettingsError(t("data.backtest.settings.settingsInvalidFee"));
+        return;
+      }
+      const payload = {
+        default_initial_cash: initialCash,
+        default_fee_bps: feeBps,
+      };
+      const res = await api.post<BacktestSettings>("/api/backtest/settings", payload);
+      setBacktestSettings(res.data);
+      setBacktestSettingsResult(t("data.backtest.settings.settingsSaved"));
+    } catch (err: any) {
+      const detail =
+        err?.response?.data?.detail || t("data.backtest.settings.settingsSaveError");
+      setBacktestSettingsError(String(detail));
+    } finally {
+      setBacktestSettingsSaving(false);
     }
   };
 
@@ -1684,6 +1749,7 @@ export default function DataPage() {
     loadTradingCalendar();
     loadBulkAutoConfig();
     loadAlphaGapSummary();
+    loadBacktestSettings();
     loadPretradeSettings();
     loadPretradeProjects();
   }, []);
@@ -4441,6 +4507,68 @@ export default function DataPage() {
                   </tbody>
                 </table>
               )}
+              <div className="section-divider" />
+              <div className="section-title">{t("data.backtest.settings.title")}</div>
+              <div className="form-hint">{t("data.backtest.settings.meta")}</div>
+              <div className="form-grid two-col">
+                <div>
+                  <label className="form-label">
+                    {t("data.backtest.settings.initialCash")}
+                  </label>
+                  <input
+                    type="number"
+                    className="form-input"
+                    value={backtestSettingsForm.default_initial_cash}
+                    onChange={(e) =>
+                      setBacktestSettingsForm((prev) => ({
+                        ...prev,
+                        default_initial_cash: e.target.value,
+                      }))
+                    }
+                    placeholder={t("data.backtest.settings.initialCashHint")}
+                  />
+                </div>
+                <div>
+                  <label className="form-label">{t("data.backtest.settings.feeBps")}</label>
+                  <input
+                    type="number"
+                    className="form-input"
+                    value={backtestSettingsForm.default_fee_bps}
+                    onChange={(e) =>
+                      setBacktestSettingsForm((prev) => ({
+                        ...prev,
+                        default_fee_bps: e.target.value,
+                      }))
+                    }
+                    placeholder={t("data.backtest.settings.feeBpsHint")}
+                  />
+                </div>
+              </div>
+              {backtestSettingsError && (
+                <div className="form-error">{backtestSettingsError}</div>
+              )}
+              {backtestSettingsResult && (
+                <div className="form-success">{backtestSettingsResult}</div>
+              )}
+              <div className="form-actions">
+                <button
+                  type="button"
+                  className="button-secondary"
+                  onClick={saveBacktestSettings}
+                  disabled={backtestSettingsSaving}
+                >
+                  {backtestSettingsSaving
+                    ? t("common.actions.loading")
+                    : t("common.actions.save")}
+                </button>
+                {backtestSettings?.updated_at ? (
+                  <span className="form-note">
+                    {t("data.backtest.settings.updatedAt", {
+                      at: formatDateTime(backtestSettings.updated_at),
+                    })}
+                  </span>
+                ) : null}
+              </div>
               <div className="section-divider" />
               <div className="section-title">{t("data.pretrade.settings.title")}</div>
               <div className="form-grid two-col">

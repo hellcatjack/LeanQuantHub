@@ -17,7 +17,14 @@ class MLOverlaySelector(QCAlgorithm):
         self.progress_end = datetime(2025, 12, 31)
         self.set_start_date(self.progress_start)
         self.set_end_date(self.progress_end)
-        self.set_cash(100000)
+        initial_cash = self.get_parameter("initial_cash")
+        if initial_cash:
+            try:
+                self.set_cash(float(initial_cash))
+            except ValueError:
+                self.set_cash(30000)
+        else:
+            self.set_cash(30000)
         self.data_resolution = Resolution.DAILY
 
         raw_symbols = self.get_parameter("symbols") or "SPY,QQQ,NVDA,AMD,GOOGL,TSLA"

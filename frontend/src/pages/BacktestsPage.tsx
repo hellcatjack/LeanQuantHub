@@ -8,10 +8,12 @@ import ReportsPanel from "../components/ReportsPanel";
 import TopBar from "../components/TopBar";
 import { useI18n } from "../i18n";
 import { Paginated } from "../types";
+import { formatNetProfitPercent } from "../utils/metrics";
 
 interface Backtest {
   id: number;
   project_id: number;
+  train_job_id?: number | null;
   status: string;
   params?: Record<string, unknown> | null;
   metrics?: Record<string, unknown> | null;
@@ -274,6 +276,7 @@ export default function BacktestsPage() {
             <tr>
               <th className="backtest-id">{t("backtests.table.id")}</th>
               <th className="backtest-project">{t("backtests.table.project")}</th>
+              <th className="backtest-train-job">{t("backtests.table.trainJobId")}</th>
               <th className="backtest-status">{t("backtests.table.status")}</th>
               <th className="backtest-progress">{t("backtests.table.progress")}</th>
               <th className="backtest-range-cell">{t("backtests.table.range")}</th>
@@ -297,6 +300,13 @@ export default function BacktestsPage() {
                 <td className="backtest-project">
                   <IdChip label={t("backtests.table.project")} value={run.project_id} />
                 </td>
+                <td className="backtest-train-job">
+                  {run.train_job_id ? (
+                    <IdChip label={t("backtests.table.trainJobId")} value={run.train_job_id} />
+                  ) : (
+                    t("common.none")
+                  )}
+                </td>
                 <td className="backtest-status">
                   <span className={`pill ${run.status === "success" ? "success" : "danger"}`}>
                     {renderStatus(run.status)}
@@ -315,7 +325,9 @@ export default function BacktestsPage() {
                 </td>
                 {metricItems.map((item) => (
                   <td key={item.key} className="backtest-metric">
-                    {run.metrics?.[item.key] ?? t("common.none")}
+                    {item.key === "Net Profit"
+                      ? formatNetProfitPercent(run.metrics)
+                      : run.metrics?.[item.key] ?? t("common.none")}
                   </td>
                 ))}
                 <td className="backtest-report">

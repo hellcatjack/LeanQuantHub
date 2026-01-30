@@ -172,6 +172,7 @@ class BacktestOut(BaseModel):
     id: int
     project_id: int
     pipeline_id: int | None = None
+    train_job_id: int | None = None
     status: str
     params: dict[str, Any] | None
     metrics: dict[str, Any] | None
@@ -1488,6 +1489,7 @@ class IBAccountPositionsOut(BaseModel):
     items: list[IBAccountPositionOut] = Field(default_factory=list)
     refreshed_at: datetime | None = None
     stale: bool = False
+    source_detail: str | None = None
 
 
 class TradeSettingsOut(BaseModel):
@@ -1504,6 +1506,22 @@ class TradeSettingsOut(BaseModel):
 class TradeSettingsUpdate(BaseModel):
     risk_defaults: dict | None = None
     execution_data_source: str | None = None
+
+
+class BacktestSettingsOut(BaseModel):
+    id: int
+    default_initial_cash: float
+    default_fee_bps: float
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class BacktestSettingsUpdate(BaseModel):
+    default_initial_cash: float | None = Field(default=None, gt=0, le=1_000_000_000)
+    default_fee_bps: float | None = Field(default=None, ge=0, le=1000)
 
 
 class TradeGuardStateOut(BaseModel):

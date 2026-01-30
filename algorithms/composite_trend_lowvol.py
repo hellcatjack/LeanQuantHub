@@ -121,7 +121,14 @@ class CompositeTrendLowVol(QCAlgorithm):
 
         self.set_start_date(2021, 1, 1)
         self.set_end_date(2025, 12, 26)
-        self.set_cash(100000)
+        initial_cash = self.get_parameter("initial_cash")
+        if initial_cash:
+            try:
+                self.set_cash(float(initial_cash))
+            except ValueError:
+                self.set_cash(30000)
+        else:
+            self.set_cash(30000)
         self.settings.minimum_order_margin_portfolio_percentage = 0
 
         fee_bps = float(self.get_parameter("fee_bps") or 1.0)

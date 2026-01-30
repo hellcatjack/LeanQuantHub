@@ -183,6 +183,8 @@ interface ProjectConfig {
   backtest_params?: Record<string, any>;
   backtest_train_job_id?: number | null;
   backtest_plugins?: Record<string, any>;
+  initial_cash?: number | null | "";
+  costs?: { fee_bps?: number | null };
   categories?: { key: string; label: string }[];
   themes?: ThemeConfigItem[];
   symbol_types?: Record<string, string>;
@@ -5970,6 +5972,39 @@ export default function ProjectsPage() {
                       />
                     </div>
                     <div className="form-hint">{t("projects.config.backtestRangeHint")}</div>
+                    <div className="form-row">
+                      <label className="form-label">{t("projects.config.initialCash")}</label>
+                      <input
+                        className="form-input"
+                        type="number"
+                        value={configDraft.initial_cash ?? ""}
+                        onChange={(e) =>
+                          setConfigDraft((prev) => ({
+                            ...(prev || {}),
+                            initial_cash: e.target.value ? Number(e.target.value) : "",
+                          }))
+                        }
+                        placeholder={t("projects.config.initialCashHint")}
+                      />
+                    </div>
+                    <div className="form-row">
+                      <label className="form-label">{t("projects.config.feeBps")}</label>
+                      <input
+                        className="form-input"
+                        type="number"
+                        value={configDraft.costs?.fee_bps ?? ""}
+                        onChange={(e) =>
+                          setConfigDraft((prev) => ({
+                            ...(prev || {}),
+                            costs: {
+                              ...(prev?.costs || {}),
+                              fee_bps: e.target.value ? Number(e.target.value) : "",
+                            },
+                          }))
+                        }
+                        placeholder={t("projects.config.feeBpsHint")}
+                      />
+                    </div>
                     <div className="form-row">
                       <label className="form-label">{t("projects.config.riskFreeRate")}</label>
                       <input

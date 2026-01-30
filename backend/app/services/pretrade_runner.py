@@ -1302,12 +1302,42 @@ def build_default_steps() -> list[dict[str, Any]]:
     ]
 
 
+def _normalize_step_plan(step_plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    steps = list(step_plan)
+
+    def _is_enabled(item: dict[str, Any]) -> bool:
+        return bool(item.get("enabled", True))
+
+    def _find_enabled_index(key: str) -> int | None:
+        for idx, item in enumerate(steps):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("key") or "").strip() != key:
+                continue
+            if _is_enabled(item):
+                return idx
+        return None
+
+    trading_idx = _find_enabled_index("trading_day_check")
+    price_idx = _find_enabled_index("price_incremental")
+    if trading_idx is None or price_idx is None:
+        return steps
+    if trading_idx > price_idx:
+        return steps
+
+    trading_item = steps.pop(trading_idx)
+    if trading_idx < price_idx:
+        price_idx -= 1
+    steps.insert(price_idx + 1, trading_item)
+    return steps
+
+
 def _build_step_plan(template: PreTradeTemplate | None) -> list[dict[str, Any]]:
     if template and isinstance(template.params, dict):
         steps = template.params.get("steps")
         if isinstance(steps, list):
-            return steps
-    return build_default_steps()
+            return _normalize_step_plan(steps)
+    return _normalize_step_plan(build_default_steps())
 
 
 def _create_steps(session, run: PreTradeRun, template: PreTradeTemplate | None) -> None:
@@ -1380,6 +1410,18 @@ def _prepare_run_snapshot(run: PreTradeRun) -> dict[str, Any]:
     return params
 
 
+def _has_other_active_pretrade_runs(session, run_id: int) -> bool:
+    return (
+        session.query(PreTradeRun)
+        .filter(
+            PreTradeRun.status.in_(PRETRADE_ACTIVE_STATUSES),
+            PreTradeRun.id != run_id,
+        )
+        .count()
+        > 0
+    )
+
+
 def run_pretrade_run(run_id: int, resume_step_id: int | None = None) -> None:
     session = SessionLocal()
     lock: JobLock | None = None
@@ -1391,11 +1433,15 @@ def run_pretrade_run(run_id: int, resume_step_id: int | None = None) -> None:
             return
         lock = JobLock("pretrade_checklist", _resolve_data_root())
         if not lock.acquire():
-            run.status = "failed"
-            run.message = "pretrade_lock_busy"
-            run.ended_at = datetime.utcnow()
+            if _has_other_active_pretrade_runs(session, run_id):
+                run.status = "failed"
+                run.message = "pretrade_lock_busy"
+                run.ended_at = datetime.utcnow()
+                session.commit()
+                return
+            lock = None
+            run.message = "pretrade_lock_bypassed"
             session.commit()
-            return
         alpha_lock = JobLock("alpha_fetch", _resolve_data_root())
         if not alpha_lock.acquire():
             run.status = "failed"

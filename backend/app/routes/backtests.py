@@ -368,6 +368,20 @@ def _resolve_dataset_for_symbol(session, symbol: str) -> Dataset | None:
     return matched[0]
 
 
+def _resolve_train_job_id(params: dict | None) -> int | None:
+    if not isinstance(params, dict):
+        return None
+    for key in ("pipeline_train_job_id", "ml_train_job_id", "train_job_id"):
+        raw = params.get(key)
+        if raw in (None, ""):
+            continue
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 @router.get("", response_model=list[BacktestOut])
 def list_backtests():
     with get_session() as session:
@@ -405,6 +419,7 @@ def list_backtests_page(
         for run in runs:
             out = BacktestListOut.model_validate(run, from_attributes=True)
             out.report_id = report_map.get(run.id)
+            out.train_job_id = _resolve_train_job_id(run.params)
             items.append(out)
         return BacktestPageOut(
             items=items,

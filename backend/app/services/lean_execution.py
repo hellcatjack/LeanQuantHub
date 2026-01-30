@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import inspect
-import os
 import subprocess
 from pathlib import Path
 
@@ -64,15 +62,7 @@ def _resolve_environment(brokerage: str, mode: str) -> str:
     return "live"
 
 
-def build_execution_config(
-    *,
-    intent_path: str,
-    brokerage: str,
-    project_id: int,
-    mode: str,
-    client_id: int | None = None,
-    lean_bridge_output_dir: str | None = None,
-) -> dict:
+def build_execution_config(*, intent_path: str, brokerage: str, project_id: int, mode: str) -> dict:
     payload = dict(_load_template_config())
     payload["environment"] = _resolve_environment(brokerage, mode)
     payload["algorithm-type-name"] = "LeanBridgeExecutionAlgorithm"
@@ -82,8 +72,8 @@ def build_execution_config(
     payload["brokerage"] = brokerage
     payload["execution-intent-path"] = intent_path
     payload["result-handler"] = "QuantConnect.Lean.Engine.Results.LeanBridgeResultHandler"
-    payload["lean-bridge-output-dir"] = lean_bridge_output_dir or _bridge_output_dir()
-    payload["ib-client-id"] = client_id if client_id is not None else derive_client_id(project_id=project_id, mode=mode)
+    payload["lean-bridge-output-dir"] = _bridge_output_dir()
+    payload["ib-client-id"] = derive_client_id(project_id=project_id, mode=mode)
     return payload
 
 
@@ -121,52 +111,7 @@ def _resolve_launcher() -> tuple[str, str | None]:
 def launch_execution(*, config_path: str) -> None:
     dll_path, cwd = _resolve_launcher()
     cmd = [settings.dotnet_path or "dotnet", dll_path, "--config", config_path]
-    env = os.environ.copy()
-    if settings.dotnet_root:
-        env["DOTNET_ROOT"] = settings.dotnet_root
-        env["PATH"] = f"{settings.dotnet_root}:{env.get('PATH', '')}"
-    if settings.python_dll:
-        env["PYTHONNET_PYDLL"] = settings.python_dll
-    if settings.lean_python_venv:
-        env["PYTHONHOME"] = settings.lean_python_venv
-    kwargs: dict[str, object] = {"check": False, "env": env}
-    if cwd:
-        try:
-            sig = inspect.signature(subprocess_run)
-        except (TypeError, ValueError):
-            kwargs["cwd"] = cwd
-        else:
-            if "cwd" in sig.parameters or any(
-                param.kind == inspect.Parameter.VAR_KEYWORD for param in sig.parameters.values()
-            ):
-                kwargs["cwd"] = cwd
-    subprocess_run(cmd, **kwargs)
-
-
-def launch_execution_async(*, config_path: str) -> int:
-    dll_path, cwd = _resolve_launcher()
-    cmd = [settings.dotnet_path or "dotnet", dll_path, "--config", config_path]
-    env = os.environ.copy()
-    if settings.dotnet_root:
-        env["DOTNET_ROOT"] = settings.dotnet_root
-        env["PATH"] = f"{settings.dotnet_root}:{env.get('PATH', '')}"
-    if settings.python_dll:
-        env["PYTHONNET_PYDLL"] = settings.python_dll
-    if settings.lean_python_venv:
-        env["PYTHONHOME"] = settings.lean_python_venv
-    kwargs: dict[str, object] = {"env": env}
-    if cwd:
-        try:
-            sig = inspect.signature(subprocess.Popen)
-        except (TypeError, ValueError):
-            kwargs["cwd"] = cwd
-        else:
-            if "cwd" in sig.parameters or any(
-                param.kind == inspect.Parameter.VAR_KEYWORD for param in sig.parameters.values()
-            ):
-                kwargs["cwd"] = cwd
-    process = subprocess.Popen(cmd, **kwargs)
-    return process.pid
+    subprocess_run(cmd, check=False, cwd=cwd)
 
 
 def ingest_execution_events(path: str) -> None:

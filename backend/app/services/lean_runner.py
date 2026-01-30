@@ -12,7 +12,8 @@ from pathlib import Path
 
 from app.core.config import settings
 from app.db import SessionLocal
-from app.models import BacktestRun, Report
+from app.models import BacktestRun, BacktestSettings, Project, Report
+from app.routes.projects import _resolve_project_config
 from app.services.audit_log import record_audit
 
 
@@ -109,6 +110,60 @@ def _read_score_symbols(score_path: str) -> set[str]:
             if symbol:
                 symbols.add(symbol)
     return symbols
+
+
+def _coerce_float(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _read_fee_bps(costs: object) -> float | None:
+    if not isinstance(costs, dict):
+        return None
+    if "fee_bps" not in costs:
+        return None
+    return _coerce_float(costs.get("fee_bps"))
+
+
+def resolve_backtest_defaults(
+    params: dict[str, object],
+    project_config: dict[str, object],
+    *,
+    default_initial_cash: float,
+    default_fee_bps: float,
+) -> tuple[float, float]:
+    initial_cash = _coerce_float(params.get("initial_cash"))
+    if initial_cash is None:
+        initial_cash = _coerce_float(project_config.get("initial_cash"))
+    if initial_cash is None:
+        initial_cash = float(default_initial_cash)
+
+    fee_bps = _read_fee_bps(params.get("costs"))
+    if fee_bps is None:
+        fee_bps = _read_fee_bps(project_config.get("costs"))
+    if fee_bps is None:
+        fee_bps = float(default_fee_bps)
+
+    return initial_cash, fee_bps
+
+
+def _load_project_config(session, project_id: int | None) -> dict[str, object]:
+    if not project_id:
+        return {}
+    try:
+        config = _resolve_project_config(session, project_id)
+    except Exception:
+        return {}
+    return config if isinstance(config, dict) else {}
 
 
 def _append_scores(score_path: str, extra_path: Path) -> None:
@@ -640,6 +695,18 @@ def run_backtest(run_id: int) -> None:
 
         config = _load_config(settings.lean_config_template)
         params = run.params if isinstance(run.params, dict) else {}
+        project_config = _load_project_config(session, run.project_id)
+        defaults_row = session.query(BacktestSettings).order_by(BacktestSettings.id.desc()).first()
+        default_initial_cash = (
+            float(defaults_row.default_initial_cash) if defaults_row else 30000.0
+        )
+        default_fee_bps = float(defaults_row.default_fee_bps) if defaults_row else 10.0
+        resolved_initial_cash, resolved_fee_bps = resolve_backtest_defaults(
+            params,
+            project_config,
+            default_initial_cash=default_initial_cash,
+            default_fee_bps=default_fee_bps,
+        )
         price_policy = _resolve_price_policy(params)
         algo_language = (params.get("algorithm_language") or "Python").strip()
         config["algorithm-language"] = algo_language
@@ -655,6 +722,10 @@ def run_backtest(run_id: int) -> None:
             for key in ("fee_bps", "slippage_open_bps", "slippage_close_bps"):
                 if key in params["costs"]:
                     algo_params[key] = str(params["costs"][key])
+        if "initial_cash" not in algo_params and resolved_initial_cash is not None:
+            algo_params["initial_cash"] = str(resolved_initial_cash)
+        if "fee_bps" not in algo_params and resolved_fee_bps is not None:
+            algo_params["fee_bps"] = str(resolved_fee_bps)
         if algo_params:
             config["parameters"] = algo_params
 
