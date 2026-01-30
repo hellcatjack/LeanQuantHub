@@ -28,6 +28,7 @@ def test_build_execution_config_uses_execution_algorithm(tmp_path):
         mode="paper",
     )
     assert config["algorithm-type-name"] == "LeanBridgeExecutionAlgorithm"
+    assert config["algorithm-language"] == "CSharp"
 
 def test_execution_config_includes_bridge_result_handler():
     cfg = lean_execution.build_execution_config(
@@ -49,7 +50,6 @@ def test_execution_config_includes_ib_client_id():
     )
     assert cfg["ib-client-id"] == 1016
 
-
 def test_execution_config_leader_output_dir():
     cfg = lean_execution.build_execution_config(
         intent_path="/tmp/intent.json",
@@ -60,34 +60,6 @@ def test_execution_config_leader_output_dir():
         lean_bridge_output_dir="/tmp/lean_bridge_custom",
     )
     assert cfg["lean-bridge-output-dir"] == "/tmp/lean_bridge_custom"
-
-
-def test_execution_config_builds_watchlist_from_intent(tmp_path):
-    intent_path = tmp_path / "order_intent_snapshot_46.json"
-    intent_path.write_text(
-        json.dumps(
-            [
-                {"symbol": "AVGO", "weight": 0.1},
-                {"symbol": "GEV", "weight": 0.2},
-                {"symbol": "AVGO", "weight": 0.3},
-                {"symbol": "TER", "quantity": 2},
-            ]
-        ),
-        encoding="utf-8",
-    )
-
-    cfg = lean_execution.build_execution_config(
-        intent_path=str(intent_path),
-        brokerage="InteractiveBrokersBrokerage",
-        project_id=16,
-        mode="paper",
-        lean_bridge_output_dir=str(tmp_path / "bridge"),
-    )
-
-    watchlist_path = Path(cfg["lean-bridge-watchlist-path"])
-    assert watchlist_path.exists()
-    watchlist_symbols = json.loads(watchlist_path.read_text(encoding="utf-8"))
-    assert set(watchlist_symbols) == {"AVGO", "GEV", "TER"}
 
 
 def test_execution_config_builds_watchlist_from_intent(tmp_path):
