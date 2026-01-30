@@ -644,6 +644,39 @@ class IBClientIdPool(Base):
     )
 
 
+class LeanExecutorPool(Base):
+    __tablename__ = "lean_executor_pool"
+    __table_args__ = (
+        UniqueConstraint("mode", "client_id", name="uq_lean_executor_pool_mode_client"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    mode: Mapped[str] = mapped_column(String(16), default="paper")
+    role: Mapped[str] = mapped_column(String(16), default="worker")
+    client_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="unknown")
+    last_heartbeat: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_order_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    output_dir: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class LeanExecutorEvent(Base):
+    __tablename__ = "lean_executor_events"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    mode: Mapped[str] = mapped_column(String(16), default="paper")
+    client_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    detail: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class IBContractCache(Base):
     __tablename__ = "ib_contract_cache"
     __table_args__ = (
