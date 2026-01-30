@@ -10,7 +10,7 @@ from uuid import uuid4
 from sqlalchemy import and_
 
 from app.core.config import settings
-from app.models import IBClientIdPool
+from app.models import IBClientIdPool, LeanExecutorPool
 
 
 class ClientIdPoolExhausted(RuntimeError):
@@ -40,6 +40,28 @@ def _ensure_pool(session, *, mode: str) -> None:
     for cid in missing:
         session.add(IBClientIdPool(client_id=cid, status="free"))
     session.commit()
+
+
+def select_worker_client_id(session, *, mode: str) -> int | None:
+    query = (
+        session.query(LeanExecutorPool)
+        .filter(
+            and_(
+                LeanExecutorPool.mode == mode,
+                LeanExecutorPool.role == "worker",
+            )
+        )
+        .order_by(
+            LeanExecutorPool.last_order_at.asc().nullsfirst(),
+            LeanExecutorPool.client_id.asc(),
+        )
+    )
+    worker = query.first()
+    if worker is None:
+        return None
+    worker.last_order_at = datetime.utcnow()
+    session.commit()
+    return int(worker.client_id)
 
 
 def _pid_alive(pid: int) -> bool:
