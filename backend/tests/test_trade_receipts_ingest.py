@@ -193,3 +193,40 @@ def test_receipts_ingest_snapshot_tag_updates_order(monkeypatch, tmp_path: Path)
     assert float(refreshed.filled_quantity or 0.0) == 2.0
 
     session.close()
+
+
+def test_receipts_ingest_marks_filled_when_event_filled(monkeypatch, tmp_path: Path) -> None:
+    session = _make_session()
+    monkeypatch.setattr(settings, "data_root", str(tmp_path))
+
+    result = create_trade_order(
+        session,
+        {
+            "client_order_id": "manual-4",
+            "symbol": "AAPL",
+            "side": "SELL",
+            "quantity": 3,
+            "order_type": "MKT",
+            "params": {"client_order_id_auto": True},
+        },
+    )
+    session.commit()
+    order = result.order
+
+    bridge_dir = tmp_path / "lean_bridge" / f"direct_{order.id}"
+    bridge_dir.mkdir(parents=True, exist_ok=True)
+    events_path = bridge_dir / "execution_events.jsonl"
+    _write_events(
+        events_path,
+        [
+            f'{{"order_id":1,"symbol":"AAPL","status":"Filled","filled":2,"fill_price":200.0,"direction":"Sell","time":"2026-01-30T20:34:01Z","tag":"direct:{order.id}"}}',
+        ],
+    )
+
+    list_trade_receipts(session, limit=50, offset=0, mode="all")
+
+    refreshed = session.get(TradeOrder, order.id)
+    assert refreshed is not None
+    assert refreshed.status == "FILLED"
+
+    session.close()

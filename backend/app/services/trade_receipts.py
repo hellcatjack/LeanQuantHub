@@ -363,6 +363,15 @@ def _ingest_lean_events(session, warnings: list[str]) -> None:
                         "event_tag": event_tag,
                     },
                 )
+                if status == "FILLED" and str(order.status or "").strip().upper() != "FILLED":
+                    filled_total = max(float(order.filled_quantity or 0.0), float(fill_qty or 0.0))
+                    update_payload = {"status": "FILLED", "filled_quantity": filled_total}
+                    if order.avg_fill_price is None and fill_price_value:
+                        update_payload["avg_fill_price"] = float(fill_price_value)
+                    try:
+                        update_trade_order_status(session, order, update_payload)
+                    except ValueError:
+                        _append_warning(warnings, "lean_event_status_transition")
                 session.commit()
 
 
