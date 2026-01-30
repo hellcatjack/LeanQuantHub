@@ -208,9 +208,11 @@ def create_trade_run(payload: TradeRunCreate):
             .first()
         )
         if existing:
-            out = TradeRunOut.model_validate(existing, from_attributes=True)
-            out.orders_created = 0
-            return out
+            status = str(existing.status or "").strip().lower()
+            if status not in {"failed", "blocked"}:
+                out = TradeRunOut.model_validate(existing, from_attributes=True)
+                out.orders_created = 0
+                return out
         run = TradeRun(
             project_id=payload.project_id,
             decision_snapshot_id=snapshot_id,

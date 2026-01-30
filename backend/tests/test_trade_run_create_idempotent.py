@@ -52,6 +52,13 @@ def test_trade_run_idempotent(monkeypatch):
         first = trade_routes.create_trade_run(payload)
         second = trade_routes.create_trade_run(payload)
         assert first.id == second.id
+
+        run = session.get(TradeRun, first.id)
+        run.status = "failed"
+        session.commit()
+
+        third = trade_routes.create_trade_run(payload)
+        assert third.id != first.id
     finally:
         session.close()
 
