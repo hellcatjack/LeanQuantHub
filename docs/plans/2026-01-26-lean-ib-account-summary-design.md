@@ -14,6 +14,7 @@
 1. `InteractiveBrokersBrokerage` 监听：
    - `HandleUpdateAccountValue`（AccountUpdates）
    - `HandleAccountSummary`（AccountSummary）
+   - 账户摘要快照来自 `AccountProperties`（键：`{Currency}:{Tag}`），提供 `GetAccountSummarySnapshot()` 只读拷贝。
 2. 两路数据分别写入账户快照字典，键为 `"{Currency}:{Tag}"`。
 3. `LeanBridgeResultHandler` 从 `BrokerageTransactionHandler.Brokerage` 读取 IB 快照并构建 `account_summary.json`。
 4. 后端读取 `account_summary.json`，实盘交易页展示该结果。
