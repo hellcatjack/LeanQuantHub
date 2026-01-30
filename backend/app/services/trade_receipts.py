@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Iterable
 
 from app.core.config import settings
-from app.models import TradeFill, TradeOrder
+from app.models import TradeFill, TradeOrder, TradeRun
 from app.services.ib_orders import apply_fill_to_order
 from app.services.trade_orders import update_trade_order_status
 from app.services.lean_bridge_paths import resolve_bridge_root
@@ -98,11 +98,70 @@ def _extract_order_id_from_tag(tag: str | None) -> int | None:
     return None
 
 
-def _resolve_order_id(event_path: Path, payload: dict) -> int | None:
+def _parse_snapshot_tag(tag: str) -> tuple[int | None, str | None]:
+    text = tag.strip()
+    if not text.startswith("snapshot:"):
+        return None, None
+    parts = text.split(":")
+    if len(parts) < 4:
+        return None, None
+    try:
+        snapshot_id = int(parts[1])
+    except ValueError:
+        return None, None
+    symbol = parts[3].strip().upper() if parts[3] else None
+    return snapshot_id, symbol or None
+
+
+def _resolve_snapshot_order_id(
+    session,
+    *,
+    snapshot_id: int,
+    symbol: str | None,
+    side: str | None,
+    tag: str | None,
+) -> int | None:
+    if session is None:
+        return None
+    query = session.query(TradeRun.id).filter(TradeRun.decision_snapshot_id == snapshot_id)
+    run_ids = [row[0] for row in query.order_by(TradeRun.id.desc()).all()]
+    if not run_ids:
+        return None
+    order_query = session.query(TradeOrder).filter(TradeOrder.run_id.in_(run_ids))
+    if symbol:
+        order_query = order_query.filter(TradeOrder.symbol == symbol)
+    if side:
+        order_query = order_query.filter(TradeOrder.side == side)
+    candidates = order_query.order_by(TradeOrder.created_at.desc(), TradeOrder.id.desc()).all()
+    for order in candidates:
+        params = order.params or {}
+        if tag and params.get("order_intent_id") == tag:
+            return order.id
+    if candidates:
+        return candidates[0].id
+    return None
+
+
+def _resolve_order_id(event_path: Path, payload: dict, session=None) -> int | None:
     direct_id = _extract_direct_order_id(event_path)
     if direct_id is not None:
         return direct_id
-    return _extract_order_id_from_tag(payload.get("tag"))
+    tag = payload.get("tag")
+    direct_tag_id = _extract_order_id_from_tag(tag)
+    if direct_tag_id is not None:
+        return direct_tag_id
+    snapshot_id, tag_symbol = _parse_snapshot_tag(str(tag or "").strip())
+    if snapshot_id is None:
+        return None
+    symbol = (payload.get("symbol") or tag_symbol or "").strip().upper() or None
+    side = _normalize_status(payload.get("direction"))
+    return _resolve_snapshot_order_id(
+        session,
+        snapshot_id=snapshot_id,
+        symbol=symbol,
+        side=side if side else None,
+        tag=tag,
+    )
 
 
 def _lean_kind(status: str, filled: float | None) -> str:
@@ -182,7 +241,7 @@ def _ingest_lean_events(session, warnings: list[str]) -> None:
                 _append_warning(warnings, "lean_logs_parse_error")
                 continue
 
-            order_id = _resolve_order_id(event_path, payload)
+            order_id = _resolve_order_id(event_path, payload, session=session)
             if order_id is None:
                 _append_warning(warnings, "lean_event_missing_order")
                 continue
@@ -399,7 +458,7 @@ def list_trade_receipts(
                 filled = payload.get("filled")
                 kind = _lean_kind(status, filled)
                 event_time = _parse_time(payload.get("time"))
-                order_id = _resolve_order_id(event_path, payload)
+                order_id = _resolve_order_id(event_path, payload, session=session)
                 if kind == "fill" and order_id is not None:
                     key = (
                         order_id,
