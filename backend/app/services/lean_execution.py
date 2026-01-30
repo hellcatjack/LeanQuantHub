@@ -85,10 +85,43 @@ def build_execution_config(
     payload["lean-bridge-output-dir"] = output_dir
     payload["lean-bridge-watchlist-path"] = str(Path(output_dir) / "watchlist.json")
     payload["lean-bridge-watchlist-refresh-seconds"] = "5"
+    _write_watchlist_from_intent(intent_path, payload["lean-bridge-watchlist-path"])
     payload["ib-client-id"] = int(client_id) if client_id is not None else derive_client_id(
         project_id=project_id, mode=mode
     )
     return payload
+
+
+def _write_watchlist_from_intent(intent_path: str, watchlist_path: str) -> None:
+    intent_file = Path(intent_path)
+    if not intent_file.exists():
+        return
+
+    try:
+        items = json.loads(intent_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+
+    if not isinstance(items, list):
+        return
+
+    symbols: list[str] = []
+    seen = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        symbol = str(item.get("symbol") or "").strip().upper()
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        symbols.append(symbol)
+
+    if not symbols:
+        return
+
+    watchlist_file = Path(watchlist_path)
+    watchlist_file.parent.mkdir(parents=True, exist_ok=True)
+    watchlist_file.write_text(json.dumps(symbols, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _resolve_launcher() -> tuple[str, str | None]:
