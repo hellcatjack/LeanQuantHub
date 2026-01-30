@@ -802,6 +802,9 @@ export default function LiveTradePage() {
       params: {
         account: row.account || undefined,
         currency: row.currency || undefined,
+        source: "manual",
+        project_id: selectedProjectId ? Number(selectedProjectId) : undefined,
+        mode: ibSettings?.mode || ibSettingsForm.mode || "paper",
       },
     };
     await submitPositionOrders([payload]);
@@ -831,6 +834,9 @@ export default function LiveTradePage() {
       params: {
         account: row.account || undefined,
         currency: row.currency || undefined,
+        source: "manual",
+        project_id: selectedProjectId ? Number(selectedProjectId) : undefined,
+        mode: ibSettings?.mode || ibSettingsForm.mode || "paper",
       },
     }));
     await submitPositionOrders(orders);

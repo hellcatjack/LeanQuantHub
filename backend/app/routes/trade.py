@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Response
 from sqlalchemy.exc import IntegrityError
 
+from app.core.config import settings
 from app.db import get_session
 from app.models import DecisionSnapshot, TradeGuardState, TradeOrder, TradeRun, TradeSettings
 from app.schemas import (
@@ -33,6 +35,8 @@ from app.schemas import (
 )
 from app.services.audit_log import record_audit
 from app.services.ib_market import check_market_health
+from app.services.lean_execution import ingest_execution_events
+from app.services.manual_trade_execution import execute_manual_order
 from app.services.trade_guard import evaluate_intraday_guard, get_or_create_guard_state
 from app.services.trade_monitor import build_trade_overview
 from app.services.trade_executor import execute_trade_run
@@ -381,6 +385,10 @@ def list_trade_orders(
     offset: int = Query(0, ge=0),
     run_id: int | None = None,
 ):
+    events_root = settings.data_root or "/data/share/stock/data"
+    events_path = Path(events_root) / "lean_bridge" / "execution_events.jsonl"
+    if events_path.exists():
+        ingest_execution_events(str(events_path))
     with get_session() as session:
         query = session.query(TradeOrder).order_by(TradeOrder.created_at.desc())
         if run_id is not None:
@@ -442,6 +450,15 @@ def create_trade_order_route(payload: TradeOrderCreate):
             result = create_trade_order(session, payload.model_dump())
             session.commit()
             session.refresh(result.order)
+            params = payload.params or {}
+            source = str(params.get("source", "")).lower()
+            if source == "manual":
+                project_id = params.get("project_id")
+                if project_id is None:
+                    raise HTTPException(status_code=422, detail="project_id_required")
+                mode = params.get("mode") or "paper"
+                execute_manual_order(session, result.order, project_id=int(project_id), mode=str(mode))
+                session.refresh(result.order)
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except IntegrityError as exc:

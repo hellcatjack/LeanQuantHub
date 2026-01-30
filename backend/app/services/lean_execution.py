@@ -8,10 +8,9 @@ from pathlib import Path
 
 from app.core.config import settings
 from app.db import SessionLocal
-from app.models import TradeOrder, TradeRun
-from app.services.ib_orders import apply_fill_to_order
-from app.services.trade_orders import create_trade_order, update_trade_order_status
+from app.models import TradeFill, TradeOrder, TradeRun
 from app.services.ib_settings import derive_client_id
+from app.services.trade_orders import create_trade_order, update_trade_order_status
 
 subprocess_run = subprocess.run
 
@@ -177,7 +176,6 @@ def launch_execution(*, config_path: str) -> None:
     cmd = [settings.dotnet_path or "dotnet", dll_path, "--config", config_path]
     subprocess_run(cmd, check=False, cwd=cwd, env=_build_launch_env())
 
-
 def launch_execution_async(*, config_path: str) -> int:
     dll_path, cwd = _resolve_launcher()
     cmd = [settings.dotnet_path or "dotnet", dll_path, "--config", config_path]
@@ -210,6 +208,45 @@ def _parse_event_time(value: str | None) -> datetime:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return datetime.now(timezone.utc)
+
+
+def _apply_fill_to_order(
+    session,
+    order: TradeOrder,
+    *,
+    fill_qty: float,
+    fill_price: float,
+    fill_time: datetime,
+    exec_id: str | None = None,
+) -> TradeFill:
+    current_status = str(order.status or "").strip().upper()
+    total_prev = float(order.filled_quantity or 0.0)
+    total_new = total_prev + float(fill_qty)
+    avg_prev = float(order.avg_fill_price or 0.0)
+    avg_new = (avg_prev * total_prev + float(fill_price) * float(fill_qty)) / total_new
+    target_status = "PARTIAL" if total_new < float(order.quantity) else "FILLED"
+    if current_status == "NEW":
+        update_trade_order_status(session, order, {"status": "SUBMITTED"})
+    update_trade_order_status(
+        session,
+        order,
+        {"status": target_status, "filled_quantity": total_new, "avg_fill_price": avg_new},
+    )
+    if not exec_id:
+        exec_id = f"lean:{order.id}:{int(fill_time.timestamp() * 1000)}"
+    fill = TradeFill(
+        order_id=order.id,
+        exec_id=exec_id,
+        fill_quantity=float(fill_qty),
+        fill_price=float(fill_price),
+        commission=None,
+        fill_time=fill_time,
+        params={"source": "lean_bridge"},
+    )
+    session.add(fill)
+    session.commit()
+    session.refresh(order)
+    return fill
 
 
 def _load_intent_items(path: str) -> list[dict]:
@@ -302,7 +339,7 @@ def apply_execution_events(events: list[dict], *, session=None) -> dict:
                     continue
                 fill_price = float(event.get("fill_price") or 0.0)
                 fill_time = _parse_event_time(event.get("time"))
-                apply_fill_to_order(
+                _apply_fill_to_order(
                     session,
                     order,
                     fill_qty=filled_qty,
