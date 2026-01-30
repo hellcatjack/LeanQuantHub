@@ -163,6 +163,65 @@ def _finalize_run_status(session, run, *, filled: int, rejected: int, cancelled:
     session.commit()
 
 
+_TERMINAL_ORDER_STATUSES = {"FILLED", "CANCELED", "CANCELLED", "REJECTED", "INVALID"}
+_CANCELLED_ORDER_STATUSES = {"CANCELED", "CANCELLED"}
+_REJECTED_ORDER_STATUSES = {"REJECTED", "INVALID"}
+
+
+def _normalize_order_status(value: str | None) -> str:
+    return str(value or "").strip().upper()
+
+
+def determine_run_status(order_statuses: list[str]) -> tuple[str | None, dict[str, int]]:
+    normalized = [_normalize_order_status(status) for status in order_statuses if status is not None]
+    total = len(normalized)
+    summary = {"total": total, "filled": 0, "cancelled": 0, "rejected": 0}
+    if not normalized:
+        return None, summary
+    if any(status not in _TERMINAL_ORDER_STATUSES for status in normalized):
+        for status in normalized:
+            if status == "FILLED":
+                summary["filled"] += 1
+            elif status in _CANCELLED_ORDER_STATUSES:
+                summary["cancelled"] += 1
+            elif status in _REJECTED_ORDER_STATUSES:
+                summary["rejected"] += 1
+        return None, summary
+    for status in normalized:
+        if status == "FILLED":
+            summary["filled"] += 1
+        elif status in _CANCELLED_ORDER_STATUSES:
+            summary["cancelled"] += 1
+        elif status in _REJECTED_ORDER_STATUSES:
+            summary["rejected"] += 1
+    if summary["filled"] == 0 and (summary["rejected"] + summary["cancelled"]) > 0:
+        return "failed", summary
+    if summary["rejected"] > 0 or summary["cancelled"] > 0:
+        return "partial", summary
+    return "done", summary
+
+
+def refresh_trade_run_status(session, run: TradeRun) -> bool:
+    if run.status != "running":
+        return False
+    statuses = [
+        row[0]
+        for row in session.query(TradeOrder.status).filter(TradeOrder.run_id == run.id).all()
+    ]
+    status, summary = determine_run_status(statuses)
+    if status is None:
+        return False
+    run.status = status
+    run.ended_at = datetime.utcnow()
+    run.updated_at = datetime.utcnow()
+    params = dict(run.params or {})
+    params["completion_summary"] = summary
+    run.params = params
+    if not run.message or run.message == "submitted_lean":
+        run.message = "orders_complete"
+    return True
+
+
 def _read_decision_items(path: str | None) -> list[dict[str, Any]]:
     if not path:
         return []

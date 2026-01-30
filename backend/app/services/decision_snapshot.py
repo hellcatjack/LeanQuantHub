@@ -89,6 +89,28 @@ def _resolve_pit_rebalance_end(snapshot_date: str | None) -> str | None:
     return sorted(set(rebalance_dates))[-1]
 
 
+def _resolve_latest_pit_snapshot() -> str | None:
+    pit_dir = _resolve_data_root() / "universe" / "pit_weekly"
+    if not pit_dir.exists():
+        return None
+    latest: str | None = None
+    for path in pit_dir.glob("pit_*.csv"):
+        stem = path.stem
+        parts = stem.split("_", 1)
+        if len(parts) != 2:
+            continue
+        raw = parts[1]
+        if len(raw) != 8 or not raw.isdigit():
+            continue
+        try:
+            parsed = datetime.strptime(raw, "%Y%m%d").date().isoformat()
+        except ValueError:
+            continue
+        if latest is None or parsed > latest:
+            latest = parsed
+    return latest
+
+
 def _coerce_bool(value: Any) -> bool | None:
     if value is None:
         return None
@@ -252,10 +274,11 @@ def _build_decision_configs(
 
     weights_payload["record_universe"] = True
     weights_payload["output_dir"] = str(output_dir)
-    if snapshot_date:
-        weights_payload["backtest_start"] = snapshot_date
-        pit_rebalance_end = _resolve_pit_rebalance_end(snapshot_date)
-        weights_payload["backtest_end"] = pit_rebalance_end or snapshot_date
+    effective_snapshot = snapshot_date or _resolve_latest_pit_snapshot()
+    if effective_snapshot:
+        weights_payload["backtest_start"] = effective_snapshot
+        pit_rebalance_end = _resolve_pit_rebalance_end(effective_snapshot)
+        weights_payload["backtest_end"] = pit_rebalance_end or effective_snapshot
 
     weights_payload = _apply_algorithm_params(weights_payload, algo_params)
 

@@ -138,6 +138,12 @@ def list_trade_runs(limit: int = Query(20, ge=1, le=200), offset: int = Query(0,
             .limit(limit)
             .all()
         )
+        updated = False
+        for run in runs:
+            if trade_executor.refresh_trade_run_status(session, run):
+                updated = True
+        if updated:
+            session.commit()
         return [TradeRunOut.model_validate(run, from_attributes=True) for run in runs]
 
 
@@ -163,6 +169,8 @@ def get_trade_run_detail(
             )
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if trade_executor.refresh_trade_run_status(session, run):
+            session.commit()
         return TradeRunDetailOut(
             run=TradeRunOut.model_validate(run, from_attributes=True),
             orders=[TradeOrderOut.model_validate(order, from_attributes=True) for order in orders],

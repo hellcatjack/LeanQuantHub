@@ -2216,32 +2216,34 @@ export default function LiveTradePage() {
         {accountSummaryFullError && <div className="form-hint">{accountSummaryFullError}</div>}
         <details style={{ marginTop: "12px" }}>
           <summary>{t("trade.accountSummaryFullTitle")}</summary>
-          <table className="table" style={{ marginTop: "8px" }}>
-            <thead>
-              <tr>
-                <th>{t("trade.accountSummaryTag")}</th>
-                <th>{t("trade.accountSummaryValue")}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {accountSummaryFullItems.length ? (
-                accountSummaryFullItems.map(([key, value]) => (
-                  <tr key={key}>
-                    <td>{resolveAccountSummaryLabel(key, accountSummaryTagMap)}</td>
-                    <td>{formatAccountValue(value)}</td>
-                  </tr>
-                ))
-              ) : (
+          <div className="table-scroll" style={{ marginTop: "8px" }}>
+            <table className="table">
+              <thead>
                 <tr>
-                  <td colSpan={2} className="empty-state">
-                    {accountSummaryFullLoading
-                      ? t("common.actions.loading")
-                      : t("trade.accountSummaryFullEmpty")}
-                  </td>
+                  <th>{t("trade.accountSummaryTag")}</th>
+                  <th>{t("trade.accountSummaryValue")}</th>
                 </tr>
-              )}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {accountSummaryFullItems.length ? (
+                  accountSummaryFullItems.map(([key, value]) => (
+                    <tr key={key}>
+                      <td>{resolveAccountSummaryLabel(key, accountSummaryTagMap)}</td>
+                      <td>{formatAccountValue(value)}</td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={2} className="empty-state">
+                      {accountSummaryFullLoading
+                        ? t("common.actions.loading")
+                        : t("trade.accountSummaryFullEmpty")}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         </details>
       </div>
     ),
@@ -2436,12 +2438,14 @@ export default function LiveTradePage() {
           <button
             className={detailTab === "orders" ? "button-primary" : "button-secondary"}
             onClick={() => setDetailTab("orders")}
+            data-testid="trade-tab-orders"
           >
             {t("trade.ordersTitle")}
           </button>
           <button
             className={detailTab === "fills" ? "button-primary" : "button-secondary"}
             onClick={() => setDetailTab("fills")}
+            data-testid="trade-tab-fills"
           >
             {t("trade.fillsTitle")}
           </button>
@@ -2451,46 +2455,49 @@ export default function LiveTradePage() {
               setDetailTab("receipts");
               loadTradeReceipts();
             }}
+            data-testid="trade-tab-receipts"
           >
             {t("trade.receiptsTitle")}
           </button>
         </div>
         {detailTab === "orders" ? (
           <>
-            <table className="table" style={{ marginTop: "12px" }}>
-              <thead>
-                <tr>
-                  <th>{t("trade.orderTable.id")}</th>
-                  <th>{t("trade.orderTable.clientOrderId")}</th>
-                  <th>{t("trade.orderTable.symbol")}</th>
-                  <th>{t("trade.orderTable.side")}</th>
-                  <th>{t("trade.orderTable.qty")}</th>
-                  <th>{t("trade.orderTable.status")}</th>
-                  <th>{t("trade.orderTable.createdAt")}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {tradeOrders.length ? (
-                  tradeOrders.map((order) => (
-                    <tr key={order.id}>
-                      <td>#{order.id}</td>
-                      <td>{order.client_order_id || t("common.none")}</td>
-                      <td>{order.symbol || t("common.none")}</td>
-                      <td>{formatSide(order.side)}</td>
-                      <td>{order.quantity ?? t("common.none")}</td>
-                      <td>{formatStatus(order.status)}</td>
-                      <td>{formatDateTime(order.created_at)}</td>
-                    </tr>
-                  ))
-                ) : (
+            <div className="table-scroll" style={{ marginTop: "12px" }}>
+              <table className="table" data-testid="trade-orders-table">
+                <thead>
                   <tr>
-                    <td colSpan={7} className="empty-state">
-                      {t("trade.orderEmpty")}
-                    </td>
+                    <th>{t("trade.orderTable.id")}</th>
+                    <th>{t("trade.orderTable.clientOrderId")}</th>
+                    <th>{t("trade.orderTable.symbol")}</th>
+                    <th>{t("trade.orderTable.side")}</th>
+                    <th>{t("trade.orderTable.qty")}</th>
+                    <th>{t("trade.orderTable.status")}</th>
+                    <th>{t("trade.orderTable.createdAt")}</th>
                   </tr>
-                )}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {tradeOrders.length ? (
+                    tradeOrders.map((order) => (
+                      <tr key={order.id}>
+                        <td>#{order.id}</td>
+                        <td>{order.client_order_id || t("common.none")}</td>
+                        <td>{order.symbol || t("common.none")}</td>
+                        <td>{formatSide(order.side)}</td>
+                        <td>{order.quantity ?? t("common.none")}</td>
+                        <td>{formatStatus(order.status)}</td>
+                        <td>{formatDateTime(order.created_at)}</td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan={7} className="empty-state">
+                        {t("trade.orderEmpty")}
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
             <PaginationBar
               page={ordersPage}
               pageSize={ordersPageSize}
@@ -2501,40 +2508,42 @@ export default function LiveTradePage() {
             />
           </>
         ) : detailTab === "fills" ? (
-          <table className="table" style={{ marginTop: "12px" }}>
-            <thead>
-              <tr>
-                <th>{t("trade.fillTable.orderId")}</th>
-                <th>{t("trade.fillTable.execId")}</th>
-                <th>{t("trade.fillTable.qty")}</th>
-                <th>{t("trade.fillTable.price")}</th>
-                <th>{t("trade.fillTable.commission")}</th>
-                <th>{t("trade.fillTable.exchange")}</th>
-                <th>{t("trade.fillTable.time")}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {runDetail?.fills?.length ? (
-                runDetail.fills.map((fill) => (
-                  <tr key={fill.id}>
-                    <td>#{fill.order_id}</td>
-                    <td>{fill.exec_id || t("common.none")}</td>
-                    <td>{formatNumber(fill.fill_quantity, 2)}</td>
-                    <td>{formatNumber(fill.fill_price, 4)}</td>
-                    <td>{formatNumber(fill.commission ?? null, 4)}</td>
-                    <td>{fill.exchange || t("common.none")}</td>
-                    <td>{fill.fill_time ? formatDateTime(fill.fill_time) : t("common.none")}</td>
-                  </tr>
-                ))
-              ) : (
+          <div className="table-scroll" style={{ marginTop: "12px" }}>
+            <table className="table" data-testid="trade-fills-table">
+              <thead>
                 <tr>
-                  <td colSpan={7} className="empty-state">
-                    {t("trade.fillsEmpty")}
-                  </td>
+                  <th>{t("trade.fillTable.orderId")}</th>
+                  <th>{t("trade.fillTable.execId")}</th>
+                  <th>{t("trade.fillTable.qty")}</th>
+                  <th>{t("trade.fillTable.price")}</th>
+                  <th>{t("trade.fillTable.commission")}</th>
+                  <th>{t("trade.fillTable.exchange")}</th>
+                  <th>{t("trade.fillTable.time")}</th>
                 </tr>
-              )}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {runDetail?.fills?.length ? (
+                  runDetail.fills.map((fill) => (
+                    <tr key={fill.id}>
+                      <td>#{fill.order_id}</td>
+                      <td>{fill.exec_id || t("common.none")}</td>
+                      <td>{formatNumber(fill.fill_quantity, 2)}</td>
+                      <td>{formatNumber(fill.fill_price, 4)}</td>
+                      <td>{formatNumber(fill.commission ?? null, 4)}</td>
+                      <td>{fill.exchange || t("common.none")}</td>
+                      <td>{fill.fill_time ? formatDateTime(fill.fill_time) : t("common.none")}</td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={7} className="empty-state">
+                      {t("trade.fillsEmpty")}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         ) : (
           <>
             {receiptsError && <div className="form-hint">{receiptsError}</div>}
@@ -2543,52 +2552,50 @@ export default function LiveTradePage() {
                 {label}
               </div>
             ))}
-            <table
-              className="table"
-              style={{ marginTop: "12px" }}
-              data-testid="trade-receipts-table"
-            >
-              <thead>
-                <tr>
-                  <th>{t("trade.receiptTable.time")}</th>
-                  <th>{t("trade.receiptTable.kind")}</th>
-                  <th>{t("trade.receiptTable.orderId")}</th>
-                  <th>{t("trade.receiptTable.clientOrderId")}</th>
-                  <th>{t("trade.receiptTable.symbol")}</th>
-                  <th>{t("trade.receiptTable.side")}</th>
-                  <th>{t("trade.receiptTable.qty")}</th>
-                  <th>{t("trade.receiptTable.filledQty")}</th>
-                  <th>{t("trade.receiptTable.fillPrice")}</th>
-                  <th>{t("trade.receiptTable.status")}</th>
-                  <th>{t("trade.receiptTable.source")}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {tradeReceipts.length ? (
-                  tradeReceipts.map((receipt, index) => (
-                    <tr key={`${receipt.source}-${receipt.order_id || "na"}-${index}`}>
-                      <td>{receipt.time ? formatDateTime(receipt.time) : t("common.none")}</td>
-                      <td>{formatReceiptKind(receipt.kind)}</td>
-                      <td>{receipt.order_id ? `#${receipt.order_id}` : t("common.none")}</td>
-                      <td>{receipt.client_order_id || t("common.none")}</td>
-                      <td>{receipt.symbol || t("common.none")}</td>
-                      <td>{formatSide(receipt.side)}</td>
-                      <td>{formatNumber(receipt.quantity ?? null)}</td>
-                      <td>{formatNumber(receipt.filled_quantity ?? null)}</td>
-                      <td>{formatNumber(receipt.fill_price ?? null)}</td>
-                      <td>{receipt.status ? formatStatus(receipt.status) : t("common.none")}</td>
-                      <td>{formatReceiptSource(receipt.source)}</td>
-                    </tr>
-                  ))
-                ) : (
+            <div className="table-scroll" style={{ marginTop: "12px" }}>
+              <table className="table" data-testid="trade-receipts-table">
+                <thead>
                   <tr>
-                    <td colSpan={11} className="empty-state">
-                      {receiptsLoading ? t("common.actions.loading") : t("trade.receiptsEmpty")}
-                    </td>
+                    <th>{t("trade.receiptTable.time")}</th>
+                    <th>{t("trade.receiptTable.kind")}</th>
+                    <th>{t("trade.receiptTable.orderId")}</th>
+                    <th>{t("trade.receiptTable.clientOrderId")}</th>
+                    <th>{t("trade.receiptTable.symbol")}</th>
+                    <th>{t("trade.receiptTable.side")}</th>
+                    <th>{t("trade.receiptTable.qty")}</th>
+                    <th>{t("trade.receiptTable.filledQty")}</th>
+                    <th>{t("trade.receiptTable.fillPrice")}</th>
+                    <th>{t("trade.receiptTable.status")}</th>
+                    <th>{t("trade.receiptTable.source")}</th>
                   </tr>
-                )}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {tradeReceipts.length ? (
+                    tradeReceipts.map((receipt, index) => (
+                      <tr key={`${receipt.source}-${receipt.order_id || "na"}-${index}`}>
+                        <td>{receipt.time ? formatDateTime(receipt.time) : t("common.none")}</td>
+                        <td>{formatReceiptKind(receipt.kind)}</td>
+                        <td>{receipt.order_id ? `#${receipt.order_id}` : t("common.none")}</td>
+                        <td>{receipt.client_order_id || t("common.none")}</td>
+                        <td>{receipt.symbol || t("common.none")}</td>
+                        <td>{formatSide(receipt.side)}</td>
+                        <td>{formatNumber(receipt.quantity ?? null)}</td>
+                        <td>{formatNumber(receipt.filled_quantity ?? null)}</td>
+                        <td>{formatNumber(receipt.fill_price ?? null)}</td>
+                        <td>{receipt.status ? formatStatus(receipt.status) : t("common.none")}</td>
+                        <td>{formatReceiptSource(receipt.source)}</td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan={11} className="empty-state">
+                        {receiptsLoading ? t("common.actions.loading") : t("trade.receiptsEmpty")}
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
             <PaginationBar
               page={receiptsPage}
               pageSize={receiptsPageSize}
@@ -3141,51 +3148,53 @@ export default function LiveTradePage() {
           </button>
         </div>
         {ibHistoryJobs.length > 0 ? (
-          <table className="table" style={{ marginTop: "12px" }}>
-            <thead>
-              <tr>
-                <th>{t("common.labels.id")}</th>
-                <th>{t("common.labels.status")}</th>
-                <th>{t("data.ib.historyProgress")}</th>
-                <th>{t("data.ib.historySuccess")}</th>
-                <th>{t("common.labels.createdAt")}</th>
-                <th>{t("common.labels.actions")}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {ibHistoryJobs.map((job) => {
-                const total = job.total_symbols ?? 0;
-                const processed = job.processed_symbols ?? 0;
-                const success = job.success_symbols ?? 0;
-                const failed = job.failed_symbols ?? 0;
-                const canCancel = ["queued", "running"].includes(job.status);
-                return (
-                  <tr key={job.id}>
-                    <td>{job.id}</td>
-                    <td>{formatStatus(job.status)}</td>
-                    <td>
-                      {processed}/{total}
-                    </td>
-                    <td>
-                      {success}/{failed}
-                    </td>
-                    <td>{formatDateTime(job.created_at)}</td>
-                    <td>
-                      <div className="table-actions">
-                        <button
-                          className="button-link"
-                          disabled={!canCancel || ibHistoryActionLoading}
-                          onClick={() => cancelIbHistoryJob(job.id)}
-                        >
-                          {t("data.ib.historyCancel")}
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+          <div className="table-scroll" style={{ marginTop: "12px" }}>
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>{t("common.labels.id")}</th>
+                  <th>{t("common.labels.status")}</th>
+                  <th>{t("data.ib.historyProgress")}</th>
+                  <th>{t("data.ib.historySuccess")}</th>
+                  <th>{t("common.labels.createdAt")}</th>
+                  <th>{t("common.labels.actions")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {ibHistoryJobs.map((job) => {
+                  const total = job.total_symbols ?? 0;
+                  const processed = job.processed_symbols ?? 0;
+                  const success = job.success_symbols ?? 0;
+                  const failed = job.failed_symbols ?? 0;
+                  const canCancel = ["queued", "running"].includes(job.status);
+                  return (
+                    <tr key={job.id}>
+                      <td>{job.id}</td>
+                      <td>{formatStatus(job.status)}</td>
+                      <td>
+                        {processed}/{total}
+                      </td>
+                      <td>
+                        {success}/{failed}
+                      </td>
+                      <td>{formatDateTime(job.created_at)}</td>
+                      <td>
+                        <div className="table-actions">
+                          <button
+                            className="button-link"
+                            disabled={!canCancel || ibHistoryActionLoading}
+                            onClick={() => cancelIbHistoryJob(job.id)}
+                          >
+                            {t("data.ib.historyCancel")}
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         ) : (
           <div className="empty-state">{t("data.ib.historyEmpty")}</div>
         )}
@@ -3307,44 +3316,46 @@ export default function LiveTradePage() {
         </div>
         {tradeSettingsError && <div className="form-hint">{tradeSettingsError}</div>}
         {tradeError && <div className="form-hint">{tradeError}</div>}
-        <table className="table" style={{ marginTop: "12px" }}>
-          <thead>
-            <tr>
-              <th>{t("trade.runTable.id")}</th>
-              <th>{t("trade.runTable.status")}</th>
-              <th>{t("trade.runTable.mode")}</th>
-              <th>{t("trade.runTable.snapshot")}</th>
-              <th>{t("trade.runTable.createdAt")}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filteredTradeRuns.length ? (
-              filteredTradeRuns.map((run) => (
-                <tr key={run.id}>
-                  <td>
-                    <IdChip label={t("trade.id.run")} value={run.id} />
-                  </td>
-                  <td>{formatStatus(run.status)}</td>
-                  <td>{formatRunMode(run.mode)}</td>
-                  <td>
-                    {run.decision_snapshot_id ? (
-                      <IdChip label={t("trade.id.snapshot")} value={run.decision_snapshot_id} />
-                    ) : (
-                      t("common.none")
-                    )}
-                  </td>
-                  <td>{formatDateTime(run.created_at)}</td>
-                </tr>
-              ))
-            ) : (
+        <div className="table-scroll" style={{ marginTop: "12px" }}>
+          <table className="table" data-testid="trade-runs-table">
+            <thead>
               <tr>
-                <td colSpan={5} className="empty-state">
-                  {t("trade.runEmpty")}
-                </td>
+                <th>{t("trade.runTable.id")}</th>
+                <th>{t("trade.runTable.status")}</th>
+                <th>{t("trade.runTable.mode")}</th>
+                <th>{t("trade.runTable.snapshot")}</th>
+                <th>{t("trade.runTable.createdAt")}</th>
               </tr>
-            )}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {filteredTradeRuns.length ? (
+                filteredTradeRuns.map((run) => (
+                  <tr key={run.id}>
+                    <td>
+                      <IdChip label={t("trade.id.run")} value={run.id} />
+                    </td>
+                    <td>{formatStatus(run.status)}</td>
+                    <td>{formatRunMode(run.mode)}</td>
+                    <td>
+                      {run.decision_snapshot_id ? (
+                        <IdChip label={t("trade.id.snapshot")} value={run.decision_snapshot_id} />
+                      ) : (
+                        t("common.none")
+                      )}
+                    </td>
+                    <td>{formatDateTime(run.created_at)}</td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td colSpan={5} className="empty-state">
+                    {t("trade.runEmpty")}
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
         <div style={{ display: "flex", gap: "10px", flexWrap: "wrap", marginTop: "12px" }}>
           <button
             className="button-secondary"
@@ -3455,48 +3466,50 @@ export default function LiveTradePage() {
         </div>
         <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
         </div>
-        <table className="table" style={{ marginTop: "12px" }}>
-          <thead>
-            <tr>
-              <th>{t("trade.symbolTable.symbol")}</th>
-              <th>{t("trade.symbolTable.targetWeight")}</th>
-              <th>{t("trade.symbolTable.targetValue")}</th>
-              <th>{t("trade.symbolTable.filledQty")}</th>
-              <th>{t("trade.symbolTable.avgPrice")}</th>
-              <th>{t("trade.symbolTable.filledValue")}</th>
-              <th>{t("trade.symbolTable.pendingQty")}</th>
-              <th>{t("trade.symbolTable.deltaValue")}</th>
-              <th>{t("trade.symbolTable.deltaWeight")}</th>
-              <th>{t("trade.symbolTable.fillRatio")}</th>
-              <th>{t("trade.symbolTable.status")}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {symbolSummary.length ? (
-              symbolSummary.map((row) => (
-                <tr key={row.symbol}>
-                  <td>{row.symbol}</td>
-                  <td>{formatPercent(row.target_weight ?? null)}</td>
-                  <td>{formatNumber(row.target_value ?? null)}</td>
-                  <td>{formatNumber(row.filled_qty ?? 0, 2)}</td>
-                  <td>{formatNumber(row.avg_fill_price ?? null)}</td>
-                  <td>{formatNumber(row.filled_value ?? 0)}</td>
-                  <td>{formatNumber(row.pending_qty ?? 0, 2)}</td>
-                  <td>{formatNumber(row.delta_value ?? null)}</td>
-                  <td>{formatPercent(row.delta_weight ?? null)}</td>
-                  <td>{formatPercent(row.fill_ratio ?? null)}</td>
-                  <td>{row.last_status ? formatStatus(row.last_status) : t("common.none")}</td>
-                </tr>
-              ))
-            ) : (
+        <div className="table-scroll" style={{ marginTop: "12px" }}>
+          <table className="table" data-testid="trade-symbol-summary-table">
+            <thead>
               <tr>
-                <td colSpan={11} className="empty-state">
-                  {detailLoading ? t("common.actions.loading") : t("trade.symbolSummaryEmpty")}
-                </td>
+                <th>{t("trade.symbolTable.symbol")}</th>
+                <th>{t("trade.symbolTable.targetWeight")}</th>
+                <th>{t("trade.symbolTable.targetValue")}</th>
+                <th>{t("trade.symbolTable.filledQty")}</th>
+                <th>{t("trade.symbolTable.avgPrice")}</th>
+                <th>{t("trade.symbolTable.filledValue")}</th>
+                <th>{t("trade.symbolTable.pendingQty")}</th>
+                <th>{t("trade.symbolTable.deltaValue")}</th>
+                <th>{t("trade.symbolTable.deltaWeight")}</th>
+                <th>{t("trade.symbolTable.fillRatio")}</th>
+                <th>{t("trade.symbolTable.status")}</th>
               </tr>
-            )}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {symbolSummary.length ? (
+                symbolSummary.map((row) => (
+                  <tr key={row.symbol}>
+                    <td>{row.symbol}</td>
+                    <td>{formatPercent(row.target_weight ?? null)}</td>
+                    <td>{formatNumber(row.target_value ?? null)}</td>
+                    <td>{formatNumber(row.filled_qty ?? 0, 2)}</td>
+                    <td>{formatNumber(row.avg_fill_price ?? null)}</td>
+                    <td>{formatNumber(row.filled_value ?? 0)}</td>
+                    <td>{formatNumber(row.pending_qty ?? 0, 2)}</td>
+                    <td>{formatNumber(row.delta_value ?? null)}</td>
+                    <td>{formatPercent(row.delta_weight ?? null)}</td>
+                    <td>{formatPercent(row.fill_ratio ?? null)}</td>
+                    <td>{row.last_status ? formatStatus(row.last_status) : t("common.none")}</td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td colSpan={11} className="empty-state">
+                    {detailLoading ? t("common.actions.loading") : t("trade.symbolSummaryEmpty")}
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
     ),
   };

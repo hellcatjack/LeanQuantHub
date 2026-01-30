@@ -19,6 +19,23 @@ def _parse_iso(ts: str | None) -> datetime | None:
     if not ts:
         return None
     text = ts.replace("Z", "+00:00")
+    if "." in text:
+        head, tail = text.split(".", 1)
+        tz = ""
+        tz_index = None
+        for sep in ("+", "-"):
+            idx = tail.find(sep)
+            if idx > 0:
+                tz_index = idx
+                break
+        if tz_index is not None:
+            frac = tail[:tz_index]
+            tz = tail[tz_index:]
+        else:
+            frac = tail
+        if len(frac) > 6:
+            frac = frac[:6]
+        text = f"{head}.{frac}{tz}"
     try:
         value = datetime.fromisoformat(text)
     except ValueError:
