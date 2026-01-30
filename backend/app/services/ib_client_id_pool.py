@@ -42,7 +42,21 @@ def _ensure_pool(session, *, mode: str) -> None:
     session.commit()
 
 
+def _build_worker_order_by(dialect_name: str | None):
+    name = str(dialect_name or "").lower()
+    if name in {"mysql", "mariadb"}:
+        return (
+            LeanExecutorPool.last_order_at.asc(),
+            LeanExecutorPool.client_id.asc(),
+        )
+    return (
+        LeanExecutorPool.last_order_at.asc().nullsfirst(),
+        LeanExecutorPool.client_id.asc(),
+    )
+
+
 def select_worker_client_id(session, *, mode: str) -> int | None:
+    dialect_name = session.bind.dialect.name if session.bind else None
     query = (
         session.query(LeanExecutorPool)
         .filter(
@@ -51,10 +65,7 @@ def select_worker_client_id(session, *, mode: str) -> int | None:
                 LeanExecutorPool.role == "worker",
             )
         )
-        .order_by(
-            LeanExecutorPool.last_order_at.asc().nullsfirst(),
-            LeanExecutorPool.client_id.asc(),
-        )
+        .order_by(*_build_worker_order_by(dialect_name))
     )
     worker = query.first()
     if worker is None:
