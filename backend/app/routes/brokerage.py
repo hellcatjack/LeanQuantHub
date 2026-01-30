@@ -50,7 +50,7 @@ from app.services.ib_account import get_account_summary, get_account_positions
 from app.services.project_symbols import collect_active_project_symbols
 from app.services.lean_bridge_paths import resolve_bridge_root
 from app.services.lean_bridge_reader import read_bridge_status, read_quotes
-from app.models import IBContractCache, IBHistoryJob
+from app.models import IBContractCache, IBHistoryJob, LeanExecutorPool
 
 router = APIRouter(prefix="/api/brokerage", tags=["brokerage"])
 
@@ -65,6 +65,40 @@ def _mask_account(value: str | None) -> str | None:
     if len(value) <= 4:
         return "*" * len(value)
     return f"{value[:2]}***{value[-2:]}"
+
+
+def _fetch_lean_pool_status(session, *, mode: str) -> list[dict]:
+    if session is None:
+        return []
+    rows = (
+        session.query(LeanExecutorPool)
+        .filter(LeanExecutorPool.mode == mode)
+        .order_by(LeanExecutorPool.role.asc(), LeanExecutorPool.client_id.asc())
+        .all()
+    )
+    return [
+        {
+            "client_id": row.client_id,
+            "role": row.role,
+            "status": row.status,
+            "pid": row.pid,
+            "last_heartbeat": row.last_heartbeat,
+            "last_order_at": row.last_order_at,
+            "output_dir": row.output_dir,
+            "last_error": row.last_error,
+        }
+        for row in rows
+    ]
+
+
+def _pool_action_response(*, action: str, mode: str, message: str | None = None) -> dict:
+    return {
+        "action": action,
+        "mode": mode,
+        "status": "ok",
+        "message": message,
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+    }
 
 
 @router.get("/settings", response_model=IBSettingsOut)
@@ -430,3 +464,29 @@ def cancel_ib_history_job_route(job_id: int):
         session.commit()
         session.refresh(job)
         return IBHistoryJobOut.model_validate(job, from_attributes=True)
+
+
+@router.get("/lean/pool/status")
+def get_lean_pool_status(mode: str = Query("paper")):
+    mode = str(mode or "paper").strip().lower() or "paper"
+    with get_session() as session:
+        items = _fetch_lean_pool_status(session, mode=mode)
+    return {"mode": mode, "count": len(items), "items": items}
+
+
+@router.post("/lean/pool/restart")
+def restart_lean_pool(mode: str = Query("paper")):
+    mode = str(mode or "paper").strip().lower() or "paper"
+    return _pool_action_response(action="restart", mode=mode)
+
+
+@router.post("/lean/pool/leader/switch")
+def switch_lean_pool_leader(mode: str = Query("paper")):
+    mode = str(mode or "paper").strip().lower() or "paper"
+    return _pool_action_response(action="leader_switch", mode=mode)
+
+
+@router.post("/lean/pool/reset")
+def reset_lean_pool(mode: str = Query("paper")):
+    mode = str(mode or "paper").strip().lower() or "paper"
+    return _pool_action_response(action="reset", mode=mode)
