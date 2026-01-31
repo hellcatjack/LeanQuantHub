@@ -162,10 +162,22 @@ test("live trade main row keeps positions widest", async ({ page }) => {
     const cards = Array.from(document.querySelectorAll(".live-trade-main-row .card"));
     return cards.slice(0, 3).map((card) => Math.round(card.getBoundingClientRect().width));
   });
+  const contentWidths = await page.evaluate(() => {
+    const cards = Array.from(document.querySelectorAll(".live-trade-main-row .card"));
+    return cards.slice(0, 3).map((card) => {
+      const styles = window.getComputedStyle(card);
+      const paddingLeft = parseFloat(styles.paddingLeft) || 0;
+      const paddingRight = parseFloat(styles.paddingRight) || 0;
+      return Math.round(card.clientWidth - paddingLeft - paddingRight);
+    });
+  });
   expect(widths.length).toBeGreaterThanOrEqual(3);
+  expect(contentWidths.length).toBeGreaterThanOrEqual(3);
   expect(widths[0]).toBeGreaterThanOrEqual(280);
   expect(widths[1]).toBeGreaterThanOrEqual(280);
   expect(widths[2]).toBeGreaterThan(widths[0]);
+  expect(contentWidths[0]).toBeGreaterThanOrEqual(280);
+  expect(contentWidths[1]).toBeGreaterThanOrEqual(280);
 });
 
 test("refresh all forces bridge refresh", async ({ page }) => {
