@@ -23,6 +23,12 @@ import {
   type RefreshKey,
 } from "../utils/liveTradeRefreshScheduler";
 import { refreshAllWithBridgeForce } from "../utils/liveTradeRefreshAll";
+import {
+  getBridgeRefreshHintKey,
+  getHeartbeatAgeSeconds,
+  getNextAllowedRefreshAt,
+  resolveConnectionReasonKey,
+} from "../utils/bridgeStatusExplain";
 
 interface IBSettings {
   id: number;
@@ -1607,6 +1613,49 @@ export default function LiveTradePage() {
     accountSummary?.refreshed_at,
   ]);
 
+  const bridgeHeartbeatAge = useMemo(() => {
+    return getHeartbeatAgeSeconds(
+      bridgeStatus?.last_heartbeat || bridgeStatus?.updated_at || null
+    );
+  }, [bridgeStatus?.last_heartbeat, bridgeStatus?.updated_at]);
+
+  const connectionReason = useMemo(() => {
+    const key = resolveConnectionReasonKey(ibState?.message || null);
+    if (key) {
+      return t(key);
+    }
+    if (ibState?.message) {
+      return ibState.message;
+    }
+    return t("trade.statusReason.unknown");
+  }, [ibState?.message, t]);
+
+  const bridgeRefreshHint = useMemo(() => {
+    const result = bridgeStatus?.last_refresh_result || null;
+    const reason = bridgeStatus?.last_refresh_reason || null;
+    const key = getBridgeRefreshHintKey(result, reason);
+    if (key === "trade.refreshHint.generic") {
+      return t(key, {
+        result: formatBridgeRefreshResult(result),
+        reason: formatBridgeRefreshReason(reason),
+      });
+    }
+    return t(key);
+  }, [
+    bridgeStatus?.last_refresh_result,
+    bridgeStatus?.last_refresh_reason,
+    formatBridgeRefreshResult,
+    formatBridgeRefreshReason,
+    t,
+  ]);
+
+  const bridgeRefreshNextAllowedAt = useMemo(() => {
+    if (bridgeStatus?.last_refresh_reason !== "rate_limited") {
+      return null;
+    }
+    return getNextAllowedRefreshAt(bridgeStatus?.last_refresh_at || null);
+  }, [bridgeStatus?.last_refresh_at, bridgeStatus?.last_refresh_reason]);
+
   const positionsStale = useMemo(() => {
     if (accountPositionsStale) {
       return true;
@@ -2036,6 +2085,53 @@ export default function LiveTradePage() {
               <strong>{ibState.message}</strong>
             </div>
           )}
+        </div>
+        <div className="card-subsection" style={{ marginTop: "12px" }}>
+          <div className="form-label">{t("trade.statusExplainTitle")}</div>
+          <div className="meta-list" style={{ marginTop: "8px" }}>
+            <div className="meta-row">
+              <span>{t("trade.statusExplainConnection")}</span>
+              <strong>{statusLabel}</strong>
+            </div>
+            <div className="form-hint">{connectionReason}</div>
+            <div className="meta-row" style={{ marginTop: "10px" }}>
+              <span>{t("trade.statusExplainDataSource")}</span>
+              <strong>{bridgeStatusLabel}</strong>
+            </div>
+            <div className="form-hint">
+              {bridgeHeartbeatAge === null
+                ? t("common.none")
+                : t("trade.statusExplainHeartbeatAge", { seconds: bridgeHeartbeatAge })}
+              {bridgeStatus?.last_heartbeat && (
+                <span style={{ marginLeft: "8px" }}>
+                  {t("trade.statusExplainLastHeartbeat", {
+                    time: formatDateTime(bridgeStatus.last_heartbeat),
+                  })}
+                </span>
+              )}
+            </div>
+            <div className="meta-row" style={{ marginTop: "10px" }}>
+              <span>{t("trade.statusExplainRefresh")}</span>
+              <strong>{formatBridgeRefreshResult(bridgeStatus?.last_refresh_result)}</strong>
+            </div>
+            <div className="form-hint">
+              {bridgeRefreshHint}
+              {bridgeStatus?.last_refresh_at && (
+                <span style={{ marginLeft: "8px" }}>
+                  {t("trade.statusExplainLastRefresh", {
+                    time: formatDateTime(bridgeStatus.last_refresh_at),
+                  })}
+                </span>
+              )}
+              {bridgeRefreshNextAllowedAt && (
+                <span style={{ marginLeft: "8px" }}>
+                  {t("trade.statusExplainNextAllowed", {
+                    time: formatDateTime(bridgeRefreshNextAllowedAt),
+                  })}
+                </span>
+              )}
+            </div>
+          </div>
         </div>
         {ibStateResult && <div className="form-success">{ibStateResult}</div>}
         {ibStateError && <div className="form-error">{ibStateError}</div>}
