@@ -33,6 +33,7 @@ import {
   formatBridgeRefreshResult,
   getBridgeRefreshHint,
 } from "../utils/bridgeRefreshHint";
+import { formatRealizedPnlValue } from "../utils/formatters";
 
 interface IBSettings {
   id: number;
@@ -191,16 +192,20 @@ interface TradeOrder {
   side: string;
   quantity: number;
   status: string;
+  realized_pnl?: number | null;
   created_at: string;
 }
 
 interface TradeFillDetail {
   id: number;
   order_id: number;
+  symbol?: string | null;
+  side?: string | null;
   exec_id?: string | null;
   fill_quantity: number;
   fill_price: number;
   commission?: number | null;
+  realized_pnl?: number | null;
   fill_time?: string | null;
   currency?: string | null;
   exchange?: string | null;
@@ -218,6 +223,8 @@ interface TradeReceipt {
   fill_price?: number | null;
   exec_id?: string | null;
   status?: string | null;
+  commission?: number | null;
+  realized_pnl?: number | null;
   source: string;
 }
 
@@ -1901,10 +1908,7 @@ export default function LiveTradePage() {
   };
 
   const formatRealizedPnl = (value?: number | null) => {
-    if (value === null || value === undefined) {
-      return t("trade.positionTable.realizedMissing");
-    }
-    return formatNumber(value);
+    return formatRealizedPnlValue(value ?? null, t("trade.positionTable.realizedMissing"));
   };
 
   const formatPercent = (value?: number | null, digits = 2) => {
@@ -2574,6 +2578,7 @@ export default function LiveTradePage() {
                     <th>{t("trade.orderTable.symbol")}</th>
                     <th>{t("trade.orderTable.side")}</th>
                     <th>{t("trade.orderTable.qty")}</th>
+                    <th>{t("trade.orderTable.realizedPnl")}</th>
                     <th>{t("trade.orderTable.status")}</th>
                     <th>{t("trade.orderTable.createdAt")}</th>
                   </tr>
@@ -2587,13 +2592,14 @@ export default function LiveTradePage() {
                         <td>{order.symbol || t("common.none")}</td>
                         <td>{formatSide(order.side)}</td>
                         <td>{order.quantity ?? t("common.none")}</td>
+                        <td>{formatNumber(order.realized_pnl ?? null)}</td>
                         <td>{formatStatus(order.status)}</td>
                         <td>{formatDateTime(order.created_at)}</td>
                       </tr>
                     ))
                   ) : (
                     <tr>
-                      <td colSpan={7} className="empty-state">
+                      <td colSpan={8} className="empty-state">
                         {t("trade.orderEmpty")}
                       </td>
                     </tr>
@@ -2616,10 +2622,13 @@ export default function LiveTradePage() {
               <thead>
                 <tr>
                   <th>{t("trade.fillTable.orderId")}</th>
+                  <th>{t("trade.fillTable.symbol")}</th>
+                  <th>{t("trade.fillTable.side")}</th>
                   <th>{t("trade.fillTable.execId")}</th>
                   <th>{t("trade.fillTable.qty")}</th>
                   <th>{t("trade.fillTable.price")}</th>
                   <th>{t("trade.fillTable.commission")}</th>
+                  <th>{t("trade.fillTable.realizedPnl")}</th>
                   <th>{t("trade.fillTable.exchange")}</th>
                   <th>{t("trade.fillTable.time")}</th>
                 </tr>
@@ -2629,17 +2638,20 @@ export default function LiveTradePage() {
                   runDetail.fills.map((fill) => (
                     <tr key={fill.id}>
                       <td>#{fill.order_id}</td>
+                      <td>{fill.symbol || t("common.none")}</td>
+                      <td>{formatSide(fill.side)}</td>
                       <td>{fill.exec_id || t("common.none")}</td>
                       <td>{formatNumber(fill.fill_quantity, 2)}</td>
                       <td>{formatNumber(fill.fill_price, 4)}</td>
                       <td>{formatNumber(fill.commission ?? null, 4)}</td>
+                      <td>{formatNumber(fill.realized_pnl ?? null)}</td>
                       <td>{fill.exchange || t("common.none")}</td>
                       <td>{fill.fill_time ? formatDateTime(fill.fill_time) : t("common.none")}</td>
                     </tr>
                   ))
                 ) : (
                   <tr>
-                    <td colSpan={7} className="empty-state">
+                    <td colSpan={10} className="empty-state">
                       {t("trade.fillsEmpty")}
                     </td>
                   </tr>
@@ -2668,6 +2680,8 @@ export default function LiveTradePage() {
                     <th>{t("trade.receiptTable.qty")}</th>
                     <th>{t("trade.receiptTable.filledQty")}</th>
                     <th>{t("trade.receiptTable.fillPrice")}</th>
+                    <th>{t("trade.receiptTable.commission")}</th>
+                    <th>{t("trade.receiptTable.realizedPnl")}</th>
                     <th>{t("trade.receiptTable.status")}</th>
                     <th>{t("trade.receiptTable.source")}</th>
                   </tr>
@@ -2685,13 +2699,15 @@ export default function LiveTradePage() {
                         <td>{formatNumber(receipt.quantity ?? null)}</td>
                         <td>{formatNumber(receipt.filled_quantity ?? null)}</td>
                         <td>{formatNumber(receipt.fill_price ?? null)}</td>
+                        <td>{formatNumber(receipt.commission ?? null)}</td>
+                        <td>{formatNumber(receipt.realized_pnl ?? null)}</td>
                         <td>{receipt.status ? formatStatus(receipt.status) : t("common.none")}</td>
                         <td>{formatReceiptSource(receipt.source)}</td>
                       </tr>
                     ))
                   ) : (
                     <tr>
-                      <td colSpan={11} className="empty-state">
+                      <td colSpan={13} className="empty-state">
                         {receiptsLoading ? t("common.actions.loading") : t("trade.receiptsEmpty")}
                       </td>
                     </tr>
