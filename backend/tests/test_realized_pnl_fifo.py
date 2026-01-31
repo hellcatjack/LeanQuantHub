@@ -58,3 +58,43 @@ def test_fifo_realized_pnl_with_commission():
         assert round(result.order_totals[order.id], 6) == round(expected, 6)
     finally:
         session.close()
+
+
+def test_realized_pnl_accepts_naive_fill_time():
+    session = _make_session()
+    try:
+        baseline = {
+            "created_at": "2026-01-30T00:00:00Z",
+            "items": [{"symbol": "AAPL", "position": 5, "avg_cost": 100.0}],
+        }
+
+        order = TradeOrder(
+            run_id=None,
+            client_order_id="oi_0_0_2",
+            symbol="AAPL",
+            side="SELL",
+            quantity=2,
+            order_type="MKT",
+            status="FILLED",
+            filled_quantity=2,
+            avg_fill_price=110.0,
+        )
+        session.add(order)
+        session.flush()
+        fill = TradeFill(
+            order_id=order.id,
+            fill_quantity=2,
+            fill_price=110.0,
+            commission=0.4,
+            fill_time=datetime(2026, 1, 30, 0, 1),
+        )
+        session.add(fill)
+        session.commit()
+
+        result = compute_realized_pnl(session, baseline)
+        expected = (110 - 100) * 2 - 0.4
+        assert round(result.symbol_totals["AAPL"], 6) == round(expected, 6)
+        assert round(result.fill_totals[fill.id], 6) == round(expected, 6)
+        assert round(result.order_totals[order.id], 6) == round(expected, 6)
+    finally:
+        session.close()

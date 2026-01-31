@@ -171,6 +171,20 @@ def _select_snapshot_row(
     return rows_sorted[-1] if rows_sorted else None
 
 
+def _normalize_snapshot_row(
+    row: dict[str, str] | None, fallback_date: str | None
+) -> dict[str, str] | None:
+    if row is None:
+        return None
+    normalized = dict(row)
+    if fallback_date:
+        if not normalized.get("snapshot_date"):
+            normalized["snapshot_date"] = fallback_date
+        if not normalized.get("rebalance_date"):
+            normalized["rebalance_date"] = fallback_date
+    return normalized
+
+
 def _apply_algorithm_params(weights_cfg: dict[str, Any], algo_params: dict[str, Any]) -> dict[str, Any]:
     plugins = weights_cfg.get("backtest_plugins")
     if not isinstance(plugins, dict):
@@ -543,12 +557,13 @@ def generate_decision_snapshot(
     if not summary:
         raise RuntimeError("decision_snapshot_failed")
 
+    effective_snapshot = snapshot_date or _resolve_latest_pit_snapshot()
     snapshot_rows = _read_csv_rows(Path(summary.get("snapshot_summary_path") or ""))
-    snapshot_row = _select_snapshot_row(snapshot_rows, snapshot_date)
+    snapshot_row = _select_snapshot_row(snapshot_rows, snapshot_date or effective_snapshot)
     if not snapshot_row:
         snapshot_row = {
-            "snapshot_date": snapshot_date or "",
-            "rebalance_date": snapshot_date or "",
+            "snapshot_date": effective_snapshot or "",
+            "rebalance_date": effective_snapshot or "",
             "signal_mode": "",
             "score_date": "",
             "active_count": "0",
@@ -562,6 +577,7 @@ def generate_decision_snapshot(
             "turnover_scale": "",
             "max_exposure": "",
         }
+    snapshot_row = _normalize_snapshot_row(snapshot_row, effective_snapshot) or snapshot_row
 
     theme_map, theme_weights = collect_project_theme_map(config)
     listing_meta = _load_listing_meta(_resolve_data_root())

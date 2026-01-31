@@ -620,6 +620,14 @@ test("live trade shows id chips in execution context", async ({ page }) => {
       ]),
     })
   );
+  await page.route("**/api/trade/orders**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      headers: { "x-total-count": "0" },
+      body: JSON.stringify([]),
+    })
+  );
   await page.goto("/live-trade");
   await page.locator("details.algo-advanced > summary").click();
   await expect(

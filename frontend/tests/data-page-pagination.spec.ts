@@ -1,9 +1,7 @@
 import { test, expect } from "@playwright/test";
 
-const BASE_URL = process.env.E2E_BASE_URL || "http://127.0.0.1:4173";
-
 test("data page shows pagination bars for PIT and PreTrade", async ({ page }) => {
-  await page.goto(`${BASE_URL}/data`);
+  await page.goto("/data");
   await expect(page.getByText(/Data Management|数据管理/)).toBeVisible();
   await expect(
     page.getByText(/PIT (Weekly Snapshots|Weekly Job|周度快照|周度任务)/)

@@ -37,6 +37,14 @@ def _parse_time(value: str | None) -> datetime | None:
     return parsed
 
 
+def _ensure_aware(value: datetime | None) -> datetime | None:
+    if not value:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
 def compute_realized_pnl(session, baseline: dict) -> RealizedPnlResult:
     baseline_at = _parse_time(str(baseline.get("created_at") or ""))
     symbol_totals: dict[str, float] = {}
@@ -62,9 +70,10 @@ def compute_realized_pnl(session, baseline: dict) -> RealizedPnlResult:
     )
 
     def effective_time(fill: TradeFill) -> datetime | None:
-        return fill.fill_time or fill.created_at
+        return _ensure_aware(fill.fill_time or fill.created_at)
 
-    rows = sorted(rows, key=lambda r: (effective_time(r[0]) or datetime.min))
+    min_dt = datetime.min.replace(tzinfo=timezone.utc)
+    rows = sorted(rows, key=lambda r: (effective_time(r[0]) or min_dt))
 
     for fill, order in rows:
         symbol = (order.symbol or "").strip().upper()

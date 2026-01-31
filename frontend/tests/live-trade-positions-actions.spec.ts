@@ -2,7 +2,17 @@ import { test, expect } from "@playwright/test";
 
 test("positions table supports select + batch close", async ({ page }) => {
   await page.goto("/live-trade");
-  await page.getByTestId("account-positions-card").scrollIntoViewIfNeeded();
+  const autoToggle = page.getByTestId("live-trade-auto-toggle");
+  if (await autoToggle.isVisible()) {
+    await autoToggle.setChecked(false);
+  }
+
+  const positionsCard = page.getByTestId("account-positions-card");
+  await expect(positionsCard).toBeVisible();
+  await positionsCard.scrollIntoViewIfNeeded();
+
+  const rows = page.getByTestId("account-positions-table").locator("tbody tr");
+  await expect(rows).not.toHaveCount(0, { timeout: 60_000 });
 
   const firstRow = page.getByTestId("account-positions-table").locator("tbody tr").first();
   await firstRow.getByRole("checkbox").check();
