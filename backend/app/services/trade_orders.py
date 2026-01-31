@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from sqlalchemy import func
+
 from app.models import TradeOrder, TradeOrderClientIdSeq
 
 
@@ -57,9 +59,15 @@ def build_manual_client_order_id(base: str, seq_id: int) -> str:
 
 
 def get_client_order_id_seq(session) -> int:
-    seq_row = TradeOrderClientIdSeq()
-    session.add(seq_row)
-    session.flush()
+    if session.bind and session.bind.dialect.name == "sqlite":
+        next_id = session.query(func.max(TradeOrderClientIdSeq.id)).scalar() or 0
+        seq_row = TradeOrderClientIdSeq(id=int(next_id) + 1)
+        session.add(seq_row)
+        session.flush()
+    else:
+        seq_row = TradeOrderClientIdSeq()
+        session.add(seq_row)
+        session.flush()
     if not seq_row.id:
         raise ValueError("client_order_id_seq_failed")
     return int(seq_row.id)
@@ -67,6 +75,9 @@ def get_client_order_id_seq(session) -> int:
 
 def _should_apply_manual_client_order_id(payload: dict[str, Any], run_id: int | None) -> bool:
     if run_id is not None:
+        return False
+    base_id = str(payload.get("client_order_id") or "").strip()
+    if base_id.startswith("oi_"):
         return False
     params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
     if params.get("client_order_id_auto") is True:

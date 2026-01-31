@@ -6,6 +6,8 @@ from datetime import datetime
 from app.models import IBConnectionState, IBSettings
 from app.core.config import settings
 from app.services.lean_bridge_watchdog import ensure_lean_bridge_live
+from app.services.lean_bridge_reader import read_bridge_status as _read_bridge_status
+from app.services.lean_bridge_paths import resolve_bridge_root
 
 
 MAX_CLIENT_ID = 2_147_483_647
@@ -105,6 +107,11 @@ def ensure_ib_client_id(
 ) -> IBSettings:
     return get_or_create_ib_settings(session)
 
+def read_bridge_status(session, *, mode: str, force: bool = False) -> dict:
+    if session is None:
+        return _read_bridge_status(resolve_bridge_root())
+    return ensure_lean_bridge_live(session, mode=mode, force=force)
+
 
 def probe_ib_connection(session, *, timeout_seconds: float = 2.0) -> IBConnectionState:
     settings = get_or_create_ib_settings(session)
@@ -115,7 +122,7 @@ def probe_ib_connection(session, *, timeout_seconds: float = 2.0) -> IBConnectio
             message="mock mode enabled",
             heartbeat=True,
         )
-    status_payload = ensure_lean_bridge_live(session, mode=settings.mode or "paper", force=False)
+    status_payload = read_bridge_status(session, mode=settings.mode or "paper", force=False)
     stale = bool(status_payload.get("stale", True))
     raw_status = str(status_payload.get("status") or "unknown").strip().lower()
     last_error = status_payload.get("last_error")

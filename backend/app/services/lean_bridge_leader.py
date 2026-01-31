@@ -9,6 +9,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
+from sqlalchemy import func
+
 from app.core.config import settings
 from app.models import LeanExecutorPool
 from app.services.job_lock import JobLock
@@ -240,7 +242,11 @@ def _upsert_leader_pool(
         .first()
     )
     if row is None:
-        row = LeanExecutorPool(mode=mode, role="leader", client_id=client_id)
+        pool_kwargs = {"mode": mode, "role": "leader", "client_id": client_id}
+        if session.bind and session.bind.dialect.name == "sqlite":
+            next_id = (session.query(func.max(LeanExecutorPool.id)).scalar() or 0) + 1
+            pool_kwargs["id"] = int(next_id)
+        row = LeanExecutorPool(**pool_kwargs)
         session.add(row)
     row.client_id = client_id
     row.pid = pid

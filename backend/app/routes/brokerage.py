@@ -497,7 +497,8 @@ def cancel_ib_history_job_route(job_id: int):
 def get_lean_pool_status(mode: str = Query("paper")):
     mode = str(mode or "paper").strip().lower() or "paper"
     with get_session() as session:
-        ensure_lean_bridge_leader(session, mode=mode, force=False)
+        if session is not None:
+            ensure_lean_bridge_leader(session, mode=mode, force=False)
         items = _fetch_lean_pool_status(session, mode=mode)
     return {"mode": mode, "count": len(items), "items": items}
 

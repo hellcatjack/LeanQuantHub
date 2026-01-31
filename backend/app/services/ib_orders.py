@@ -21,6 +21,14 @@ def apply_fill_to_order(
 ) -> TradeFill:
     if fill_time is None:
         fill_time = datetime.utcnow()
+    if exec_id:
+        existing = (
+            session.query(TradeFill)
+            .filter(TradeFill.order_id == order.id, TradeFill.exec_id == exec_id)
+            .first()
+        )
+        if existing:
+            return existing
     current_status = str(order.status or "").strip().upper()
     total_prev = float(order.filled_quantity or 0.0)
     total_new = total_prev + float(fill_qty)

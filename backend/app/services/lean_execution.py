@@ -183,7 +183,7 @@ def launch_execution_async(*, config_path: str) -> int:
     return int(proc.pid)
 
 
-def ingest_execution_events(path: str) -> dict:
+def ingest_execution_events(path: str, *, session=None) -> dict:
     content = Path(path).read_text(encoding="utf-8")
     try:
         parsed = json.loads(content)
@@ -198,7 +198,7 @@ def ingest_execution_events(path: str) -> dict:
                 events.append(json.loads(line))
             except json.JSONDecodeError:
                 continue
-    return apply_execution_events(events)
+    return apply_execution_events(events, session=session)
 
 
 def _parse_event_time(value: str | None) -> datetime:
