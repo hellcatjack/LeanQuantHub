@@ -20,7 +20,7 @@
 3) **表格与操作控件紧凑化**
    - 当前持仓表格增加 `positions-table` 样式，缩小 `th/td` 的 padding 与字号。
    - 行内操作容器使用 `positions-action-group`，缩小间距。
-   - 行内数量输入与按钮使用 `positions-action-input` / `positions-action-button`，将高度降至 24px。
+   - 行内数量输入与按钮使用 `positions-action-input` / `positions-action-button`，将高度降至 22px（必要时覆盖默认控件高度）。
 
 ## 影响范围
 - 仅影响 Live Trade 的当前持仓卡片与其表格样式。
@@ -30,6 +30,7 @@
 - Playwright：新增断言
   - `card-refresh-inline-positions` 可见（刷新摘要一行化）
   - `positions-table` / `positions-action-input` / `positions-action-button` class 存在
+  - 输入框与按钮高度 <= 22px（不降低字体大小）
 - 手动：检查当前持仓卡片
   - 刷新摘要为单行
   - 数据时间仍单独显示

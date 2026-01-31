@@ -349,6 +349,14 @@ test("live trade positions refresh summary shows inline schedule", async ({ page
   await expect(actionCell.locator("input")).toHaveClass(/positions-action-input/);
   const actionButton = actionCell.locator("button").first();
   await expect(actionButton).toHaveClass(/positions-action-button/);
+  const inputHeight = await actionCell.locator("input").evaluate((el) =>
+    Math.round(el.getBoundingClientRect().height)
+  );
+  const buttonHeight = await actionCell.locator("button").first().evaluate((el) =>
+    Math.round(el.getBoundingClientRect().height)
+  );
+  expect(inputHeight).toBeLessThanOrEqual(22);
+  expect(buttonHeight).toBeLessThanOrEqual(22);
 });
 
 test("live trade positions table stays within card width", async ({ page }) => {
