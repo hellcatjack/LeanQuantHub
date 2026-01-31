@@ -143,8 +143,46 @@ test("live trade page shows bridge status card", async ({ page }) => {
   );
   await page.goto("/live-trade");
   await expect(
-    page.locator(".card-title", { hasText: /Lean Bridge 状态|Lean Bridge Status/i })
+    page.locator(".form-label", { hasText: /Lean Bridge 状态|Lean Bridge Status/i })
   ).toBeVisible();
+});
+
+test("live trade does not show per-bridge refresh button", async ({ page }) => {
+  await page.goto("/live-trade");
+  await expect(
+    page.getByRole("button", { name: /刷新 Lean Bridge|Refresh Lean Bridge/i })
+  ).toHaveCount(0);
+});
+
+test("live trade main row keeps positions widest", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/live-trade");
+  await page.waitForTimeout(1000);
+  const widths = await page.evaluate(() => {
+    const cards = Array.from(document.querySelectorAll(".live-trade-main-row .card"));
+    return cards.slice(0, 3).map((card) => Math.round(card.getBoundingClientRect().width));
+  });
+  expect(widths.length).toBeGreaterThanOrEqual(3);
+  expect(widths[0]).toBeLessThanOrEqual(300);
+  expect(widths[1]).toBeLessThanOrEqual(300);
+  expect(widths[2]).toBeGreaterThan(widths[0]);
+});
+
+test("refresh all forces bridge refresh", async ({ page }) => {
+  await page.unroute("**/api/brokerage/bridge/refresh**");
+  let forceParam: string | null = null;
+  await page.route("**/api/brokerage/bridge/refresh**", (route) => {
+    const url = new URL(route.request().url());
+    forceParam = url.searchParams.get("force");
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ bridge_status: { status: "ok", stale: false } }),
+    });
+  });
+  await page.goto("/live-trade");
+  await page.getByTestId("live-trade-refresh-all").click();
+  await expect.poll(() => forceParam).toBe("true");
 });
 
 test("live trade run table shows decision snapshot column", async ({ page }) => {
@@ -228,7 +266,9 @@ test("live trade positions table uses scroll wrapper", async ({ page }) => {
     })
   );
   await page.goto("/live-trade");
-  const table = page.locator(".table-scroll").first();
+  const table = page
+    .getByTestId("account-positions-card")
+    .locator(".table-scroll");
   await expect(table).toBeVisible();
 });
 
@@ -730,7 +770,9 @@ test("live trade order submission uses direct order endpoint", async ({ page }) 
   const buyButton = page.getByRole("button", { name: /买入|Buy/i }).first();
   await expect(buyButton).toBeVisible();
   await buyButton.click();
-  await expect(page.locator(".form-success")).toBeVisible();
+  await expect(
+    page.getByText(/已提交\\s*\\d+\\s*笔订单|orders submitted/i)
+  ).toBeVisible();
   await expect(page.locator(".form-hint.warn")).toContainText(/Lean Bridge/i);
   expect(submittedPayload?.symbol).toBe("AAPL");
 });

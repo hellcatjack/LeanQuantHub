@@ -396,7 +396,6 @@ export default function LiveTradePage() {
   const [bridgeStatus, setBridgeStatus] = useState<IBBridgeStatusOut | null>(null);
   const [bridgeStatusLoading, setBridgeStatusLoading] = useState(false);
   const [bridgeStatusError, setBridgeStatusError] = useState("");
-  const [bridgeRefreshLoading, setBridgeRefreshLoading] = useState(false);
   const [marketSnapshot, setMarketSnapshot] = useState<IBMarketSnapshotItem | null>(null);
   const [marketSnapshotSymbol, setMarketSnapshotSymbol] = useState("");
   const [marketSnapshotLoading, setMarketSnapshotLoading] = useState(false);
@@ -1072,7 +1071,6 @@ export default function LiveTradePage() {
   };
 
   const refreshBridgeStatus = async (reason: string, force: boolean) => {
-    setBridgeRefreshLoading(true);
     setBridgeStatusError("");
     try {
       const mode = (ibSettings?.mode || ibSettingsForm.mode || "paper").toLowerCase();
@@ -1087,8 +1085,6 @@ export default function LiveTradePage() {
     } catch (err: any) {
       const detail = err?.response?.data?.detail || t("trade.bridgeRefreshError");
       setBridgeStatusError(String(detail));
-    } finally {
-      setBridgeRefreshLoading(false);
     }
   };
 
@@ -2184,17 +2180,6 @@ export default function LiveTradePage() {
                   <strong>{bridgeStatus.last_error}</strong>
                 </div>
               )}
-            </div>
-            <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
-              <button
-                className="button-secondary"
-                onClick={() => refreshBridgeStatus("manual", true)}
-                disabled={bridgeRefreshLoading}
-              >
-                {bridgeRefreshLoading
-                  ? t("trade.bridgeRefreshRunning")
-                  : t("trade.bridgeRefreshButton")}
-              </button>
             </div>
           </div>
           <div className="card-subsection">

@@ -4,6 +4,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from app.core.config import settings
 
 _HEARTBEAT_STALE_SECONDS = 10
 
@@ -65,11 +66,19 @@ def parse_bridge_timestamp(payload: dict | None, keys: list[str]) -> datetime | 
     return None
 
 
-def _is_stale(heartbeat: datetime | None) -> bool:
+def _resolve_stale_seconds() -> int:
+    try:
+        return int(settings.lean_bridge_heartbeat_timeout_seconds)
+    except (TypeError, ValueError):
+        return _HEARTBEAT_STALE_SECONDS
+
+
+def _is_stale(heartbeat: datetime | None, *, stale_seconds: int | None = None) -> bool:
     if heartbeat is None:
         return True
     now = datetime.now(timezone.utc)
-    return now - heartbeat > timedelta(seconds=_HEARTBEAT_STALE_SECONDS)
+    timeout = stale_seconds if stale_seconds is not None else _resolve_stale_seconds()
+    return now - heartbeat > timedelta(seconds=timeout)
 
 
 def read_bridge_status(root: Path) -> dict:

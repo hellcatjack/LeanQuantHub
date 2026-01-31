@@ -37,6 +37,9 @@ export const resolveConnectionReasonKey = (message?: string | null) => {
     return null;
   }
   const normalized = String(message).toLowerCase();
+  if (normalized.includes("lean bridge ok")) {
+    return null;
+  }
   if (normalized.includes("lean bridge stale")) {
     return "trade.statusReason.bridgeStale";
   }

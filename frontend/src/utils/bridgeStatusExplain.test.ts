@@ -20,4 +20,8 @@ describe("bridgeStatusExplain", () => {
       "trade.statusReason.bridgeStale"
     );
   });
+
+  it("ignores lean bridge ok message", () => {
+    expect(resolveConnectionReasonKey("lean bridge ok")).toBe(null);
+  });
 });
