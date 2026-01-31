@@ -385,7 +385,6 @@ export default function LiveTradePage() {
   const [bridgeStatus, setBridgeStatus] = useState<IBBridgeStatusOut | null>(null);
   const [bridgeStatusLoading, setBridgeStatusLoading] = useState(false);
   const [bridgeStatusError, setBridgeStatusError] = useState("");
-  const [bridgeAutoRefresh, setBridgeAutoRefresh] = useState(true);
   const [bridgeRefreshLoading, setBridgeRefreshLoading] = useState(false);
   const [marketSnapshot, setMarketSnapshot] = useState<IBMarketSnapshotItem | null>(null);
   const [marketSnapshotSymbol, setMarketSnapshotSymbol] = useState("");
@@ -1328,6 +1327,9 @@ export default function LiveTradePage() {
       connection: async () => {
         await Promise.all([loadIbSettings(), loadIbState(true), loadIbStreamStatus(true)]);
       },
+      bridge: async () => {
+        await loadBridgeStatus(true);
+      },
       project: async () => {
         await loadProjects();
         if (selectedProjectId) {
@@ -2039,136 +2041,136 @@ export default function LiveTradePage() {
             {t("trade.openData")}
           </a>
         </div>
-      </div>
-    ),
-    bridge: (
-      <div className="card">
-        <div className="card-title">{t("trade.bridgeStatusTitle")}</div>
-        <div className="card-meta">{t("trade.bridgeStatusMeta")}</div>
-        {bridgeStatusLoading && <div className="form-hint">{t("common.actions.loading")}</div>}
-        {bridgeStatusError && <div className="form-hint">{bridgeStatusError}</div>}
-        <div className="meta-list" style={{ marginTop: "12px" }}>
-          <div className="meta-row">
-            <span>{t("trade.bridgeStatusLabel")}</span>
-            <strong>
-              {bridgeStatus?.status ? formatStatus(bridgeStatus.status) : t("common.none")}
-            </strong>
-          </div>
-          <div className="meta-row">
-            <span>{t("trade.bridgeHeartbeatAt")}</span>
-            <strong>{formatDateTime(bridgeStatus?.last_heartbeat)}</strong>
-          </div>
-          <div className="meta-row">
-            <span>{t("trade.bridgeStaleLabel")}</span>
-            <strong>
-              {bridgeStatus?.stale === undefined
-                ? t("common.none")
-                : bridgeStatus.stale
-                  ? t("common.boolean.true")
-                  : t("common.boolean.false")}
-            </strong>
-          </div>
-          <div className="meta-row">
-            <span>{t("trade.bridgeLastRefreshAt")}</span>
-            <strong>{formatDateTime(bridgeStatus?.last_refresh_at)}</strong>
-          </div>
-          <div className="meta-row">
-            <span>{t("trade.bridgeRefreshResultLabel")}</span>
-            <strong>{formatBridgeRefreshResult(bridgeStatus?.last_refresh_result)}</strong>
-          </div>
-          <div className="meta-row">
-            <span>{t("trade.bridgeRefreshReasonLabel")}</span>
-            <strong>{formatBridgeRefreshReason(bridgeStatus?.last_refresh_reason)}</strong>
-          </div>
-          {bridgeStatus?.last_refresh_message && (
-            <div className="meta-row">
-              <span>{t("trade.bridgeRefreshMessageLabel")}</span>
-              <strong>{bridgeStatus.last_refresh_message}</strong>
+        <div
+          className="live-trade-status-grid"
+          style={{
+            marginTop: "16px",
+            display: "grid",
+            gap: "16px",
+            gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
+          }}
+        >
+          <div className="card-subsection">
+            <div className="form-label">{t("trade.bridgeStatusTitle")}</div>
+            {renderRefreshSchedule("bridge", "bridge")}
+            {bridgeStatusLoading && <div className="form-hint">{t("common.actions.loading")}</div>}
+            {bridgeStatusError && <div className="form-hint">{bridgeStatusError}</div>}
+            <div className="meta-list" style={{ marginTop: "12px" }}>
+              <div className="meta-row">
+                <span>{t("trade.bridgeStatusLabel")}</span>
+                <strong>
+                  {bridgeStatus?.status ? formatStatus(bridgeStatus.status) : t("common.none")}
+                </strong>
+              </div>
+              <div className="meta-row">
+                <span>{t("trade.bridgeHeartbeatAt")}</span>
+                <strong>{formatDateTime(bridgeStatus?.last_heartbeat)}</strong>
+              </div>
+              <div className="meta-row">
+                <span>{t("trade.bridgeStaleLabel")}</span>
+                <strong>
+                  {bridgeStatus?.stale === undefined
+                    ? t("common.none")
+                    : bridgeStatus.stale
+                      ? t("common.boolean.true")
+                      : t("common.boolean.false")}
+                </strong>
+              </div>
+              <div className="meta-row">
+                <span>{t("trade.bridgeLastRefreshAt")}</span>
+                <strong>{formatDateTime(bridgeStatus?.last_refresh_at)}</strong>
+              </div>
+              <div className="meta-row">
+                <span>{t("trade.bridgeRefreshResultLabel")}</span>
+                <strong>{formatBridgeRefreshResult(bridgeStatus?.last_refresh_result)}</strong>
+              </div>
+              <div className="meta-row">
+                <span>{t("trade.bridgeRefreshReasonLabel")}</span>
+                <strong>{formatBridgeRefreshReason(bridgeStatus?.last_refresh_reason)}</strong>
+              </div>
+              {bridgeStatus?.last_refresh_message && (
+                <div className="meta-row">
+                  <span>{t("trade.bridgeRefreshMessageLabel")}</span>
+                  <strong>{bridgeStatus.last_refresh_message}</strong>
+                </div>
+              )}
+              {bridgeStatus?.last_error && (
+                <div className="meta-row">
+                  <span>{t("trade.bridgeLastError")}</span>
+                  <strong>{bridgeStatus.last_error}</strong>
+                </div>
+              )}
             </div>
-          )}
-          {bridgeStatus?.last_error && (
-            <div className="meta-row">
-              <span>{t("trade.bridgeLastError")}</span>
-              <strong>{bridgeStatus.last_error}</strong>
+            <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+              <button
+                className="button-secondary"
+                onClick={() => refreshBridgeStatus("manual", true)}
+                disabled={bridgeRefreshLoading}
+              >
+                {bridgeRefreshLoading
+                  ? t("trade.bridgeRefreshRunning")
+                  : t("trade.bridgeRefreshButton")}
+              </button>
             </div>
-          )}
-        </div>
-        <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
-          <button
-            className="button-secondary"
-            onClick={() => refreshBridgeStatus("manual", true)}
-            disabled={bridgeRefreshLoading}
-          >
-            {bridgeRefreshLoading ? t("trade.bridgeRefreshRunning") : t("trade.bridgeRefreshButton")}
-          </button>
-          <button
-            className={bridgeAutoRefresh ? "button-primary" : "button-secondary"}
-            onClick={() => setBridgeAutoRefresh((prev) => !prev)}
-            disabled={bridgeRefreshLoading}
-          >
-            {bridgeAutoRefresh ? t("trade.bridgeAutoRefreshOn") : t("trade.bridgeAutoRefreshOff")}
-          </button>
-        </div>
-      </div>
-    ),
-    project: (
-      <div className="card">
-        <div className="card-title">{t("trade.projectBindingTitle")}</div>
-        <div className="card-meta">{t("trade.projectBindingMeta")}</div>
-        {renderRefreshSchedule("project", "project")}
-        {projectError && <div className="form-hint">{projectError}</div>}
-        <div className="form-grid two-col" style={{ marginTop: "12px" }}>
-          <div className="form-row">
-            <label className="form-label">{t("trade.projectSelect")}</label>
-            <select
-              className="form-select"
-              value={selectedProjectId}
-              onChange={(event) => setSelectedProjectId(event.target.value)}
-              data-testid="live-trade-project-select"
-            >
-              <option value="">{t("trade.projectSelectPlaceholder")}</option>
-              {projects.map((project) => (
-                <option key={project.id} value={project.id}>
-                  #{project.id} · {project.name}
-                </option>
-              ))}
-            </select>
+          </div>
+          <div className="card-subsection">
+            <div className="form-label">{t("trade.projectBindingTitle")}</div>
+            {renderRefreshSchedule("project", "project")}
+            {projectError && <div className="form-hint">{projectError}</div>}
+            <div className="form-grid two-col" style={{ marginTop: "12px" }}>
+              <div className="form-row">
+                <label className="form-label">{t("trade.projectSelect")}</label>
+                <select
+                  className="form-select"
+                  value={selectedProjectId}
+                  onChange={(event) => setSelectedProjectId(event.target.value)}
+                  data-testid="live-trade-project-select"
+                >
+                  <option value="">{t("trade.projectSelectPlaceholder")}</option>
+                  {projects.map((project) => (
+                    <option key={project.id} value={project.id}>
+                      #{project.id} · {project.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            {!selectedProjectId && <div className="form-hint">{t("trade.projectSelectHint")}</div>}
+            <div className="meta-list" style={{ marginTop: "12px" }}>
+              <div className="meta-row">
+                <span>{t("trade.snapshotStatus")}</span>
+                <strong data-testid="live-trade-snapshot-status">
+                  {snapshotLoading
+                    ? t("common.actions.loading")
+                    : snapshotReady
+                      ? t("trade.snapshotReady")
+                      : t("trade.snapshotMissing")}
+                </strong>
+              </div>
+              <div className="meta-row">
+                <span>{t("trade.snapshotDate")}</span>
+                <strong data-testid="live-trade-snapshot-date">
+                  {snapshot?.snapshot_date || t("common.none")}
+                </strong>
+              </div>
+              <div className="meta-row">
+                <span>{t("trade.snapshotId")}</span>
+                <strong data-testid="live-trade-snapshot-id">
+                  {snapshot?.id ? `#${snapshot.id}` : t("common.none")}
+                </strong>
+              </div>
+            </div>
+            {selectedProject && (
+              <div className="form-hint" style={{ marginTop: "8px" }}>
+                {t("trade.projectBindingSelected", {
+                  id: selectedProject.id,
+                  name: selectedProject.name,
+                })}
+              </div>
+            )}
+            {snapshotError && <div className="form-hint">{snapshotError}</div>}
           </div>
         </div>
-        {!selectedProjectId && <div className="form-hint">{t("trade.projectSelectHint")}</div>}
-        <div className="meta-list" style={{ marginTop: "12px" }}>
-          <div className="meta-row">
-            <span>{t("trade.snapshotStatus")}</span>
-            <strong data-testid="live-trade-snapshot-status">
-              {snapshotLoading
-                ? t("common.actions.loading")
-                : snapshotReady
-                  ? t("trade.snapshotReady")
-                  : t("trade.snapshotMissing")}
-            </strong>
-          </div>
-          <div className="meta-row">
-            <span>{t("trade.snapshotDate")}</span>
-            <strong data-testid="live-trade-snapshot-date">
-              {snapshot?.snapshot_date || t("common.none")}
-            </strong>
-          </div>
-          <div className="meta-row">
-            <span>{t("trade.snapshotId")}</span>
-            <strong data-testid="live-trade-snapshot-id">
-              {snapshot?.id ? `#${snapshot.id}` : t("common.none")}
-            </strong>
-          </div>
-        </div>
-        {selectedProject && (
-          <div className="form-hint" style={{ marginTop: "8px" }}>
-            {t("trade.projectBindingSelected", {
-              id: selectedProject.id,
-              name: selectedProject.name,
-            })}
-          </div>
-        )}
-        {snapshotError && <div className="form-hint">{snapshotError}</div>}
       </div>
     ),
     account: (
@@ -2248,7 +2250,7 @@ export default function LiveTradePage() {
       </div>
     ),
     positions: (
-      <div className="card span-2" data-testid="account-positions-card">
+      <div className="card live-trade-positions" data-testid="account-positions-card">
         <div className="card-title">{t("trade.accountPositionsTitle")}</div>
         <div className="card-meta">{t("trade.accountPositionsMeta")}</div>
         {renderRefreshSchedule("positions", "positions")}
@@ -3542,6 +3544,11 @@ export default function LiveTradePage() {
               {autoRefreshEnabled ? t("trade.autoUpdateOn") : t("trade.autoUpdateOff")}
             </strong>
           </div>
+        </div>
+        <div className="live-trade-main-row">
+          {sections.mainRow.map((key) => (
+            <Fragment key={key}>{sectionCards[key]}</Fragment>
+          ))}
         </div>
         <div className="grid-2">
           {sections.main.map((key) => (

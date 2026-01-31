@@ -7,8 +7,6 @@ export const LIVE_TRADE_REFRESH_MS = {
 
 export type LiveTradeSectionKey =
   | "connection"
-  | "bridge"
-  | "project"
   | "account"
   | "positions"
   | "monitor"
@@ -21,12 +19,8 @@ export type LiveTradeSectionKey =
   | "symbolSummary";
 
 export const getLiveTradeSections = () => ({
+  mainRow: ["connection", "account", "positions"] as LiveTradeSectionKey[],
   main: [
-    "connection",
-    "bridge",
-    "project",
-    "account",
-    "positions",
     "monitor",
   ] as LiveTradeSectionKey[],
   advanced: [
