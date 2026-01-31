@@ -1861,6 +1861,7 @@ class TradeOrderOut(BaseModel):
     ib_order_id: int | None = None
     ib_perm_id: int | None = None
     rejected_reason: str | None = None
+    realized_pnl: float | None = None
     params: dict | None
     created_at: datetime
     updated_at: datetime
@@ -1872,10 +1873,13 @@ class TradeOrderOut(BaseModel):
 class TradeFillDetailOut(BaseModel):
     id: int
     order_id: int
+    symbol: str | None = None
+    side: str | None = None
     exec_id: str | None = None
     fill_quantity: float
     fill_price: float
     commission: float | None = None
+    realized_pnl: float | None = None
     fill_time: datetime | None = None
     currency: str | None = None
     exchange: str | None = None
@@ -1896,6 +1900,8 @@ class TradeReceiptOut(BaseModel):
     fill_price: float | None = None
     exec_id: str | None = None
     status: str | None = None
+    commission: float | None = None
+    realized_pnl: float | None = None
     source: str
 
     class Config:

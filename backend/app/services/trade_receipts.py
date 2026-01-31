@@ -11,6 +11,9 @@ from app.models import TradeFill, TradeOrder, TradeRun
 from app.services.ib_orders import apply_fill_to_order
 from app.services.trade_orders import update_trade_order_status
 from app.services.lean_bridge_paths import resolve_bridge_root
+from app.services.lean_bridge_reader import read_positions
+from app.services.realized_pnl import compute_realized_pnl
+from app.services.realized_pnl_baseline import ensure_positions_baseline
 
 
 @dataclass
@@ -26,6 +29,8 @@ class TradeReceipt:
     fill_price: float | None
     exec_id: str | None
     status: str | None
+    commission: float | None
+    realized_pnl: float | None
     source: str
 
 
@@ -396,6 +401,10 @@ def list_trade_receipts(
 
     _ingest_lean_events(session, warnings)
 
+    positions_payload = read_positions(resolve_bridge_root())
+    baseline = ensure_positions_baseline(resolve_bridge_root(), positions_payload)
+    realized = compute_realized_pnl(session, baseline)
+
     order_rows = session.query(TradeOrder).order_by(TradeOrder.created_at.desc()).all()
     order_map = {order.id: order for order in order_rows}
     items: list[TradeReceipt] = []
@@ -414,6 +423,8 @@ def list_trade_receipts(
                 fill_price=order.avg_fill_price,
                 exec_id=None,
                 status=order.status,
+                commission=None,
+                realized_pnl=realized.order_totals.get(order.id, 0.0),
                 source="db",
             )
         )
@@ -441,6 +452,8 @@ def list_trade_receipts(
                 fill_price=fill.fill_price,
                 exec_id=fill.exec_id,
                 status=order.status if order else None,
+                commission=fill.commission,
+                realized_pnl=realized.fill_totals.get(fill.id, 0.0),
                 source="db",
             )
         )
@@ -488,6 +501,9 @@ def list_trade_receipts(
                         continue
                 direction = _normalize_status(payload.get("direction"))
                 order = order_map.get(order_id) if order_id is not None else None
+                realized_value = None
+                if order_id is not None and kind == "order":
+                    realized_value = realized.order_totals.get(order_id, 0.0)
                 items.append(
                     TradeReceipt(
                         time=_ensure_aware(event_time),
@@ -503,6 +519,8 @@ def list_trade_receipts(
                         else None,
                         exec_id=None,
                         status=status or None,
+                        commission=None,
+                        realized_pnl=realized_value,
                         source="lean",
                     )
                 )

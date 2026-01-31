@@ -43,6 +43,10 @@ from app.services.trade_executor import execute_trade_run
 from app.services.trade_direct_order import submit_direct_order
 from app.services.trade_orders import create_trade_order, update_trade_order_status
 from app.services.trade_receipts import list_trade_receipts as build_trade_receipts
+from app.services.lean_bridge_paths import resolve_bridge_root
+from app.services.lean_bridge_reader import read_positions
+from app.services.realized_pnl import compute_realized_pnl
+from app.services.realized_pnl_baseline import ensure_positions_baseline
 from app.services.trade_order_intent import write_order_intent_manual
 from app.services import trade_executor
 from app.services.trade_run_summary import build_last_update_at, build_symbol_summary, build_trade_run_detail
@@ -173,8 +177,8 @@ def get_trade_run_detail(
             session.commit()
         return TradeRunDetailOut(
             run=TradeRunOut.model_validate(run, from_attributes=True),
-            orders=[TradeOrderOut.model_validate(order, from_attributes=True) for order in orders],
-            fills=[TradeFillDetailOut.model_validate(fill, from_attributes=True) for fill in fills],
+            orders=[TradeOrderOut.model_validate(order) for order in orders],
+            fills=[TradeFillDetailOut.model_validate(fill) for fill in fills],
             last_update_at=last_update_at,
         )
 
@@ -388,23 +392,97 @@ def create_manual_trade_run(payload: TradeManualRunCreate):
 
 @router.get("/orders", response_model=list[TradeOrderOut])
 def list_trade_orders(
-    response: Response,
+    response: Response = None,
     limit: int = Query(20, ge=1, le=200),
     offset: int = Query(0, ge=0),
     run_id: int | None = None,
 ):
     events_root = settings.data_root or "/data/share/stock/data"
     events_path = Path(events_root) / "lean_bridge" / "execution_events.jsonl"
-    if events_path.exists():
-        ingest_execution_events(str(events_path))
+    if response is None:
+        response = Response()
     with get_session() as session:
+        if events_path.exists():
+            ingest_execution_events(str(events_path), session=session)
+        positions_payload = read_positions(resolve_bridge_root())
+        baseline = ensure_positions_baseline(resolve_bridge_root(), positions_payload)
+        realized = compute_realized_pnl(session, baseline)
         query = session.query(TradeOrder).order_by(TradeOrder.created_at.desc())
         if run_id is not None:
             query = query.filter(TradeOrder.run_id == run_id)
         total = query.order_by(None).count()
         response.headers["X-Total-Count"] = str(total)
         orders = query.offset(offset).limit(limit).all()
-        return [TradeOrderOut.model_validate(order, from_attributes=True) for order in orders]
+        return [
+            TradeOrderOut.model_validate(
+                {
+                    "id": order.id,
+                    "run_id": order.run_id,
+                    "client_order_id": order.client_order_id,
+                    "symbol": order.symbol,
+                    "side": order.side,
+                    "quantity": order.quantity,
+                    "order_type": order.order_type,
+                    "limit_price": order.limit_price,
+                    "status": order.status,
+                    "filled_quantity": order.filled_quantity,
+                    "avg_fill_price": order.avg_fill_price,
+                    "ib_order_id": order.ib_order_id,
+                    "ib_perm_id": order.ib_perm_id,
+                    "rejected_reason": order.rejected_reason,
+                    "realized_pnl": realized.order_totals.get(order.id, 0.0),
+                    "params": order.params,
+                    "created_at": order.created_at,
+                    "updated_at": order.updated_at,
+                }
+            )
+            for order in orders
+        ]
+
+
+@router.get("/runs/{run_id}/orders", response_model=list[TradeOrderOut])
+def get_trade_run_orders(
+    run_id: int,
+    limit: int = Query(200, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    with get_session() as session:
+        positions_payload = read_positions(resolve_bridge_root())
+        baseline = ensure_positions_baseline(resolve_bridge_root(), positions_payload)
+        realized = compute_realized_pnl(session, baseline)
+        orders = (
+            session.query(TradeOrder)
+            .filter(TradeOrder.run_id == run_id)
+            .order_by(TradeOrder.created_at.desc())
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+        return [
+            TradeOrderOut.model_validate(
+                {
+                    "id": order.id,
+                    "run_id": order.run_id,
+                    "client_order_id": order.client_order_id,
+                    "symbol": order.symbol,
+                    "side": order.side,
+                    "quantity": order.quantity,
+                    "order_type": order.order_type,
+                    "limit_price": order.limit_price,
+                    "status": order.status,
+                    "filled_quantity": order.filled_quantity,
+                    "avg_fill_price": order.avg_fill_price,
+                    "ib_order_id": order.ib_order_id,
+                    "ib_perm_id": order.ib_perm_id,
+                    "rejected_reason": order.rejected_reason,
+                    "realized_pnl": realized.order_totals.get(order.id, 0.0),
+                    "params": order.params,
+                    "created_at": order.created_at,
+                    "updated_at": order.updated_at,
+                }
+            )
+            for order in orders
+        ]
 
 
 @router.get("/receipts", response_model=TradeReceiptPageOut)

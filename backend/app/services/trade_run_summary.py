@@ -7,6 +7,10 @@ import csv
 from typing import Any
 
 from app.models import DecisionSnapshot, TradeFill, TradeOrder, TradeRun
+from app.services.lean_bridge_paths import resolve_bridge_root
+from app.services.lean_bridge_reader import read_positions
+from app.services.realized_pnl import compute_realized_pnl
+from app.services.realized_pnl_baseline import ensure_positions_baseline
 
 
 def _read_snapshot_weights(items_path: str | None) -> dict[str, float]:
@@ -58,12 +62,62 @@ def build_trade_run_detail(session, run_id: int, *, limit: int = 200, offset: in
         .limit(limit)
         .all()
     )
+    order_map = {order.id: order for order in orders}
+
+    positions_payload = read_positions(resolve_bridge_root())
+    baseline = ensure_positions_baseline(resolve_bridge_root(), positions_payload)
+    realized = compute_realized_pnl(session, baseline)
+
+    order_payloads: list[dict[str, Any]] = []
+    for order in orders:
+        order_payloads.append(
+            {
+                "id": order.id,
+                "run_id": order.run_id,
+                "client_order_id": order.client_order_id,
+                "symbol": order.symbol,
+                "side": order.side,
+                "quantity": order.quantity,
+                "order_type": order.order_type,
+                "limit_price": order.limit_price,
+                "status": order.status,
+                "filled_quantity": order.filled_quantity,
+                "avg_fill_price": order.avg_fill_price,
+                "ib_order_id": order.ib_order_id,
+                "ib_perm_id": order.ib_perm_id,
+                "rejected_reason": order.rejected_reason,
+                "realized_pnl": realized.order_totals.get(order.id, 0.0),
+                "params": order.params,
+                "created_at": order.created_at,
+                "updated_at": order.updated_at,
+            }
+        )
+
+    fill_payloads: list[dict[str, Any]] = []
+    for fill in fills:
+        order = order_map.get(fill.order_id)
+        fill_payloads.append(
+            {
+                "id": fill.id,
+                "order_id": fill.order_id,
+                "symbol": order.symbol if order else None,
+                "side": order.side if order else None,
+                "exec_id": fill.exec_id,
+                "fill_quantity": fill.fill_quantity,
+                "fill_price": fill.fill_price,
+                "commission": fill.commission,
+                "realized_pnl": realized.fill_totals.get(fill.id, 0.0),
+                "fill_time": fill.fill_time,
+                "currency": fill.currency,
+                "exchange": fill.exchange,
+            }
+        )
     last_update_at = _max_datetime(
         [run.updated_at]
         + [order.updated_at for order in orders]
         + [fill.updated_at for fill in fills]
     )
-    return run, orders, fills, last_update_at
+    return run, order_payloads, fill_payloads, last_update_at
 
 
 def build_symbol_summary(session, run_id: int) -> list[dict[str, Any]]:
