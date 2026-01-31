@@ -22,6 +22,7 @@ import {
   type AutoRefreshKey,
   type RefreshKey,
 } from "../utils/liveTradeRefreshScheduler";
+import { refreshAllWithBridgeForce } from "../utils/liveTradeRefreshAll";
 
 interface IBSettings {
   id: number;
@@ -1391,19 +1392,21 @@ export default function LiveTradePage() {
     [markRefreshed, refreshHandlers]
   );
 
-  const refreshAll = async () => {
+  const refreshAll = async (forceBridge: boolean = false) => {
     setLoading(true);
     try {
-      await Promise.all(
-        (Object.keys(refreshHandlers) as RefreshKey[]).map((key) => triggerRefresh(key))
-      );
+      await refreshAllWithBridgeForce({
+        refreshHandlers,
+        triggerRefresh,
+        forceBridge: forceBridge ? async () => refreshBridgeStatus("manual", true) : undefined,
+      });
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    refreshAll();
+    refreshAll(false);
   }, []);
 
   useEffect(() => {
@@ -3524,7 +3527,7 @@ export default function LiveTradePage() {
           <button
             className="button-primary"
             data-testid="live-trade-refresh-all"
-            onClick={refreshAll}
+            onClick={() => refreshAll(true)}
             disabled={loading}
           >
             {loading ? t("common.actions.loading") : t("trade.refreshAll")}
