@@ -24,11 +24,15 @@ import {
 } from "../utils/liveTradeRefreshScheduler";
 import { refreshAllWithBridgeForce } from "../utils/liveTradeRefreshAll";
 import {
-  getBridgeRefreshHintKey,
   getHeartbeatAgeSeconds,
   getNextAllowedRefreshAt,
   resolveConnectionReasonKey,
 } from "../utils/bridgeStatusExplain";
+import {
+  formatBridgeRefreshReason,
+  formatBridgeRefreshResult,
+  getBridgeRefreshHint,
+} from "../utils/bridgeRefreshHint";
 
 interface IBSettings {
   id: number;
@@ -759,8 +763,8 @@ export default function LiveTradePage() {
         if (refreshResult && refreshResult !== "success") {
           warnings.add(
             t("trade.bridgeOrderWarningRefresh", {
-              result: formatBridgeRefreshResult(refreshResult),
-              reason: formatBridgeRefreshReason(status?.last_refresh_reason),
+              result: formatBridgeRefreshResult(t, refreshResult),
+              reason: formatBridgeRefreshReason(t, status?.last_refresh_reason),
             })
           );
         }
@@ -1631,21 +1635,14 @@ export default function LiveTradePage() {
   }, [ibState?.message, t]);
 
   const bridgeRefreshHint = useMemo(() => {
-    const result = bridgeStatus?.last_refresh_result || null;
-    const reason = bridgeStatus?.last_refresh_reason || null;
-    const key = getBridgeRefreshHintKey(result, reason);
-    if (key === "trade.refreshHint.generic") {
-      return t(key, {
-        result: formatBridgeRefreshResult(result),
-        reason: formatBridgeRefreshReason(reason),
-      });
-    }
-    return t(key);
+    return getBridgeRefreshHint(
+      t,
+      bridgeStatus?.last_refresh_result || null,
+      bridgeStatus?.last_refresh_reason || null
+    );
   }, [
     bridgeStatus?.last_refresh_result,
     bridgeStatus?.last_refresh_reason,
-    formatBridgeRefreshResult,
-    formatBridgeRefreshReason,
     t,
   ]);
 
@@ -1709,24 +1706,6 @@ export default function LiveTradePage() {
       return t("common.none");
     }
     const key = `common.status.${String(value)}`;
-    const translated = t(key);
-    return translated === key ? String(value) : translated;
-  };
-
-  const formatBridgeRefreshResult = (value?: string | null) => {
-    if (!value) {
-      return t("common.none");
-    }
-    const key = `trade.bridgeRefreshResult.${String(value)}`;
-    const translated = t(key);
-    return translated === key ? String(value) : translated;
-  };
-
-  const formatBridgeRefreshReason = (value?: string | null) => {
-    if (!value) {
-      return t("common.none");
-    }
-    const key = `trade.bridgeRefreshReason.${String(value)}`;
     const translated = t(key);
     return translated === key ? String(value) : translated;
   };
@@ -2112,7 +2091,9 @@ export default function LiveTradePage() {
             </div>
             <div className="meta-row" style={{ marginTop: "10px" }}>
               <span>{t("trade.statusExplainRefresh")}</span>
-              <strong>{formatBridgeRefreshResult(bridgeStatus?.last_refresh_result)}</strong>
+              <strong>
+                {formatBridgeRefreshResult(t, bridgeStatus?.last_refresh_result)}
+              </strong>
             </div>
             <div className="form-hint">
               {bridgeRefreshHint}
@@ -2181,11 +2162,15 @@ export default function LiveTradePage() {
               </div>
               <div className="meta-row">
                 <span>{t("trade.bridgeRefreshResultLabel")}</span>
-                <strong>{formatBridgeRefreshResult(bridgeStatus?.last_refresh_result)}</strong>
+                <strong>
+                  {formatBridgeRefreshResult(t, bridgeStatus?.last_refresh_result)}
+                </strong>
               </div>
               <div className="meta-row">
                 <span>{t("trade.bridgeRefreshReasonLabel")}</span>
-                <strong>{formatBridgeRefreshReason(bridgeStatus?.last_refresh_reason)}</strong>
+                <strong>
+                  {formatBridgeRefreshReason(t, bridgeStatus?.last_refresh_reason)}
+                </strong>
               </div>
               {bridgeStatus?.last_refresh_message && (
                 <div className="meta-row">
