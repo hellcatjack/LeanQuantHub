@@ -1327,6 +1327,24 @@ a {
   align-items: flex-start;
 }
 
+.refresh-inline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.refresh-inline strong {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.refresh-inline-dot {
+  color: var(--muted);
+}
+
 .ml-config-block {
   flex: 1;
   margin: 0;
@@ -1518,6 +1536,36 @@ a {
 .table th {
   background: var(--panel-alt);
   font-weight: 600;
+}
+
+.positions-table th,
+.positions-table td {
+  padding: 6px 8px;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.positions-action-group {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.positions-action-input {
+  min-height: 24px;
+  height: 24px;
+  padding: 2px 6px;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.positions-action-button {
+  min-height: 24px;
+  height: 24px;
+  padding: 2px 6px;
+  font-size: 11px;
+  line-height: 1;
 }
 
 .pretrade-steps-table th,

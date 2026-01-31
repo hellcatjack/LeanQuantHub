@@ -498,7 +498,11 @@ export default function LiveTradePage() {
   );
 
   const formatNextRefresh = useCallback(
-    (meta: { intervalMs: number | null; nextAt: string | null } | undefined) => {
+    (
+      meta:
+        | { intervalMs: number | null; nextAt: string | null; lastAt?: string | null }
+        | undefined
+    ) => {
       if (!meta) {
         return t("common.none");
       }
@@ -508,10 +512,14 @@ export default function LiveTradePage() {
       if (!autoRefreshEnabled) {
         return t("trade.autoUpdateOff");
       }
-      if (!meta.nextAt) {
+      const computedNextAt =
+        meta.lastAt && meta.intervalMs
+          ? new Date(new Date(meta.lastAt).getTime() + meta.intervalMs).toISOString()
+          : meta.nextAt;
+      if (!computedNextAt) {
         return t("common.none");
       }
-      return formatDateTime(meta.nextAt);
+      return formatDateTime(computedNextAt);
     },
     [autoRefreshEnabled, formatDateTime, t]
   );
@@ -1748,31 +1756,55 @@ export default function LiveTradePage() {
   };
 
   const renderRefreshSchedule = useCallback(
-    (key: RefreshKey, testIdSuffix?: string) => {
+    (key: RefreshKey, testIdSuffix?: string, variant: "stack" | "inline" = "stack") => {
       const meta = refreshMeta[key];
       if (!meta) {
         return null;
       }
       const suffix = testIdSuffix || key;
+      const intervalLabel = formatIntervalLabel(meta.intervalMs);
+      const lastLabel = meta.lastAt ? formatDateTime(meta.lastAt) : t("common.none");
+      const nextLabel = formatNextRefresh({
+        intervalMs: meta.intervalMs,
+        nextAt: meta.nextAt,
+        lastAt: meta.lastAt,
+      });
+      if (variant === "inline") {
+        return (
+          <div
+            className="refresh-inline"
+            style={{ marginTop: "8px" }}
+            data-testid={`card-refresh-inline-${suffix}`}
+          >
+            <span>{t("common.actions.refresh")}</span>
+            <span className="refresh-inline-dot">·</span>
+            <span>
+              {t("trade.refreshInterval")} <strong>{intervalLabel}</strong>
+            </span>
+            <span className="refresh-inline-dot">·</span>
+            <span>
+              {t("trade.refreshLast")} <strong>{lastLabel}</strong>
+            </span>
+            <span className="refresh-inline-dot">·</span>
+            <span>
+              {t("trade.refreshNext")} <strong>{nextLabel}</strong>
+            </span>
+          </div>
+        );
+      }
       return (
         <div className="meta-list" style={{ marginTop: "8px" }}>
           <div className="meta-row">
             <span>{t("trade.refreshInterval")}</span>
-            <strong data-testid={`card-refresh-interval-${suffix}`}>
-              {formatIntervalLabel(meta.intervalMs)}
-            </strong>
+            <strong data-testid={`card-refresh-interval-${suffix}`}>{intervalLabel}</strong>
           </div>
           <div className="meta-row">
             <span>{t("trade.refreshNext")}</span>
-            <strong data-testid={`card-refresh-next-${suffix}`}>
-              {formatNextRefresh(meta)}
-            </strong>
+            <strong data-testid={`card-refresh-next-${suffix}`}>{nextLabel}</strong>
           </div>
           <div className="meta-row">
             <span>{t("trade.refreshLast")}</span>
-            <strong data-testid={`card-refresh-last-${suffix}`}>
-              {meta.lastAt ? formatDateTime(meta.lastAt) : t("common.none")}
-            </strong>
+            <strong data-testid={`card-refresh-last-${suffix}`}>{lastLabel}</strong>
           </div>
         </div>
       );
@@ -2322,7 +2354,7 @@ export default function LiveTradePage() {
       <div className="card live-trade-positions" data-testid="account-positions-card">
         <div className="card-title">{t("trade.accountPositionsTitle")}</div>
         <div className="card-meta">{t("trade.accountPositionsMeta")}</div>
-        {renderRefreshSchedule("positions", "positions")}
+        {renderRefreshSchedule("positions", "positions", "inline")}
         {positionsStale && (
           <div className="form-hint warn" style={{ marginTop: "8px" }}>
             <div>{t("trade.accountPositionsStaleHint")}</div>
@@ -2390,7 +2422,7 @@ export default function LiveTradePage() {
           </button>
         </div>
         <div className="table-scroll" style={{ marginTop: "12px" }}>
-          <table className="table" data-testid="account-positions-table">
+          <table className="table positions-table" data-testid="account-positions-table">
             <thead>
               <tr>
                 <th>
@@ -2441,9 +2473,9 @@ export default function LiveTradePage() {
                       <td>{row.account || t("common.none")}</td>
                       <td>{row.currency || t("common.none")}</td>
                       <td>
-                        <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+                        <div className="positions-action-group">
                           <input
-                            className="form-input"
+                            className="form-input positions-action-input"
                             style={{ width: "90px" }}
                             type="number"
                             min="0"
@@ -2454,21 +2486,21 @@ export default function LiveTradePage() {
                             }
                           />
                           <button
-                            className="button-compact"
+                            className="button-compact positions-action-button"
                             onClick={() => handlePositionOrder(row, "BUY", index)}
                             disabled={positionActionLoading}
                           >
                             {t("trade.positionActionBuy")}
                           </button>
                           <button
-                            className="button-compact"
+                            className="button-compact positions-action-button"
                             onClick={() => handlePositionOrder(row, "SELL", index)}
                             disabled={positionActionLoading}
                           >
                             {t("trade.positionActionSell")}
                           </button>
                           <button
-                            className="button-compact"
+                            className="button-compact positions-action-button"
                             onClick={() => handleClosePositions([row])}
                             disabled={positionActionLoading}
                           >

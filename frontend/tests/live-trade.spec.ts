@@ -316,6 +316,41 @@ test("live trade positions show realized pnl not reported when missing", async (
   await expect(realizedCell).toHaveText(/未回传|Not reported/);
 });
 
+test("live trade positions refresh summary shows inline schedule", async ({ page }) => {
+  await page.route("**/api/brokerage/account/positions**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: [
+          {
+            symbol: "SPY",
+            position: 12,
+            avg_cost: 420.5,
+            market_price: 432.1,
+            market_value: 5185.2,
+            unrealized_pnl: 139.2,
+            realized_pnl: 0.0,
+            account: "DU123456",
+            currency: "USD",
+          },
+        ],
+        refreshed_at: "2026-01-24T00:00:00Z",
+        stale: false,
+      }),
+    })
+  );
+  await page.goto("/live-trade");
+  const schedule = page.getByTestId("card-refresh-inline-positions");
+  await expect(schedule).toBeVisible();
+  const table = page.getByTestId("account-positions-table");
+  await expect(table).toHaveClass(/positions-table/);
+  const actionCell = table.locator("tbody tr td").last();
+  await expect(actionCell.locator("input")).toHaveClass(/positions-action-input/);
+  const actionButton = actionCell.locator("button").first();
+  await expect(actionButton).toHaveClass(/positions-action-button/);
+});
+
 test("live trade positions table stays within card width", async ({ page }) => {
   await page.setViewportSize({ width: 960, height: 800 });
   await page.route("**/api/brokerage/account/positions**", (route) =>
