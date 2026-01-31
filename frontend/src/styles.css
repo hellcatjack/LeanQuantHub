@@ -167,7 +167,7 @@ a {
 
 @media (min-width: 1200px) {
   .live-trade-main-row {
-    grid-template-columns: minmax(260px, 280px) minmax(260px, 280px) minmax(360px, 1fr);
+    grid-template-columns: 280px 280px minmax(360px, 1fr);
   }
 }
 

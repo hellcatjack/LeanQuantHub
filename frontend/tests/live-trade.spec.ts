@@ -155,7 +155,7 @@ test("live trade does not show per-bridge refresh button", async ({ page }) => {
 });
 
 test("live trade main row keeps positions widest", async ({ page }) => {
-  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.setViewportSize({ width: 1200, height: 900 });
   await page.goto("/live-trade");
   await page.waitForTimeout(1000);
   const widths = await page.evaluate(() => {
@@ -163,8 +163,8 @@ test("live trade main row keeps positions widest", async ({ page }) => {
     return cards.slice(0, 3).map((card) => Math.round(card.getBoundingClientRect().width));
   });
   expect(widths.length).toBeGreaterThanOrEqual(3);
-  expect(widths[0]).toBeLessThanOrEqual(300);
-  expect(widths[1]).toBeLessThanOrEqual(300);
+  expect(widths[0]).toBeGreaterThanOrEqual(280);
+  expect(widths[1]).toBeGreaterThanOrEqual(280);
   expect(widths[2]).toBeGreaterThan(widths[0]);
 });
 
