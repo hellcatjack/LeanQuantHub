@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 from typing import Any
 
 from app.services.lean_bridge_paths import resolve_bridge_root
 from app.services.ib_settings import ensure_ib_client_id, get_or_create_ib_settings
 from app.services.lean_bridge_watchdog import ensure_lean_bridge_live
 from app.services.lean_bridge_reader import read_account_summary, read_positions, read_quotes
+from app.services.realized_pnl import compute_realized_pnl
+from app.services.realized_pnl_baseline import ensure_positions_baseline
 
 
 CORE_TAGS = (
@@ -16,9 +19,32 @@ CORE_TAGS = (
     "CashBalance",
 )
 
+CACHE_ROOT: Path | None = None
+
 
 def _resolve_bridge_root() -> Path:
     return resolve_bridge_root()
+
+
+def _read_cached_summary() -> dict[str, object] | None:
+    if CACHE_ROOT is None:
+        return None
+    path = Path(CACHE_ROOT) / "account_summary.json"
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    items = data.get("items") if "items" in data else data
+    return {
+        "items": items,
+        "refreshed_at": data.get("updated_at") or data.get("refreshed_at"),
+        "source": "cache",
+        "stale": bool(data.get("stale", False)),
+    }
 
 
 def _normalize_items(raw_items: Any) -> dict[str, object]:
@@ -61,7 +87,22 @@ def iter_account_client_ids(base: int, *, attempts: int = 3):
         yield base_id + offset
 
 
-def get_account_summary(session, *, mode: str, full: bool, force_refresh: bool = False) -> dict[str, object]:
+def get_account_summary(
+    session=None, *, mode: str, full: bool, force_refresh: bool = False
+) -> dict[str, object]:
+    cache_payload = _read_cached_summary()
+    if cache_payload is not None:
+        items = _normalize_items(cache_payload.get("items"))
+        refreshed_at = cache_payload.get("refreshed_at")
+        stale = bool(cache_payload.get("stale", False))
+        source = cache_payload.get("source") or "cache"
+        return {
+            "items": items,
+            "refreshed_at": refreshed_at,
+            "source": source,
+            "stale": stale,
+            "full": full,
+        }
     payload = read_account_summary(_resolve_bridge_root())
     items = _normalize_items(payload.get("items"))
     refreshed_at = payload.get("updated_at") or payload.get("refreshed_at")
@@ -82,6 +123,13 @@ def get_account_positions(session, *, mode: str, force_refresh: bool = False) ->
     refreshed_at = payload.get("updated_at") or payload.get("refreshed_at")
     stale = bool(payload.get("stale", True))
     if source_detail != "ib_holdings" or stale:
+        if session is None:
+            return {
+                "items": [],
+                "refreshed_at": refreshed_at,
+                "stale": True,
+                "source_detail": source_detail,
+            }
         ensure_lean_bridge_live(session, mode=mode, force=True)
         payload = read_positions(_resolve_bridge_root())
         source_detail = payload.get("source_detail") if isinstance(payload, dict) else None
@@ -120,6 +168,10 @@ def get_account_positions(session, *, mode: str, force_refresh: bool = False) ->
         except (TypeError, ValueError):
             continue
     raw_items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    realized = None
+    if session is not None:
+        baseline = ensure_positions_baseline(_resolve_bridge_root(), payload)
+        realized = compute_realized_pnl(session, baseline)
     items: list[dict[str, object]] = []
     for item in raw_items:
         if not isinstance(item, dict):
@@ -167,6 +219,10 @@ def get_account_positions(session, *, mode: str, force_refresh: bool = False) ->
                 )
             except (TypeError, ValueError, ZeroDivisionError):
                 pass
+        if realized is not None:
+            symbol_key = str(normalized.get("symbol") or "").strip().upper()
+            if symbol_key:
+                normalized["realized_pnl"] = realized.symbol_totals.get(symbol_key, 0.0)
         items.append(normalized)
     return {
         "items": items,
