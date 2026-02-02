@@ -1,0 +1,19 @@
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "backend"))
+sys.path.insert(0, str(ROOT))
+
+from scripts import run_train_model_opt  # noqa: E402
+
+
+def test_build_payload_includes_train_job_and_params():
+    base_params = {"max_exposure": 0.4, "vol_target": 0.045, "max_weight": 0.028}
+    payload = run_train_model_opt.build_payload(83, base_params)
+    params = payload["params"]
+    assert params["pipeline_train_job_id"] == 83
+    algo = params["algorithm_parameters"]
+    assert algo["max_exposure"] == 0.4
+    assert algo["vol_target"] == 0.045
+    assert algo["max_weight"] == 0.028
