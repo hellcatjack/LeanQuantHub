@@ -110,3 +110,15 @@ def test_is_done_uses_retries(monkeypatch) -> None:
     monkeypatch.setattr(run_cagr_opt, "_request_json", _fake_request)
     assert run_cagr_opt.is_done(1) is True
     assert called["max_retries"] >= 1
+
+
+def test_submit_uses_retries(monkeypatch) -> None:
+    called = {}
+
+    def _fake_request(method, url, payload=None, **kwargs):  # noqa: ANN001
+        called["max_retries"] = kwargs.get("max_retries", 0)
+        return {"id": 1}
+
+    monkeypatch.setattr(run_cagr_opt, "_request_json", _fake_request)
+    run_cagr_opt.submit({"max_exposure": 0.4})
+    assert called["max_retries"] >= 1

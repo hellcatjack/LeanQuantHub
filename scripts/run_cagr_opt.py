@@ -103,7 +103,14 @@ def build_payload(params: Dict[str, float]) -> dict:
 
 def submit(params: Dict[str, float]) -> dict:
     payload = build_payload(params)
-    return _request_json("POST", f"{API}/api/backtests", payload)
+    return _request_json(
+        "POST",
+        f"{API}/api/backtests",
+        payload,
+        timeout=30,
+        max_retries=3,
+        retry_sleep=1.0,
+    )
 
 
 def is_done(run_id: int) -> bool:
