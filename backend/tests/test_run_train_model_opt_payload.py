@@ -17,3 +17,10 @@ def test_build_payload_includes_train_job_and_params():
     assert algo["max_exposure"] == 0.4
     assert algo["vol_target"] == 0.045
     assert algo["max_weight"] == 0.028
+
+
+def test_prune_inflight_filters_done_ids():
+    inflight = [1, 2, 3]
+    done = {2}
+    remaining = run_train_model_opt.prune_inflight(inflight, lambda rid: rid in done)
+    assert remaining == [1, 3]

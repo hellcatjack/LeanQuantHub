@@ -70,6 +70,18 @@ def build_payload(train_job_id: int, params: Dict[str, float]) -> dict:
     }
 
 
+def is_done(run_id: int) -> bool:
+    try:
+        status = _request_json(f"{API}/api/backtests/{run_id}")
+    except Exception:
+        return False
+    return status.get("status") in {"completed", "failed", "canceled"}
+
+
+def prune_inflight(inflight: list[int], is_done_fn) -> list[int]:
+    return [rid for rid in inflight if not is_done_fn(rid)]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--train-jobs", required=True, help="train_job_id 列表文件")
@@ -83,6 +95,7 @@ def main() -> None:
     for train_job_id in ids:
         while len(inflight) >= MAX_INFLIGHT:
             time.sleep(5)
+            inflight = prune_inflight(inflight, is_done)
         payload = build_payload(train_job_id, base)
         res = _request_json(f"{API}/api/backtests", payload)
         inflight.append(int(res["id"]))
