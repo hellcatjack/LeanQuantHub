@@ -18,13 +18,18 @@ def extract_train_job_ids(items: Iterable[dict]) -> list[int]:
     return [int(row["id"]) for row in items if row.get("status") == "success"]
 
 
+def build_page_url(project_id: int, page: int, page_size: int) -> str:
+    return (
+        f"{API}/api/ml/train-jobs/page"
+        f"?project_id={project_id}&page={page}&page_size={page_size}"
+    )
+
+
 def main() -> None:
     page = 1
     ids: list[int] = []
     while True:
-        data = _get_json(
-            f"{API}/api/ml/train_jobs/page?project_id={PROJECT_ID}&page={page}&page_size=200"
-        )
+        data = _get_json(build_page_url(PROJECT_ID, page, 200))
         items = data.get("items") or []
         ids.extend(extract_train_job_ids(items))
         if len(items) < 200:
