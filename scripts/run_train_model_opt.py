@@ -44,6 +44,10 @@ def is_retryable_exception(exc: BaseException) -> bool:
     return isinstance(exc, (TimeoutError, URLError, socket.timeout))
 
 
+def is_terminal_status(status: str | None) -> bool:
+    return status in {"completed", "failed", "canceled", "success"}
+
+
 def _request_json(
     url: str,
     payload: dict | None = None,
@@ -100,7 +104,7 @@ def is_done(run_id: int) -> bool:
         status = _request_json(f"{API}/api/backtests/{run_id}")
     except Exception:
         return False
-    return status.get("status") in {"completed", "failed", "canceled"}
+    return is_terminal_status(status.get("status"))
 
 
 def prune_inflight(inflight: list[int], is_done_fn) -> list[int]:

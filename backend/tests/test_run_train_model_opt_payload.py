@@ -29,3 +29,8 @@ def test_prune_inflight_filters_done_ids():
 def test_is_retryable_exception_for_timeout():
     assert run_train_model_opt.is_retryable_exception(TimeoutError("timeout")) is True
     assert run_train_model_opt.is_retryable_exception(ValueError("no")) is False
+
+
+def test_is_terminal_status_includes_success():
+    assert run_train_model_opt.is_terminal_status("success") is True
+    assert run_train_model_opt.is_terminal_status("queued") is False
