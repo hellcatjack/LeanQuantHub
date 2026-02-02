@@ -15,6 +15,7 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from app.services.backtest_opt_random import generate_candidates
 from app.services.backtest_opt_runner import (
+    build_signature,
     merge_algo_params,
     parse_pct,
     select_core_params,
@@ -85,17 +86,50 @@ def is_terminal(status: str | None) -> bool:
     return status in {"success", "failed"}
 
 
+def load_manifest_state() -> tuple[dict[int, dict[str, Any]], set[int]]:
+    launched: dict[int, dict[str, Any]] = {}
+    completed: set[int] = set()
+    if not MANIFEST.exists():
+        return launched, completed
+    for line in MANIFEST.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        run_id = row.get("id")
+        if not isinstance(run_id, int):
+            continue
+        if "params" in row:
+            launched[run_id] = row["params"] or {}
+        if "status" in row and "params" not in row:
+            completed.add(run_id)
+    return launched, completed
+
+
 def main() -> None:
     ARTIFACT_ROOT.mkdir(parents=True, exist_ok=True)
     base_params = fetch_base_params()
     base_algo = base_params.get("algorithm_parameters") or {}
     candidates = build_candidates(base_algo)
 
-    active: Dict[int, Dict[str, Any]] = {}
-    pending = list(candidates)
-    results: List[Dict[str, Any]] = []
+    launched_params, completed_ids = load_manifest_state()
+    existing_signatures = {build_signature(params) for params in launched_params.values()}
+    pending = [
+        item
+        for item in candidates
+        if build_signature(item) not in existing_signatures
+    ]
+    remaining = max(0, TOTAL_RUNS - len(launched_params))
+    pending = pending[:remaining]
 
-    with MANIFEST.open("w", encoding="utf-8") as handle:
+    active: Dict[int, Dict[str, Any]] = {
+        run_id: {"params": params, "status": "queued"}
+        for run_id, params in launched_params.items()
+        if run_id not in completed_ids
+    }
+    results_by_id: Dict[int, Dict[str, Any]] = {}
+
+    manifest_mode = "a" if MANIFEST.exists() else "w"
+    with MANIFEST.open(manifest_mode, encoding="utf-8") as handle:
         while pending or active:
             while pending and len(active) < MAX_CONCURRENCY:
                 item = pending.pop(0)
@@ -125,8 +159,8 @@ def main() -> None:
                     metrics = run.get("metrics") or {}
                     cagr = parse_pct(metrics.get("Compounding Annual Return"))
                     dd = parse_pct(metrics.get("Drawdown"))
-                    results.append(
-                        {
+                    if run_id not in results_by_id:
+                        results_by_id[run_id] = {
                             "run_id": run_id,
                             "status": status,
                             "cagr": cagr,
@@ -134,28 +168,31 @@ def main() -> None:
                             "metrics": metrics,
                             "params": active[run_id]["params"],
                         }
-                    )
                     done_ids.append(run_id)
-                    handle.write(
-                        json.dumps(
-                            {"id": run_id, "status": status, "cagr": cagr, "dd": dd},
-                            ensure_ascii=False,
+                    if run_id not in completed_ids:
+                        handle.write(
+                            json.dumps(
+                                {"id": run_id, "status": status, "cagr": cagr, "dd": dd},
+                                ensure_ascii=False,
+                            )
+                            + "\n"
                         )
-                        + "\n"
-                    )
-                    handle.flush()
+                        handle.flush()
+                        completed_ids.add(run_id)
             for run_id in done_ids:
                 active.pop(run_id, None)
 
     with SUMMARY_CSV.open("w", encoding="utf-8") as handle:
         handle.write("run_id,status,cagr,dd\n")
-        for row in results:
+        for row in results_by_id.values():
             handle.write(
                 f"{row['run_id']},{row['status']},{row['cagr']:.6f},{row['dd']:.6f}\n"
             )
 
     candidates_ok = [
-        r for r in results if r["status"] == "success" and r["dd"] <= 0.15
+        r
+        for r in results_by_id.values()
+        if r["status"] == "success" and r["dd"] <= 0.15
     ]
     candidates_ok.sort(key=lambda x: x["cagr"], reverse=True)
     with TOP10_JSON.open("w", encoding="utf-8") as handle:

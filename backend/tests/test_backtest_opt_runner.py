@@ -11,6 +11,7 @@ from app.services.backtest_opt_runner import (
     parse_pct,
     merge_algo_params,
     select_core_params,
+    build_signature,
 )
 
 
@@ -44,3 +45,9 @@ def test_select_core_params_coerces():
     assert core["top_n"] == 30
     assert core["market_ma_window"] == 200
     assert core["max_weight"] == 0.033
+
+
+def test_build_signature_stable_order():
+    params = {"b": 2, "a": 1}
+    signature = build_signature(params)
+    assert signature == (("a", 1), ("b", 2))

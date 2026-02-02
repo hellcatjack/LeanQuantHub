@@ -51,3 +51,7 @@ def select_core_params(base: Dict[str, Any]) -> Dict[str, float | int]:
         else:
             core[key] = value
     return core
+
+
+def build_signature(params: Dict[str, Any]) -> tuple[tuple[str, Any], ...]:
+    return tuple((key, params.get(key)) for key in sorted(params.keys()))
