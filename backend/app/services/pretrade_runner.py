@@ -198,10 +198,31 @@ def _quotes_ready(symbols: list[str], ttl_seconds: int | None) -> tuple[bool, li
         if stale and ts is None:
             stale_symbols.append(symbol)
             continue
-        if ts and ttl > 0 and now - ts > timedelta(seconds=ttl):
+        if ts and effective_ttl > 0 and now - ts > timedelta(seconds=effective_ttl):
             stale_symbols.append(symbol)
     ok = not missing and not stale_symbols
     return ok, missing, stale_symbols
+
+
+def _wait_for_quotes_ready(
+    symbols: list[str],
+    ttl_seconds: int | None,
+    wait_seconds: int,
+    poll_interval_seconds: int,
+) -> tuple[bool, list[str], list[str], int]:
+    ok, missing, stale_symbols = _quotes_ready(symbols, ttl_seconds)
+    if ok or wait_seconds <= 0:
+        return ok, missing, stale_symbols, 0
+    poll = max(1, int(poll_interval_seconds or 1))
+    max_attempts = max(1, int(wait_seconds // poll))
+    waited = 0
+    for _ in range(max_attempts):
+        time.sleep(poll)
+        waited += poll
+        ok, missing, stale_symbols = _quotes_ready(symbols, ttl_seconds)
+        if ok:
+            return ok, missing, stale_symbols, waited
+    return ok, missing, stale_symbols, waited
 
 
 def _coerce_ttl(value: int | None, default: int) -> int:
@@ -1224,11 +1245,25 @@ def step_market_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResult
     config = _resolve_project_config(ctx.session, ctx.run.project_id)
     trade_cfg = config.get("trade") if isinstance(config.get("trade"), dict) else {}
     ttl_seconds = trade_cfg.get("market_snapshot_ttl_seconds")
+    wait_seconds = trade_cfg.get("market_snapshot_wait_seconds")
+    poll_seconds = trade_cfg.get("market_snapshot_poll_interval_seconds")
     exclude_symbols_raw = trade_cfg.get("market_snapshot_exclude_symbols")
     try:
         ttl_seconds = int(ttl_seconds) if ttl_seconds is not None else 30
     except (TypeError, ValueError):
         ttl_seconds = 30
+    try:
+        wait_seconds = int(wait_seconds) if wait_seconds is not None else 120
+    except (TypeError, ValueError):
+        wait_seconds = 120
+    if wait_seconds < 0:
+        wait_seconds = 0
+    try:
+        poll_seconds = int(poll_seconds) if poll_seconds is not None else 5
+    except (TypeError, ValueError):
+        poll_seconds = 5
+    if poll_seconds <= 0:
+        poll_seconds = 5
 
     decision_snapshot_id = None
     if isinstance(ctx.step.artifacts, dict):
@@ -1298,7 +1333,12 @@ def step_market_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResult
         raise StepSkip(reason, artifacts=skip_artifacts)
 
     watchlist_path = _write_watchlist(symbols)
-    ok, missing, stale_symbols = _quotes_ready(symbols, ttl_seconds)
+    ok, missing, stale_symbols, waited_seconds = _wait_for_quotes_ready(
+        symbols,
+        ttl_seconds,
+        wait_seconds,
+        poll_seconds,
+    )
     if ok:
         return StepResult(
             artifacts={
@@ -1306,6 +1346,8 @@ def step_market_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResult
                     "skipped": True,
                     "symbols": symbols,
                     "ttl_seconds": ttl_seconds,
+                    "wait_seconds": waited_seconds,
+                    "poll_seconds": poll_seconds,
                     "decision_snapshot_id": decision_snapshot_id,
                     "excluded_symbols": sorted(excluded),
                     "watchlist_path": str(watchlist_path),
@@ -1318,6 +1360,8 @@ def step_market_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResult
             "skipped": False,
             "symbols": symbols,
             "ttl_seconds": ttl_seconds,
+            "wait_seconds": waited_seconds,
+            "poll_seconds": poll_seconds,
             "decision_snapshot_id": decision_snapshot_id,
             "excluded_symbols": sorted(excluded),
             "watchlist_path": str(watchlist_path),

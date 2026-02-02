@@ -16,6 +16,11 @@ from app.models import Base, PreTradeRun, PreTradeStep, Project, DecisionSnapsho
 from app.services import pretrade_runner
 
 
+@pytest.fixture(autouse=True)
+def _no_sleep(monkeypatch):
+    monkeypatch.setattr(pretrade_runner.time, "sleep", lambda *_args, **_kwargs: None)
+
+
 def _make_session():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -40,6 +45,70 @@ def _quotes_payload_with_old_items(symbols: list[str], *, updated_at: datetime) 
         "updated_at": fresh,
         "stale": False,
     }
+
+
+def test_pretrade_market_snapshot_waits_for_quotes_ready(monkeypatch, tmp_path):
+    session = _make_session()
+    try:
+        project = Project(name="pretrade-wait", description="")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        items_path = tmp_path / "items.csv"
+        items_path.write_text("symbol\nSPY\nAAPL\n", encoding="utf-8")
+        snapshot = DecisionSnapshot(project_id=project.id, items_path=str(items_path))
+        session.add(snapshot)
+        session.commit()
+        session.refresh(snapshot)
+
+        run = PreTradeRun(project_id=project.id, status="running", params={})
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        step = PreTradeStep(
+            run_id=run.id,
+            step_key="market_snapshot",
+            step_order=9,
+            status="queued",
+            artifacts={"decision_snapshot_id": snapshot.id},
+        )
+        session.add(step)
+        session.commit()
+        session.refresh(step)
+
+        calls = {"count": 0}
+
+        def _read_quotes(*_args, **_kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return _quotes_payload(["SPY"])
+            return _quotes_payload(["SPY", "AAPL"])
+
+        monkeypatch.setattr(pretrade_runner, "read_quotes", _read_quotes)
+        monkeypatch.setattr(
+            pretrade_runner,
+            "_resolve_project_config",
+            lambda _session, _pid: {
+                "trade": {
+                    "market_snapshot_ttl_seconds": 30,
+                    "market_snapshot_wait_seconds": 5,
+                    "market_snapshot_poll_interval_seconds": 1,
+                }
+            },
+        )
+        monkeypatch.setattr(pretrade_runner, "resolve_bridge_root", lambda: tmp_path)
+        monkeypatch.setattr(pretrade_runner, "_resolve_bridge_root", lambda: tmp_path)
+
+        ctx = pretrade_runner.StepContext(session=session, run=run, step=step)
+        result = pretrade_runner.step_market_snapshot(ctx, {})
+
+        assert result.artifacts is not None
+        assert result.artifacts["market_snapshot"]["skipped"] is True
+        assert calls["count"] >= 2
+    finally:
+        session.close()
 
 
 def test_pretrade_market_snapshot_min_ttl_allows_recent_updated_at(monkeypatch, tmp_path):
