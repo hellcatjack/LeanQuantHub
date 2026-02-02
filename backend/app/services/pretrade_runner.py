@@ -173,6 +173,8 @@ def _quotes_ready(symbols: list[str], ttl_seconds: int | None) -> tuple[bool, li
     updated_at = quotes.get("updated_at") or quotes.get("refreshed_at")
     now = datetime.utcnow()
     ttl = max(0, int(ttl_seconds))
+    effective_ttl = max(ttl, 120)
+    updated_ts = _parse_timestamp(updated_at) if isinstance(updated_at, str) else None
     quotes_map = {
         _normalize_symbol(item.get("symbol")): item
         for item in items
@@ -184,6 +186,13 @@ def _quotes_ready(symbols: list[str], ttl_seconds: int | None) -> tuple[bool, li
         item = quotes_map.get(symbol)
         if not item:
             missing.append(symbol)
+            continue
+    if not missing:
+        if updated_ts and effective_ttl > 0 and now - updated_ts <= timedelta(seconds=effective_ttl) and not stale:
+            return True, [], []
+    for symbol in symbols:
+        item = quotes_map.get(symbol)
+        if not item:
             continue
         ts = _quote_timestamp(item, updated_at)
         if stale and ts is None:

@@ -1456,6 +1456,8 @@ const messages: Record<Locale, MessageTree> = {
           title: "发起 Checklist",
           action: "开始运行",
           note: "仅允许单实例执行",
+          activeConflict: "已有运行中的 checklist（#{id}），请等待完成后再发起",
+          activeConflictGeneric: "已有运行中的 checklist，请等待完成后再发起",
         },
         history: {
           title: "历史运行",
@@ -4058,6 +4060,8 @@ const messages: Record<Locale, MessageTree> = {
           title: "Start Checklist",
           action: "Start Run",
           note: "Only one run at a time",
+          activeConflict: "A checklist run is already active (#{id}). Please wait.",
+          activeConflictGeneric: "A checklist run is already active. Please wait.",
         },
         history: {
           title: "Run History",

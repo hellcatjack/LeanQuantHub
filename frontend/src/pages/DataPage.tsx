@@ -7,6 +7,7 @@ import IdChip from "../components/IdChip";
 import TopBar from "../components/TopBar";
 import { useI18n } from "../i18n";
 import { DatasetSummary, Paginated } from "../types";
+import { findActivePretradeRun, isPretradeRunActive } from "../utils/pretradeRunState";
 
 const PRETRADE_STEP_KEYS = [
   "calendar_refresh",
@@ -1172,6 +1173,12 @@ export default function DataPage() {
       setPretradeRunActionError(t("data.pretrade.projectRequired"));
       return;
     }
+    if (pretradeActiveRun) {
+      setPretradeRunActionError(
+        t("data.pretrade.run.activeConflict", { id: pretradeActiveRun.id })
+      );
+      return;
+    }
     setPretradeRunLoading(true);
     setPretradeRunActionError("");
     setPretradeRunActionResult("");
@@ -1192,8 +1199,15 @@ export default function DataPage() {
       setPretradeRunActionResult(t("data.pretrade.runCreated", { id: res.data.id }));
       await loadPretradeRuns(pretradeProjectId);
     } catch (err: any) {
-      const detail = err?.response?.data?.detail || t("data.pretrade.runCreateError");
-      setPretradeRunActionError(String(detail));
+      if (err?.response?.status === 409) {
+        const detail = pretradeActiveRun?.id
+          ? t("data.pretrade.run.activeConflict", { id: pretradeActiveRun.id })
+          : t("data.pretrade.run.activeConflictGeneric");
+        setPretradeRunActionError(detail);
+      } else {
+        const detail = err?.response?.data?.detail || t("data.pretrade.runCreateError");
+        setPretradeRunActionError(String(detail));
+      }
     } finally {
       setPretradeRunLoading(false);
     }
@@ -2855,6 +2869,17 @@ export default function DataPage() {
     };
   }, [pretradeRunDetail]);
 
+  const pretradeActiveRun = useMemo(() => {
+    const fromList = findActivePretradeRun(pretradeRuns);
+    if (fromList) {
+      return fromList;
+    }
+    if (pretradeRunDetail && isPretradeRunActive(pretradeRunDetail.run.status)) {
+      return pretradeRunDetail.run;
+    }
+    return undefined;
+  }, [pretradeRuns, pretradeRunDetail]);
+
   const latestSyncByDataset = useMemo(() => {
     const map = new Map<number, DataSyncJob>();
     for (const job of syncJobs) {
@@ -4319,7 +4344,7 @@ export default function DataPage() {
                   type="button"
                   className="primary-button large"
                   onClick={createPretradeRun}
-                  disabled={pretradeRunLoading}
+                  disabled={pretradeRunLoading || !!pretradeActiveRun}
                   data-testid="pretrade-weekly-run"
                 >
                   {pretradeRunLoading
@@ -4335,6 +4360,11 @@ export default function DataPage() {
                 </button>
                 <span className="form-note">{t("data.pretrade.run.note")}</span>
               </div>
+              {pretradeActiveRun && (
+                <div className="form-hint danger">
+                  {t("data.pretrade.run.activeConflict", { id: pretradeActiveRun.id })}
+                </div>
+              )}
               <div className="section-divider" />
               <div className="form-hint">{t("data.pretrade.history.title")}</div>
               {pretradeRunsError && <div className="form-error">{pretradeRunsError}</div>}

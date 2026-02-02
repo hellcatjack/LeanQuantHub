@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import sys
 
@@ -30,6 +30,71 @@ def _quotes_payload(symbols: list[str]) -> dict:
         "updated_at": now,
         "stale": False,
     }
+
+
+def _quotes_payload_with_old_items(symbols: list[str], *, updated_at: datetime) -> dict:
+    fresh = updated_at.replace(microsecond=0).isoformat() + "Z"
+    old = (updated_at - timedelta(minutes=5)).replace(microsecond=0).isoformat() + "Z"
+    return {
+        "items": [{"symbol": symbol, "last": 1.0, "timestamp": old} for symbol in symbols],
+        "updated_at": fresh,
+        "stale": False,
+    }
+
+
+def test_pretrade_market_snapshot_min_ttl_allows_recent_updated_at(monkeypatch, tmp_path):
+    session = _make_session()
+    try:
+        project = Project(name="pretrade-min-ttl", description="")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        items_path = tmp_path / "items.csv"
+        items_path.write_text("symbol\nSPY\nAAPL\n", encoding="utf-8")
+        snapshot = DecisionSnapshot(project_id=project.id, items_path=str(items_path))
+        session.add(snapshot)
+        session.commit()
+        session.refresh(snapshot)
+
+        run = PreTradeRun(project_id=project.id, status="running", params={})
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        step = PreTradeStep(
+            run_id=run.id,
+            step_key="market_snapshot",
+            step_order=9,
+            status="queued",
+            artifacts={"decision_snapshot_id": snapshot.id},
+        )
+        session.add(step)
+        session.commit()
+        session.refresh(step)
+
+        now = datetime.utcnow()
+        updated_at = now - timedelta(seconds=90)
+        monkeypatch.setattr(
+            pretrade_runner,
+            "read_quotes",
+            lambda *_args, **_kwargs: _quotes_payload_with_old_items(["SPY", "AAPL"], updated_at=updated_at),
+        )
+        monkeypatch.setattr(
+            pretrade_runner,
+            "_resolve_project_config",
+            lambda _session, _pid: {"trade": {"market_snapshot_ttl_seconds": 30}},
+        )
+        monkeypatch.setattr(pretrade_runner, "resolve_bridge_root", lambda: tmp_path)
+        monkeypatch.setattr(pretrade_runner, "_resolve_bridge_root", lambda: tmp_path)
+
+        ctx = pretrade_runner.StepContext(session=session, run=run, step=step)
+        result = pretrade_runner.step_market_snapshot(ctx, {})
+
+        assert result.artifacts is not None
+        assert result.artifacts["market_snapshot"]["skipped"] is True
+    finally:
+        session.close()
 
 
 def test_pretrade_market_snapshot_skips_when_quotes_ready(monkeypatch, tmp_path):
@@ -127,6 +192,60 @@ def test_pretrade_market_snapshot_filters_excluded_symbols(monkeypatch, tmp_path
 
         assert result.artifacts is not None
         assert result.artifacts["market_snapshot"]["excluded_symbols"] == ["1143.HK", "BRK.B"]
+    finally:
+        session.close()
+
+
+def test_pretrade_market_snapshot_uses_updated_at_over_item_timestamp(monkeypatch, tmp_path):
+    session = _make_session()
+    try:
+        project = Project(name="pretrade-updated", description="")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        items_path = tmp_path / "items.csv"
+        items_path.write_text("symbol\nSPY\nAAPL\n", encoding="utf-8")
+        snapshot = DecisionSnapshot(project_id=project.id, items_path=str(items_path))
+        session.add(snapshot)
+        session.commit()
+        session.refresh(snapshot)
+
+        run = PreTradeRun(project_id=project.id, status="running", params={})
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        step = PreTradeStep(
+            run_id=run.id,
+            step_key="market_snapshot",
+            step_order=9,
+            status="queued",
+            artifacts={"decision_snapshot_id": snapshot.id},
+        )
+        session.add(step)
+        session.commit()
+        session.refresh(step)
+
+        now = datetime.utcnow()
+        monkeypatch.setattr(
+            pretrade_runner,
+            "read_quotes",
+            lambda *_args, **_kwargs: _quotes_payload_with_old_items(["SPY", "AAPL"], updated_at=now),
+        )
+        monkeypatch.setattr(
+            pretrade_runner,
+            "_resolve_project_config",
+            lambda _session, _pid: {"trade": {"market_snapshot_ttl_seconds": 30}},
+        )
+        monkeypatch.setattr(pretrade_runner, "resolve_bridge_root", lambda: tmp_path)
+        monkeypatch.setattr(pretrade_runner, "_resolve_bridge_root", lambda: tmp_path)
+
+        ctx = pretrade_runner.StepContext(session=session, run=run, step=step)
+        result = pretrade_runner.step_market_snapshot(ctx, {})
+
+        assert result.artifacts is not None
+        assert result.artifacts["market_snapshot"]["skipped"] is True
     finally:
         session.close()
 
