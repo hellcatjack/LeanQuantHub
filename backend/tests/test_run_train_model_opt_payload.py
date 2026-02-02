@@ -24,3 +24,8 @@ def test_prune_inflight_filters_done_ids():
     done = {2}
     remaining = run_train_model_opt.prune_inflight(inflight, lambda rid: rid in done)
     assert remaining == [1, 3]
+
+
+def test_is_retryable_exception_for_timeout():
+    assert run_train_model_opt.is_retryable_exception(TimeoutError("timeout")) is True
+    assert run_train_model_opt.is_retryable_exception(ValueError("no")) is False

@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import socket
 import time
 from pathlib import Path
 from typing import Dict
 from urllib.request import Request, urlopen
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 API = "http://127.0.0.1:8021"
 PROJECT_ID = 18
@@ -39,19 +40,43 @@ BASE_PARAMS: Dict[str, str] = {
 OUT = Path("/app/stocklean/artifacts/train_model_opt_manifest.jsonl")
 
 
-def _request_json(url: str, payload: dict | None = None) -> dict:
+def is_retryable_exception(exc: BaseException) -> bool:
+    return isinstance(exc, (TimeoutError, URLError, socket.timeout))
+
+
+def _request_json(
+    url: str,
+    payload: dict | None = None,
+    *,
+    timeout: float = 30,
+    max_retries: int = 3,
+    retry_sleep: float = 1.0,
+) -> dict:
     data = None
     headers = {"Accept": "application/json"}
     if payload is not None:
         data = json.dumps(payload).encode("utf-8")
         headers["Content-Type"] = "application/json"
-    req = Request(url, data=data, headers=headers)
-    try:
-        with urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except HTTPError as exc:
-        body = exc.read().decode("utf-8")
-        raise RuntimeError(f"HTTP {exc.code}: {body}") from exc
+    attempt = 0
+    while True:
+        req = Request(url, data=data, headers=headers)
+        try:
+            with urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except HTTPError as exc:
+            body = exc.read().decode("utf-8")
+            if exc.code in {429, 500, 502, 503, 504} and attempt < max_retries:
+                attempt += 1
+                time.sleep(retry_sleep)
+                continue
+            raise RuntimeError(f"HTTP {exc.code}: {body}") from exc
+        except BaseException as exc:  # noqa: BLE001 - retry on timeout-like errors
+            if not is_retryable_exception(exc):
+                raise
+            if attempt >= max_retries:
+                raise
+            attempt += 1
+            time.sleep(retry_sleep)
 
 
 def build_payload(train_job_id: int, params: Dict[str, float]) -> dict:
