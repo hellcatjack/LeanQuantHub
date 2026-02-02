@@ -1542,10 +1542,24 @@ def run_pretrade_run(run_id: int, resume_step_id: int | None = None) -> None:
                     session.commit()
                     break
                 except Exception as exc:
+                    error_key = str(exc)
+                    if step.step_key == "market_snapshot" and error_key == "market_snapshot_failed":
+                        step.status = "failed"
+                        step.message = "行情快照不可用"
+                        step.ended_at = datetime.utcnow()
+                        run.status = "failed"
+                        run.message = "行情快照不可用"
+                        run.ended_at = datetime.utcnow()
+                        session.commit()
+                        _notify_telegram(
+                            settings_row,
+                            f"PreTrade step failed: run={run_id} step={step.step_key} error={error_key}",
+                        )
+                        break
                     retry_count += 1
                     step.retry_count = retry_count
                     step.status = "failed"
-                    step.message = str(exc)
+                    step.message = error_key
                     step.ended_at = datetime.utcnow()
                     session.commit()
                     now = datetime.utcnow()
