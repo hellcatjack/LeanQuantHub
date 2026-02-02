@@ -847,11 +847,36 @@ export default function ThemesPage() {
     () => themeDrafts.find((item) => item.key === activeThemeKey),
     [themeDrafts, activeThemeKey]
   );
+  const mergeSymbolLists = (...lists: Array<string[] | undefined | null>) => {
+    const merged: string[] = [];
+    const seen = new Set<string>();
+    lists.forEach((list) => {
+      (list || []).forEach((symbol) => {
+        const value = String(symbol || "").trim();
+        if (!value || seen.has(value)) {
+          return;
+        }
+        seen.add(value);
+        merged.push(value);
+      });
+    });
+    return merged;
+  };
   const activeAutoSymbols = activeThemeSymbols?.auto_symbols || activeThemeSymbols?.symbols || [];
-  const activeManualSymbols =
-    activeThemeDraft?.manual || activeThemeSymbols?.manual_symbols || [];
-  const activeExcludeSymbols =
-    activeThemeDraft?.exclude || activeThemeSymbols?.exclude_symbols || [];
+  const draftManualSymbols = mergeSymbolLists(
+    activeThemeDraft?.system_base?.manual,
+    activeThemeDraft?.manual
+  );
+  const draftExcludeSymbols = mergeSymbolLists(
+    activeThemeDraft?.system_base?.exclude,
+    activeThemeDraft?.exclude
+  );
+  const activeManualSymbols = draftManualSymbols.length
+    ? draftManualSymbols
+    : activeThemeSymbols?.manual_symbols || [];
+  const activeExcludeSymbols = draftExcludeSymbols.length
+    ? draftExcludeSymbols
+    : activeThemeSymbols?.exclude_symbols || [];
   const activeExcludeSet = useMemo(
     () => new Set(activeExcludeSymbols),
     [activeExcludeSymbols]
