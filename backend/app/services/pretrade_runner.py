@@ -1304,6 +1304,25 @@ def step_market_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResult
             }
         )
 
+    failure_artifacts = {
+        "market_snapshot": {
+            "skipped": False,
+            "symbols": symbols,
+            "ttl_seconds": ttl_seconds,
+            "decision_snapshot_id": decision_snapshot_id,
+            "excluded_symbols": sorted(excluded),
+            "watchlist_path": str(watchlist_path),
+            "missing_symbols": sorted(missing),
+            "stale_symbols": sorted(stale_symbols),
+        }
+    }
+    if ctx.step is not None:
+        existing = dict(ctx.step.artifacts or {})
+        existing.update(failure_artifacts)
+        ctx.step.artifacts = existing
+        ctx.step.updated_at = datetime.utcnow()
+        ctx.session.commit()
+
     errors = [f"{symbol}:missing" for symbol in missing] + [f"{symbol}:stale" for symbol in stale_symbols]
     error_message = "; ".join(errors) if errors else "market_snapshot_unavailable"
     update_ib_state(ctx.session, status="degraded", message=error_message, heartbeat=True)
