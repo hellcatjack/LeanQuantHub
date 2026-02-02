@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 import sys
 
-import requests
+import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 BACKEND_ROOT = ROOT / "backend"
@@ -34,16 +34,22 @@ SUMMARY_CSV = ARTIFACT_ROOT / "summary.csv"
 TOP10_JSON = ARTIFACT_ROOT / "top10.json"
 
 
-def _get(url: str, **kwargs):
-    resp = requests.get(url, timeout=10, **kwargs)
-    resp.raise_for_status()
-    return resp.json()
+def _request(method: str, url: str, payload: Dict[str, Any] | None = None):
+    data = None
+    headers = {"Content-Type": "application/json"}
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read().decode("utf-8"))
 
 
-def _post(url: str, payload: Dict[str, Any]):
-    resp = requests.post(url, json=payload, timeout=10)
-    resp.raise_for_status()
-    return resp.json()
+def _get(url: str) -> Dict[str, Any]:
+    return _request("GET", url)
+
+
+def _post(url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    return _request("POST", url, payload)
 
 
 def fetch_base_params() -> Dict[str, Any]:
