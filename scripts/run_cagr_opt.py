@@ -114,13 +114,16 @@ def submit(params: Dict[str, float]) -> dict:
 
 
 def is_done(run_id: int) -> bool:
-    status = _request_json(
-        "GET",
-        f"{API}/api/backtests/{run_id}",
-        timeout=10,
-        max_retries=3,
-        retry_sleep=1.0,
-    )
+    try:
+        status = _request_json(
+            "GET",
+            f"{API}/api/backtests/{run_id}",
+            timeout=10,
+            max_retries=3,
+            retry_sleep=1.0,
+        )
+    except Exception:
+        return False
     return status.get("status") in {"completed", "failed", "canceled"}
 
 

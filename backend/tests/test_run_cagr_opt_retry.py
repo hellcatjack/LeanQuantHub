@@ -122,3 +122,11 @@ def test_submit_uses_retries(monkeypatch) -> None:
     monkeypatch.setattr(run_cagr_opt, "_request_json", _fake_request)
     run_cagr_opt.submit({"max_exposure": 0.4})
     assert called["max_retries"] >= 1
+
+
+def test_is_done_returns_false_on_timeout(monkeypatch) -> None:
+    def _fake_request(method, url, **kwargs):  # noqa: ANN001
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(run_cagr_opt, "_request_json", _fake_request)
+    assert run_cagr_opt.is_done(1) is False
