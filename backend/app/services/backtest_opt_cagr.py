@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Dict, List
 
 
@@ -22,3 +24,25 @@ def build_grid(base: Dict[str, float]) -> List[Dict[str, float]]:
                 )
                 grid.append(item)
     return grid
+
+
+def _pct(value: str | None) -> float:
+    if not value:
+        return 0.0
+    s = str(value).strip().replace("%", "")
+    return float(s) / 100.0
+
+
+def parse_summary(path: Path) -> Dict[str, float]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    stats = data.get("statistics", {})
+    return {
+        "cagr": _pct(stats.get("Compounding Annual Return")),
+        "dd": _pct(stats.get("Drawdown")),
+        "sharpe": float(stats.get("Sharpe Ratio") or 0.0),
+        "sortino": float(stats.get("Sortino Ratio") or 0.0),
+    }
+
+
+def is_acceptable(stats: Dict[str, float], *, max_dd: float = 0.15) -> bool:
+    return stats.get("dd", 1.0) <= max_dd
