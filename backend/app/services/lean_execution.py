@@ -198,6 +198,8 @@ def ingest_execution_events(path: str, *, session=None) -> dict:
                 events.append(json.loads(line))
             except json.JSONDecodeError:
                 continue
+    if session is None:
+        return apply_execution_events(events)
     return apply_execution_events(events, session=session)
 
 

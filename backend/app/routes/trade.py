@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import inspect
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Response
@@ -403,7 +404,14 @@ def list_trade_orders(
         response = Response()
     with get_session() as session:
         if events_path.exists():
-            ingest_execution_events(str(events_path), session=session)
+            try:
+                ingest_params = inspect.signature(ingest_execution_events).parameters
+            except (TypeError, ValueError):
+                ingest_params = {}
+            if "session" in ingest_params:
+                ingest_execution_events(str(events_path), session=session)
+            else:
+                ingest_execution_events(str(events_path))
         positions_payload = read_positions(resolve_bridge_root())
         baseline = ensure_positions_baseline(resolve_bridge_root(), positions_payload)
         realized = compute_realized_pnl(session, baseline)

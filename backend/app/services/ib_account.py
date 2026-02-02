@@ -91,6 +91,14 @@ def get_account_summary(
     session=None, *, mode: str, full: bool, force_refresh: bool = False
 ) -> dict[str, object]:
     cache_payload = _read_cached_summary()
+    if cache_payload is None and CACHE_ROOT is not None:
+        try:
+            from app.services import lean_bridge as lean_bridge_service
+
+            lean_bridge_service.refresh_bridge_cache()
+        except Exception:
+            pass
+        cache_payload = _read_cached_summary()
     if cache_payload is not None:
         items = _normalize_items(cache_payload.get("items"))
         refreshed_at = cache_payload.get("refreshed_at")

@@ -97,7 +97,12 @@ def read_account_summary(root: Path) -> dict:
     data = _read_json(path)
     if not isinstance(data, dict):
         return {"items": [], "stale": True}
-    data.setdefault("items", [])
+    if "items" not in data:
+        meta_keys = {"updated_at", "refreshed_at", "stale", "source", "source_detail"}
+        items = {key: value for key, value in data.items() if key not in meta_keys}
+        data = {**data, "items": items}
+    else:
+        data.setdefault("items", [])
     data.setdefault("stale", False)
     return data
 
