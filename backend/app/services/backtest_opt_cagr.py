@@ -46,3 +46,35 @@ def parse_summary(path: Path) -> Dict[str, float]:
 
 def is_acceptable(stats: Dict[str, float], *, max_dd: float = 0.15) -> bool:
     return stats.get("dd", 1.0) <= max_dd
+
+
+def score_manifest(
+    manifest_path: Path,
+    *,
+    artifacts_root: Path,
+    max_dd: float = 0.15,
+    limit: int = 3,
+) -> List[Dict[str, float]]:
+    results: List[Dict[str, float]] = []
+    for line in manifest_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        run_id = row.get("id")
+        params = row.get("params") or {}
+        summary = artifacts_root / f"run_{run_id}" / "lean_results" / "-summary.json"
+        if not summary.exists():
+            continue
+        stats = parse_summary(summary)
+        if not is_acceptable(stats, max_dd=max_dd):
+            continue
+        results.append(
+            {
+                "run_id": int(run_id),
+                "cagr": stats["cagr"],
+                "dd": stats["dd"],
+                "params": params,
+            }
+        )
+    results.sort(key=lambda x: x["cagr"], reverse=True)
+    return results[:limit]
