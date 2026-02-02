@@ -85,17 +85,35 @@ def _request_json(
             time.sleep(retry_sleep)
 
 
-def submit(params: Dict[str, float]) -> dict:
-    payload = {
-        "project_id": PROJECT_ID,
-        "parameters": {**BASE_PARAMS, **params, "backtest_start": START, "backtest_end": END},
-        "pipeline_train_job_id": TRAIN_JOB_ID,
+def build_payload(params: Dict[str, float]) -> dict:
+    algorithm_parameters = {
+        **BASE_PARAMS,
+        **params,
+        "backtest_start": START,
+        "backtest_end": END,
     }
+    return {
+        "project_id": PROJECT_ID,
+        "params": {
+            "pipeline_train_job_id": TRAIN_JOB_ID,
+            "algorithm_parameters": algorithm_parameters,
+        },
+    }
+
+
+def submit(params: Dict[str, float]) -> dict:
+    payload = build_payload(params)
     return _request_json("POST", f"{API}/api/backtests", payload)
 
 
 def is_done(run_id: int) -> bool:
-    status = _request_json("GET", f"{API}/api/backtests/{run_id}")
+    status = _request_json(
+        "GET",
+        f"{API}/api/backtests/{run_id}",
+        timeout=10,
+        max_retries=3,
+        retry_sleep=1.0,
+    )
     return status.get("status") in {"completed", "failed", "canceled"}
 
 

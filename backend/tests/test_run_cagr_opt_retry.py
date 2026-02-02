@@ -98,3 +98,15 @@ def test_request_json_retries_on_http_500(tmp_path: Path) -> None:
     finally:
         server.shutdown()
         thread.join(timeout=1)
+
+
+def test_is_done_uses_retries(monkeypatch) -> None:
+    called = {}
+
+    def _fake_request(method, url, **kwargs):  # noqa: ANN001
+        called["max_retries"] = kwargs.get("max_retries", 0)
+        return {"status": "completed"}
+
+    monkeypatch.setattr(run_cagr_opt, "_request_json", _fake_request)
+    assert run_cagr_opt.is_done(1) is True
+    assert called["max_retries"] >= 1
