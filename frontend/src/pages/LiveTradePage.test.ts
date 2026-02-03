@@ -63,4 +63,9 @@ describe("LiveTradePage", () => {
     );
     expect(html).toContain("Pipeline");
   });
+
+  it("renders pipeline view container", () => {
+    const html = ReactDOMServer.renderToString(React.createElement(LiveTradePage));
+    expect(html).toContain("pipeline-view");
+  });
 });

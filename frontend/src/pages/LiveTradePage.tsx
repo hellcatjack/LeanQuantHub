@@ -446,6 +446,7 @@ export default function LiveTradePage() {
   const [tradeError, setTradeError] = useState("");
   const [loading, setLoading] = useState(false);
   const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(true);
+  const [mainTab, setMainTab] = useState<"overview" | "pipeline">("overview");
   const [refreshMeta, setRefreshMeta] = useState<
     Record<RefreshKey, { intervalMs: number | null; lastAt: string | null; nextAt: string | null }>
   >(() => {
@@ -3636,50 +3637,81 @@ export default function LiveTradePage() {
     <div className="main">
       <TopBar title={t("trade.title")} />
       <div className="content">
-        <div className="section-title">{t("trade.mainSectionTitle")}</div>
-        <div style={{ display: "flex", gap: "16px", flexWrap: "wrap", alignItems: "center" }}>
+        <div className="project-tabs">
           <button
-            className="button-primary"
-            data-testid="live-trade-refresh-all"
-            onClick={() => refreshAll(true)}
-            disabled={loading}
+            className={mainTab === "overview" ? "tab-button active" : "tab-button"}
+            onClick={() => setMainTab("overview")}
           >
-            {loading ? t("common.actions.loading") : t("trade.refreshAll")}
+            {t("trade.mainSectionTitle")}
           </button>
-          <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
-            <span>{t("trade.autoUpdateLabel")}</span>
-            <label className="switch">
-              <input
-                type="checkbox"
-                checked={autoRefreshEnabled}
-                onChange={(event) => setAutoRefreshEnabled(event.target.checked)}
-                data-testid="live-trade-auto-toggle"
-              />
-              <span className="slider" />
-            </label>
-            <strong data-testid="auto-refresh-status">
-              {autoRefreshEnabled ? t("trade.autoUpdateOn") : t("trade.autoUpdateOff")}
-            </strong>
+          <button
+            className={mainTab === "pipeline" ? "tab-button active" : "tab-button"}
+            onClick={() => setMainTab("pipeline")}
+          >
+            {t("trade.pipelineTab")}
+          </button>
+        </div>
+        <div
+          className="pipeline-view"
+          style={{ display: mainTab === "pipeline" ? "grid" : "none" }}
+        >
+          <div className="pipeline-list">
+            <div className="card-title">{t("trade.pipelineTitle")}</div>
+            <div className="card-meta">{t("trade.pipelineMeta")}</div>
+            <div className="empty-state">{t("common.none")}</div>
+          </div>
+          <div className="pipeline-detail">
+            <div className="card-title">{t("trade.pipelineTitle")}</div>
+            <div className="card-meta">{t("trade.pipelineMeta")}</div>
+            <div className="empty-state">{t("common.none")}</div>
           </div>
         </div>
-        <div className="live-trade-main-row">
-          {sections.mainRow.map((key) => (
-            <Fragment key={key}>{sectionCards[key]}</Fragment>
-          ))}
-        </div>
-        <div className="grid-2">
-          {sections.main.map((key) => (
-            <Fragment key={key}>{sectionCards[key]}</Fragment>
-          ))}
-        </div>
-        <details className="algo-advanced" style={{ marginTop: "16px" }}>
-          <summary>{t("trade.advancedSectionTitle")}</summary>
-          <div className="grid-2" style={{ marginTop: "12px" }}>
-            {sections.advanced.map((key) => (
+        <div style={{ display: mainTab === "overview" ? "block" : "none" }}>
+          <div className="section-title">{t("trade.mainSectionTitle")}</div>
+          <div style={{ display: "flex", gap: "16px", flexWrap: "wrap", alignItems: "center" }}>
+            <button
+              className="button-primary"
+              data-testid="live-trade-refresh-all"
+              onClick={() => refreshAll(true)}
+              disabled={loading}
+            >
+              {loading ? t("common.actions.loading") : t("trade.refreshAll")}
+            </button>
+            <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
+              <span>{t("trade.autoUpdateLabel")}</span>
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={autoRefreshEnabled}
+                  onChange={(event) => setAutoRefreshEnabled(event.target.checked)}
+                  data-testid="live-trade-auto-toggle"
+                />
+                <span className="slider" />
+              </label>
+              <strong data-testid="auto-refresh-status">
+                {autoRefreshEnabled ? t("trade.autoUpdateOn") : t("trade.autoUpdateOff")}
+              </strong>
+            </div>
+          </div>
+          <div className="live-trade-main-row">
+            {sections.mainRow.map((key) => (
               <Fragment key={key}>{sectionCards[key]}</Fragment>
             ))}
           </div>
-        </details>
+          <div className="grid-2">
+            {sections.main.map((key) => (
+              <Fragment key={key}>{sectionCards[key]}</Fragment>
+            ))}
+          </div>
+          <details className="algo-advanced" style={{ marginTop: "16px" }}>
+            <summary>{t("trade.advancedSectionTitle")}</summary>
+            <div className="grid-2" style={{ marginTop: "12px" }}>
+              {sections.advanced.map((key) => (
+                <Fragment key={key}>{sectionCards[key]}</Fragment>
+              ))}
+            </div>
+          </details>
+        </div>
       </div>
     </div>
   );
