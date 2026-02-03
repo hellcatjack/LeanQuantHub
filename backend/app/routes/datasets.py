@@ -94,6 +94,7 @@ from app.services.alpha_fetch import (
 from app.services.bulk_auto import load_bulk_auto_config, write_bulk_auto_config
 from app.services.data_sync_orphan_guard import load_data_sync_orphan_guard_config
 from app.services.project_symbols import collect_active_project_symbols, write_symbol_list
+from app.services import universe_exclude
 from app.services.trading_calendar import (
     load_trading_calendar_config,
     load_trading_calendar_meta,
@@ -635,52 +636,20 @@ def _alpha_exclude_symbols_path(data_root: Path) -> Path:
 
 
 def _load_alpha_exclude_symbols(data_root: Path) -> dict[str, str]:
-    path = _alpha_exclude_symbols_path(data_root)
-    if not path.exists():
-        return {}
-    excluded: dict[str, str] = {}
-    try:
-        with path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
-            reader = csv.DictReader(handle)
-            if reader.fieldnames and "symbol" in reader.fieldnames:
-                for row in reader:
-                    symbol = (row.get("symbol") or "").strip().upper()
-                    if not symbol:
-                        continue
-                    reason = (row.get("reason") or "").strip()
-                    excluded[symbol] = reason
-            else:
-                handle.seek(0)
-                for line in handle:
-                    symbol = line.strip().upper()
-                    if symbol and symbol != "SYMBOL":
-                        excluded[symbol] = ""
-    except OSError:
-        return {}
-    return excluded
+    return universe_exclude.load_exclude_reason_map(data_root)
 
 
 def _append_alpha_exclude_symbol(data_root: Path, symbol: str, reason: str) -> None:
     cleaned = _normalize_symbol(symbol).upper()
     if not cleaned or cleaned == "UNKNOWN":
         return
-    lock = JobLock("alpha_exclude_symbols", data_root)
-    if not lock.acquire():
-        return
-    try:
-        existing = _load_alpha_exclude_symbols(data_root)
-        if cleaned in existing:
-            return
-        path = _alpha_exclude_symbols_path(data_root)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        write_header = not path.exists()
-        with path.open("a", encoding="utf-8", newline="") as handle:
-            writer = csv.writer(handle)
-            if write_header:
-                writer.writerow(["symbol", "reason", "updated_at"])
-            writer.writerow([cleaned, reason, datetime.utcnow().isoformat()])
-    finally:
-        lock.release()
+    universe_exclude.upsert_exclude_item(
+        data_root,
+        symbol=cleaned,
+        reason=reason,
+        source="alpha/exclude",
+        enabled=True,
+    )
 
 
 def _run_bulk_sync_job(job_id: int) -> None:

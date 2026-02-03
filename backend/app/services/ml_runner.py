@@ -28,6 +28,7 @@ from app.routes.projects import _resolve_project_config
 from app.services.audit_log import record_audit
 from app.services.lean_runner import run_backtest
 from app.services.ml_quality import attach_train_quality
+from app.services import universe_exclude
 
 CANCEL_EXIT_CODE = 130
 
@@ -73,26 +74,7 @@ def _load_base_config() -> dict[str, Any]:
 
 
 def _load_exclude_symbols(data_root: Path | None) -> set[str]:
-    if not data_root:
-        return set()
-    exclude_paths = [
-        data_root / "universe" / "exclude_symbols.csv",
-        data_root / "universe" / "fundamentals_exclude.csv",
-    ]
-    symbols: set[str] = set()
-    for path in exclude_paths:
-        if not path.exists():
-            continue
-        try:
-            with path.open(encoding="utf-8-sig", errors="ignore") as handle:
-                reader = csv.DictReader(handle)
-                for row in reader:
-                    symbol = str(row.get("symbol") or "").strip().upper()
-                    if symbol:
-                        symbols.add(symbol)
-        except OSError:
-            continue
-    return symbols
+    return universe_exclude.load_exclude_symbols(data_root)
 
 
 def _resolve_system_theme_symbols(session, key: str | None) -> list[str]:

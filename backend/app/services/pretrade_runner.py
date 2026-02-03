@@ -65,6 +65,7 @@ from app.services.pit_runner import (
     run_pit_fundamental_job,
     run_pit_weekly_job,
 )
+from app.services import universe_exclude
 from app.services.trading_calendar import (
     load_trading_calendar_config,
     load_trading_calendar_meta,
@@ -1291,6 +1292,7 @@ def step_market_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResult
         decision_snapshot_id=decision_snapshot_id,
     )
     excluded: set[str] = set()
+    excluded.update(universe_exclude.load_exclude_symbols(_resolve_data_root()))
     if exclude_symbols_raw:
         if isinstance(exclude_symbols_raw, (list, tuple, set)):
             candidates = list(exclude_symbols_raw)

@@ -14,6 +14,7 @@ from app.models import PitFundamentalJob, PitWeeklyJob
 from app.services.audit_log import record_audit
 from app.services.alpha_rate import alpha_rate_config_path, write_alpha_rate_config
 from app.services.job_lock import JobLock
+from app.services import universe_exclude
 
 
 FUNDAMENTAL_CANCEL_EXIT_CODE = 130
@@ -214,13 +215,7 @@ def _build_fundamental_command(params: dict[str, Any], output_dir: str | None) -
 
     exclude_symbols_path = str(params.get("exclude_symbols_path") or "").strip()
     if not exclude_symbols_path and data_root:
-        long_term_exclude = Path(data_root) / "universe" / "fundamentals_exclude.csv"
-        if long_term_exclude.exists():
-            exclude_symbols_path = str(long_term_exclude)
-        else:
-            default_exclude = Path(data_root) / "universe" / "fundamentals_missing.csv"
-            if default_exclude.exists():
-                exclude_symbols_path = str(default_exclude)
+        exclude_symbols_path = str(universe_exclude.ensure_exclude_file(Path(data_root)))
     if exclude_symbols_path:
         cmd.extend(["--exclude-symbols", exclude_symbols_path])
     asset_types = str(params.get("asset_types") or "").strip()
