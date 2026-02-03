@@ -34,6 +34,7 @@ import {
   getBridgeRefreshHint,
 } from "../utils/bridgeRefreshHint";
 import { formatRealizedPnlValue } from "../utils/formatters";
+import { parsePretradeRunId } from "../utils/pipelineTrace";
 
 interface IBSettings {
   id: number;
@@ -231,6 +232,34 @@ interface TradeReceipt {
 interface TradeReceiptPage {
   items: TradeReceipt[];
   total: number;
+  warnings?: string[];
+}
+
+interface PipelineRunItem {
+  trace_id: string;
+  run_type: string;
+  project_id: number;
+  status: string;
+  mode?: string | null;
+  created_at?: string | null;
+  started_at?: string | null;
+  ended_at?: string | null;
+}
+
+interface PipelineEvent {
+  event_id: string;
+  task_type: string;
+  task_id?: number | null;
+  stage?: string | null;
+  status?: string | null;
+  message?: string | null;
+  started_at?: string | null;
+  ended_at?: string | null;
+}
+
+interface PipelineTraceDetail {
+  trace_id: string;
+  events: PipelineEvent[];
   warnings?: string[];
 }
 
@@ -446,6 +475,22 @@ export default function LiveTradePage() {
   const [tradeError, setTradeError] = useState("");
   const [loading, setLoading] = useState(false);
   const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(true);
+  const [mainTab, setMainTab] = useState<"overview" | "pipeline">("overview");
+  const [pipelineRuns, setPipelineRuns] = useState<PipelineRunItem[]>([]);
+  const [pipelineRunsLoading, setPipelineRunsLoading] = useState(false);
+  const [pipelineRunsError, setPipelineRunsError] = useState("");
+  const [pipelineTraceId, setPipelineTraceId] = useState<string | null>(null);
+  const [pipelineDetail, setPipelineDetail] = useState<PipelineTraceDetail | null>(null);
+  const [pipelineDetailLoading, setPipelineDetailLoading] = useState(false);
+  const [pipelineDetailError, setPipelineDetailError] = useState("");
+  const [pipelineActionLoading, setPipelineActionLoading] = useState<Record<string, boolean>>(
+    {}
+  );
+  const [pipelineActionError, setPipelineActionError] = useState("");
+  const [pipelineActionResult, setPipelineActionResult] = useState("");
+  const [pipelineStatusFilter, setPipelineStatusFilter] = useState("");
+  const [pipelineTypeFilter, setPipelineTypeFilter] = useState("");
+  const [pipelineKeyword, setPipelineKeyword] = useState("");
   const [refreshMeta, setRefreshMeta] = useState<
     Record<RefreshKey, { intervalMs: number | null; lastAt: string | null; nextAt: string | null }>
   >(() => {
@@ -1266,6 +1311,119 @@ export default function LiveTradePage() {
     }
   };
 
+  const loadPipelineRuns = async () => {
+    if (!selectedProjectId) {
+      setPipelineRuns([]);
+      setPipelineTraceId(null);
+      setPipelineDetail(null);
+      return;
+    }
+    setPipelineRunsLoading(true);
+    setPipelineRunsError("");
+    try {
+      const res = await api.get<PipelineRunItem[]>("/api/pipeline/runs", {
+        params: { project_id: Number(selectedProjectId) },
+      });
+      const items = res.data || [];
+      setPipelineRuns(items);
+      setPipelineDetail(null);
+      const existing =
+        pipelineTraceId && items.some((item) => item.trace_id === pipelineTraceId)
+          ? pipelineTraceId
+          : null;
+      setPipelineTraceId(existing || items[0]?.trace_id || null);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("trade.pipeline.errors.loadRuns");
+      setPipelineRunsError(String(detail));
+      setPipelineRuns([]);
+      setPipelineTraceId(null);
+      setPipelineDetail(null);
+    } finally {
+      setPipelineRunsLoading(false);
+    }
+  };
+
+  const loadPipelineDetail = async (traceId: string) => {
+    setPipelineDetailLoading(true);
+    setPipelineDetailError("");
+    try {
+      const res = await api.get<PipelineTraceDetail>(`/api/pipeline/runs/${traceId}`);
+      setPipelineDetail(res.data);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("trade.pipeline.errors.loadDetail");
+      setPipelineDetailError(String(detail));
+      setPipelineDetail(null);
+    } finally {
+      setPipelineDetailLoading(false);
+    }
+  };
+
+  const runPipelineAction = async (
+    actionKey: string,
+    action: () => Promise<void>,
+    successMessage: string
+  ) => {
+    setPipelineActionError("");
+    setPipelineActionResult("");
+    setPipelineActionLoading((prev) => ({ ...prev, [actionKey]: true }));
+    try {
+      await action();
+      setPipelineActionResult(successMessage);
+      await loadPipelineRuns();
+      if (pipelineTraceId) {
+        await loadPipelineDetail(pipelineTraceId);
+      }
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("trade.pipeline.errors.actionFailed");
+      setPipelineActionError(String(detail));
+    } finally {
+      setPipelineActionLoading((prev) => {
+        const next = { ...prev };
+        delete next[actionKey];
+        return next;
+      });
+    }
+  };
+
+  const retryPipelineStep = async (stepId: number) => {
+    if (!pipelinePretradeRunId) {
+      return;
+    }
+    await runPipelineAction(
+      `pretrade-step-${stepId}`,
+      async () => {
+        await api.post(`/api/pretrade/runs/${pipelinePretradeRunId}/steps/${stepId}/retry`);
+      },
+      t("trade.pipeline.actions.retryStepSuccess")
+    );
+  };
+
+  const resumePipelineRun = async () => {
+    if (!pipelinePretradeRunId) {
+      return;
+    }
+    await runPipelineAction(
+      `pretrade-run-${pipelinePretradeRunId}`,
+      async () => {
+        await api.post(`/api/pretrade/runs/${pipelinePretradeRunId}/resume`);
+      },
+      t("trade.pipeline.actions.resumeSuccess")
+    );
+  };
+
+  const executePipelineTrade = async (runId: number) => {
+    await runPipelineAction(
+      `trade-run-${runId}`,
+      async () => {
+        await api.post(`/api/trade/runs/${runId}/execute`, {
+          dry_run: false,
+          force: false,
+        });
+      },
+      t("trade.pipeline.actions.executeSuccess")
+    );
+  };
+
   const handleOrdersPageChange = (page: number) => {
     setOrdersPage(page);
     loadTradeActivity(page, ordersPageSize);
@@ -1522,6 +1680,33 @@ export default function LiveTradePage() {
     return tradeRuns.filter((run) => String(run.project_id) === selectedProjectId);
   }, [selectedProjectId, tradeRuns]);
 
+  const pipelineTypeOptions = useMemo(() => {
+    return Array.from(new Set(pipelineRuns.map((item) => item.run_type).filter(Boolean))).sort();
+  }, [pipelineRuns]);
+
+  const pipelineStatusOptions = useMemo(() => {
+    return Array.from(new Set(pipelineRuns.map((item) => item.status).filter(Boolean))).sort();
+  }, [pipelineRuns]);
+
+  const filteredPipelineRuns = useMemo(() => {
+    let items = pipelineRuns;
+    if (pipelineTypeFilter) {
+      items = items.filter((item) => item.run_type === pipelineTypeFilter);
+    }
+    if (pipelineStatusFilter) {
+      items = items.filter((item) => item.status === pipelineStatusFilter);
+    }
+    if (pipelineKeyword.trim()) {
+      const keyword = pipelineKeyword.trim().toLowerCase();
+      items = items.filter((item) => item.trace_id.toLowerCase().includes(keyword));
+    }
+    return items;
+  }, [pipelineKeyword, pipelineRuns, pipelineStatusFilter, pipelineTypeFilter]);
+
+  const pipelinePretradeRunId = useMemo(() => {
+    return parsePretradeRunId(pipelineTraceId);
+  }, [pipelineTraceId]);
+
   const latestTradeRun = filteredTradeRuns[0];
 
   useEffect(() => {
@@ -1551,6 +1736,30 @@ export default function LiveTradePage() {
       setSymbolSummaryUpdatedAt(null);
     }
   }, [selectedRunId]);
+
+  useEffect(() => {
+    if (mainTab !== "pipeline") {
+      return;
+    }
+    if (!selectedProjectId) {
+      setPipelineRuns([]);
+      setPipelineTraceId(null);
+      setPipelineDetail(null);
+      return;
+    }
+    loadPipelineRuns();
+  }, [mainTab, selectedProjectId]);
+
+  useEffect(() => {
+    if (mainTab !== "pipeline") {
+      return;
+    }
+    if (!pipelineTraceId) {
+      setPipelineDetail(null);
+      return;
+    }
+    loadPipelineDetail(pipelineTraceId);
+  }, [mainTab, pipelineTraceId]);
 
   useEffect(() => {
     if (ibSettings?.market_data_type) {
@@ -3636,50 +3845,255 @@ export default function LiveTradePage() {
     <div className="main">
       <TopBar title={t("trade.title")} />
       <div className="content">
-        <div className="section-title">{t("trade.mainSectionTitle")}</div>
-        <div style={{ display: "flex", gap: "16px", flexWrap: "wrap", alignItems: "center" }}>
+        <div className="project-tabs">
           <button
-            className="button-primary"
-            data-testid="live-trade-refresh-all"
-            onClick={() => refreshAll(true)}
-            disabled={loading}
+            className={mainTab === "overview" ? "tab-button active" : "tab-button"}
+            onClick={() => setMainTab("overview")}
           >
-            {loading ? t("common.actions.loading") : t("trade.refreshAll")}
+            {t("trade.mainSectionTitle")}
           </button>
-          <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
-            <span>{t("trade.autoUpdateLabel")}</span>
-            <label className="switch">
-              <input
-                type="checkbox"
-                checked={autoRefreshEnabled}
-                onChange={(event) => setAutoRefreshEnabled(event.target.checked)}
-                data-testid="live-trade-auto-toggle"
-              />
-              <span className="slider" />
-            </label>
-            <strong data-testid="auto-refresh-status">
-              {autoRefreshEnabled ? t("trade.autoUpdateOn") : t("trade.autoUpdateOff")}
-            </strong>
+          <button
+            className={mainTab === "pipeline" ? "tab-button active" : "tab-button"}
+            onClick={() => setMainTab("pipeline")}
+          >
+            {t("trade.pipelineTab")}
+          </button>
+        </div>
+        <div
+          className="pipeline-view"
+          style={{ display: mainTab === "pipeline" ? "grid" : "none" }}
+        >
+          <div className="pipeline-list">
+            <div className="card-title">{t("trade.pipeline.listTitle")}</div>
+            <div className="card-meta">{t("trade.pipelineMeta")}</div>
+            <div className="form-grid" style={{ marginTop: "12px" }}>
+              <div className="form-row">
+                <label className="form-label">{t("trade.pipeline.filters.project")}</label>
+                <select
+                  className="form-select"
+                  value={selectedProjectId}
+                  onChange={(event) => setSelectedProjectId(event.target.value)}
+                >
+                  <option value="">{t("trade.projectSelectPlaceholder")}</option>
+                  {projects.map((project) => (
+                    <option key={project.id} value={project.id}>
+                      #{project.id} · {project.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("trade.pipeline.filters.type")}</label>
+                <select
+                  className="form-select"
+                  value={pipelineTypeFilter}
+                  onChange={(event) => setPipelineTypeFilter(event.target.value)}
+                >
+                  <option value="">{t("trade.pipeline.filters.all")}</option>
+                  {pipelineTypeOptions.map((item) => (
+                    <option key={item} value={item}>
+                      {item}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("trade.pipeline.filters.status")}</label>
+                <select
+                  className="form-select"
+                  value={pipelineStatusFilter}
+                  onChange={(event) => setPipelineStatusFilter(event.target.value)}
+                >
+                  <option value="">{t("trade.pipeline.filters.all")}</option>
+                  {pipelineStatusOptions.map((item) => (
+                    <option key={item} value={item}>
+                      {formatStatus(item)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("trade.pipeline.filters.keyword")}</label>
+                <input
+                  className="form-input"
+                  value={pipelineKeyword}
+                  onChange={(event) => setPipelineKeyword(event.target.value)}
+                  placeholder={t("trade.pipeline.filters.keyword")}
+                />
+              </div>
+            </div>
+            {pipelineRunsError && <div className="form-hint">{pipelineRunsError}</div>}
+            {pipelineRunsLoading && (
+              <div className="form-hint">{t("common.actions.loading")}</div>
+            )}
+            <div className="pipeline-run-list">
+              {!selectedProjectId ? (
+                <div className="empty-state">{t("trade.pipeline.projectRequired")}</div>
+              ) : filteredPipelineRuns.length ? (
+                filteredPipelineRuns.map((item) => (
+                  <button
+                    key={item.trace_id}
+                    type="button"
+                    className={
+                      item.trace_id === pipelineTraceId
+                        ? "pipeline-run-item active"
+                        : "pipeline-run-item"
+                    }
+                    onClick={() => setPipelineTraceId(item.trace_id)}
+                  >
+                    <div className="pipeline-run-title">
+                      <span>{item.run_type}</span>
+                      <span className="pipeline-run-status">{formatStatus(item.status)}</span>
+                    </div>
+                    <div className="pipeline-run-meta">
+                      <span>{item.trace_id}</span>
+                      <span>
+                        {item.created_at ? formatDateTime(item.created_at) : t("common.none")}
+                      </span>
+                    </div>
+                  </button>
+                ))
+              ) : (
+                <div className="empty-state">{t("trade.pipeline.empty")}</div>
+              )}
+            </div>
+          </div>
+          <div className="pipeline-detail">
+            <div className="card-title">{t("trade.pipeline.detailTitle")}</div>
+            <div className="card-meta">{t("trade.pipeline.detailMeta")}</div>
+            {pipelineDetailError && <div className="form-hint">{pipelineDetailError}</div>}
+            {pipelineActionError && <div className="form-hint">{pipelineActionError}</div>}
+            {pipelineActionResult && <div className="form-success">{pipelineActionResult}</div>}
+            {pipelineDetailLoading && (
+              <div className="form-hint">{t("common.actions.loading")}</div>
+            )}
+            <div className="pipeline-events">
+              {pipelineDetail?.events?.length ? (
+                pipelineDetail.events.map((event) => {
+                  const canRetryStep =
+                    event.task_type === "pretrade_step" &&
+                    pipelinePretradeRunId &&
+                    event.task_id;
+                  const canResumeRun =
+                    event.task_type === "pretrade_run" && pipelinePretradeRunId;
+                  const canExecuteTrade =
+                    event.task_type === "trade_run" && event.task_id;
+                  return (
+                    <div key={event.event_id} className="pipeline-event">
+                      <div className="pipeline-event-title">
+                        <span>{event.task_type}</span>
+                        {event.status ? (
+                          <span className="pipeline-event-status">
+                            {formatStatus(event.status)}
+                          </span>
+                        ) : null}
+                      </div>
+                      <div className="pipeline-event-meta">
+                        <span>{event.message || t("common.none")}</span>
+                        <span>
+                          {event.started_at ? formatDateTime(event.started_at) : t("common.none")}
+                        </span>
+                      </div>
+                      {(canRetryStep || canResumeRun || canExecuteTrade) && (
+                        <div className="pipeline-event-actions">
+                          {canRetryStep && event.task_id ? (
+                            <button
+                              type="button"
+                              className="button-secondary button-compact"
+                              disabled={pipelineActionLoading[`pretrade-step-${event.task_id}`]}
+                              onClick={() => retryPipelineStep(event.task_id as number)}
+                            >
+                              {pipelineActionLoading[`pretrade-step-${event.task_id}`]
+                                ? t("common.actions.loading")
+                                : t("trade.pipeline.actions.retryStep")}
+                            </button>
+                          ) : null}
+                          {canResumeRun ? (
+                            <button
+                              type="button"
+                              className="button-secondary button-compact"
+                              disabled={
+                                pipelinePretradeRunId
+                                  ? pipelineActionLoading[`pretrade-run-${pipelinePretradeRunId}`]
+                                  : false
+                              }
+                              onClick={resumePipelineRun}
+                            >
+                              {pipelinePretradeRunId &&
+                              pipelineActionLoading[`pretrade-run-${pipelinePretradeRunId}`]
+                                ? t("common.actions.loading")
+                                : t("trade.pipeline.actions.resumeRun")}
+                            </button>
+                          ) : null}
+                          {canExecuteTrade && event.task_id ? (
+                            <button
+                              type="button"
+                              className="button-secondary button-compact"
+                              disabled={pipelineActionLoading[`trade-run-${event.task_id}`]}
+                              onClick={() => executePipelineTrade(event.task_id as number)}
+                            >
+                              {pipelineActionLoading[`trade-run-${event.task_id}`]
+                                ? t("common.actions.loading")
+                                : t("trade.pipeline.actions.executeTrade")}
+                            </button>
+                          ) : null}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              ) : (
+                <div className="empty-state">{t("trade.pipeline.detailEmpty")}</div>
+              )}
+            </div>
           </div>
         </div>
-        <div className="live-trade-main-row">
-          {sections.mainRow.map((key) => (
-            <Fragment key={key}>{sectionCards[key]}</Fragment>
-          ))}
-        </div>
-        <div className="grid-2">
-          {sections.main.map((key) => (
-            <Fragment key={key}>{sectionCards[key]}</Fragment>
-          ))}
-        </div>
-        <details className="algo-advanced" style={{ marginTop: "16px" }}>
-          <summary>{t("trade.advancedSectionTitle")}</summary>
-          <div className="grid-2" style={{ marginTop: "12px" }}>
-            {sections.advanced.map((key) => (
+        <div style={{ display: mainTab === "overview" ? "block" : "none" }}>
+          <div className="section-title">{t("trade.mainSectionTitle")}</div>
+          <div style={{ display: "flex", gap: "16px", flexWrap: "wrap", alignItems: "center" }}>
+            <button
+              className="button-primary"
+              data-testid="live-trade-refresh-all"
+              onClick={() => refreshAll(true)}
+              disabled={loading}
+            >
+              {loading ? t("common.actions.loading") : t("trade.refreshAll")}
+            </button>
+            <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
+              <span>{t("trade.autoUpdateLabel")}</span>
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={autoRefreshEnabled}
+                  onChange={(event) => setAutoRefreshEnabled(event.target.checked)}
+                  data-testid="live-trade-auto-toggle"
+                />
+                <span className="slider" />
+              </label>
+              <strong data-testid="auto-refresh-status">
+                {autoRefreshEnabled ? t("trade.autoUpdateOn") : t("trade.autoUpdateOff")}
+              </strong>
+            </div>
+          </div>
+          <div className="live-trade-main-row">
+            {sections.mainRow.map((key) => (
               <Fragment key={key}>{sectionCards[key]}</Fragment>
             ))}
           </div>
-        </details>
+          <div className="grid-2">
+            {sections.main.map((key) => (
+              <Fragment key={key}>{sectionCards[key]}</Fragment>
+            ))}
+          </div>
+          <details className="algo-advanced" style={{ marginTop: "16px" }}>
+            <summary>{t("trade.advancedSectionTitle")}</summary>
+            <div className="grid-2" style={{ marginTop: "12px" }}>
+              {sections.advanced.map((key) => (
+                <Fragment key={key}>{sectionCards[key]}</Fragment>
+              ))}
+            </div>
+          </details>
+        </div>
       </div>
     </div>
   );

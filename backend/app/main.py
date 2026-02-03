@@ -14,6 +14,7 @@ from app.routes import (
     audit_logs,
     backtests,
     backtest_settings,
+    pipeline,
     datasets,
     decisions,
     factor_scores,
@@ -71,6 +72,7 @@ app.include_router(reports.router)
 app.include_router(datasets.router)
 app.include_router(audit_logs.router)
 app.include_router(automation.router)
+app.include_router(pipeline.router)
 app.include_router(decisions.router)
 app.include_router(system_themes.router)
 app.include_router(universe.router)
