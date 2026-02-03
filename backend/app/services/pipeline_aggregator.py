@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.models import PreTradeRun, TradeRun
+from app.models import AutoWeeklyJob, PreTradeRun, TradeRun
 
 
 def list_pipeline_runs(session, *, project_id: int) -> list[dict[str, Any]]:
@@ -18,6 +18,12 @@ def list_pipeline_runs(session, *, project_id: int) -> list[dict[str, Any]]:
         .order_by(TradeRun.created_at.desc())
         .all()
     )
+    weekly_jobs = (
+        session.query(AutoWeeklyJob)
+        .filter(AutoWeeklyJob.project_id == project_id)
+        .order_by(AutoWeeklyJob.created_at.desc())
+        .all()
+    )
 
     items: list[dict[str, Any]] = []
     for run in pretrade_runs:
@@ -30,6 +36,18 @@ def list_pipeline_runs(session, *, project_id: int) -> list[dict[str, Any]]:
                 "started_at": run.started_at,
                 "ended_at": run.ended_at,
                 "created_at": run.created_at,
+            }
+        )
+    for job in weekly_jobs:
+        items.append(
+            {
+                "trace_id": f"auto:{job.id}",
+                "run_type": "auto_weekly",
+                "project_id": job.project_id,
+                "status": job.status,
+                "started_at": job.started_at,
+                "ended_at": job.ended_at,
+                "created_at": job.created_at,
             }
         )
     for run in trade_runs:

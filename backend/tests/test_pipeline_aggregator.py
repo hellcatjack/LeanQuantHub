@@ -35,3 +35,14 @@ def test_list_pipeline_runs_project_scoped():
     assert "pretrade:1" in trace_ids
     assert "trade:1" in trace_ids
     assert all(item["project_id"] == 1 for item in runs)
+
+from app.models import AutoWeeklyJob
+
+
+def test_list_includes_auto_weekly():
+    session = _make_session()
+    session.add(AutoWeeklyJob(project_id=1, status="running"))
+    session.commit()
+
+    runs = list_pipeline_runs(session, project_id=1)
+    assert any(item["trace_id"].startswith("auto:") for item in runs)
