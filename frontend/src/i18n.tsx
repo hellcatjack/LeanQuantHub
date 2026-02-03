@@ -2231,6 +2231,9 @@ const messages: Record<Locale, MessageTree> = {
     trade: {
       title: "实盘交易",
       meta: "Brokerage 执行与运行状态概览",
+      pipelineTab: "Pipeline",
+      pipelineTitle: "交易 Pipeline",
+      pipelineMeta: "按项目回放自动/手动链路",
       mainSectionTitle: "核心信息",
       advancedSectionTitle: "高级功能区",
       refreshAll: "刷新全部",
@@ -4864,6 +4867,9 @@ const messages: Record<Locale, MessageTree> = {
     trade: {
       title: "Live Trading",
       meta: "Brokerage execution status and runtime overview",
+      pipelineTab: "Pipeline",
+      pipelineTitle: "Pipeline",
+      pipelineMeta: "Replay the workflow by project",
       mainSectionTitle: "Core Panels",
       advancedSectionTitle: "Advanced Panels",
       refreshAll: "Refresh All",
