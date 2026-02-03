@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from app.models import (
@@ -72,7 +73,15 @@ def list_pipeline_runs(session, *, project_id: int) -> list[dict[str, Any]]:
                 "created_at": run.created_at,
             }
         )
+    items.sort(key=_run_sort_key, reverse=True)
     return items
+
+
+def _run_sort_key(item: dict[str, Any]) -> tuple[datetime, str]:
+    when = item.get("created_at") or item.get("started_at") or item.get("ended_at")
+    if when is None:
+        when = datetime.min
+    return when, item.get("trace_id", "")
 
 
 def build_pipeline_trace(session, *, trace_id: str) -> dict[str, Any]:

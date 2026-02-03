@@ -1,3 +1,4 @@
+from datetime import datetime
 from pathlib import Path
 import sys
 
@@ -102,3 +103,23 @@ def test_pretrade_trace_includes_snapshot_and_trade():
     assert "decision_snapshot" in event_types
     assert "trade_run" in event_types
     assert "trade_order" in event_types
+
+
+def test_list_pipeline_runs_sorted_desc():
+    session = _make_session()
+    session.add_all(
+        [
+            PreTradeRun(project_id=1, status="success", created_at=datetime(2024, 1, 1)),
+            TradeRun(
+                project_id=1,
+                status="queued",
+                mode="paper",
+                created_at=datetime(2024, 1, 2),
+            ),
+            AutoWeeklyJob(project_id=1, status="running", created_at=datetime(2024, 1, 3)),
+        ]
+    )
+    session.commit()
+
+    runs = list_pipeline_runs(session, project_id=1)
+    assert [item["trace_id"] for item in runs] == ["auto:1", "trade:1", "pretrade:1"]
