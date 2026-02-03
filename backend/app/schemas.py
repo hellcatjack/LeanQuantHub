@@ -1966,6 +1966,36 @@ class TradeSymbolSummaryPageOut(BaseModel):
     last_update_at: datetime | None
 
 
+class PipelineRunListOut(BaseModel):
+    trace_id: str
+    run_type: str
+    project_id: int
+    status: str
+    mode: str | None = None
+    created_at: datetime | None = None
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+
+
+class PipelineEventOut(BaseModel):
+    event_id: str
+    task_type: str
+    task_id: int | None = None
+    stage: str | None = None
+    status: str | None = None
+    message: str | None = None
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    params_snapshot: dict | None = None
+    artifact_paths: dict | None = None
+
+
+class PipelineRunDetailOut(BaseModel):
+    trace_id: str
+    events: list[PipelineEventOut]
+    warnings: list[str] = []
+
+
 class AuditLogOut(BaseModel):
     id: int
     actor: str
