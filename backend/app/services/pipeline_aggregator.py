@@ -189,5 +189,13 @@ def build_pipeline_trace(session, *, trace_id: str) -> dict[str, Any]:
                     )
             else:
                 warnings.append("trade_run_missing")
+        events.sort(key=_event_sort_key)
         return {"trace_id": trace_id, "events": events, "warnings": warnings}
     return {"trace_id": trace_id, "events": [], "warnings": ["trace_type_unknown"]}
+
+
+def _event_sort_key(event: dict[str, Any]) -> tuple[datetime, str]:
+    when = event.get("started_at") or event.get("ended_at")
+    if when is None:
+        when = datetime.min
+    return when, event.get("event_id", "")

@@ -123,3 +123,59 @@ def test_list_pipeline_runs_sorted_desc():
 
     runs = list_pipeline_runs(session, project_id=1)
     assert [item["trace_id"] for item in runs] == ["auto:1", "trade:1", "pretrade:1"]
+
+
+def test_pretrade_trace_sorted_by_time():
+    session = _make_session()
+    run = PreTradeRun(project_id=1, status="success", started_at=datetime(2024, 1, 1, 10, 0, 0))
+    session.add(run)
+    session.commit()
+
+    snapshot = DecisionSnapshot(
+        project_id=1, status="success", started_at=datetime(2024, 1, 1, 12, 0, 0)
+    )
+    session.add(snapshot)
+    session.commit()
+
+    trade_run = TradeRun(
+        project_id=1,
+        decision_snapshot_id=snapshot.id,
+        status="queued",
+        mode="paper",
+        started_at=datetime(2024, 1, 1, 9, 0, 0),
+    )
+    session.add(trade_run)
+    session.commit()
+
+    step = PreTradeStep(
+        run_id=run.id,
+        step_key="decision_snapshot",
+        step_order=1,
+        status="success",
+        started_at=datetime(2024, 1, 1, 11, 0, 0),
+        artifacts={"decision_snapshot_id": snapshot.id, "trade_run_id": trade_run.id},
+    )
+    session.add(step)
+    session.commit()
+
+    order = TradeOrder(
+        run_id=trade_run.id,
+        client_order_id="run-1-SPY-BUY",
+        symbol="SPY",
+        side="BUY",
+        quantity=1,
+        order_type="MKT",
+        status="NEW",
+        created_at=datetime(2024, 1, 1, 9, 30, 0),
+    )
+    session.add(order)
+    session.commit()
+
+    detail = build_pipeline_trace(session, trace_id=f"pretrade:{run.id}")
+    assert [event["event_id"] for event in detail["events"]] == [
+        f"trade_run:{trade_run.id}",
+        f"trade_order:{order.id}",
+        f"pretrade_run:{run.id}",
+        f"pretrade_step:{step.id}",
+        f"decision_snapshot:{snapshot.id}",
+    ]
