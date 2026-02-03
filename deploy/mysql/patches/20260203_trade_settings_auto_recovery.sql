@@ -18,8 +18,12 @@ PREPARE stmt FROM @sql;
 EXECUTE stmt;
 DEALLOCATE PREPARE stmt;
 
-INSERT INTO schema_migrations (version, applied_at)
-SELECT '20260203_trade_settings_auto_recovery', NOW()
+INSERT INTO schema_migrations (version, description, checksum, applied_at)
+SELECT
+  '20260203_trade_settings_auto_recovery',
+  'add trade_settings.auto_recovery',
+  SHA2('20260203_trade_settings_auto_recovery', 256),
+  NOW()
 WHERE EXISTS (
   SELECT 1 FROM information_schema.tables
   WHERE table_schema = DATABASE() AND table_name = 'schema_migrations'
