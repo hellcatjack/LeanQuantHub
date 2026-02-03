@@ -10,11 +10,15 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from app.models import (
+    AuditLog,
     AutoWeeklyJob,
     Base,
     DecisionSnapshot,
+    PitFundamentalJob,
+    PitWeeklyJob,
     PreTradeRun,
     PreTradeStep,
+    TradeFill,
     TradeOrder,
     TradeRun,
 )
@@ -220,3 +224,82 @@ def test_list_pipeline_runs_supports_filters():
         keyword="trade",
     )
     assert [item["trace_id"] for item in runs] == ["trade:1"]
+
+
+def test_auto_weekly_trace_includes_pit_backtest_and_audit():
+    session = _make_session()
+    job = AutoWeeklyJob(
+        project_id=1,
+        status="success",
+        pit_weekly_job_id=1,
+        pit_fundamental_job_id=2,
+        backtest_status="success",
+        backtest_log_path="/tmp/backtest.log",
+        backtest_output_dir="/tmp/backtest/out",
+        backtest_artifact_dir="/tmp/backtest/artifacts",
+    )
+    pit_weekly = PitWeeklyJob(id=1, status="success", log_path="/tmp/pit_weekly.log")
+    pit_fund = PitFundamentalJob(id=2, status="success", log_path="/tmp/pit_fund.log")
+    session.add_all([job, pit_weekly, pit_fund])
+    session.commit()
+
+    audit = AuditLog(
+        actor="system",
+        action="automation.weekly.success",
+        resource_type="auto_weekly_job",
+        resource_id=job.id,
+    )
+    session.add(audit)
+    session.commit()
+
+    detail = build_pipeline_trace(session, trace_id=f"auto:{job.id}")
+    task_types = {event["task_type"] for event in detail["events"]}
+    assert "auto_weekly" in task_types
+    assert "pit_weekly" in task_types
+    assert "pit_fundamental" in task_types
+    assert "backtest" in task_types
+    assert "audit_log" in task_types
+
+
+def test_trade_trace_includes_fills_and_audit():
+    session = _make_session()
+    run = TradeRun(project_id=1, status="queued", mode="paper")
+    session.add(run)
+    session.commit()
+
+    order = TradeOrder(
+        run_id=run.id,
+        client_order_id="run-1-SPY-BUY",
+        symbol="SPY",
+        side="BUY",
+        quantity=1,
+        order_type="MKT",
+        status="NEW",
+    )
+    session.add(order)
+    session.commit()
+
+    fill = TradeFill(
+        order_id=order.id,
+        fill_quantity=1,
+        fill_price=100.0,
+        commission=0.1,
+    )
+    session.add(fill)
+    session.commit()
+
+    audit = AuditLog(
+        actor="system",
+        action="trade_run.execute",
+        resource_type="trade_run",
+        resource_id=run.id,
+    )
+    session.add(audit)
+    session.commit()
+
+    detail = build_pipeline_trace(session, trace_id=f"trade:{run.id}")
+    task_types = {event["task_type"] for event in detail["events"]}
+    assert "trade_run" in task_types
+    assert "trade_order" in task_types
+    assert "trade_fill" in task_types
+    assert "audit_log" in task_types

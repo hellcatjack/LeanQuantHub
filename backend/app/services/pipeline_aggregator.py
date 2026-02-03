@@ -4,10 +4,14 @@ from datetime import datetime
 from typing import Any
 
 from app.models import (
+    AuditLog,
     AutoWeeklyJob,
     DecisionSnapshot,
+    PitFundamentalJob,
+    PitWeeklyJob,
     PreTradeRun,
     PreTradeStep,
+    TradeFill,
     TradeOrder,
     TradeRun,
 )
@@ -188,6 +192,9 @@ def _collect_trade_tags(session, run_id: int) -> list[str]:
     orders = session.query(TradeOrder).filter(TradeOrder.run_id == run_id).all()
     order_ids = [order.id for order in orders]
     tags.update(str(order_id) for order_id in order_ids)
+    if order_ids:
+        fills = session.query(TradeFill).filter(TradeFill.order_id.in_(order_ids)).all()
+        tags.update(str(fill.id) for fill in fills)
     return sorted(tags)
 
 
@@ -325,8 +332,218 @@ def build_pipeline_trace(session, *, trace_id: str) -> dict[str, Any]:
                             tags=[str(order.id), str(trade_run.id)],
                         )
                     )
+                    fills = (
+                        session.query(TradeFill)
+                        .filter(TradeFill.order_id == order.id)
+                        .order_by(TradeFill.created_at.asc())
+                        .all()
+                    )
+                    for fill in fills:
+                        events.append(
+                            _build_event(
+                                event_id=f"trade_fill:{fill.id}",
+                                task_type="trade_fill",
+                                task_id=fill.id,
+                                stage="trade_execute",
+                                status="filled",
+                                started_at=fill.fill_time or fill.created_at,
+                                ended_at=fill.created_at,
+                                params_snapshot=fill.params,
+                                parent_id=f"trade_order:{order.id}",
+                                tags=[str(fill.id), str(order.id), str(trade_run.id)],
+                            )
+                        )
             else:
                 warnings.append("trade_run_missing")
+        _append_audit_events(
+            session,
+            events,
+            resource_type="pretrade_run",
+            resource_id=run.id,
+            parent_id=f"pretrade_run:{run.id}",
+        )
+        events.sort(key=_event_sort_key)
+        return {"trace_id": trace_id, "events": events, "warnings": warnings}
+    if trace_id.startswith("auto:"):
+        job_id = int(trace_id.split(":", 1)[1])
+        job = session.get(AutoWeeklyJob, job_id)
+        if not job:
+            return {"trace_id": trace_id, "events": [], "warnings": ["auto_weekly_missing"]}
+        events.append(
+            _build_event(
+                event_id=f"auto_weekly:{job.id}",
+                task_type="auto_weekly",
+                task_id=job.id,
+                stage="data_prepare",
+                status=job.status,
+                started_at=job.started_at,
+                ended_at=job.ended_at,
+                message=job.message,
+                error_code=job.message if job.status in {"failed", "blocked"} else None,
+                params_snapshot=job.params,
+                artifact_paths={
+                    "backtest_output_dir": job.backtest_output_dir,
+                    "backtest_artifact_dir": job.backtest_artifact_dir,
+                },
+                log_path=job.log_path,
+                tags=[str(job.id)],
+            )
+        )
+        if job.pit_weekly_job_id:
+            pit_weekly = session.get(PitWeeklyJob, job.pit_weekly_job_id)
+            if pit_weekly:
+                events.append(
+                    _build_event(
+                        event_id=f"pit_weekly:{pit_weekly.id}",
+                        task_type="pit_weekly",
+                        task_id=pit_weekly.id,
+                        stage="data_prepare",
+                        status=pit_weekly.status,
+                        started_at=pit_weekly.started_at,
+                        ended_at=pit_weekly.ended_at,
+                        message=pit_weekly.message,
+                        error_code=pit_weekly.message
+                        if pit_weekly.status in {"failed", "blocked"}
+                        else None,
+                        params_snapshot=pit_weekly.params,
+                        artifact_paths={
+                            "output_dir": pit_weekly.output_dir,
+                            "last_snapshot": pit_weekly.last_snapshot_path,
+                        },
+                        log_path=pit_weekly.log_path,
+                        parent_id=f"auto_weekly:{job.id}",
+                        tags=[str(pit_weekly.id), str(job.id)],
+                    )
+                )
+            else:
+                warnings.append("pit_weekly_missing")
+        if job.pit_fundamental_job_id:
+            pit_fundamental = session.get(PitFundamentalJob, job.pit_fundamental_job_id)
+            if pit_fundamental:
+                events.append(
+                    _build_event(
+                        event_id=f"pit_fundamental:{pit_fundamental.id}",
+                        task_type="pit_fundamental",
+                        task_id=pit_fundamental.id,
+                        stage="data_prepare",
+                        status=pit_fundamental.status,
+                        started_at=pit_fundamental.started_at,
+                        ended_at=pit_fundamental.ended_at,
+                        message=pit_fundamental.message,
+                        error_code=pit_fundamental.message
+                        if pit_fundamental.status in {"failed", "blocked"}
+                        else None,
+                        params_snapshot=pit_fundamental.params,
+                        artifact_paths={
+                            "output_dir": pit_fundamental.output_dir,
+                            "last_snapshot": pit_fundamental.last_snapshot_path,
+                        },
+                        log_path=pit_fundamental.log_path,
+                        parent_id=f"auto_weekly:{job.id}",
+                        tags=[str(pit_fundamental.id), str(job.id)],
+                    )
+                )
+            else:
+                warnings.append("pit_fundamental_missing")
+        if job.backtest_status or job.backtest_log_path or job.backtest_output_dir:
+            events.append(
+                _build_event(
+                    event_id=f"backtest:{job.id}",
+                    task_type="backtest",
+                    task_id=job.id,
+                    stage="data_prepare",
+                    status=job.backtest_status,
+                    started_at=job.started_at,
+                    ended_at=job.ended_at,
+                    message=job.message,
+                    error_code=job.message if job.backtest_status == "failed" else None,
+                    artifact_paths={
+                        "output_dir": job.backtest_output_dir,
+                        "artifact_dir": job.backtest_artifact_dir,
+                    },
+                    log_path=job.backtest_log_path,
+                    parent_id=f"auto_weekly:{job.id}",
+                    tags=[str(job.id)],
+                )
+            )
+        _append_audit_events(
+            session,
+            events,
+            resource_type="auto_weekly_job",
+            resource_id=job.id,
+            parent_id=f"auto_weekly:{job.id}",
+        )
+        events.sort(key=_event_sort_key)
+        return {"trace_id": trace_id, "events": events, "warnings": warnings}
+    if trace_id.startswith("trade:"):
+        run_id = int(trace_id.split(":", 1)[1])
+        run = session.get(TradeRun, run_id)
+        if not run:
+            return {"trace_id": trace_id, "events": [], "warnings": ["trade_run_missing"]}
+        events.append(
+            _build_event(
+                event_id=f"trade_run:{run.id}",
+                task_type="trade_run",
+                task_id=run.id,
+                stage="trade_execute",
+                status=run.status,
+                started_at=run.started_at,
+                ended_at=run.ended_at,
+                message=run.message,
+                error_code=run.message if run.status in {"failed", "blocked"} else None,
+                params_snapshot=run.params,
+                tags=[str(run.id)],
+            )
+        )
+        orders = (
+            session.query(TradeOrder)
+            .filter(TradeOrder.run_id == run.id)
+            .order_by(TradeOrder.created_at.asc())
+            .all()
+        )
+        for order in orders:
+            events.append(
+                _build_event(
+                    event_id=f"trade_order:{order.id}",
+                    task_type="trade_order",
+                    task_id=order.id,
+                    stage="trade_execute",
+                    status=order.status,
+                    started_at=order.created_at,
+                    ended_at=order.updated_at,
+                    params_snapshot=order.params,
+                    parent_id=f"trade_run:{run.id}",
+                    tags=[str(order.id), str(run.id)],
+                )
+            )
+            fills = (
+                session.query(TradeFill)
+                .filter(TradeFill.order_id == order.id)
+                .order_by(TradeFill.created_at.asc())
+                .all()
+            )
+            for fill in fills:
+                events.append(
+                    _build_event(
+                        event_id=f"trade_fill:{fill.id}",
+                        task_type="trade_fill",
+                        task_id=fill.id,
+                        stage="trade_execute",
+                        status="filled",
+                        started_at=fill.fill_time or fill.created_at,
+                        ended_at=fill.created_at,
+                        params_snapshot=fill.params,
+                        parent_id=f"trade_order:{order.id}",
+                        tags=[str(fill.id), str(order.id), str(run.id)],
+                    )
+                )
+        _append_audit_events(
+            session,
+            events,
+            resource_type="trade_run",
+            resource_id=run.id,
+            parent_id=f"trade_run:{run.id}",
+        )
         events.sort(key=_event_sort_key)
         return {"trace_id": trace_id, "events": events, "warnings": warnings}
     return {"trace_id": trace_id, "events": [], "warnings": ["trace_type_unknown"]}
@@ -374,3 +591,40 @@ def _build_event(
         "retry_of": retry_of,
         "tags": tags or [],
     }
+
+
+def _append_audit_events(
+    session,
+    events: list[dict[str, Any]],
+    *,
+    resource_type: str,
+    resource_id: int | None,
+    parent_id: str | None,
+) -> None:
+    if resource_id is None:
+        return
+    logs = (
+        session.query(AuditLog)
+        .filter(
+            AuditLog.resource_type == resource_type,
+            AuditLog.resource_id == resource_id,
+        )
+        .order_by(AuditLog.created_at.asc())
+        .all()
+    )
+    for log in logs:
+        events.append(
+            _build_event(
+                event_id=f"audit_log:{log.id}",
+                task_type="audit_log",
+                task_id=log.id,
+                stage="audit_log",
+                status=None,
+                started_at=log.created_at,
+                ended_at=log.created_at,
+                message=log.action,
+                params_snapshot=log.detail,
+                parent_id=parent_id,
+                tags=[str(log.id), str(resource_id)],
+            )
+        )
