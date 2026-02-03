@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import socket
 from datetime import datetime
 
 from app.models import IBConnectionState, IBSettings
@@ -64,6 +65,20 @@ def resolve_ib_api_mode(settings: IBSettings | None) -> str:
     return mode
 
 
+def _probe_ib_socket(host: str | None, port: int | None, timeout_seconds: float = 2.0) -> bool:
+    if not host or not port:
+        return False
+    try:
+        target = (str(host).strip(), int(port))
+    except (TypeError, ValueError):
+        return False
+    try:
+        with socket.create_connection(target, timeout=timeout_seconds):
+            return True
+    except OSError:
+        return False
+
+
 def get_or_create_ib_state(session) -> IBConnectionState:
     row = session.query(IBConnectionState).first()
     if row:
@@ -120,6 +135,13 @@ def probe_ib_connection(session, *, timeout_seconds: float = 2.0) -> IBConnectio
             session,
             status="mock",
             message="mock mode enabled",
+            heartbeat=True,
+        )
+    if not _probe_ib_socket(settings.host, settings.port, timeout_seconds=timeout_seconds):
+        return update_ib_state(
+            session,
+            status="disconnected",
+            message="tws unreachable",
             heartbeat=True,
         )
     status_payload = read_bridge_status(session, mode=settings.mode or "paper", force=False)

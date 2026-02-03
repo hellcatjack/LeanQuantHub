@@ -45,7 +45,7 @@ def test_default_client_id_is_101(monkeypatch):
     assert defaults["client_id"] == 101
 
 
-def test_probe_ib_connection_uses_bridge_only(monkeypatch):
+def test_probe_ib_connection_marks_disconnected_when_socket_unreachable(monkeypatch):
     session = _make_session()
     try:
         row = IBSettings(client_id=101, host="127.0.0.1", port=7497, api_mode="ib")
@@ -56,6 +56,37 @@ def test_probe_ib_connection_uses_bridge_only(monkeypatch):
             ib_settings,
             "read_bridge_status",
             lambda *args, **kwargs: {"status": "ok", "stale": False, "last_error": None},
+        )
+        monkeypatch.setattr(
+            ib_settings,
+            "_probe_ib_socket",
+            lambda *args, **kwargs: False,
+            raising=False,
+        )
+
+        state = ib_settings.probe_ib_connection(session, timeout_seconds=0.1)
+        assert state.status == "disconnected"
+    finally:
+        session.close()
+
+
+def test_probe_ib_connection_connected_when_socket_ok(monkeypatch):
+    session = _make_session()
+    try:
+        row = IBSettings(client_id=101, host="127.0.0.1", port=7497, api_mode="ib")
+        session.add(row)
+        session.commit()
+
+        monkeypatch.setattr(
+            ib_settings,
+            "read_bridge_status",
+            lambda *args, **kwargs: {"status": "ok", "stale": False, "last_error": None},
+        )
+        monkeypatch.setattr(
+            ib_settings,
+            "_probe_ib_socket",
+            lambda *args, **kwargs: True,
+            raising=False,
         )
 
         state = ib_settings.probe_ib_connection(session, timeout_seconds=0.1)
