@@ -3967,6 +3967,27 @@ export default function LiveTradePage() {
             {pipelineDetailLoading && (
               <div className="form-hint">{t("common.actions.loading")}</div>
             )}
+            <div className="pipeline-stage-lanes">
+              <div className="pipeline-stage-lane">
+                <div className="pipeline-stage-title">{t("trade.pipeline.stages.data")}</div>
+              </div>
+              <div className="pipeline-stage-lane">
+                <div className="pipeline-stage-title">{t("trade.pipeline.stages.snapshot")}</div>
+              </div>
+              <div className="pipeline-stage-lane">
+                <div className="pipeline-stage-title">{t("trade.pipeline.stages.pretrade")}</div>
+              </div>
+              <div className="pipeline-stage-lane">
+                <div className="pipeline-stage-title">{t("trade.pipeline.stages.trade")}</div>
+              </div>
+              <div className="pipeline-stage-lane">
+                <div className="pipeline-stage-title">{t("trade.pipeline.stages.audit")}</div>
+              </div>
+            </div>
+            <div className="pipeline-event-drawer">
+              <div className="pipeline-drawer-title">{t("trade.pipeline.drawerTitle")}</div>
+              <div className="pipeline-drawer-empty">{t("trade.pipeline.drawerEmpty")}</div>
+            </div>
             <div className="pipeline-events">
               {pipelineDetail?.events?.length ? (
                 pipelineDetail.events.map((event) => {

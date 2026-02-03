@@ -513,6 +513,44 @@ a {
   flex-wrap: wrap;
 }
 
+.pipeline-stage-lanes {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px;
+}
+
+.pipeline-stage-lane {
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  padding: 8px;
+  background: #fbfbff;
+}
+
+.pipeline-stage-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.pipeline-event-drawer {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #ffffff;
+  padding: 12px;
+}
+
+.pipeline-drawer-title {
+  font-weight: 600;
+}
+
+.pipeline-drawer-empty {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
 .overview-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));

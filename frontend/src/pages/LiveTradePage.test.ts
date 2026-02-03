@@ -78,4 +78,10 @@ describe("LiveTradePage", () => {
     const html = ReactDOMServer.renderToString(React.createElement(LiveTradePage));
     expect(html).toContain("pipeline-events");
   });
+
+  it("renders pipeline stage lanes and event drawer", () => {
+    const html = ReactDOMServer.renderToString(React.createElement(LiveTradePage));
+    expect(html).toContain("pipeline-stage-lanes");
+    expect(html).toContain("pipeline-event-drawer");
+  });
 });
