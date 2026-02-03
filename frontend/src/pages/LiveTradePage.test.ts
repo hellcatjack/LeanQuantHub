@@ -9,6 +9,11 @@ const PipelineLabel = () => {
   return React.createElement("span", null, t("trade.pipelineTab"));
 };
 
+const TradeStatusLabel = () => {
+  const { t } = useI18n();
+  return React.createElement("span", null, t("trade.statusLabel"));
+};
+
 describe("LiveTradePage", () => {
   it("renders market snapshot card", () => {
     const html = ReactDOMServer.renderToString(React.createElement(LiveTradePage));
@@ -62,6 +67,17 @@ describe("LiveTradePage", () => {
       )
     );
     expect(html).toContain("Pipeline");
+  });
+
+  it("renders TWS status label translation", () => {
+    const html = ReactDOMServer.renderToString(
+      React.createElement(
+        I18nProvider,
+        null,
+        React.createElement(TradeStatusLabel)
+      )
+    );
+    expect(html).toContain("TWS 状态");
   });
 
   it("renders pipeline view container", () => {
