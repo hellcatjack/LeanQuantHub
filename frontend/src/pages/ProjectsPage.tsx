@@ -469,6 +469,7 @@ const PIPELINE_BACKTEST_FIELDS = [
   "drawdown_tiers",
   "drawdown_exposures",
   "max_turnover_week",
+  "cold_start_turnover",
   "vol_target",
   "vol_window",
   "idle_allocation",
@@ -498,12 +499,13 @@ const PIPELINE_BACKTEST_NUMBER_FIELDS = new Set([
   "drawdown_recovery_ratio",
   "drawdown_exposure_floor",
   "max_turnover_week",
+  "cold_start_turnover",
   "vol_target",
   "vol_window",
   "rebalance_time_minutes",
 ]);
 
-const PIPELINE_BACKTEST_DEFAULTS: Record<string, any> = {
+export const PIPELINE_BACKTEST_DEFAULTS: Record<string, any> = {
   top_n: 36,
   weighting: "score",
   max_weight: 0.025,
@@ -527,6 +529,7 @@ const PIPELINE_BACKTEST_DEFAULTS: Record<string, any> = {
   idle_allocation: "defensive",
   dynamic_exposure: true,
   max_turnover_week: 0.08,
+  cold_start_turnover: 0.3,
   vol_target: 0.055,
 };
 
@@ -2643,6 +2646,7 @@ export default function ProjectsPage() {
       { key: "drawdown_tiers", label: t("projects.pipeline.backtest.fields.drawdownTiers"), value: algoParams.drawdown_tiers },
       { key: "drawdown_exposures", label: t("projects.pipeline.backtest.fields.drawdownExposures"), value: algoParams.drawdown_exposures },
       { key: "max_turnover_week", label: t("projects.pipeline.backtest.fields.maxTurnoverWeek"), value: algoParams.max_turnover_week },
+      { key: "cold_start_turnover", label: t("projects.pipeline.backtest.fields.coldStartTurnover"), value: algoParams.cold_start_turnover },
       { key: "vol_target", label: t("projects.pipeline.backtest.fields.volTarget"), value: algoParams.vol_target },
       { key: "vol_window", label: t("projects.pipeline.backtest.fields.volWindow"), value: algoParams.vol_window },
       { key: "idle_allocation", label: t("projects.pipeline.backtest.fields.idleAllocation"), value: algoParams.idle_allocation },
@@ -3181,6 +3185,23 @@ export default function ProjectsPage() {
           />
           <div className="form-hint">
             {t("projects.pipeline.backtest.hints.maxTurnoverWeek")}
+          </div>
+        </div>
+        <div className="form-row">
+          <label className="form-label">
+            {t("projects.pipeline.backtest.fields.coldStartTurnover")}
+          </label>
+          <input
+            type="number"
+            step="0.01"
+            className="form-input"
+            value={pipelineBacktestParams.cold_start_turnover ?? ""}
+            onChange={(e) =>
+              updatePipelineBacktestParam("cold_start_turnover", e.target.value)
+            }
+          />
+          <div className="form-hint">
+            {t("projects.pipeline.backtest.hints.coldStartTurnover")}
           </div>
         </div>
         <div className="form-row">
