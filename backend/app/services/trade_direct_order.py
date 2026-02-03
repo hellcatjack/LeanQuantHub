@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from app.core.config import settings
+from app.models import TradeOrder
 from app.services.audit_log import record_audit
 from app.services.ib_settings import get_or_create_ib_settings, resolve_ib_api_mode
 from app.services.trade_direct_intent import build_direct_intent_items
@@ -19,6 +20,9 @@ from app.services.ib_client_id_pool import (
 from app.services.lean_execution import build_execution_config, launch_execution_async
 from app.services.lean_bridge_watchdog import refresh_bridge
 from app.schemas import TradeDirectOrderOut
+
+_DIRECT_RETRY_BASE_SECONDS = 20
+_DIRECT_RETRY_MAX_SECONDS = 300
 
 
 def validate_direct_order_payload(payload: dict[str, Any]) -> tuple[bool, str]:
@@ -57,6 +61,177 @@ def _select_worker(session, *, mode: str) -> int | None:
     return select_worker_client_id(session, mode=mode)
 
 
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _compute_retry_delay(retry_count: int) -> int:
+    if retry_count <= 1:
+        return _DIRECT_RETRY_BASE_SECONDS
+    delay = _DIRECT_RETRY_BASE_SECONDS * (2 ** (retry_count - 1))
+    return int(min(delay, _DIRECT_RETRY_MAX_SECONDS))
+
+
+def _update_retry_meta(order: TradeOrder, *, pending: bool, reason: str) -> dict:
+    params = dict(order.params or {})
+    meta = dict(params.get("direct_retry") or {})
+    retry_count = int(meta.get("count") or 0) + 1
+    now = _now_utc()
+    delay = _compute_retry_delay(retry_count)
+    next_at = now + timedelta(seconds=delay)
+    meta.update(
+        {
+            "count": retry_count,
+            "pending": pending,
+            "last_reason": reason,
+            "last_at": now.isoformat().replace("+00:00", "Z"),
+            "next_retry_at": next_at.isoformat().replace("+00:00", "Z"),
+        }
+    )
+    params["direct_retry"] = meta
+    order.params = params
+    return meta
+
+
+def _ensure_direct_intent(order: TradeOrder) -> Path:
+    intent_dir = Path(settings.artifact_root) / "order_intents"
+    intent_dir.mkdir(parents=True, exist_ok=True)
+    intent_path = intent_dir / f"order_intent_direct_{order.id}.json"
+    if intent_path.exists():
+        return intent_path
+    intent_items = build_direct_intent_items(
+        order_id=order.id,
+        symbol=order.symbol,
+        side=order.side,
+        quantity=order.quantity,
+    )
+    intent_path.write_text(
+        json.dumps(intent_items, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return intent_path
+
+
+def _launch_direct_execution(
+    session,
+    *,
+    order: TradeOrder,
+    mode: str,
+    project_id: int,
+    intent_path: str,
+    output_dir: Path,
+) -> TradeDirectOrderOut:
+    lease = None
+    client_id = _select_worker(session, mode=mode)
+    if client_id is None:
+        try:
+            lease = lease_client_id(session, order_id=order.id, mode=mode, output_dir=str(output_dir))
+            client_id = lease.client_id
+        except ClientIdPoolExhausted:
+            _update_retry_meta(order, pending=True, reason="client_id_busy")
+            session.commit()
+            return TradeDirectOrderOut(
+                order_id=order.id,
+                status=order.status or "NEW",
+                execution_status="retry_pending",
+                intent_path=intent_path,
+            )
+
+    config = build_execution_config(
+        intent_path=intent_path,
+        brokerage="InteractiveBrokersBrokerage",
+        project_id=project_id,
+        mode=mode,
+        client_id=client_id,
+        lean_bridge_output_dir=str(output_dir),
+    )
+    exec_dir = Path(settings.artifact_root) / "lean_execution"
+    exec_dir.mkdir(parents=True, exist_ok=True)
+    config_path = exec_dir / f"direct_order_{order.id}_config.json"
+    config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    try:
+        pid = launch_execution_async(config_path=str(config_path))
+    except Exception:
+        _update_retry_meta(order, pending=True, reason="launch_failed")
+        session.commit()
+        return TradeDirectOrderOut(
+            order_id=order.id,
+            status=order.status or "NEW",
+            execution_status="retry_pending",
+            intent_path=intent_path,
+            config_path=str(config_path),
+        )
+    if pid <= 0:
+        _update_retry_meta(order, pending=True, reason="launch_failed")
+        session.commit()
+        return TradeDirectOrderOut(
+            order_id=order.id,
+            status=order.status or "NEW",
+            execution_status="retry_pending",
+            intent_path=intent_path,
+            config_path=str(config_path),
+        )
+
+    if lease is not None:
+        attach_lease_pid(session, lease_token=lease.lease_token or "", pid=pid)
+
+    probe_path = exec_dir / f"direct_order_{order.id}.json"
+    probe_path.write_text(
+        json.dumps(
+            {
+                "order_id": order.id,
+                "mode": mode,
+                "intent_path": intent_path,
+                "config_path": str(config_path),
+                "submitted_at": datetime.utcnow().isoformat() + "Z",
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    _update_retry_meta(order, pending=False, reason="submitted")
+    session.commit()
+
+    bridge_status = refresh_bridge(session, mode=mode, reason="order_submit", force=False)
+    refresh_result = bridge_status.get("last_refresh_result")
+
+    return TradeDirectOrderOut(
+        order_id=order.id,
+        status=order.status or "NEW",
+        execution_status="submitted_lean",
+        intent_path=intent_path,
+        config_path=str(config_path),
+        bridge_status=bridge_status,
+        refresh_result=refresh_result if isinstance(refresh_result, str) else None,
+    )
+
+
+def retry_direct_order(session, *, order_id: int, reason: str | None = None, force: bool = False) -> TradeDirectOrderOut:
+    order = session.get(TradeOrder, order_id)
+    if order is None:
+        raise ValueError("order_not_found")
+    status = str(order.status or "").strip().upper()
+    if not force and status not in {"NEW", "REJECTED"}:
+        raise ValueError("order_not_retryable")
+    params = dict(order.params or {})
+    mode = str(params.get("mode") or "paper").strip().lower() or "paper"
+    project_id = int(params.get("project_id") or 0)
+    intent_path = str(_ensure_direct_intent(order))
+    output_dir = Path(settings.data_root or "/data/share/stock/data") / "lean_bridge" / f"direct_{order.id}"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return _launch_direct_execution(
+        session,
+        order=order,
+        mode=mode,
+        project_id=project_id,
+        intent_path=intent_path,
+        output_dir=output_dir,
+    )
+
+
 def submit_direct_order(session, payload: dict[str, Any]) -> TradeDirectOrderOut:
     ok, reason = validate_direct_order_payload(payload)
     if not ok:
@@ -92,63 +267,17 @@ def submit_direct_order(session, payload: dict[str, Any]) -> TradeDirectOrderOut
     session.refresh(result.order)
     order = result.order
 
-    intent_items = build_direct_intent_items(
-        order_id=order.id,
-        symbol=order.symbol,
-        side=order.side,
-        quantity=order.quantity,
-    )
-    intent_dir = Path(settings.artifact_root) / "order_intents"
-    intent_dir.mkdir(parents=True, exist_ok=True)
-    intent_path = intent_dir / f"order_intent_direct_{order.id}.json"
-    intent_path.write_text(
-        json.dumps(intent_items, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
+    intent_path = _ensure_direct_intent(order)
     output_dir = Path(settings.data_root or "/data/share/stock/data") / "lean_bridge" / f"direct_{order.id}"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    lease = None
-    client_id = _select_worker(session, mode=mode)
-    if client_id is None:
-        try:
-            lease = lease_client_id(session, order_id=order.id, mode=mode, output_dir=str(output_dir))
-            client_id = lease.client_id
-        except ClientIdPoolExhausted as exc:
-            raise ValueError("client_id_busy") from exc
-
-    config = build_execution_config(
-        intent_path=str(intent_path),
-        brokerage="InteractiveBrokersBrokerage",
-        project_id=project_id,
+    result = _launch_direct_execution(
+        session,
+        order=order,
         mode=mode,
-        client_id=client_id,
-        lean_bridge_output_dir=str(output_dir),
-    )
-    exec_dir = Path(settings.artifact_root) / "lean_execution"
-    exec_dir.mkdir(parents=True, exist_ok=True)
-    config_path = exec_dir / f"direct_order_{order.id}_config.json"
-    config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    pid = launch_execution_async(config_path=str(config_path))
-    if lease is not None:
-        attach_lease_pid(session, lease_token=lease.lease_token or "", pid=pid)
-
-    probe_path = exec_dir / f"direct_order_{order.id}.json"
-    probe_path.write_text(
-        json.dumps(
-            {
-                "order_id": order.id,
-                "mode": mode,
-                "intent_path": str(intent_path),
-                "config_path": str(config_path),
-                "submitted_at": datetime.utcnow().isoformat() + "Z",
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
+        project_id=project_id,
+        intent_path=str(intent_path),
+        output_dir=output_dir,
     )
 
     record_audit(
@@ -159,20 +288,9 @@ def submit_direct_order(session, payload: dict[str, Any]) -> TradeDirectOrderOut
         detail={
             "mode": mode,
             "intent_path": str(intent_path),
-            "config_path": str(config_path),
+            "execution_status": result.execution_status,
         },
     )
     session.commit()
 
-    bridge_status = refresh_bridge(session, mode=mode, reason="order_submit", force=False)
-    refresh_result = bridge_status.get("last_refresh_result")
-
-    return TradeDirectOrderOut(
-        order_id=order.id,
-        status=order.status or "NEW",
-        execution_status="submitted_lean",
-        intent_path=str(intent_path),
-        config_path=str(config_path),
-        bridge_status=bridge_status,
-        refresh_result=refresh_result if isinstance(refresh_result, str) else None,
-    )
+    return result

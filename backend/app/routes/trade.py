@@ -41,7 +41,7 @@ from app.services.manual_trade_execution import execute_manual_order
 from app.services.trade_guard import evaluate_intraday_guard, get_or_create_guard_state
 from app.services.trade_monitor import build_trade_overview
 from app.services.trade_executor import execute_trade_run
-from app.services.trade_direct_order import submit_direct_order
+from app.services.trade_direct_order import submit_direct_order, retry_direct_order
 from app.services.trade_orders import create_trade_order, update_trade_order_status
 from app.services.trade_receipts import list_trade_receipts as build_trade_receipts
 from app.services.lean_bridge_paths import resolve_bridge_root
@@ -523,6 +523,21 @@ def create_direct_trade_order_route(payload: TradeDirectOrderRequest):
             if detail == "live_confirm_required":
                 raise HTTPException(status_code=403, detail=detail) from exc
             if detail in {"ib_api_mode_disabled", "ib_settings_missing", "client_id_busy"}:
+                raise HTTPException(status_code=409, detail=detail) from exc
+            raise HTTPException(status_code=400, detail=detail) from exc
+        return result
+
+
+@router.post("/orders/{order_id}/retry", response_model=TradeDirectOrderOut)
+def retry_direct_trade_order(order_id: int, force: bool = False):
+    with get_session() as session:
+        try:
+            result = retry_direct_order(session, order_id=order_id, force=force)
+        except ValueError as exc:
+            detail = str(exc)
+            if detail == "order_not_found":
+                raise HTTPException(status_code=404, detail=detail) from exc
+            if detail == "order_not_retryable":
                 raise HTTPException(status_code=409, detail=detail) from exc
             raise HTTPException(status_code=400, detail=detail) from exc
         return result
