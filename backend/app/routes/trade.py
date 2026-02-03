@@ -26,6 +26,7 @@ from app.schemas import (
     TradeReceiptPageOut,
     TradeSettingsOut,
     TradeSettingsUpdate,
+    TradeAutoRecoveryOut,
     TradeDirectOrderRequest,
     TradeDirectOrderOut,
     TradeGuardEvaluateOut,
@@ -43,6 +44,7 @@ from app.services.trade_monitor import build_trade_overview
 from app.services.trade_executor import execute_trade_run
 from app.services.trade_direct_order import submit_direct_order, retry_direct_order
 from app.services.trade_orders import create_trade_order, update_trade_order_status
+from app.services.trade_order_recovery import run_auto_recovery
 from app.services.trade_receipts import list_trade_receipts as build_trade_receipts
 from app.services.lean_bridge_paths import resolve_bridge_root
 from app.services.lean_bridge_reader import read_positions
@@ -612,3 +614,10 @@ def update_trade_order_status_route(order_id: int, payload: TradeOrderStatusUpda
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return TradeOrderOut.model_validate(order, from_attributes=True)
+
+
+@router.post("/orders/auto-recover", response_model=TradeAutoRecoveryOut)
+def auto_recover_trade_orders(limit: int = Query(200, ge=1, le=1000)):
+    with get_session() as session:
+        result = run_auto_recovery(session, limit=limit)
+        return TradeAutoRecoveryOut(**result)

@@ -1567,6 +1567,14 @@ class TradeSettingsUpdate(BaseModel):
     auto_recovery: dict | None = None
 
 
+class TradeAutoRecoveryOut(BaseModel):
+    scanned: int = 0
+    cancelled: int = 0
+    replaced: int = 0
+    skipped: int = 0
+    failed: int = 0
+
+
 class BacktestSettingsOut(BaseModel):
     id: int
     default_initial_cash: float
