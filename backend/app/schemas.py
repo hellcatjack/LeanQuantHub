@@ -525,6 +525,32 @@ class UniverseThemeSymbolsOut(BaseModel):
     updated_at: datetime | None = None
 
 
+class UniverseExcludeItem(BaseModel):
+    symbol: str
+    enabled: bool
+    reason: str | None = None
+    source: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class UniverseExcludeListOut(BaseModel):
+    items: list[UniverseExcludeItem]
+
+
+class UniverseExcludeUpsertIn(BaseModel):
+    symbol: str
+    reason: str | None = None
+    source: str | None = None
+    enabled: bool | None = None
+
+
+class UniverseExcludePatchIn(BaseModel):
+    reason: str | None = None
+    source: str | None = None
+    enabled: bool | None = None
+
+
 class ReportPageOut(BaseModel):
     items: list[ReportOut]
     total: int

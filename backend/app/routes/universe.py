@@ -5,13 +5,22 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from sqlalchemy import func
 
 from app.core.config import settings
 from app.db import get_session
 from app.models import UniverseMembership
-from app.schemas import UniverseThemeListOut, UniverseThemeOut, UniverseThemeSymbolsOut
+from app.schemas import (
+    UniverseExcludeItem,
+    UniverseExcludeListOut,
+    UniverseExcludePatchIn,
+    UniverseExcludeUpsertIn,
+    UniverseThemeListOut,
+    UniverseThemeOut,
+    UniverseThemeSymbolsOut,
+)
+from app.services import universe_exclude
 
 router = APIRouter(prefix="/api/universe", tags=["universe"])
 
@@ -146,4 +155,76 @@ def list_universe_theme_symbols(category: str) -> UniverseThemeSymbolsOut:
         label=label,
         symbols=symbols,
         updated_at=row_updated_at or updated_at,
+    )
+
+
+@router.get("/excludes", response_model=UniverseExcludeListOut)
+def list_universe_excludes(enabled: bool | None = None) -> UniverseExcludeListOut:
+    include_disabled = enabled is None or enabled is False
+    items = universe_exclude.load_exclude_items(
+        None, include_disabled=include_disabled
+    )
+    if enabled is True:
+        items = [row for row in items if row.get("enabled") != "false"]
+    out_items = [
+        UniverseExcludeItem(
+            symbol=row.get("symbol", ""),
+            enabled=row.get("enabled") != "false",
+            reason=row.get("reason") or "",
+            source=row.get("source") or "",
+            created_at=row.get("created_at") or None,
+            updated_at=row.get("updated_at") or None,
+        )
+        for row in items
+    ]
+    return UniverseExcludeListOut(items=out_items)
+
+
+@router.post("/excludes", response_model=UniverseExcludeItem)
+def create_universe_exclude(payload: UniverseExcludeUpsertIn) -> UniverseExcludeItem:
+    symbol = (payload.symbol or "").strip().upper()
+    if not symbol:
+        raise HTTPException(status_code=400, detail="symbol_invalid")
+    universe_exclude.upsert_exclude_item(
+        None,
+        symbol=symbol,
+        reason=payload.reason or "",
+        source=payload.source or "manual/ui",
+        enabled=payload.enabled is not False,
+    )
+    items = universe_exclude.load_exclude_items(None, include_disabled=True)
+    row = next(item for item in items if item["symbol"] == symbol)
+    return UniverseExcludeItem(
+        symbol=row["symbol"],
+        enabled=row.get("enabled") != "false",
+        reason=row.get("reason") or "",
+        source=row.get("source") or "",
+        created_at=row.get("created_at") or None,
+        updated_at=row.get("updated_at") or None,
+    )
+
+
+@router.patch("/excludes/{symbol}", response_model=UniverseExcludeItem)
+def patch_universe_exclude(
+    symbol: str, payload: UniverseExcludePatchIn
+) -> UniverseExcludeItem:
+    normalized = (symbol or "").strip().upper()
+    if not normalized:
+        raise HTTPException(status_code=400, detail="symbol_invalid")
+    universe_exclude.upsert_exclude_item(
+        None,
+        symbol=normalized,
+        reason=payload.reason or "",
+        source=payload.source or "manual/ui",
+        enabled=payload.enabled is not False,
+    )
+    items = universe_exclude.load_exclude_items(None, include_disabled=True)
+    row = next(item for item in items if item["symbol"] == normalized)
+    return UniverseExcludeItem(
+        symbol=row["symbol"],
+        enabled=row.get("enabled") != "false",
+        reason=row.get("reason") or "",
+        source=row.get("source") or "",
+        created_at=row.get("created_at") or None,
+        updated_at=row.get("updated_at") or None,
     )
