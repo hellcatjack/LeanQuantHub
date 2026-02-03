@@ -221,6 +221,15 @@ def _apply_fill_to_order(
     fill_time: datetime,
     exec_id: str | None = None,
 ) -> TradeFill:
+    if not exec_id:
+        exec_id = f"lean:{order.id}:{int(fill_time.timestamp() * 1000)}"
+    existing = (
+        session.query(TradeFill)
+        .filter(TradeFill.order_id == order.id, TradeFill.exec_id == exec_id)
+        .first()
+    )
+    if existing:
+        return existing
     current_status = str(order.status or "").strip().upper()
     total_prev = float(order.filled_quantity or 0.0)
     total_new = total_prev + float(fill_qty)
@@ -234,8 +243,6 @@ def _apply_fill_to_order(
         order,
         {"status": target_status, "filled_quantity": total_new, "avg_fill_price": avg_new},
     )
-    if not exec_id:
-        exec_id = f"lean:{order.id}:{int(fill_time.timestamp() * 1000)}"
     fill = TradeFill(
         order_id=order.id,
         exec_id=exec_id,
@@ -261,9 +268,31 @@ def _load_intent_items(path: str) -> list[dict]:
     return []
 
 
+def _parse_intent_run_id(intent_id: str) -> int | None:
+    if not intent_id:
+        return None
+    parts = str(intent_id).split("_")
+    if len(parts) < 3 or parts[0] != "oi":
+        return None
+    try:
+        return int(parts[1])
+    except (TypeError, ValueError):
+        return None
+
+
 def _find_intent_for_id(session, intent_id: str) -> tuple[TradeRun | None, dict | None]:
     if not intent_id:
         return None, None
+    run_id = _parse_intent_run_id(intent_id)
+    if run_id:
+        run = session.get(TradeRun, run_id)
+        if run is not None:
+            params = run.params or {}
+            intent_path = params.get("order_intent_path")
+            if intent_path:
+                for item in _load_intent_items(intent_path):
+                    if str(item.get("order_intent_id") or "").strip() == intent_id:
+                        return run, item
     runs = session.query(TradeRun).all()
     for run in runs:
         params = run.params or {}
@@ -274,6 +303,15 @@ def _find_intent_for_id(session, intent_id: str) -> tuple[TradeRun | None, dict 
             if str(item.get("order_intent_id") or "").strip() == intent_id:
                 return run, item
     return None, None
+
+
+def _merge_duplicate_order(session, *, target: TradeOrder, duplicate: TradeOrder) -> None:
+    fills = session.query(TradeFill).filter(TradeFill.order_id == duplicate.id).all()
+    for fill in fills:
+        fill.order_id = target.id
+    session.delete(duplicate)
+    session.commit()
+    session.refresh(target)
 
 
 def apply_execution_events(events: list[dict], *, session=None) -> dict:
@@ -289,41 +327,72 @@ def apply_execution_events(events: list[dict], *, session=None) -> dict:
                 summary["skipped_invalid_tag"] += 1
                 continue
             intent_id = tag
+            run_id_hint = _parse_intent_run_id(intent_id)
+            duplicate_order = None
             order = (
                 session.query(TradeOrder)
                 .filter(TradeOrder.client_order_id == intent_id)
                 .one_or_none()
             )
+            if order is not None and run_id_hint and order.run_id != run_id_hint:
+                duplicate_order = order
+                order = None
             if order is None:
                 run, intent = _find_intent_for_id(session, intent_id)
                 if run is None:
-                    summary["skipped_not_found"] += 1
-                    continue
-                symbol = (event.get("symbol") or intent.get("symbol") or "").strip().upper()
-                if not symbol:
-                    summary["skipped_not_found"] += 1
-                    continue
-                direction = str(event.get("direction") or "").strip().upper()
-                side = "BUY" if direction in {"BUY", "LONG"} else "SELL" if direction in {"SELL", "SHORT"} else ""
-                if not side:
-                    summary["skipped_not_found"] += 1
-                    continue
-                filled_qty = float(event.get("filled") or 0.0)
-                quantity = abs(filled_qty) if filled_qty else float(intent.get("quantity") or 0.0)
-                if quantity <= 0:
-                    summary["skipped_not_found"] += 1
-                    continue
-                payload = {
-                    "client_order_id": intent_id,
-                    "symbol": symbol,
-                    "side": side,
-                    "quantity": quantity,
-                    "order_type": "MKT",
-                    "params": {"source": "lean_bridge"},
-                }
-                result = create_trade_order(session, payload, run_id=run.id)
-                session.commit()
-                order = result.order
+                    if duplicate_order is not None:
+                        order = duplicate_order
+                    else:
+                        summary["skipped_not_found"] += 1
+                        continue
+                if run is not None:
+                    symbol = (event.get("symbol") or intent.get("symbol") or "").strip().upper()
+                    if not symbol:
+                        summary["skipped_not_found"] += 1
+                        continue
+                    direction = str(event.get("direction") or "").strip().upper()
+                    side = "BUY" if direction in {"BUY", "LONG"} else "SELL" if direction in {"SELL", "SHORT"} else ""
+                    if not side:
+                        summary["skipped_not_found"] += 1
+                        continue
+                    filled_qty = float(event.get("filled") or 0.0)
+                    quantity = abs(filled_qty) if filled_qty else float(intent.get("quantity") or 0.0)
+                    if quantity <= 0:
+                        summary["skipped_not_found"] += 1
+                        continue
+                    existing_orders = (
+                        session.query(TradeOrder)
+                        .filter(
+                            TradeOrder.run_id == run.id,
+                            TradeOrder.symbol == symbol,
+                            TradeOrder.side == side,
+                        )
+                        .all()
+                    )
+                    matched = None
+                    if existing_orders:
+                        for candidate in existing_orders:
+                            if abs(float(candidate.quantity) - float(quantity)) < 1e-6:
+                                matched = candidate
+                                break
+                        if matched is None and len(existing_orders) == 1:
+                            matched = existing_orders[0]
+                    if matched is not None:
+                        order = matched
+                    else:
+                        payload = {
+                            "client_order_id": intent_id,
+                            "symbol": symbol,
+                            "side": side,
+                            "quantity": quantity,
+                            "order_type": "MKT",
+                            "params": {"source": "lean_bridge"},
+                        }
+                        result = create_trade_order(session, payload, run_id=run.id)
+                        session.commit()
+                        order = result.order
+                    if duplicate_order is not None and order.id != duplicate_order.id:
+                        _merge_duplicate_order(session, target=order, duplicate=duplicate_order)
             order_id = event.get("order_id")
             if order_id is not None and order.ib_order_id is None:
                 order.ib_order_id = int(order_id)
@@ -331,7 +400,12 @@ def apply_execution_events(events: list[dict], *, session=None) -> dict:
                 session.refresh(order)
             status = str(event.get("status") or "").strip().upper()
             if status == "SUBMITTED":
-                update_trade_order_status(session, order, {"status": "SUBMITTED"})
+                current_status = str(order.status or "").strip().upper()
+                if current_status in {"NEW", "SUBMITTED"}:
+                    try:
+                        update_trade_order_status(session, order, {"status": "SUBMITTED"})
+                    except ValueError:
+                        continue
                 summary["processed"] += 1
                 continue
             if status == "FILLED":
@@ -341,13 +415,26 @@ def apply_execution_events(events: list[dict], *, session=None) -> dict:
                     continue
                 fill_price = float(event.get("fill_price") or 0.0)
                 fill_time = _parse_event_time(event.get("time"))
-                _apply_fill_to_order(
-                    session,
-                    order,
-                    fill_qty=filled_qty,
-                    fill_price=fill_price,
-                    fill_time=fill_time,
+                exec_id = event.get("exec_id") or f"lean:{order.id}:{int(fill_time.timestamp() * 1000)}"
+                existing = (
+                    session.query(TradeFill)
+                    .filter(TradeFill.order_id == order.id, TradeFill.exec_id == exec_id)
+                    .first()
                 )
+                if existing:
+                    summary["processed"] += 1
+                    continue
+                try:
+                    _apply_fill_to_order(
+                        session,
+                        order,
+                        fill_qty=filled_qty,
+                        fill_price=fill_price,
+                        fill_time=fill_time,
+                        exec_id=exec_id,
+                    )
+                except ValueError:
+                    continue
                 summary["processed"] += 1
     finally:
         if own_session:

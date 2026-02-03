@@ -12,7 +12,7 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from app.models import Base, TradeOrder, TradeRun
+from app.models import Base, TradeFill, TradeOrder, TradeRun
 from app.services.lean_execution import apply_execution_events
 
 
@@ -91,5 +91,145 @@ def test_apply_execution_events_rejects_invalid_tag(tmp_path):
         assert result["skipped_invalid_tag"] == 1
         order = session.query(TradeOrder).filter(TradeOrder.ib_order_id == 1).first()
         assert order is None
+    finally:
+        session.close()
+
+
+def test_apply_execution_events_reuses_existing_order(tmp_path):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    try:
+        run = TradeRun(project_id=1, decision_snapshot_id=63, status="running", params={})
+        session.add(run)
+        session.commit()
+        intent_path = tmp_path / "order_intent.json"
+        intent_payload = [
+            {
+                "order_intent_id": f"oi_{run.id}_1",
+                "symbol": "AAPL",
+                "quantity": 1,
+                "weight": 0,
+            }
+        ]
+        intent_path.write_text(json.dumps(intent_payload), encoding="utf-8")
+        run.params = {"order_intent_path": str(intent_path)}
+        session.commit()
+
+        existing = TradeOrder(
+            run_id=run.id,
+            client_order_id=f"{run.id}:AAPL:BUY:{run.decision_snapshot_id}",
+            symbol="AAPL",
+            side="BUY",
+            quantity=1,
+            order_type="MKT",
+        )
+        session.add(existing)
+        session.commit()
+
+        events = [
+            {
+                "order_id": 10,
+                "symbol": "AAPL",
+                "status": "Filled",
+                "filled": 1.0,
+                "fill_price": 100.0,
+                "direction": "Buy",
+                "time": "2026-01-27T15:25:46.9105632Z",
+                "tag": f"oi_{run.id}_1",
+            }
+        ]
+
+        apply_execution_events(events, session=session)
+
+        assert session.query(TradeOrder).count() == 1
+        refreshed = session.query(TradeOrder).filter_by(id=existing.id).one()
+        assert refreshed.status == "FILLED"
+        assert float(refreshed.filled_quantity) == 1.0
+        assert float(refreshed.avg_fill_price) == 100.0
+    finally:
+        session.close()
+
+
+def test_apply_execution_events_merges_mismatched_run(tmp_path):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    try:
+        run = TradeRun(project_id=1, decision_snapshot_id=63, status="running", params={})
+        other_run = TradeRun(project_id=1, decision_snapshot_id=63, status="running", params={})
+        session.add_all([run, other_run])
+        session.commit()
+
+        intent_path = tmp_path / "order_intent.json"
+        intent_payload = [
+            {
+                "order_intent_id": f"oi_{run.id}_1",
+                "symbol": "AAPL",
+                "quantity": 1,
+                "weight": 0,
+            }
+        ]
+        intent_path.write_text(json.dumps(intent_payload), encoding="utf-8")
+        run.params = {"order_intent_path": str(intent_path)}
+        session.commit()
+
+        canonical = TradeOrder(
+            run_id=run.id,
+            client_order_id=f"{run.id}:AAPL:BUY:{run.decision_snapshot_id}",
+            symbol="AAPL",
+            side="BUY",
+            quantity=1,
+            order_type="MKT",
+        )
+        duplicate = TradeOrder(
+            run_id=other_run.id,
+            client_order_id=f"oi_{run.id}_1",
+            symbol="AAPL",
+            side="BUY",
+            quantity=1,
+            order_type="MKT",
+            status="FILLED",
+            filled_quantity=1,
+            avg_fill_price=100.0,
+            ib_order_id=99,
+        )
+        session.add_all([canonical, duplicate])
+        session.commit()
+
+        fill = TradeFill(
+            order_id=duplicate.id,
+            exec_id="lean:dup",
+            fill_quantity=1,
+            fill_price=100.0,
+        )
+        session.add(fill)
+        session.commit()
+
+        events = [
+            {
+                "order_id": 99,
+                "symbol": "AAPL",
+                "status": "Filled",
+                "filled": 1.0,
+                "fill_price": 100.0,
+                "direction": "Buy",
+                "time": "2026-01-27T15:25:46.9105632Z",
+                "tag": f"oi_{run.id}_1",
+            }
+        ]
+
+        apply_execution_events(events, session=session)
+
+        assert session.query(TradeOrder).filter_by(id=duplicate.id).first() is None
+        refreshed = session.query(TradeOrder).filter_by(id=canonical.id).one()
+        assert refreshed.status == "FILLED"
+        assert refreshed.filled_quantity == 1
+        assert refreshed.avg_fill_price == 100.0
+        assert refreshed.ib_order_id == 99
+        moved_fill = session.query(TradeFill).filter_by(exec_id="lean:dup").one()
+        assert moved_fill.order_id == canonical.id
     finally:
         session.close()
