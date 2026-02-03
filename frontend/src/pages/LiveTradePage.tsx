@@ -253,6 +253,13 @@ interface PipelineEvent {
   stage?: string | null;
   status?: string | null;
   message?: string | null;
+  error_code?: string | null;
+  log_path?: string | null;
+  parent_id?: string | null;
+  retry_of?: string | null;
+  tags?: string[];
+  params_snapshot?: Record<string, any> | null;
+  artifact_paths?: Record<string, any> | null;
   started_at?: string | null;
   ended_at?: string | null;
 }
@@ -490,7 +497,13 @@ export default function LiveTradePage() {
   const [pipelineActionResult, setPipelineActionResult] = useState("");
   const [pipelineStatusFilter, setPipelineStatusFilter] = useState("");
   const [pipelineTypeFilter, setPipelineTypeFilter] = useState("");
+  const [pipelineModeFilter, setPipelineModeFilter] = useState("");
+  const [pipelineDateFrom, setPipelineDateFrom] = useState("");
+  const [pipelineDateTo, setPipelineDateTo] = useState("");
   const [pipelineKeyword, setPipelineKeyword] = useState("");
+  const [pipelineSelectedEvent, setPipelineSelectedEvent] = useState<PipelineEvent | null>(
+    null
+  );
   const [refreshMeta, setRefreshMeta] = useState<
     Record<RefreshKey, { intervalMs: number | null; lastAt: string | null; nextAt: string | null }>
   >(() => {
@@ -1311,22 +1324,63 @@ export default function LiveTradePage() {
     }
   };
 
+  const resolvePipelineDate = (value: string, isEnd: boolean) => {
+    if (!value) {
+      return null;
+    }
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      return null;
+    }
+    if (isEnd) {
+      date.setHours(23, 59, 59, 999);
+    } else {
+      date.setHours(0, 0, 0, 0);
+    }
+    return date.toISOString();
+  };
+
   const loadPipelineRuns = async () => {
     if (!selectedProjectId) {
       setPipelineRuns([]);
       setPipelineTraceId(null);
       setPipelineDetail(null);
+      setPipelineSelectedEvent(null);
       return;
     }
     setPipelineRunsLoading(true);
     setPipelineRunsError("");
     try {
+      const params: Record<string, any> = {
+        project_id: Number(selectedProjectId),
+      };
+      if (pipelineStatusFilter) {
+        params.status = pipelineStatusFilter;
+      }
+      if (pipelineTypeFilter) {
+        params.type = pipelineTypeFilter;
+      }
+      if (pipelineModeFilter) {
+        params.mode = pipelineModeFilter;
+      }
+      if (pipelineKeyword.trim()) {
+        params.keyword = pipelineKeyword.trim();
+      }
+      const from = resolvePipelineDate(pipelineDateFrom, false);
+      const to = resolvePipelineDate(pipelineDateTo, true);
+      if (from) {
+        params.started_from = from;
+      }
+      if (to) {
+        params.started_to = to;
+      }
       const res = await api.get<PipelineRunItem[]>("/api/pipeline/runs", {
-        params: { project_id: Number(selectedProjectId) },
+        params,
       });
       const items = res.data || [];
       setPipelineRuns(items);
       setPipelineDetail(null);
+      setPipelineSelectedEvent(null);
       const existing =
         pipelineTraceId && items.some((item) => item.trace_id === pipelineTraceId)
           ? pipelineTraceId
@@ -1688,6 +1742,10 @@ export default function LiveTradePage() {
     return Array.from(new Set(pipelineRuns.map((item) => item.status).filter(Boolean))).sort();
   }, [pipelineRuns]);
 
+  const pipelineModeOptions = useMemo(() => {
+    return Array.from(new Set(pipelineRuns.map((item) => item.mode).filter(Boolean))).sort();
+  }, [pipelineRuns]);
+
   const filteredPipelineRuns = useMemo(() => {
     let items = pipelineRuns;
     if (pipelineTypeFilter) {
@@ -1696,16 +1754,62 @@ export default function LiveTradePage() {
     if (pipelineStatusFilter) {
       items = items.filter((item) => item.status === pipelineStatusFilter);
     }
+    if (pipelineModeFilter) {
+      items = items.filter((item) => item.mode === pipelineModeFilter);
+    }
+    if (pipelineDateFrom || pipelineDateTo) {
+      const from = pipelineDateFrom ? new Date(pipelineDateFrom).getTime() : null;
+      const to = pipelineDateTo ? new Date(pipelineDateTo).getTime() : null;
+      items = items.filter((item) => {
+        if (!item.created_at) {
+          return false;
+        }
+        const ts = new Date(item.created_at).getTime();
+        if (Number.isNaN(ts)) {
+          return false;
+        }
+        if (from && ts < from) {
+          return false;
+        }
+        if (to && ts > to) {
+          return false;
+        }
+        return true;
+      });
+    }
     if (pipelineKeyword.trim()) {
       const keyword = pipelineKeyword.trim().toLowerCase();
-      items = items.filter((item) => item.trace_id.toLowerCase().includes(keyword));
+      items = items.filter((item) => {
+        if (item.trace_id.toLowerCase().includes(keyword)) {
+          return true;
+        }
+        if (item.run_type.toLowerCase().includes(keyword)) {
+          return true;
+        }
+        if (item.status.toLowerCase().includes(keyword)) {
+          return true;
+        }
+        return item.mode ? item.mode.toLowerCase().includes(keyword) : false;
+      });
     }
     return items;
-  }, [pipelineKeyword, pipelineRuns, pipelineStatusFilter, pipelineTypeFilter]);
+  }, [
+    pipelineDateFrom,
+    pipelineDateTo,
+    pipelineKeyword,
+    pipelineModeFilter,
+    pipelineRuns,
+    pipelineStatusFilter,
+    pipelineTypeFilter,
+  ]);
 
   const pipelinePretradeRunId = useMemo(() => {
     return parsePretradeRunId(pipelineTraceId);
   }, [pipelineTraceId]);
+
+  const pipelineKeywordValue = useMemo(() => {
+    return pipelineKeyword.trim().toLowerCase();
+  }, [pipelineKeyword]);
 
   const latestTradeRun = filteredTradeRuns[0];
 
@@ -1748,7 +1852,16 @@ export default function LiveTradePage() {
       return;
     }
     loadPipelineRuns();
-  }, [mainTab, selectedProjectId]);
+  }, [
+    mainTab,
+    pipelineDateFrom,
+    pipelineDateTo,
+    pipelineKeyword,
+    pipelineModeFilter,
+    pipelineStatusFilter,
+    pipelineTypeFilter,
+    selectedProjectId,
+  ]);
 
   useEffect(() => {
     if (mainTab !== "pipeline") {
@@ -1756,10 +1869,25 @@ export default function LiveTradePage() {
     }
     if (!pipelineTraceId) {
       setPipelineDetail(null);
+      setPipelineSelectedEvent(null);
       return;
     }
     loadPipelineDetail(pipelineTraceId);
   }, [mainTab, pipelineTraceId]);
+
+  useEffect(() => {
+    if (!pipelineDetail?.events?.length) {
+      setPipelineSelectedEvent(null);
+      return;
+    }
+    if (
+      pipelineSelectedEvent &&
+      pipelineDetail.events.some((event) => event.event_id === pipelineSelectedEvent.event_id)
+    ) {
+      return;
+    }
+    setPipelineSelectedEvent(null);
+  }, [pipelineDetail, pipelineSelectedEvent]);
 
   useEffect(() => {
     if (ibSettings?.market_data_type) {
@@ -3913,9 +4041,42 @@ export default function LiveTradePage() {
                 </select>
               </div>
               <div className="form-row">
+                <label className="form-label">{t("trade.pipeline.filters.mode")}</label>
+                <select
+                  className="form-select"
+                  value={pipelineModeFilter}
+                  onChange={(event) => setPipelineModeFilter(event.target.value)}
+                >
+                  <option value="">{t("trade.pipeline.filters.all")}</option>
+                  {pipelineModeOptions.map((item) => (
+                    <option key={item} value={item}>
+                      {item}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("trade.pipeline.filters.dateFrom")}</label>
+                <input
+                  type="date"
+                  className="form-input"
+                  value={pipelineDateFrom}
+                  onChange={(event) => setPipelineDateFrom(event.target.value)}
+                />
+              </div>
+              <div className="form-row">
+                <label className="form-label">{t("trade.pipeline.filters.dateTo")}</label>
+                <input
+                  type="date"
+                  className="form-input"
+                  value={pipelineDateTo}
+                  onChange={(event) => setPipelineDateTo(event.target.value)}
+                />
+              </div>
+              <div className="form-row">
                 <label className="form-label">{t("trade.pipeline.filters.keyword")}</label>
                 <input
-                  className="form-input"
+                  className="form-input pipeline-keyword-input"
                   value={pipelineKeyword}
                   onChange={(event) => setPipelineKeyword(event.target.value)}
                   placeholder={t("trade.pipeline.filters.keyword")}
@@ -3986,11 +4147,67 @@ export default function LiveTradePage() {
             </div>
             <div className="pipeline-event-drawer">
               <div className="pipeline-drawer-title">{t("trade.pipeline.drawerTitle")}</div>
-              <div className="pipeline-drawer-empty">{t("trade.pipeline.drawerEmpty")}</div>
+              {pipelineSelectedEvent ? (
+                <div className="pipeline-drawer-body">
+                  <div className="meta-list" style={{ marginTop: "8px" }}>
+                    <div className="meta-row">
+                      <span>{t("trade.pipeline.drawerLabelType")}</span>
+                      <strong>{pipelineSelectedEvent.task_type}</strong>
+                    </div>
+                    <div className="meta-row">
+                      <span>{t("trade.pipeline.drawerLabelId")}</span>
+                      <strong>{pipelineSelectedEvent.task_id ?? t("common.none")}</strong>
+                    </div>
+                    <div className="meta-row">
+                      <span>{t("trade.pipeline.drawerLabelStatus")}</span>
+                      <strong>
+                        {pipelineSelectedEvent.status
+                          ? formatStatus(pipelineSelectedEvent.status)
+                          : t("common.none")}
+                      </strong>
+                    </div>
+                    <div className="meta-row">
+                      <span>{t("trade.pipeline.drawerLabelError")}</span>
+                      <strong>{pipelineSelectedEvent.error_code || t("common.none")}</strong>
+                    </div>
+                    <div className="meta-row">
+                      <span>{t("trade.pipeline.drawerLabelLog")}</span>
+                      <strong>{pipelineSelectedEvent.log_path || t("common.none")}</strong>
+                    </div>
+                    <div className="meta-row">
+                      <span>{t("trade.pipeline.drawerLabelTags")}</span>
+                      <strong>
+                        {pipelineSelectedEvent.tags?.length
+                          ? pipelineSelectedEvent.tags.join(", ")
+                          : t("common.none")}
+                      </strong>
+                    </div>
+                  </div>
+                  {pipelineSelectedEvent.params_snapshot ? (
+                    <pre className="pipeline-drawer-json">
+                      {JSON.stringify(pipelineSelectedEvent.params_snapshot, null, 2)}
+                    </pre>
+                  ) : null}
+                  {pipelineSelectedEvent.artifact_paths ? (
+                    <pre className="pipeline-drawer-json">
+                      {JSON.stringify(pipelineSelectedEvent.artifact_paths, null, 2)}
+                    </pre>
+                  ) : null}
+                </div>
+              ) : (
+                <div className="pipeline-drawer-empty">{t("trade.pipeline.drawerEmpty")}</div>
+              )}
             </div>
+            <span className="pipeline-event-highlight" style={{ display: "none" }} />
             <div className="pipeline-events">
               {pipelineDetail?.events?.length ? (
                 pipelineDetail.events.map((event) => {
+                  const eventTags = event.tags || [];
+                  const isHighlighted =
+                    pipelineKeywordValue.length > 0 &&
+                    eventTags.some((tag) =>
+                      String(tag).toLowerCase().includes(pipelineKeywordValue)
+                    );
                   const canRetryStep =
                     event.task_type === "pretrade_step" &&
                     pipelinePretradeRunId &&
@@ -4000,7 +4217,13 @@ export default function LiveTradePage() {
                   const canExecuteTrade =
                     event.task_type === "trade_run" && event.task_id;
                   return (
-                    <div key={event.event_id} className="pipeline-event">
+                    <div
+                      key={event.event_id}
+                      className={`pipeline-event${isHighlighted ? " pipeline-event-highlight" : ""}`}
+                      onClick={() => setPipelineSelectedEvent(event)}
+                      role="button"
+                      tabIndex={0}
+                    >
                       <div className="pipeline-event-title">
                         <span>{event.task_type}</span>
                         {event.status ? (

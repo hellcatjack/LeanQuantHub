@@ -84,4 +84,10 @@ describe("LiveTradePage", () => {
     expect(html).toContain("pipeline-stage-lanes");
     expect(html).toContain("pipeline-event-drawer");
   });
+
+  it("filters pipeline runs by keyword and highlights events", () => {
+    const html = ReactDOMServer.renderToString(React.createElement(LiveTradePage));
+    expect(html).toContain("pipeline-keyword-input");
+    expect(html).toContain("pipeline-event-highlight");
+  });
 });
