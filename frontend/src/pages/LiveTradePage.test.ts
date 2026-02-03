@@ -73,4 +73,9 @@ describe("LiveTradePage", () => {
     const html = ReactDOMServer.renderToString(React.createElement(LiveTradePage));
     expect(html).toContain("trade.pipeline.filters.project");
   });
+
+  it("renders pipeline event list", () => {
+    const html = ReactDOMServer.renderToString(React.createElement(LiveTradePage));
+    expect(html).toContain("pipeline-events");
+  });
 });

@@ -482,6 +482,11 @@ export default function LiveTradePage() {
   const [pipelineDetail, setPipelineDetail] = useState<PipelineTraceDetail | null>(null);
   const [pipelineDetailLoading, setPipelineDetailLoading] = useState(false);
   const [pipelineDetailError, setPipelineDetailError] = useState("");
+  const [pipelineActionLoading, setPipelineActionLoading] = useState<Record<string, boolean>>(
+    {}
+  );
+  const [pipelineActionError, setPipelineActionError] = useState("");
+  const [pipelineActionResult, setPipelineActionResult] = useState("");
   const [pipelineStatusFilter, setPipelineStatusFilter] = useState("");
   const [pipelineTypeFilter, setPipelineTypeFilter] = useState("");
   const [pipelineKeyword, setPipelineKeyword] = useState("");
@@ -1352,6 +1357,72 @@ export default function LiveTradePage() {
     }
   };
 
+  const runPipelineAction = async (
+    actionKey: string,
+    action: () => Promise<void>,
+    successMessage: string
+  ) => {
+    setPipelineActionError("");
+    setPipelineActionResult("");
+    setPipelineActionLoading((prev) => ({ ...prev, [actionKey]: true }));
+    try {
+      await action();
+      setPipelineActionResult(successMessage);
+      await loadPipelineRuns();
+      if (pipelineTraceId) {
+        await loadPipelineDetail(pipelineTraceId);
+      }
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("trade.pipeline.errors.actionFailed");
+      setPipelineActionError(String(detail));
+    } finally {
+      setPipelineActionLoading((prev) => {
+        const next = { ...prev };
+        delete next[actionKey];
+        return next;
+      });
+    }
+  };
+
+  const retryPipelineStep = async (stepId: number) => {
+    if (!pipelinePretradeRunId) {
+      return;
+    }
+    await runPipelineAction(
+      `pretrade-step-${stepId}`,
+      async () => {
+        await api.post(`/api/pretrade/runs/${pipelinePretradeRunId}/steps/${stepId}/retry`);
+      },
+      t("trade.pipeline.actions.retryStepSuccess")
+    );
+  };
+
+  const resumePipelineRun = async () => {
+    if (!pipelinePretradeRunId) {
+      return;
+    }
+    await runPipelineAction(
+      `pretrade-run-${pipelinePretradeRunId}`,
+      async () => {
+        await api.post(`/api/pretrade/runs/${pipelinePretradeRunId}/resume`);
+      },
+      t("trade.pipeline.actions.resumeSuccess")
+    );
+  };
+
+  const executePipelineTrade = async (runId: number) => {
+    await runPipelineAction(
+      `trade-run-${runId}`,
+      async () => {
+        await api.post(`/api/trade/runs/${runId}/execute`, {
+          dry_run: false,
+          force: false,
+        });
+      },
+      t("trade.pipeline.actions.executeSuccess")
+    );
+  };
+
   const handleOrdersPageChange = (page: number) => {
     setOrdersPage(page);
     loadTradeActivity(page, ordersPageSize);
@@ -1630,6 +1701,14 @@ export default function LiveTradePage() {
     }
     return items;
   }, [pipelineKeyword, pipelineRuns, pipelineStatusFilter, pipelineTypeFilter]);
+
+  const pipelinePretradeRunId = useMemo(() => {
+    if (!pipelineTraceId || !pipelineTraceId.startsWith("pretrade:")) {
+      return null;
+    }
+    const raw = Number(pipelineTraceId.split(":", 1)[1]);
+    return Number.isNaN(raw) ? null : raw;
+  }, [pipelineTraceId]);
 
   const latestTradeRun = filteredTradeRuns[0];
 
@@ -3886,32 +3965,90 @@ export default function LiveTradePage() {
             <div className="card-title">{t("trade.pipeline.detailTitle")}</div>
             <div className="card-meta">{t("trade.pipeline.detailMeta")}</div>
             {pipelineDetailError && <div className="form-hint">{pipelineDetailError}</div>}
-            {pipelineDetailLoading ? (
+            {pipelineActionError && <div className="form-hint">{pipelineActionError}</div>}
+            {pipelineActionResult && <div className="form-success">{pipelineActionResult}</div>}
+            {pipelineDetailLoading && (
               <div className="form-hint">{t("common.actions.loading")}</div>
-            ) : pipelineDetail?.events?.length ? (
-              <div className="pipeline-events">
-                {pipelineDetail.events.map((event) => (
-                  <div key={event.event_id} className="pipeline-event">
-                    <div className="pipeline-event-title">
-                      <span>{event.task_type}</span>
-                      {event.status ? (
-                        <span className="pipeline-event-status">
-                          {formatStatus(event.status)}
-                        </span>
-                      ) : null}
-                    </div>
-                    <div className="pipeline-event-meta">
-                      <span>{event.message || t("common.none")}</span>
-                      <span>
-                        {event.started_at ? formatDateTime(event.started_at) : t("common.none")}
-                      </span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="empty-state">{t("trade.pipeline.detailEmpty")}</div>
             )}
+            <div className="pipeline-events">
+              {pipelineDetail?.events?.length ? (
+                pipelineDetail.events.map((event) => {
+                  const canRetryStep =
+                    event.task_type === "pretrade_step" &&
+                    pipelinePretradeRunId &&
+                    event.task_id;
+                  const canResumeRun =
+                    event.task_type === "pretrade_run" && pipelinePretradeRunId;
+                  const canExecuteTrade =
+                    event.task_type === "trade_run" && event.task_id;
+                  return (
+                    <div key={event.event_id} className="pipeline-event">
+                      <div className="pipeline-event-title">
+                        <span>{event.task_type}</span>
+                        {event.status ? (
+                          <span className="pipeline-event-status">
+                            {formatStatus(event.status)}
+                          </span>
+                        ) : null}
+                      </div>
+                      <div className="pipeline-event-meta">
+                        <span>{event.message || t("common.none")}</span>
+                        <span>
+                          {event.started_at ? formatDateTime(event.started_at) : t("common.none")}
+                        </span>
+                      </div>
+                      {(canRetryStep || canResumeRun || canExecuteTrade) && (
+                        <div className="pipeline-event-actions">
+                          {canRetryStep && event.task_id ? (
+                            <button
+                              type="button"
+                              className="button-secondary button-compact"
+                              disabled={pipelineActionLoading[`pretrade-step-${event.task_id}`]}
+                              onClick={() => retryPipelineStep(event.task_id as number)}
+                            >
+                              {pipelineActionLoading[`pretrade-step-${event.task_id}`]
+                                ? t("common.actions.loading")
+                                : t("trade.pipeline.actions.retryStep")}
+                            </button>
+                          ) : null}
+                          {canResumeRun ? (
+                            <button
+                              type="button"
+                              className="button-secondary button-compact"
+                              disabled={
+                                pipelinePretradeRunId
+                                  ? pipelineActionLoading[`pretrade-run-${pipelinePretradeRunId}`]
+                                  : false
+                              }
+                              onClick={resumePipelineRun}
+                            >
+                              {pipelinePretradeRunId &&
+                              pipelineActionLoading[`pretrade-run-${pipelinePretradeRunId}`]
+                                ? t("common.actions.loading")
+                                : t("trade.pipeline.actions.resumeRun")}
+                            </button>
+                          ) : null}
+                          {canExecuteTrade && event.task_id ? (
+                            <button
+                              type="button"
+                              className="button-secondary button-compact"
+                              disabled={pipelineActionLoading[`trade-run-${event.task_id}`]}
+                              onClick={() => executePipelineTrade(event.task_id as number)}
+                            >
+                              {pipelineActionLoading[`trade-run-${event.task_id}`]
+                                ? t("common.actions.loading")
+                                : t("trade.pipeline.actions.executeTrade")}
+                            </button>
+                          ) : null}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              ) : (
+                <div className="empty-state">{t("trade.pipeline.detailEmpty")}</div>
+              )}
+            </div>
           </div>
         </div>
         <div style={{ display: mainTab === "overview" ? "block" : "none" }}>
