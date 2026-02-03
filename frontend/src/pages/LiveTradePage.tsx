@@ -34,6 +34,7 @@ import {
   getBridgeRefreshHint,
 } from "../utils/bridgeRefreshHint";
 import { formatRealizedPnlValue } from "../utils/formatters";
+import { parsePretradeRunId } from "../utils/pipelineTrace";
 
 interface IBSettings {
   id: number;
@@ -1703,11 +1704,7 @@ export default function LiveTradePage() {
   }, [pipelineKeyword, pipelineRuns, pipelineStatusFilter, pipelineTypeFilter]);
 
   const pipelinePretradeRunId = useMemo(() => {
-    if (!pipelineTraceId || !pipelineTraceId.startsWith("pretrade:")) {
-      return null;
-    }
-    const raw = Number(pipelineTraceId.split(":", 1)[1]);
-    return Number.isNaN(raw) ? null : raw;
+    return parsePretradeRunId(pipelineTraceId);
   }, [pipelineTraceId]);
 
   const latestTradeRun = filteredTradeRuns[0];
