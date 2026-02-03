@@ -433,6 +433,79 @@ a {
   min-width: 0;
 }
 
+.pipeline-run-list {
+  margin-top: 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.pipeline-run-item {
+  border: 1px solid var(--border);
+  background: #ffffff;
+  border-radius: 10px;
+  padding: 10px;
+  cursor: pointer;
+  text-align: left;
+  display: grid;
+  gap: 6px;
+}
+
+.pipeline-run-item.active {
+  border-color: var(--accent);
+  background: #f6f8ff;
+}
+
+.pipeline-run-title {
+  display: flex;
+  justify-content: space-between;
+  font-weight: 600;
+}
+
+.pipeline-run-status {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.pipeline-run-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.pipeline-events {
+  margin-top: 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.pipeline-event {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px;
+  background: var(--panel-alt);
+}
+
+.pipeline-event-title {
+  display: flex;
+  justify-content: space-between;
+  font-weight: 600;
+}
+
+.pipeline-event-status {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.pipeline-event-meta {
+  margin-top: 6px;
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--muted);
+  gap: 8px;
+}
+
 .overview-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));

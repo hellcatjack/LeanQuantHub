@@ -68,4 +68,9 @@ describe("LiveTradePage", () => {
     const html = ReactDOMServer.renderToString(React.createElement(LiveTradePage));
     expect(html).toContain("pipeline-view");
   });
+
+  it("renders pipeline filters labels", () => {
+    const html = ReactDOMServer.renderToString(React.createElement(LiveTradePage));
+    expect(html).toContain("trade.pipeline.filters.project");
+  });
 });
