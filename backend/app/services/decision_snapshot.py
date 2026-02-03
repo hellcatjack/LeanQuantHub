@@ -261,6 +261,9 @@ def _apply_algorithm_params(weights_cfg: dict[str, Any], algo_params: dict[str, 
     max_turnover_week = algo_params.get("max_turnover_week")
     if max_turnover_week not in (None, ""):
         weights_cfg["turnover_limit"] = max_turnover_week
+    cold_start_turnover = algo_params.get("cold_start_turnover")
+    if cold_start_turnover not in (None, ""):
+        weights_cfg["cold_start_turnover"] = cold_start_turnover
 
     if risk_cfg:
         plugins["risk_control"] = risk_cfg
