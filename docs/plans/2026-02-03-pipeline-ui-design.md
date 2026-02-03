@@ -10,6 +10,15 @@
   - 每周一自动交易（Automation Weekly）
   - 手动 PreTrade / Trade Run
 - 最小审计粒度：子任务级（PIT Job / 训练作业 / 交易批次 / 订单等）。
+- 展示范围：**按项目过滤**，Pipeline 时间轴仅显示当前 project_id 范围内的链路。
+
+## 方案选择
+- 选用方案 A：**纯聚合，不做 DB 结构变更**。
+- `trace_id` 规则：
+  - Automation Weekly：`auto:{job_id}`
+  - PreTrade：`pretrade:{run_id}`
+  - 手动 Trade Run：`trade:{run_id}`
+- `event_id` 统一为 `type:id` 字符串（如 `pretrade_step:123`）。
 
 ## 总体信息架构
 - 页面入口：实盘交易 → Pipeline 子标签。
@@ -42,11 +51,18 @@
   - status / message / error_code
   - started_at / ended_at / duration
   - artifact_paths / log_path / params_snapshot
+  - link_source（artifact / params / fallback）标识关联依据
+  - warnings（链路缺口或推断失败）
+  - tags（order_id / run_id / snapshot_id 用于高亮）
 
 ## 后端聚合 API
-- `GET /api/pipeline/runs`：Run 列表（支持 project_id、mode、status、date_range、type）。
+- `GET /api/pipeline/runs`：Run 列表（**project_id 必填**，支持 mode、status、date_range、type、keyword）。
 - `GET /api/pipeline/runs/{trace_id}`：事件流详情（按时间排序，阶段分组）。
-- `POST /api/pipeline/events/{event_id}/retry`：触发重试（映射到具体子任务）。
+- 重试不新增统一 API，UI 根据事件类型直接调用既有接口：
+  - PreTrade step：`POST /api/pretrade/runs/{run_id}/steps/{step_id}/retry`
+  - PreTrade run：`POST /api/pretrade/runs/{run_id}/resume`
+  - Trade run：`POST /api/trade/runs/{run_id}/execute`
+  - Auto weekly：提示新建周任务 `POST /api/automation/weekly-jobs`
 
 ## 数据来源映射
 - Automation Weekly: `auto_weekly_jobs` → 数据准备/回测
@@ -55,10 +71,30 @@
 - Trade Execution: `trade_runs` / `trade_orders` / `trade_fills`
 - 审计：`audit_log`
 
+## 关联与聚合规则
+- 优先强关联：
+  - `pretrade_steps.artifacts.decision_snapshot_id` → Decision Snapshot
+  - `pretrade_steps.artifacts.trade_run_id` / `trade_runs.params.pretrade_run_id` → Trade Run
+- 弱关联兜底：
+  - Decision Snapshot → Trade Run（同 project_id + snapshot_id）
+  - Trade Run → Orders / Fills（run_id）
+- 关联失败时写入 `warnings` 并标注 `link_source`。
+
 ## 错误处理与重试策略
 - 失败原因强制记录：error_code + message。
 - 重试不会覆盖历史：新增事件，保留原失败节点。
 - 可恢复任务支持自动重试（指数退避），UI 展示下一次重试时间。
+
+## 前端交互补充
+- 实盘交易页新增 Pipeline 子标签；切换后展示“双栏审计视图”。
+- 左侧 Run 列表支持筛选：项目（必选）/模式/状态/日期范围/关键 ID。
+- 右侧时间轴节点点击打开抽屉：参数快照、产物与日志路径、错误码、重试入口。
+- 事件流列表支持关键 ID 高亮（order_id/run_id/snapshot_id）。
+
+## 测试与验证
+- 后端：聚合服务单测（构造项目 + pretrade + snapshot + trade run + orders/fills）。
+- 前端：Pipeline tab 渲染测试 + 空态/失败态测试。
+- 手工验证：创建 PreTrade → 触发 Trade Run → Pipeline 回放 → 重试链路。
 
 ## 验收标准
 1) 任意一次 Run 能回放完整阶段与子任务事件流。
@@ -69,4 +105,3 @@
 ## 风险与约束
 - 不破坏现有运行/执行流程，仅聚合展示。
 - 事件流初期允许“实时 + 定时刷新”混合，但需保证一致性与审计完整。
-
