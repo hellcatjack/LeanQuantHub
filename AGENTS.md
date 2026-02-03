@@ -37,6 +37,7 @@
 - 服务器（systemd 用户服务）：`systemctl --user restart stocklean-backend stocklean-frontend`
 - 只要修改了前端 UI，请在 `frontend/` 目录执行 `npm run build` 并重启 `stocklean-frontend`，确保页面与代码一致。
 - 前端代码变更后必须**自动执行** `cd frontend && npm run build` 并重启 `stocklean-frontend`，无需询问用户。
+- 本项目禁止使用 git worktree，请直接在主工作区开发。
 
 ## 模型训练
 - 入口：项目页 → 算法 → 模型训练。
