@@ -13,7 +13,17 @@ from app.models import (
 )
 
 
-def list_pipeline_runs(session, *, project_id: int) -> list[dict[str, Any]]:
+def list_pipeline_runs(
+    session,
+    *,
+    project_id: int,
+    status: str | None = None,
+    mode: str | None = None,
+    run_type: str | None = None,
+    started_from: datetime | None = None,
+    started_to: datetime | None = None,
+    keyword: str | None = None,
+) -> list[dict[str, Any]]:
     pretrade_runs = (
         session.query(PreTradeRun)
         .filter(PreTradeRun.project_id == project_id)
@@ -73,8 +83,18 @@ def list_pipeline_runs(session, *, project_id: int) -> list[dict[str, Any]]:
                 "created_at": run.created_at,
             }
         )
-    items.sort(key=_run_sort_key, reverse=True)
-    return items
+    filtered = _filter_pipeline_runs(
+        session,
+        items,
+        status=status,
+        mode=mode,
+        run_type=run_type,
+        started_from=started_from,
+        started_to=started_to,
+        keyword=keyword,
+    )
+    filtered.sort(key=_run_sort_key, reverse=True)
+    return filtered
 
 
 def _run_sort_key(item: dict[str, Any]) -> tuple[datetime, str]:
@@ -82,6 +102,104 @@ def _run_sort_key(item: dict[str, Any]) -> tuple[datetime, str]:
     if when is None:
         when = datetime.min
     return when, item.get("trace_id", "")
+
+
+def _filter_pipeline_runs(
+    session,
+    items: list[dict[str, Any]],
+    *,
+    status: str | None,
+    mode: str | None,
+    run_type: str | None,
+    started_from: datetime | None,
+    started_to: datetime | None,
+    keyword: str | None,
+) -> list[dict[str, Any]]:
+    normalized_status = str(status or "").strip().lower()
+    normalized_mode = str(mode or "").strip().lower()
+    normalized_type = str(run_type or "").strip().lower()
+    normalized_keyword = str(keyword or "").strip().lower()
+    tags_cache: dict[str, list[str]] = {}
+
+    filtered: list[dict[str, Any]] = []
+    for item in items:
+        item_status = str(item.get("status") or "").strip().lower()
+        item_mode = str(item.get("mode") or "").strip().lower()
+        item_type = str(item.get("run_type") or "").strip().lower()
+        if normalized_status and item_status != normalized_status:
+            continue
+        if normalized_mode and item_mode != normalized_mode:
+            continue
+        if normalized_type and item_type != normalized_type:
+            continue
+
+        when = item.get("created_at") or item.get("started_at") or item.get("ended_at")
+        if started_from and (when is None or when < started_from):
+            continue
+        if started_to and (when is None or when > started_to):
+            continue
+
+        if normalized_keyword:
+            trace_id = str(item.get("trace_id") or "")
+            trace_match = normalized_keyword in trace_id.lower()
+            if not trace_match:
+                if trace_id not in tags_cache:
+                    tags_cache[trace_id] = _collect_trace_tags(session, trace_id)
+                tag_match = any(
+                    normalized_keyword in tag.lower() for tag in tags_cache[trace_id]
+                )
+                if not tag_match:
+                    continue
+        filtered.append(item)
+    return filtered
+
+
+def _collect_trace_tags(session, trace_id: str) -> list[str]:
+    if trace_id.startswith("pretrade:"):
+        return _collect_pretrade_tags(session, int(trace_id.split(":", 1)[1]))
+    if trace_id.startswith("trade:"):
+        return _collect_trade_tags(session, int(trace_id.split(":", 1)[1]))
+    if trace_id.startswith("auto:"):
+        return _collect_auto_tags(session, int(trace_id.split(":", 1)[1]))
+    return []
+
+
+def _collect_pretrade_tags(session, run_id: int) -> list[str]:
+    tags: set[str] = {str(run_id)}
+    steps = session.query(PreTradeStep).filter(PreTradeStep.run_id == run_id).all()
+    trade_run_ids: set[int] = set()
+    for step in steps:
+        tags.add(str(step.id))
+        if isinstance(step.artifacts, dict):
+            snapshot_id = step.artifacts.get("decision_snapshot_id")
+            trade_run_id = step.artifacts.get("trade_run_id")
+            if snapshot_id:
+                tags.add(str(snapshot_id))
+            if trade_run_id:
+                trade_run_ids.add(int(trade_run_id))
+                tags.add(str(trade_run_id))
+    for trade_run_id in trade_run_ids:
+        tags.update(_collect_trade_tags(session, trade_run_id))
+    return sorted(tags)
+
+
+def _collect_trade_tags(session, run_id: int) -> list[str]:
+    tags: set[str] = {str(run_id)}
+    orders = session.query(TradeOrder).filter(TradeOrder.run_id == run_id).all()
+    order_ids = [order.id for order in orders]
+    tags.update(str(order_id) for order_id in order_ids)
+    return sorted(tags)
+
+
+def _collect_auto_tags(session, job_id: int) -> list[str]:
+    tags: set[str] = {str(job_id)}
+    job = session.get(AutoWeeklyJob, job_id)
+    if job:
+        if job.pit_weekly_job_id:
+            tags.add(str(job.pit_weekly_job_id))
+        if job.pit_fundamental_job_id:
+            tags.add(str(job.pit_fundamental_job_id))
+    return sorted(tags)
 
 
 def build_pipeline_trace(session, *, trace_id: str) -> dict[str, Any]:

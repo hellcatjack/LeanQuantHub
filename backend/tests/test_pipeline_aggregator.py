@@ -195,3 +195,28 @@ def test_pipeline_event_contains_audit_fields():
     assert "artifact_paths" in event
     assert "tags" in event
     assert "parent_id" in event
+
+
+def test_list_pipeline_runs_supports_filters():
+    session = _make_session()
+    base = datetime(2024, 1, 1)
+    run1 = PreTradeRun(project_id=1, status="success", created_at=base)
+    run2 = TradeRun(
+        project_id=1,
+        status="failed",
+        mode="paper",
+        created_at=base.replace(day=2),
+    )
+    session.add_all([run1, run2])
+    session.commit()
+
+    runs = list_pipeline_runs(
+        session,
+        project_id=1,
+        status="failed",
+        run_type="trade",
+        started_from=base,
+        started_to=base.replace(day=3),
+        keyword="trade",
+    )
+    assert [item["trace_id"] for item in runs] == ["trade:1"]
