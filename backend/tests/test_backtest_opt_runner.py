@@ -40,11 +40,13 @@ def test_select_core_params_coerces():
         "retain_top_n": "10",
         "max_turnover_week": "0.08",
         "market_ma_window": "200",
+        "cold_start_turnover": "0.3",
     }
     core = select_core_params(base)
     assert core["top_n"] == 30
     assert core["market_ma_window"] == 200
     assert core["max_weight"] == 0.033
+    assert core["cold_start_turnover"] == 0.3
 
 
 def test_build_signature_stable_order():

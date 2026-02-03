@@ -10,6 +10,7 @@ CORE_KEYS = (
     "top_n",
     "retain_top_n",
     "max_turnover_week",
+    "cold_start_turnover",
     "market_ma_window",
 )
 
