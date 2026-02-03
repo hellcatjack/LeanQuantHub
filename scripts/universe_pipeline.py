@@ -21,6 +21,20 @@ DEFAULT_SP500_URL = (
 WIKI_SP500_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 YAHOO_SEARCH_URL = "https://query2.finance.yahoo.com/v1/finance/search"
 YAHOO_QUOTE_URL = "https://query1.finance.yahoo.com/v7/finance/quote"
+COLD_START_EPSILON = 1e-6
+
+
+def resolve_turnover_limit(
+    turnover_limit: float | None,
+    cold_start_turnover: float | None,
+    prev_weight_sum: float,
+    epsilon: float = COLD_START_EPSILON,
+) -> tuple[float | None, bool]:
+    cold_start = prev_weight_sum <= epsilon
+    effective = turnover_limit
+    if cold_start and cold_start_turnover is not None:
+        effective = float(cold_start_turnover)
+    return effective, cold_start
 
 
 def load_env(path: Path) -> dict[str, str]:
@@ -1272,6 +1286,13 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
         turnover_limit = None
     else:
         turnover_limit = float(turnover_raw)
+    cold_start_turnover_raw = execution_cfg.get(
+        "cold_start_turnover", weights_cfg.get("cold_start_turnover")
+    )
+    if cold_start_turnover_raw in (None, ""):
+        cold_start_turnover = None
+    else:
+        cold_start_turnover = float(cold_start_turnover_raw)
     trade_weekdays_raw = execution_cfg.get("trade_weekdays", weights_cfg.get("trade_weekdays"))
     trade_day_policy = str(
         execution_cfg.get(
@@ -1722,6 +1743,9 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
         cash_weight: float | None,
         weights_sum: float | None,
         turnover_scale: float | None,
+        cold_start: bool,
+        prev_weight_sum: float,
+        effective_turnover_limit: float | None,
     ) -> None:
         snapshot_rows.append(
             {
@@ -1739,6 +1763,13 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
                 "weights_sum": f"{weights_sum:.8f}" if weights_sum is not None else "",
                 "turnover_scale": f"{turnover_scale:.6f}" if turnover_scale is not None else "",
                 "max_exposure": f"{max_exposure:.6f}",
+                "cold_start": "1" if cold_start else "0",
+                "prev_weight_sum": f"{prev_weight_sum:.8f}",
+                "effective_turnover_limit": (
+                    f"{effective_turnover_limit:.6f}"
+                    if effective_turnover_limit is not None
+                    else ""
+                ),
             }
         )
     min_history_days = int(weights_cfg.get("min_history_days") or 0)
@@ -2062,6 +2093,9 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
     turnover_scale_sum = 0.0
     cash_weight_sum = 0.0
     risk_off_count = 0
+    cold_start_count = 0
+    effective_turnover_limit_sum = 0.0
+    effective_turnover_limit_count = 0
 
     for idx, rebalance in enumerate(rebalance_dates):
         snapshot_date = pit_snapshot_map.get(rebalance, rebalance)
@@ -2348,6 +2382,10 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
                     weights_for_symbols[symbol] = share
 
         if not weights_for_symbols and risk_off:
+            prev_weight_sum = float(prev_weights_row.abs().sum())
+            effective_turnover_limit, cold_start = resolve_turnover_limit(
+                turnover_limit, cold_start_turnover, prev_weight_sum
+            )
             weight_series = pd.Series(0.0, index=prices.columns)
             start_idx = prices.index.get_loc(pd.Timestamp(rebalance))
             end_idx = (
@@ -2371,7 +2409,15 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
                 cash_weight=1.0,
                 weights_sum=0.0,
                 turnover_scale=None,
+                cold_start=cold_start,
+                prev_weight_sum=prev_weight_sum,
+                effective_turnover_limit=effective_turnover_limit,
             )
+            if cold_start:
+                cold_start_count += 1
+            if effective_turnover_limit is not None:
+                effective_turnover_limit_sum += effective_turnover_limit
+                effective_turnover_limit_count += 1
             continue
         if not weights_for_symbols:
             continue
@@ -2424,10 +2470,14 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
             total_weight = float(weight_series.sum())
             if total_weight > 0:
                 weight_series = weight_series / total_weight
+        prev_weight_sum = float(prev_weights_row.abs().sum())
+        effective_turnover_limit, cold_start = resolve_turnover_limit(
+            turnover_limit, cold_start_turnover, prev_weight_sum
+        )
         turnover_scale = None
-        if turnover_limit and turnover_limit > 0:
+        if effective_turnover_limit and effective_turnover_limit > 0:
             weight_series, planned_turnover, scale = _apply_turnover_limit(
-                weight_series, prev_weights_row, turnover_limit
+                weight_series, prev_weights_row, effective_turnover_limit
             )
             if scale < 1.0:
                 turnover_limited += 1
@@ -2475,7 +2525,15 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
             cash_weight=max(0.0, 1.0 - float(weight_series.sum())),
             weights_sum=float(weight_series.sum()),
             turnover_scale=turnover_scale,
+            cold_start=cold_start,
+            prev_weight_sum=prev_weight_sum,
+            effective_turnover_limit=effective_turnover_limit,
         )
+        if cold_start:
+            cold_start_count += 1
+        if effective_turnover_limit is not None:
+            effective_turnover_limit_sum += effective_turnover_limit
+            effective_turnover_limit_count += 1
 
     portfolio_returns = (weights * returns).sum(axis=1)
     turnover_by_date: dict[str, float] = {}
@@ -2608,6 +2666,16 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
         "max_holdings": max_holdings,
         "max_position_weight": max_position_weight if max_position_weight is not None else "",
         "turnover_limit": turnover_limit if turnover_limit is not None else "",
+        "cold_start_turnover": (
+            cold_start_turnover if cold_start_turnover is not None else ""
+        ),
+        "cold_start_epsilon": COLD_START_EPSILON,
+        "cold_start_count": cold_start_count,
+        "effective_turnover_limit_avg": (
+            effective_turnover_limit_sum / effective_turnover_limit_count
+            if effective_turnover_limit_count
+            else ""
+        ),
         "trade_weekdays": sorted(allowed_weekdays) if allowed_weekdays else "",
         "trade_day_policy": trade_day_policy,
         "trade_day_max_shift_days": max_shift_days if max_shift_days is not None else "",
@@ -2685,6 +2753,9 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
                 "weights_sum",
                 "turnover_scale",
                 "max_exposure",
+                "cold_start",
+                "prev_weight_sum",
+                "effective_turnover_limit",
             ],
         )
         summary["snapshot_summary_path"] = str(snapshot_path)
