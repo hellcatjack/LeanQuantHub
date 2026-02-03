@@ -9,7 +9,7 @@
 - 覆盖类型：
   - 每周一自动交易（Automation Weekly）
   - 手动 PreTrade / Trade Run
-- 最小审计粒度：子任务级（PIT Job / 训练作业 / 交易批次 / 订单等）。
+- 最小审计粒度：子任务级（PIT Job / 训练作业 / 交易批次 / 订单 / 成交 / 审计日志）。
 - 展示范围：**按项目过滤**，Pipeline 时间轴仅显示当前 project_id 范围内的链路。
 
 ## 方案选择
@@ -24,7 +24,7 @@
 - 页面入口：实盘交易 → Pipeline 子标签。
 - 左侧：Run 列表（按时间倒序）。
 - 右侧：Run 详情（时间轴 + 事件流）。
-- 顶部：过滤器（项目/模式/状态/日期范围/关键ID）。
+- 顶部：过滤器（项目/模式/状态/日期范围/关键 ID）。
 
 ## 视觉与交互方案（时间轴 + 事件流）
 - 形态：阶段泳道（Stage Lanes）+ 时间轴事件节点。
@@ -41,7 +41,7 @@
   - 错误码/原因
   - 重试入口
 - 关系追踪：节点之间用细线标识“父子/重试/关联”。
-- 搜索：输入 order_id / run_id / snapshot_id 高亮相关链路。
+- 搜索：输入 order_id / run_id / snapshot_id 后 **过滤左侧 Run 列表 + 高亮右侧事件**，不自动定位。
 
 ## 数据模型（事件流 DTO）
 - 字段建议（可先聚合，不必落库）：
@@ -53,7 +53,7 @@
   - artifact_paths / log_path / params_snapshot
   - link_source（artifact / params / fallback）标识关联依据
   - warnings（链路缺口或推断失败）
-  - tags（order_id / run_id / snapshot_id 用于高亮）
+  - tags（order_id / run_id / snapshot_id，用于高亮）
 
 ## 后端聚合 API
 - `GET /api/pipeline/runs`：Run 列表（**project_id 必填**，支持 mode、status、date_range、type、keyword）。
@@ -66,6 +66,8 @@
 
 ## 数据来源映射
 - Automation Weekly: `auto_weekly_jobs` → 数据准备/回测
+  - Pit Weekly/Fundamental: `pit_weekly_jobs` / `pit_fundamental_jobs`
+  - Backtest 产物：`auto_weekly_jobs.backtest_*`
 - PreTrade: `pretrade_runs` / `pretrade_steps`
 - Decision Snapshot: `decision_snapshots`
 - Trade Execution: `trade_runs` / `trade_orders` / `trade_fills`
