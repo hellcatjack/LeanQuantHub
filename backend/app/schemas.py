@@ -3,7 +3,7 @@
 from datetime import date, datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class ProjectCreate(BaseModel):
@@ -1538,8 +1538,24 @@ class TradeSettingsOut(BaseModel):
     id: int
     risk_defaults: dict | None = None
     execution_data_source: str | None = None
+    auto_recovery: dict | None = None
     created_at: datetime
     updated_at: datetime
+
+    @field_validator("auto_recovery", mode="before")
+    @classmethod
+    def _normalize_auto_recovery(cls, value: Any) -> dict:
+        defaults = {
+            "new_timeout_seconds": 45,
+            "max_auto_retries": 1,
+            "max_price_deviation_pct": 1.5,
+            "allow_replace_outside_rth": False,
+        }
+        if not isinstance(value, dict):
+            return dict(defaults)
+        merged = dict(defaults)
+        merged.update(value)
+        return merged
 
     class Config:
         from_attributes = True
@@ -1548,6 +1564,7 @@ class TradeSettingsOut(BaseModel):
 class TradeSettingsUpdate(BaseModel):
     risk_defaults: dict | None = None
     execution_data_source: str | None = None
+    auto_recovery: dict | None = None
 
 
 class BacktestSettingsOut(BaseModel):

@@ -55,12 +55,31 @@ from app.services.trade_run_summary import build_last_update_at, build_symbol_su
 router = APIRouter(prefix="/api/trade", tags=["trade"])
 
 
+def _merge_auto_recovery(
+    incoming: dict | None,
+    current: dict | None = None,
+) -> dict:
+    defaults = {
+        "new_timeout_seconds": 45,
+        "max_auto_retries": 1,
+        "max_price_deviation_pct": 1.5,
+        "allow_replace_outside_rth": False,
+    }
+    merged = dict(defaults)
+    if isinstance(current, dict):
+        merged.update(current)
+    if isinstance(incoming, dict):
+        merged.update(incoming)
+    return merged
+
+
 @router.get("/settings", response_model=TradeSettingsOut)
 def get_trade_settings():
     with get_session() as session:
         settings_row = session.query(TradeSettings).order_by(TradeSettings.id.desc()).first()
         if settings_row is None:
             settings_row = TradeSettings(risk_defaults={}, execution_data_source="ib")
+            settings_row.auto_recovery = _merge_auto_recovery(None, None)
             session.add(settings_row)
             session.commit()
             session.refresh(settings_row)
@@ -82,10 +101,16 @@ def update_trade_settings(payload: TradeSettingsUpdate):
                 risk_defaults=payload.risk_defaults or {},
                 execution_data_source="ib",
             )
+            settings_row.auto_recovery = _merge_auto_recovery(payload.auto_recovery, None)
             session.add(settings_row)
         else:
             settings_row.risk_defaults = payload.risk_defaults
             settings_row.execution_data_source = "ib"
+            if payload.auto_recovery is not None:
+                settings_row.auto_recovery = _merge_auto_recovery(
+                    payload.auto_recovery,
+                    settings_row.auto_recovery if isinstance(settings_row.auto_recovery, dict) else None,
+                )
         session.commit()
         session.refresh(settings_row)
         return TradeSettingsOut.model_validate(settings_row, from_attributes=True)
