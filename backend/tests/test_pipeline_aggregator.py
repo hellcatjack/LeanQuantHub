@@ -179,3 +179,19 @@ def test_pretrade_trace_sorted_by_time():
         f"pretrade_step:{step.id}",
         f"decision_snapshot:{snapshot.id}",
     ]
+
+
+def test_pipeline_event_contains_audit_fields():
+    session = _make_session()
+    run = PreTradeRun(project_id=1, status="failed", message="pretrade_failed")
+    session.add(run)
+    session.commit()
+
+    detail = build_pipeline_trace(session, trace_id=f"pretrade:{run.id}")
+    event = next(item for item in detail["events"] if item["task_type"] == "pretrade_run")
+    assert "error_code" in event
+    assert "log_path" in event
+    assert "params_snapshot" in event
+    assert "artifact_paths" in event
+    assert "tags" in event
+    assert "parent_id" in event

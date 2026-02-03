@@ -1984,10 +1984,15 @@ class PipelineEventOut(BaseModel):
     stage: str | None = None
     status: str | None = None
     message: str | None = None
+    error_code: str | None = None
     started_at: datetime | None = None
     ended_at: datetime | None = None
     params_snapshot: dict | None = None
     artifact_paths: dict | None = None
+    log_path: str | None = None
+    parent_id: str | None = None
+    retry_of: str | None = None
+    tags: list[str] = []
 
 
 class PipelineRunDetailOut(BaseModel):
