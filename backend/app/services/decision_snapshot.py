@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import settings
-from app.models import DecisionSnapshot, MLTrainJob, MLPipelineRun, Project
+from app.models import BacktestRun, DecisionSnapshot, MLTrainJob, MLPipelineRun, Project
 from app.routes.projects import (
     _build_theme_config,
     _build_weights_config,
@@ -39,6 +39,47 @@ def _resolve_data_root() -> Path:
 
 def _ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
+
+
+def resolve_backtest_run_link(
+    session,
+    *,
+    project_id: int,
+    pipeline_id: int | None,
+    explicit_backtest_run_id: int | None,
+) -> tuple[int | None, str]:
+    if explicit_backtest_run_id:
+        run = session.get(BacktestRun, explicit_backtest_run_id)
+        if not run:
+            raise ValueError("backtest_run_not_found")
+        if run.project_id != project_id:
+            raise ValueError("backtest_run_project_mismatch")
+        return run.id, "explicit"
+    if pipeline_id:
+        pipeline_run = (
+            session.query(BacktestRun)
+            .filter(
+                BacktestRun.project_id == project_id,
+                BacktestRun.pipeline_id == pipeline_id,
+                BacktestRun.status == "success",
+            )
+            .order_by(BacktestRun.created_at.desc())
+            .first()
+        )
+        if pipeline_run:
+            return pipeline_run.id, "auto_pipeline"
+    project_run = (
+        session.query(BacktestRun)
+        .filter(
+            BacktestRun.project_id == project_id,
+            BacktestRun.status == "success",
+        )
+        .order_by(BacktestRun.created_at.desc())
+        .first()
+    )
+    if project_run:
+        return project_run.id, "auto_project"
+    return None, "missing"
 
 
 def _read_csv_rows(path: Path) -> list[dict[str, str]]:
