@@ -118,6 +118,7 @@ class DecisionSnapshot(Base):
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False)
     pipeline_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     train_job_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    backtest_run_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="queued")
     snapshot_date: Mapped[str | None] = mapped_column(String(16), nullable=True)
     params: Mapped[dict | None] = mapped_column(JSON, nullable=True)

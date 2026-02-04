@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 from datetime import datetime
+import math
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from sqlalchemy import String, cast, or_
 
 from app.db import get_session
 from app.models import DecisionSnapshot
 from app.schemas import (
     DecisionSnapshotDetailOut,
     DecisionSnapshotOut,
+    DecisionSnapshotPageOut,
     DecisionSnapshotPreviewOut,
     DecisionSnapshotRequest,
 )
@@ -20,6 +23,18 @@ from app.services.decision_snapshot import (
 )
 
 router = APIRouter(prefix="/api/decisions", tags=["decisions"])
+
+MAX_PAGE_SIZE = 200
+
+
+def _coerce_pagination(page: int, page_size: int, total: int) -> tuple[int, int, int]:
+    safe_page = max(page, 1)
+    safe_page_size = min(max(page_size, 1), MAX_PAGE_SIZE)
+    total_pages = max(1, math.ceil(total / safe_page_size)) if total else 1
+    if safe_page > total_pages:
+        safe_page = total_pages
+    offset = (safe_page - 1) * safe_page_size
+    return safe_page, safe_page_size, offset
 
 
 @router.post("/preview", response_model=DecisionSnapshotPreviewOut)
@@ -73,6 +88,51 @@ def run_decision_snapshot(payload: DecisionSnapshotRequest, background_tasks: Ba
         session.commit()
         background_tasks.add_task(run_decision_snapshot_task, snapshot.id)
         return DecisionSnapshotOut.model_validate(snapshot, from_attributes=True)
+
+
+@router.get("", response_model=DecisionSnapshotPageOut)
+def list_decision_snapshots_page(
+    project_id: int = Query(...),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=MAX_PAGE_SIZE),
+    status: str | None = None,
+    snapshot_date: str | None = None,
+    backtest_run_id: int | None = None,
+    keyword: str | None = None,
+):
+    with get_session() as session:
+        query = session.query(DecisionSnapshot).filter(
+            DecisionSnapshot.project_id == project_id
+        )
+        if status:
+            query = query.filter(DecisionSnapshot.status == status)
+        if snapshot_date:
+            query = query.filter(DecisionSnapshot.snapshot_date == snapshot_date)
+        if backtest_run_id is not None:
+            query = query.filter(DecisionSnapshot.backtest_run_id == backtest_run_id)
+        if keyword:
+            like = f"%{keyword}%"
+            query = query.filter(
+                or_(
+                    cast(DecisionSnapshot.id, String).like(like),
+                    cast(DecisionSnapshot.pipeline_id, String).like(like),
+                    cast(DecisionSnapshot.train_job_id, String).like(like),
+                )
+            )
+        total = query.count()
+        safe_page, safe_page_size, offset = _coerce_pagination(page, page_size, total)
+        items = (
+            query.order_by(DecisionSnapshot.created_at.desc())
+            .offset(offset)
+            .limit(safe_page_size)
+            .all()
+        )
+        return DecisionSnapshotPageOut(
+            items=items,
+            total=total,
+            page=safe_page,
+            page_size=safe_page_size,
+        )
 
 
 @router.get("/latest", response_model=DecisionSnapshotDetailOut)

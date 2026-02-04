@@ -301,6 +301,7 @@ class DecisionSnapshotRequest(BaseModel):
     pipeline_id: int | None = None
     snapshot_date: str | None = None
     algorithm_parameters: dict[str, Any] | None = None
+    backtest_run_id: int | None = None
 
 
 class DecisionSnapshotItem(BaseModel):
@@ -321,6 +322,7 @@ class DecisionSnapshotOut(BaseModel):
     project_id: int
     pipeline_id: int | None = None
     train_job_id: int | None = None
+    backtest_run_id: int | None = None
     status: str
     snapshot_date: str | None = None
     params: dict[str, Any] | None = None
@@ -348,6 +350,7 @@ class DecisionSnapshotPreviewOut(BaseModel):
     project_id: int
     pipeline_id: int | None = None
     train_job_id: int | None = None
+    backtest_run_id: int | None = None
     status: str
     snapshot_date: str | None = None
     params: dict[str, Any] | None = None
@@ -359,6 +362,27 @@ class DecisionSnapshotPreviewOut(BaseModel):
     message: str | None = None
     items: list[DecisionSnapshotItem] = []
     filters: list[DecisionSnapshotItem] = []
+
+
+class DecisionSnapshotListItem(BaseModel):
+    id: int
+    project_id: int
+    status: str
+    snapshot_date: str | None = None
+    backtest_run_id: int | None = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class DecisionSnapshotPageOut(BaseModel):
+    items: list[DecisionSnapshotListItem]
+    total: int
+    page: int
+    page_size: int
+
+
 class BacktestListOut(BacktestOut):
     report_id: int | None = None
 
