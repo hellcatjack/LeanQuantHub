@@ -1862,6 +1862,11 @@ class TradeRunOut(BaseModel):
     created_at: datetime
     started_at: datetime | None
     ended_at: datetime | None
+    last_progress_at: datetime | None = None
+    progress_stage: str | None = None
+    progress_reason: str | None = None
+    stalled_at: datetime | None = None
+    stalled_reason: str | None = None
     updated_at: datetime
 
     class Config:
@@ -1872,6 +1877,10 @@ class TradeRunExecuteRequest(BaseModel):
     dry_run: bool = False
     force: bool = False
     live_confirm_token: str | None = None
+
+
+class TradeRunActionRequest(BaseModel):
+    reason: str | None = None
 
 
 class TradeRunExecuteOut(BaseModel):

@@ -739,6 +739,11 @@ class TradeRun(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_progress_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    progress_stage: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    progress_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    stalled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    stalled_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
     )

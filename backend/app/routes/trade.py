@@ -20,6 +20,7 @@ from app.schemas import (
     TradeRunDetailOut,
     TradeRunExecuteOut,
     TradeRunExecuteRequest,
+    TradeRunActionRequest,
     TradeRunOut,
     TradeFillDetailOut,
     TradeReceiptOut,
@@ -53,6 +54,7 @@ from app.services.realized_pnl_baseline import ensure_positions_baseline
 from app.services.trade_order_intent import write_order_intent_manual
 from app.services import trade_executor
 from app.services.trade_run_summary import build_last_update_at, build_symbol_summary, build_trade_run_detail
+from app.services.trade_run_progress import update_trade_run_progress
 
 router = APIRouter(prefix="/api/trade", tags=["trade"])
 
@@ -363,6 +365,88 @@ def execute_trade_run_route(run_id: int, payload: TradeRunExecuteRequest):
         )
         session.commit()
     return TradeRunExecuteOut(**result.__dict__)
+
+
+@router.post("/runs/{run_id}/resume", response_model=TradeRunOut)
+def resume_trade_run(run_id: int, payload: TradeRunActionRequest | None = None):
+    with get_session() as session:
+        run = session.get(TradeRun, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="run not found")
+        if str(run.status or "").lower() != "stalled":
+            raise HTTPException(status_code=409, detail="run_not_stalled")
+        reason = payload.reason if payload else None
+        now = datetime.utcnow()
+        run.status = "running"
+        run.message = "manual_resume"
+        run.stalled_at = None
+        run.stalled_reason = None
+        run.last_progress_at = now
+        run.progress_stage = "manual_resume"
+        run.progress_reason = reason
+        run.updated_at = now
+        record_audit(
+            session,
+            action="trade_run.resume",
+            resource_type="trade_run",
+            resource_id=run.id,
+            detail={"reason": reason},
+        )
+        session.commit()
+        session.refresh(run)
+        return TradeRunOut.model_validate(run, from_attributes=True)
+
+
+@router.post("/runs/{run_id}/terminate", response_model=TradeRunOut)
+def terminate_trade_run(run_id: int, payload: TradeRunActionRequest | None = None):
+    with get_session() as session:
+        run = session.get(TradeRun, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="run not found")
+        if str(run.status or "").lower() in {"done", "partial", "failed"}:
+            raise HTTPException(status_code=409, detail="run_already_completed")
+        reason = payload.reason if payload else None
+        now = datetime.utcnow()
+        run.status = "failed"
+        run.message = "manual_terminate"
+        run.ended_at = now
+        run.stalled_at = None
+        run.stalled_reason = None
+        run.last_progress_at = now
+        run.progress_stage = "manual_terminate"
+        run.progress_reason = reason
+        run.updated_at = now
+        record_audit(
+            session,
+            action="trade_run.terminate",
+            resource_type="trade_run",
+            resource_id=run.id,
+            detail={"reason": reason},
+        )
+        session.commit()
+        session.refresh(run)
+        return TradeRunOut.model_validate(run, from_attributes=True)
+
+
+@router.post("/runs/{run_id}/sync", response_model=TradeRunOut)
+def sync_trade_run(run_id: int):
+    with get_session() as session:
+        run = session.get(TradeRun, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="run not found")
+        updated = trade_executor.refresh_trade_run_status(session, run)
+        if updated:
+            update_trade_run_progress(session, run, "manual_sync", reason="manual_sync", commit=False)
+        record_audit(
+            session,
+            action="trade_run.sync",
+            resource_type="trade_run",
+            resource_id=run.id,
+            detail={"updated": updated},
+        )
+        session.commit()
+        session.refresh(run)
+        return TradeRunOut.model_validate(run, from_attributes=True)
 
 
 @router.post("/runs/manual", response_model=TradeRunExecuteOut)

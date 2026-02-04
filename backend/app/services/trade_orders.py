@@ -6,7 +6,8 @@ from typing import Any
 
 from sqlalchemy import func
 
-from app.models import TradeOrder, TradeOrderClientIdSeq
+from app.models import TradeOrder, TradeOrderClientIdSeq, TradeRun
+from app.services.trade_run_progress import update_trade_run_progress
 
 
 ALLOWED_TRANSITIONS: dict[str, set[str]] = {
@@ -209,4 +210,10 @@ def update_trade_order_status(session, order: TradeOrder, payload: dict[str, Any
     order.updated_at = datetime.utcnow()
     session.commit()
     session.refresh(order)
+    if order.run_id:
+        run = session.get(TradeRun, order.run_id)
+        if run:
+            stage = f"order_{target_status.lower()}"
+            reason = f"{order.id}:{order.symbol}"
+            update_trade_run_progress(session, run, stage, reason=reason, commit=True)
     return order

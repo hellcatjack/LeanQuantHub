@@ -27,6 +27,8 @@ from app.services.trade_order_intent import write_order_intent, ensure_order_int
 from app.services.lean_bridge_paths import resolve_bridge_root
 from app.services.lean_bridge_reader import read_bridge_status, read_quotes
 from app.services.lean_execution import build_execution_config, launch_execution
+from app.services.audit_log import record_audit
+from app.services.trade_run_progress import is_market_open, is_trade_run_stalled, update_trade_run_progress
 
 
 ARTIFACT_ROOT = Path(settings.artifact_root) if settings.artifact_root else Path("/app/stocklean/artifacts")
@@ -166,6 +168,7 @@ def _finalize_run_status(session, run, *, filled: int, rejected: int, cancelled:
 _TERMINAL_ORDER_STATUSES = {"FILLED", "CANCELED", "CANCELLED", "REJECTED", "INVALID"}
 _CANCELLED_ORDER_STATUSES = {"CANCELED", "CANCELLED"}
 _REJECTED_ORDER_STATUSES = {"REJECTED", "INVALID"}
+_STALLED_WINDOW_MINUTES = 15
 
 
 def _normalize_order_status(value: str | None) -> str:
@@ -202,7 +205,8 @@ def determine_run_status(order_statuses: list[str]) -> tuple[str | None, dict[st
 
 
 def refresh_trade_run_status(session, run: TradeRun) -> bool:
-    if run.status != "running":
+    active_status = str(run.status or "").lower()
+    if active_status not in {"running", "stalled"}:
         return False
     statuses = [
         row[0]
@@ -210,10 +214,40 @@ def refresh_trade_run_status(session, run: TradeRun) -> bool:
     ]
     status, summary = determine_run_status(statuses)
     if status is None:
-        return False
+        if active_status != "running":
+            return False
+        now = datetime.utcnow()
+        trading_open = is_market_open(now)
+        if not is_trade_run_stalled(
+            run,
+            now,
+            window_minutes=_STALLED_WINDOW_MINUTES,
+            trading_open=trading_open,
+        ):
+            return False
+        run.status = "stalled"
+        run.stalled_at = now
+        run.stalled_reason = f"no_progress_{_STALLED_WINDOW_MINUTES}m"
+        run.updated_at = now
+        if not run.message or run.message == "submitted_lean":
+            run.message = "stalled"
+        record_audit(
+            session,
+            action="trade_run.stalled",
+            resource_type="trade_run",
+            resource_id=run.id,
+            detail={
+                "stage": run.progress_stage,
+                "last_progress_at": run.last_progress_at.isoformat() if run.last_progress_at else None,
+                "reason": run.stalled_reason,
+            },
+        )
+        return True
     run.status = status
     run.ended_at = datetime.utcnow()
     run.updated_at = datetime.utcnow()
+    run.stalled_at = None
+    run.stalled_reason = None
     params = dict(run.params or {})
     params["completion_summary"] = summary
     run.params = params
@@ -610,6 +644,7 @@ def execute_trade_run(
         run.started_at = datetime.utcnow()
         run.updated_at = datetime.utcnow()
         session.commit()
+        update_trade_run_progress(session, run, "run_started", reason="execution_start", commit=True)
 
         filled = 0
         cancelled = 0
@@ -666,6 +701,7 @@ def execute_trade_run(
         run.message = "submitted_lean"
         run.updated_at = datetime.utcnow()
         session.commit()
+        update_trade_run_progress(session, run, "submitted_lean", reason="lean_execution", commit=True)
 
         return TradeExecutionResult(
             run_id=run.id,
