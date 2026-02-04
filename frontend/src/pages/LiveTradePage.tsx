@@ -171,7 +171,14 @@ interface TradeRun {
   status: string;
   message?: string | null;
   created_at: string;
+  started_at?: string | null;
   ended_at?: string | null;
+  updated_at?: string | null;
+  last_progress_at?: string | null;
+  progress_stage?: string | null;
+  progress_reason?: string | null;
+  stalled_at?: string | null;
+  stalled_reason?: string | null;
 }
 
 interface TradeRunExecuteOut {
@@ -474,6 +481,10 @@ export default function LiveTradePage() {
   const [executeLoading, setExecuteLoading] = useState(false);
   const [executeError, setExecuteError] = useState("");
   const [executeResult, setExecuteResult] = useState("");
+  const [runActionReason, setRunActionReason] = useState("");
+  const [runActionLoading, setRunActionLoading] = useState(false);
+  const [runActionError, setRunActionError] = useState("");
+  const [runActionResult, setRunActionResult] = useState("");
   const [createRunLoading, setCreateRunLoading] = useState(false);
   const [createRunError, setCreateRunError] = useState("");
   const [createRunResult, setCreateRunResult] = useState("");
@@ -1556,6 +1567,31 @@ export default function LiveTradePage() {
     }
   };
 
+  const handleRunAction = async (action: "sync" | "resume" | "terminate") => {
+    setRunActionLoading(true);
+    setRunActionError("");
+    setRunActionResult("");
+    const runId = activeTradeRun?.id;
+    if (!runId) {
+      setRunActionError(t("trade.runActionMissing"));
+      setRunActionLoading(false);
+      return;
+    }
+    try {
+      const reason = runActionReason.trim();
+      const payload = reason ? { reason } : undefined;
+      await api.post(`/api/trade/runs/${runId}/${action}`, payload);
+      setRunActionResult(t("trade.runActionSuccess", { action: t(`trade.runAction.${action}`) }));
+      setRunActionReason("");
+      await Promise.all([loadTradeActivity(), loadTradeRunData(runId)]);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("trade.runActionError");
+      setRunActionError(String(detail));
+    } finally {
+      setRunActionLoading(false);
+    }
+  };
+
   const refreshHandlers = useMemo<Partial<Record<RefreshKey, () => Promise<void>>>>(
     () => ({
       connection: async () => {
@@ -1812,6 +1848,9 @@ export default function LiveTradePage() {
   }, [pipelineKeyword]);
 
   const latestTradeRun = filteredTradeRuns[0];
+  const activeTradeRun = runDetail?.run ?? latestTradeRun ?? null;
+  const canResumeRun = activeTradeRun?.status === "stalled";
+  const canTerminateRun = !!activeTradeRun && !["done", "partial", "failed"].includes(activeTradeRun.status);
 
   useEffect(() => {
     if (latestTradeRun?.project_id && !ibStreamForm.project_id) {
@@ -3845,6 +3884,93 @@ export default function LiveTradePage() {
             <div className="form-hint">{t("trade.runSelectHint")}</div>
           </div>
         </div>
+        {activeTradeRun ? (
+          <div className="meta-list" style={{ marginTop: "12px" }}>
+            <div className="meta-row">
+              <span>{t("trade.runProgressAt")}</span>
+              <strong>
+                {activeTradeRun.last_progress_at
+                  ? formatDateTime(activeTradeRun.last_progress_at)
+                  : t("common.none")}
+              </strong>
+            </div>
+            <div className="meta-row">
+              <span>{t("trade.runProgressStage")}</span>
+              <strong>{activeTradeRun.progress_stage || t("common.none")}</strong>
+            </div>
+            <div className="meta-row">
+              <span>{t("trade.runProgressReason")}</span>
+              <strong>{activeTradeRun.progress_reason || t("common.none")}</strong>
+            </div>
+            {activeTradeRun.status === "stalled" ? (
+              <>
+                <div className="meta-row">
+                  <span>{t("trade.runStalledAt")}</span>
+                  <strong>
+                    {activeTradeRun.stalled_at
+                      ? formatDateTime(activeTradeRun.stalled_at)
+                      : t("common.none")}
+                  </strong>
+                </div>
+                <div className="meta-row">
+                  <span>{t("trade.runStalledReason")}</span>
+                  <strong>{activeTradeRun.stalled_reason || t("common.none")}</strong>
+                </div>
+              </>
+            ) : null}
+          </div>
+        ) : null}
+        {activeTradeRun?.status === "stalled" ? (
+          <div className="form-hint warn" style={{ marginTop: "8px" }}>
+            {t("trade.runStalledHint")}
+          </div>
+        ) : null}
+        <div className="form-grid" style={{ marginTop: "12px" }}>
+          <div className="form-row">
+            <label className="form-label">{t("trade.runActionReason")}</label>
+            <input
+              type="text"
+              className="form-input"
+              value={runActionReason}
+              placeholder={t("trade.runActionReasonHint")}
+              onChange={(event) => setRunActionReason(event.target.value)}
+            />
+            <div className="form-hint">{t("trade.runActionReasonHint")}</div>
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+          <button
+            className="button-secondary"
+            onClick={() => handleRunAction("sync")}
+            disabled={runActionLoading || !activeTradeRun}
+          >
+            {runActionLoading ? t("common.actions.loading") : t("trade.runAction.sync")}
+          </button>
+          <button
+            className="button-secondary"
+            onClick={() => handleRunAction("resume")}
+            disabled={runActionLoading || !canResumeRun}
+          >
+            {runActionLoading ? t("common.actions.loading") : t("trade.runAction.resume")}
+          </button>
+          <button
+            className="danger-button"
+            onClick={() => handleRunAction("terminate")}
+            disabled={runActionLoading || !canTerminateRun}
+          >
+            {runActionLoading ? t("common.actions.loading") : t("trade.runAction.terminate")}
+          </button>
+        </div>
+        {runActionError && (
+          <div className="form-hint danger" style={{ marginTop: "8px" }}>
+            {runActionError}
+          </div>
+        )}
+        {runActionResult && (
+          <div className="form-success" style={{ marginTop: "8px" }}>
+            {runActionResult}
+          </div>
+        )}
         <div className="meta-list" style={{ marginTop: "12px" }}>
           <div className="meta-row" style={{ alignItems: "flex-start" }}>
             <span>{t("trade.executeContext")}</span>
