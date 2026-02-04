@@ -392,6 +392,8 @@ def _build_decision_payload(
     pipeline_id: int | None,
     snapshot_date: str | None,
     algo_params: dict[str, Any],
+    backtest_run_id: int | None,
+    backtest_link_status: str | None,
     preview: bool,
 ) -> dict[str, Any]:
     stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
@@ -414,6 +416,8 @@ def _build_decision_payload(
             "pipeline_id": pipeline_id,
             "snapshot_date": snapshot_date,
             "algorithm_parameters": algo_params,
+            "backtest_run_id": backtest_run_id,
+            "backtest_link_status": backtest_link_status,
         },
     }
 
@@ -568,6 +572,8 @@ def generate_decision_snapshot(
     pipeline_id: int | None,
     snapshot_date: str | None,
     algorithm_parameters: dict[str, Any] | None,
+    backtest_run_id: int | None,
+    backtest_link_status: str | None,
     preview: bool,
 ) -> dict[str, Any]:
     project = session.get(Project, project_id)
@@ -582,7 +588,14 @@ def generate_decision_snapshot(
     score_csv_path = _resolve_score_csv(train_job, algo_params)
 
     payload = _build_decision_payload(
-        project_id, train_job_id, pipeline_id, snapshot_date, algo_params, preview
+        project_id,
+        train_job_id,
+        pipeline_id,
+        snapshot_date,
+        algo_params,
+        backtest_run_id,
+        backtest_link_status,
+        preview,
     )
     root = payload["artifact_dir"]
     output_dir = payload["output_dir"]
@@ -692,6 +705,8 @@ def generate_decision_snapshot(
         "project_id": project_id,
         "train_job_id": train_job_id,
         "pipeline_id": pipeline_id,
+        "backtest_run_id": backtest_run_id,
+        "backtest_link_status": backtest_link_status or "missing",
         "score_csv_path": score_csv_path,
         "algorithm_parameters": algo_params,
         "snapshot_date": snapshot_row.get("snapshot_date"),
@@ -768,6 +783,8 @@ def run_decision_snapshot_task(snapshot_id: int) -> None:
             pipeline_id=params.get("pipeline_id"),
             snapshot_date=params.get("snapshot_date"),
             algorithm_parameters=params.get("algorithm_parameters"),
+            backtest_run_id=params.get("backtest_run_id"),
+            backtest_link_status=params.get("backtest_link_status"),
             preview=False,
         )
         summary = _sanitize_json(result.get("summary"))
@@ -801,6 +818,8 @@ def build_preview_decision_snapshot(session, payload: dict[str, Any]) -> dict[st
         pipeline_id=payload.get("pipeline_id"),
         snapshot_date=payload.get("snapshot_date"),
         algorithm_parameters=payload.get("algorithm_parameters"),
+        backtest_run_id=payload.get("backtest_run_id"),
+        backtest_link_status=payload.get("backtest_link_status"),
         preview=True,
     )
 

@@ -43,7 +43,7 @@ from app.routes.projects import _get_latest_version, _resolve_project_config, PR
 from app.services.alpha_fetch import load_alpha_fetch_config
 from app.services.alpha_rate import load_alpha_rate_config
 from app.services.bulk_auto import load_bulk_auto_config
-from app.services.decision_snapshot import generate_decision_snapshot
+from app.services.decision_snapshot import generate_decision_snapshot, resolve_backtest_run_link
 from app.services.factor_score_runner import run_factor_score_job
 from app.services.lean_bridge_paths import resolve_bridge_root
 from app.services.lean_bridge_reader import (
@@ -1067,6 +1067,16 @@ def step_decision_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResu
     algo_params = params.get("algorithm_parameters")
     if not isinstance(algo_params, dict):
         algo_params = {}
+    explicit_backtest_run_id = params.get("backtest_run_id")
+    try:
+        backtest_run_id, backtest_link_status = resolve_backtest_run_link(
+            ctx.session,
+            project_id=ctx.run.project_id,
+            pipeline_id=params.get("pipeline_id"),
+            explicit_backtest_run_id=explicit_backtest_run_id,
+        )
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
     result = generate_decision_snapshot(
         ctx.session,
         project_id=ctx.run.project_id,
@@ -1074,6 +1084,8 @@ def step_decision_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResu
         pipeline_id=params.get("pipeline_id"),
         snapshot_date=params.get("snapshot_date"),
         algorithm_parameters=algo_params,
+        backtest_run_id=backtest_run_id,
+        backtest_link_status=backtest_link_status,
         preview=False,
     )
     summary = result.get("summary") or {}
@@ -1088,6 +1100,7 @@ def step_decision_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResu
             project_id=ctx.run.project_id,
             pipeline_id=params.get("pipeline_id"),
             train_job_id=params.get("train_job_id"),
+            backtest_run_id=backtest_run_id,
             status="success",
             snapshot_date=summary.get("snapshot_date"),
             params={
@@ -1096,6 +1109,8 @@ def step_decision_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResu
                 "train_job_id": params.get("train_job_id"),
                 "snapshot_date": summary.get("snapshot_date"),
                 "algorithm_parameters": algo_params,
+                "backtest_run_id": backtest_run_id,
+                "backtest_link_status": backtest_link_status,
                 "pretrade_run_id": ctx.run.id,
             },
             summary=summary,
@@ -1110,6 +1125,16 @@ def step_decision_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResu
         ctx.session.add(snapshot)
         ctx.session.commit()
         ctx.session.refresh(snapshot)
+    else:
+        if backtest_run_id and snapshot.backtest_run_id is None:
+            snapshot.backtest_run_id = backtest_run_id
+            existing_params = dict(snapshot.params or {})
+            if "backtest_run_id" not in existing_params:
+                existing_params["backtest_run_id"] = backtest_run_id
+            if "backtest_link_status" not in existing_params:
+                existing_params["backtest_link_status"] = backtest_link_status
+            snapshot.params = existing_params
+            ctx.session.commit()
     config = _resolve_project_config(ctx.session, ctx.run.project_id)
     version = _get_latest_version(ctx.session, ctx.run.project_id, PROJECT_CONFIG_TAG)
     strategy_snapshot = {

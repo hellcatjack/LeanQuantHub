@@ -19,6 +19,7 @@ from app.services.audit_log import record_audit
 from app.services.decision_snapshot import (
     build_preview_decision_snapshot,
     load_decision_snapshot_detail,
+    resolve_backtest_run_link,
     run_decision_snapshot_task,
 )
 
@@ -41,7 +42,19 @@ def _coerce_pagination(page: int, page_size: int, total: int) -> tuple[int, int,
 def preview_decision_snapshot(payload: DecisionSnapshotRequest):
     with get_session() as session:
         try:
-            result = build_preview_decision_snapshot(session, payload.model_dump())
+            backtest_run_id, backtest_link_status = resolve_backtest_run_link(
+                session,
+                project_id=payload.project_id,
+                pipeline_id=payload.pipeline_id,
+                explicit_backtest_run_id=payload.backtest_run_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        payload_dict = payload.model_dump()
+        payload_dict["backtest_run_id"] = backtest_run_id
+        payload_dict["backtest_link_status"] = backtest_link_status
+        try:
+            result = build_preview_decision_snapshot(session, payload_dict)
         except Exception as exc:  # pylint: disable=broad-except
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return DecisionSnapshotPreviewOut(
@@ -49,6 +62,7 @@ def preview_decision_snapshot(payload: DecisionSnapshotRequest):
             project_id=payload.project_id,
             pipeline_id=payload.pipeline_id,
             train_job_id=payload.train_job_id,
+            backtest_run_id=backtest_run_id,
             status="preview",
             snapshot_date=(result.get("summary") or {}).get("snapshot_date"),
             params=result.get("params"),
@@ -66,13 +80,26 @@ def preview_decision_snapshot(payload: DecisionSnapshotRequest):
 @router.post("/run", response_model=DecisionSnapshotOut)
 def run_decision_snapshot(payload: DecisionSnapshotRequest, background_tasks: BackgroundTasks):
     with get_session() as session:
+        try:
+            backtest_run_id, backtest_link_status = resolve_backtest_run_link(
+                session,
+                project_id=payload.project_id,
+                pipeline_id=payload.pipeline_id,
+                explicit_backtest_run_id=payload.backtest_run_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        params = payload.model_dump()
+        params["backtest_run_id"] = backtest_run_id
+        params["backtest_link_status"] = backtest_link_status
         snapshot = DecisionSnapshot(
             project_id=payload.project_id,
             pipeline_id=payload.pipeline_id,
             train_job_id=payload.train_job_id,
+            backtest_run_id=backtest_run_id,
             status="queued",
             snapshot_date=payload.snapshot_date,
-            params=payload.model_dump(),
+            params=params,
             created_at=datetime.utcnow(),
         )
         session.add(snapshot)
@@ -83,7 +110,11 @@ def run_decision_snapshot(payload: DecisionSnapshotRequest, background_tasks: Ba
             action="decision.snapshot.create",
             resource_type="decision_snapshot",
             resource_id=snapshot.id,
-            detail={"project_id": payload.project_id},
+            detail={
+                "project_id": payload.project_id,
+                "backtest_run_id": backtest_run_id,
+                "backtest_link_status": backtest_link_status,
+            },
         )
         session.commit()
         background_tasks.add_task(run_decision_snapshot_task, snapshot.id)
