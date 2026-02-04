@@ -2263,6 +2263,59 @@ a {
   gap: 12px;
 }
 
+.decision-history-filters {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  align-items: end;
+}
+
+.decision-history-actions {
+  align-self: end;
+}
+
+.decision-history-layout {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) minmax(260px, 360px);
+  gap: 12px;
+}
+
+@media (max-width: 1100px) {
+  .decision-history-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.decision-history-table th,
+.decision-history-table td {
+  font-size: 12px;
+}
+
+.decision-history-selected {
+  background: #eef2ff;
+}
+
+.decision-history-pagination {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.decision-history-page-meta {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.decision-history-detail {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
+  background: #f8fafc;
+  display: grid;
+  gap: 12px;
+}
+
 .ml-curve-chart {
   border: 1px solid var(--border);
   border-radius: 12px;

@@ -98,6 +98,7 @@ interface DecisionSnapshotDetail {
   project_id: number;
   pipeline_id?: number | null;
   train_job_id?: number | null;
+  backtest_run_id?: number | null;
   status?: string | null;
   snapshot_date?: string | null;
   summary?: Record<string, any> | null;
@@ -110,6 +111,15 @@ interface DecisionSnapshotDetail {
   items?: DecisionSnapshotItem[];
   filters?: DecisionSnapshotItem[];
   created_at?: string | null;
+}
+
+interface DecisionSnapshotListItem {
+  id: number;
+  project_id: number;
+  status: string;
+  snapshot_date?: string | null;
+  backtest_run_id?: number | null;
+  created_at: string;
 }
 
 interface ThemeSystemMeta {
@@ -676,12 +686,22 @@ export default function ProjectsPage() {
   const [activePipelineId, setActivePipelineId] = useState<number | null>(null);
   const [decisionLatest, setDecisionLatest] = useState<DecisionSnapshotDetail | null>(null);
   const [decisionPreview, setDecisionPreview] = useState<DecisionSnapshotDetail | null>(null);
+  const [decisionSelected, setDecisionSelected] = useState<DecisionSnapshotDetail | null>(null);
+  const [decisionSelectedId, setDecisionSelectedId] = useState<number | null>(null);
   const [decisionLoading, setDecisionLoading] = useState(false);
   const [decisionMode, setDecisionMode] = useState<"selected" | "filtered">("selected");
   const [decisionTrainJobId, setDecisionTrainJobId] = useState<string>("");
   const [decisionSnapshotDate, setDecisionSnapshotDate] = useState("");
+  const [decisionBacktestRunId, setDecisionBacktestRunId] = useState("");
   const [decisionMessage, setDecisionMessage] = useState("");
   const decisionPollRef = useRef(0);
+  const [decisionHistory, setDecisionHistory] = useState<DecisionSnapshotListItem[]>([]);
+  const [decisionHistoryPage, setDecisionHistoryPage] = useState(1);
+  const [decisionHistoryTotal, setDecisionHistoryTotal] = useState(0);
+  const [decisionHistoryStatus, setDecisionHistoryStatus] = useState("");
+  const [decisionHistoryBacktestRunId, setDecisionHistoryBacktestRunId] = useState("");
+  const [decisionHistorySnapshotDate, setDecisionHistorySnapshotDate] = useState("");
+  const [decisionHistoryLoading, setDecisionHistoryLoading] = useState(false);
   const [factorJobs, setFactorJobs] = useState<FactorScoreJob[]>([]);
   const [factorLoadError, setFactorLoadError] = useState("");
   const [factorActionMessage, setFactorActionMessage] = useState("");
@@ -1006,6 +1026,51 @@ export default function ProjectsPage() {
     }
   };
 
+  const loadDecisionHistory = async (projectId: number, pageOverride?: number) => {
+    const nextPage = pageOverride ?? decisionHistoryPage;
+    const backtestId = decisionHistoryBacktestRunId
+      ? Number(decisionHistoryBacktestRunId)
+      : null;
+    setDecisionHistoryLoading(true);
+    try {
+      const res = await api.get<Paginated<DecisionSnapshotListItem>>("/api/decisions", {
+        params: {
+          project_id: projectId,
+          page: nextPage,
+          page_size: 20,
+          status: decisionHistoryStatus || undefined,
+          snapshot_date: decisionHistorySnapshotDate || undefined,
+          backtest_run_id: Number.isFinite(backtestId) ? backtestId : undefined,
+        },
+      });
+      setDecisionHistory(res.data.items || []);
+      setDecisionHistoryTotal(res.data.total || 0);
+      setDecisionHistoryPage(res.data.page || nextPage);
+    } catch {
+      setDecisionHistory([]);
+      setDecisionHistoryTotal(0);
+    } finally {
+      setDecisionHistoryLoading(false);
+    }
+  };
+
+  const refreshDecisionHistory = async (pageOverride?: number) => {
+    if (!selectedProjectId) {
+      return;
+    }
+    const nextPage = pageOverride ?? 1;
+    setDecisionHistoryPage(nextPage);
+    await loadDecisionHistory(selectedProjectId, nextPage);
+  };
+
+  const gotoDecisionHistoryPage = async (nextPage: number) => {
+    if (!selectedProjectId) {
+      return;
+    }
+    setDecisionHistoryPage(nextPage);
+    await loadDecisionHistory(selectedProjectId, nextPage);
+  };
+
   const fetchDecisionSnapshot = async (snapshotId: number) => {
     if (!Number.isFinite(snapshotId)) {
       return null;
@@ -1016,6 +1081,13 @@ export default function ProjectsPage() {
     } catch {
       return null;
     }
+  };
+
+  const selectDecisionSnapshot = async (snapshotId: number) => {
+    const detail = await fetchDecisionSnapshot(snapshotId);
+    setDecisionSelected(detail);
+    setDecisionSelectedId(Number.isFinite(snapshotId) ? snapshotId : null);
+    setDecisionPreview(null);
   };
 
   const isDecisionSnapshotReady = (snapshot: DecisionSnapshotDetail | null) => {
@@ -1062,6 +1134,12 @@ export default function ProjectsPage() {
     }
     if (decisionSnapshotDate) {
       payload.snapshot_date = decisionSnapshotDate;
+    }
+    if (decisionBacktestRunId) {
+      const backtestId = Number(decisionBacktestRunId);
+      if (Number.isFinite(backtestId)) {
+        payload.backtest_run_id = backtestId;
+      }
     }
     return payload;
   };
@@ -1672,6 +1750,7 @@ export default function ProjectsPage() {
       loadFactorJobs(selectedProjectId);
       loadPipelines(selectedProjectId);
       loadDecisionLatest(selectedProjectId);
+      loadDecisionHistory(selectedProjectId, 1);
       setConfigMessage("");
       setDataMessage("");
       setBacktestMessage("");
@@ -1683,8 +1762,15 @@ export default function ProjectsPage() {
       setNewThemeSymbolType("STOCK");
       setThemeSymbolMessage("");
       setDecisionPreview(null);
+      setDecisionSelected(null);
+      setDecisionSelectedId(null);
       setDecisionMessage("");
       setDecisionSnapshotDate("");
+      setDecisionBacktestRunId("");
+      setDecisionHistoryStatus("");
+      setDecisionHistoryBacktestRunId("");
+      setDecisionHistorySnapshotDate("");
+      setDecisionHistoryPage(1);
       setDecisionMode("selected");
       setProjectTab("overview");
     } else {
@@ -1727,9 +1813,18 @@ export default function ProjectsPage() {
       setBenchmarkMessage("");
       setDecisionLatest(null);
       setDecisionPreview(null);
+      setDecisionSelected(null);
+      setDecisionSelectedId(null);
       setDecisionMessage("");
       setDecisionSnapshotDate("");
       setDecisionTrainJobId("");
+      setDecisionBacktestRunId("");
+      setDecisionHistory([]);
+      setDecisionHistoryTotal(0);
+      setDecisionHistoryPage(1);
+      setDecisionHistoryStatus("");
+      setDecisionHistoryBacktestRunId("");
+      setDecisionHistorySnapshotDate("");
       setDecisionMode("selected");
     }
   }, [selectedProjectId]);
@@ -2658,11 +2753,14 @@ export default function ProjectsPage() {
     return entries.filter((item) => item.value !== undefined && item.value !== null && item.value !== "");
   }, [pipelineDetail, t]);
 
-  const decisionData = decisionPreview || decisionLatest;
+  const decisionData = decisionSelected || decisionPreview || decisionLatest;
   const decisionSummary = useMemo(
     () => (decisionData?.summary as Record<string, any> | null) || null,
     [decisionData]
   );
+  const decisionBacktestId =
+    decisionData?.backtest_run_id ??
+    ((decisionSummary?.backtest_run_id as number | null | undefined) ?? null);
   const decisionItems = useMemo(() => {
     if (!decisionData) {
       return [];
@@ -2687,6 +2785,10 @@ export default function ProjectsPage() {
       .sort((a, b) => b[1] - a[1])
       .slice(0, 6);
   }, [decisionSummary]);
+  const decisionHistoryTotalPages = useMemo(() => {
+    const total = decisionHistoryTotal || 0;
+    return Math.max(1, Math.ceil(total / 20));
+  }, [decisionHistoryTotal]);
 
   const backtestTrainJobIdRaw = configDraft?.backtest_train_job_id;
   const backtestTrainJobId =
@@ -3420,6 +3522,12 @@ export default function ProjectsPage() {
 
   const automationStatusLabel = (status?: string) => {
     const key = `projects.automation.status.${status || "unknown"}`;
+    const label = t(key);
+    return label === key ? status || t("common.none") : label;
+  };
+
+  const decisionStatusLabel = (status?: string) => {
+    const key = `common.status.${status || "unknown"}`;
     const label = t(key);
     return label === key ? status || t("common.none") : label;
   };
@@ -7350,6 +7458,15 @@ export default function ProjectsPage() {
                     />
                     <div className="form-hint">{t("projects.decision.snapshotHint")}</div>
                   </div>
+                  <div className="form-row">
+                    <label className="form-label">{t("projects.decision.backtestRunId")}</label>
+                    <input
+                      className="form-input"
+                      value={decisionBacktestRunId}
+                      onChange={(e) => setDecisionBacktestRunId(e.target.value)}
+                      placeholder={t("projects.decision.backtestRunIdHint")}
+                    />
+                  </div>
                 </div>
                 <div className="form-actions">
                   <button
@@ -7394,6 +7511,16 @@ export default function ProjectsPage() {
                       <div className="meta-row">
                         <span>{t("projects.decision.status")}</span>
                         <strong>{decisionData.status || "-"}</strong>
+                      </div>
+                      <div className="meta-row">
+                        <span>{t("projects.decision.backtestRunId")}</span>
+                        <strong>
+                          {decisionBacktestId ?? t("projects.decision.backtestUnlinked")}
+                        </strong>
+                      </div>
+                      <div className="meta-row">
+                        <span>{t("projects.decision.backtestLinkStatus")}</span>
+                        <strong>{decisionSummary?.backtest_link_status || "-"}</strong>
                       </div>
                       <div className="meta-row">
                         <span>{t("projects.decision.snapshotDate")}</span>
@@ -7532,6 +7659,192 @@ export default function ProjectsPage() {
                 ) : (
                   <div className="empty-state">{t("projects.decision.empty")}</div>
                 )}
+              </div>
+              <div className="card decision-history-card">
+                <div className="card-title">{t("projects.decision.history.title")}</div>
+                <div className="card-meta">{t("projects.decision.history.meta")}</div>
+                <div className="form-grid decision-history-filters">
+                  <div className="form-row">
+                    <label className="form-label">
+                      {t("projects.decision.history.filters.status")}
+                    </label>
+                    <select
+                      className="form-select"
+                      value={decisionHistoryStatus}
+                      onChange={(e) => setDecisionHistoryStatus(e.target.value)}
+                    >
+                      <option value="">{t("projects.decision.history.filters.all")}</option>
+                      <option value="queued">{decisionStatusLabel("queued")}</option>
+                      <option value="running">{decisionStatusLabel("running")}</option>
+                      <option value="success">{decisionStatusLabel("success")}</option>
+                      <option value="failed">{decisionStatusLabel("failed")}</option>
+                      <option value="canceled">{decisionStatusLabel("canceled")}</option>
+                    </select>
+                  </div>
+                  <div className="form-row">
+                    <label className="form-label">
+                      {t("projects.decision.history.filters.backtestRunId")}
+                    </label>
+                    <input
+                      className="form-input"
+                      value={decisionHistoryBacktestRunId}
+                      onChange={(e) => setDecisionHistoryBacktestRunId(e.target.value)}
+                      placeholder={t("projects.decision.history.filters.backtestRunIdHint")}
+                    />
+                  </div>
+                  <div className="form-row">
+                    <label className="form-label">
+                      {t("projects.decision.history.filters.snapshotDate")}
+                    </label>
+                    <input
+                      type="date"
+                      className="form-input"
+                      value={decisionHistorySnapshotDate}
+                      onChange={(e) => setDecisionHistorySnapshotDate(e.target.value)}
+                    />
+                  </div>
+                  <div className="form-row decision-history-actions">
+                    <button
+                      type="button"
+                      className="button-secondary"
+                      onClick={() => refreshDecisionHistory(1)}
+                      disabled={!selectedProjectId || decisionHistoryLoading}
+                    >
+                      {decisionHistoryLoading
+                        ? t("common.actions.loading")
+                        : t("common.actions.refresh")}
+                    </button>
+                  </div>
+                </div>
+                <div className="decision-history-layout">
+                  <div className="decision-history-list">
+                    {decisionHistoryLoading ? (
+                      <div className="empty-state">{t("common.actions.loading")}</div>
+                    ) : decisionHistory.length ? (
+                      <div className="table-scroll">
+                        <table className="table decision-history-table">
+                          <thead>
+                            <tr>
+                              <th>{t("common.labels.id")}</th>
+                              <th>{t("common.labels.status")}</th>
+                              <th>{t("projects.decision.history.snapshotDate")}</th>
+                              <th>{t("projects.decision.backtestRunId")}</th>
+                              <th>{t("common.labels.createdAt")}</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {decisionHistory.map((item) => (
+                              <tr
+                                key={item.id}
+                                className={
+                                  decisionSelectedId === item.id
+                                    ? "decision-history-selected"
+                                    : ""
+                                }
+                                onClick={() => selectDecisionSnapshot(item.id)}
+                              >
+                                <td>#{item.id}</td>
+                                <td>{decisionStatusLabel(item.status)}</td>
+                                <td>{item.snapshot_date || "-"}</td>
+                                <td>{item.backtest_run_id ?? "-"}</td>
+                                <td>{formatDateTime(item.created_at)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    ) : (
+                      <div className="empty-state">
+                        {t("projects.decision.history.empty")}
+                      </div>
+                    )}
+                    <div className="decision-history-pagination">
+                      <button
+                        type="button"
+                        className="button-secondary"
+                        onClick={() => gotoDecisionHistoryPage(decisionHistoryPage - 1)}
+                        disabled={decisionHistoryPage <= 1 || decisionHistoryLoading}
+                      >
+                        {t("projects.decision.history.prev")}
+                      </button>
+                      <div className="decision-history-page-meta">
+                        {decisionHistoryPage} / {decisionHistoryTotalPages}
+                      </div>
+                      <button
+                        type="button"
+                        className="button-secondary"
+                        onClick={() => gotoDecisionHistoryPage(decisionHistoryPage + 1)}
+                        disabled={
+                          decisionHistoryPage >= decisionHistoryTotalPages ||
+                          decisionHistoryLoading
+                        }
+                      >
+                        {t("projects.decision.history.next")}
+                      </button>
+                    </div>
+                  </div>
+                  <div className="decision-history-detail">
+                    {decisionSelected ? (
+                      <>
+                        <div className="card-title">
+                          {t("projects.decision.history.detailTitle")}
+                        </div>
+                        <div className="meta-list">
+                          <div className="meta-row">
+                            <span>{t("common.labels.id")}</span>
+                            <strong>#{decisionSelected.id}</strong>
+                          </div>
+                          <div className="meta-row">
+                            <span>{t("common.labels.status")}</span>
+                            <strong>{decisionStatusLabel(decisionSelected.status || "")}</strong>
+                          </div>
+                          <div className="meta-row">
+                            <span>{t("projects.decision.history.snapshotDate")}</span>
+                            <strong>{decisionSelected.snapshot_date || "-"}</strong>
+                          </div>
+                          <div className="meta-row">
+                            <span>{t("projects.decision.backtestRunId")}</span>
+                            <strong>
+                              {decisionSelected.backtest_run_id ??
+                                t("projects.decision.backtestUnlinked")}
+                            </strong>
+                          </div>
+                          <div className="meta-row">
+                            <span>{t("projects.decision.backtestLinkStatus")}</span>
+                            <strong>
+                              {(decisionSelected.summary as Record<string, any> | null)
+                                ?.backtest_link_status || "-"}
+                            </strong>
+                          </div>
+                          <div className="meta-row">
+                            <span>{t("common.labels.createdAt")}</span>
+                            <strong>{formatDateTime(decisionSelected.created_at)}</strong>
+                          </div>
+                          <div className="meta-row">
+                            <span>{t("projects.decision.history.selectedCount")}</span>
+                            <strong>
+                              {(decisionSelected.summary as Record<string, any> | null)
+                                ?.selected_count ?? "-"}
+                            </strong>
+                          </div>
+                          <div className="meta-row">
+                            <span>{t("projects.decision.history.riskOff")}</span>
+                            <strong>
+                              {(decisionSelected.summary as Record<string, any> | null)
+                                ?.risk_off
+                                ? t("common.boolean.true")
+                                : t("common.boolean.false")}
+                            </strong>
+                          </div>
+                        </div>
+                      </>
+                    ) : (
+                      <div className="empty-state">
+                        {t("projects.decision.history.detailEmpty")}
+                      </div>
+                    )}
+                  </div>
+                </div>
               </div>
               <div className="card algorithm-top-pipeline">
                 <div className="card-title">{t("projects.pipeline.title")}</div>
