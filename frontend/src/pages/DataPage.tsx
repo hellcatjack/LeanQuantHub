@@ -3541,130 +3541,6 @@ export default function DataPage() {
           </div>
         </div>
 
-        <div className="card">
-          <div className="card-title">{t("data.excludes.title")}</div>
-          <div className="card-meta">{t("data.excludes.meta")}</div>
-          <div className="form-grid" style={{ marginTop: "12px" }}>
-            <div className="form-grid two-col">
-              <input
-                name="exclude-symbol"
-                value={excludeForm.symbol}
-                onChange={(e) => updateExcludeForm("symbol", e.target.value)}
-                className="form-input"
-                placeholder={t("data.excludes.placeholderSymbol")}
-              />
-              <input
-                value={excludeForm.reason}
-                onChange={(e) => updateExcludeForm("reason", e.target.value)}
-                className="form-input"
-                placeholder={t("data.excludes.placeholderReason")}
-              />
-            </div>
-            <div className="form-actions" style={{ marginTop: 0 }}>
-              <button
-                type="button"
-                className="primary-button"
-                onClick={createExclude}
-                disabled={excludeSaving}
-              >
-                {excludeSaving ? t("common.actions.loading") : t("data.excludes.add")}
-              </button>
-              <div className="form-hint" style={{ marginLeft: "8px" }}>
-                {t("data.excludes.hint")}
-              </div>
-            </div>
-            <div className="form-grid two-col" style={{ marginTop: "8px" }}>
-              <label className="form-label">{t("data.excludes.filter.label")}</label>
-              <select
-                className="form-input"
-                value={excludeFilter}
-                onChange={(e) => setExcludeFilter(e.target.value as "all" | "enabled")}
-              >
-                <option value="all">{t("data.excludes.filter.all")}</option>
-                <option value="enabled">{t("data.excludes.filter.enabled")}</option>
-              </select>
-            </div>
-            {excludeError && <div className="form-error">{excludeError}</div>}
-            {excludeLoading ? (
-              <div className="form-hint">{t("data.excludes.loading")}</div>
-            ) : excludeItems.length === 0 ? (
-              <div className="form-hint">{t("data.excludes.empty")}</div>
-            ) : (
-              <table className="table">
-                <thead>
-                  <tr>
-                    <th>{t("data.excludes.symbol")}</th>
-                    <th>{t("data.excludes.status")}</th>
-                    <th>{t("data.excludes.reason")}</th>
-                    <th>{t("data.excludes.source")}</th>
-                    <th>{t("data.excludes.updatedAt")}</th>
-                    <th>{t("data.excludes.actions")}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {excludeItems.map((item) => {
-                    const edit = excludeEdits[item.symbol] || {
-                      reason: item.reason || "",
-                      source: item.source || "manual/ui",
-                    };
-                    return (
-                      <tr key={item.symbol}>
-                        <td>{item.symbol}</td>
-                        <td>
-                          {item.enabled
-                            ? t("data.excludes.enabled")
-                            : t("data.excludes.disabled")}
-                        </td>
-                        <td>
-                          <input
-                            value={edit.reason}
-                            onChange={(e) =>
-                              updateExcludeEdit(item.symbol, "reason", e.target.value)
-                            }
-                            className="form-input"
-                          />
-                        </td>
-                        <td>
-                          <input
-                            value={edit.source}
-                            onChange={(e) =>
-                              updateExcludeEdit(item.symbol, "source", e.target.value)
-                            }
-                            className="form-input"
-                          />
-                        </td>
-                        <td>{item.updated_at ? formatDateTime(item.updated_at) : "-"}</td>
-                        <td>
-                          <div className="table-actions">
-                            <button
-                              type="button"
-                              className="button-secondary"
-                              onClick={() => saveExcludeEdit(item.symbol)}
-                              disabled={excludeSaving}
-                            >
-                              {t("data.excludes.save")}
-                            </button>
-                            <button
-                              type="button"
-                              className="button-secondary"
-                              onClick={() => toggleExcludeEnabled(item)}
-                              disabled={excludeSaving}
-                            >
-                              {item.enabled
-                                ? t("data.excludes.disable")
-                                : t("data.excludes.enable")}
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            )}
-          </div>
-        </div>
-
         {scanResult && (
           <div className="card">
             <div className="card-title">{t("data.scan.result")}</div>
@@ -6351,6 +6227,130 @@ export default function DataPage() {
           >
             {alphaRateSaving ? t("common.actions.loading") : t("common.actions.save")}
           </button>
+        </div>
+
+        <div className="card">
+          <div className="card-title">{t("data.excludes.title")}</div>
+          <div className="card-meta">{t("data.excludes.meta")}</div>
+          <div className="form-grid" style={{ marginTop: "12px" }}>
+            <div className="form-grid two-col">
+              <input
+                name="exclude-symbol"
+                value={excludeForm.symbol}
+                onChange={(e) => updateExcludeForm("symbol", e.target.value)}
+                className="form-input"
+                placeholder={t("data.excludes.placeholderSymbol")}
+              />
+              <input
+                value={excludeForm.reason}
+                onChange={(e) => updateExcludeForm("reason", e.target.value)}
+                className="form-input"
+                placeholder={t("data.excludes.placeholderReason")}
+              />
+            </div>
+            <div className="form-actions" style={{ marginTop: 0 }}>
+              <button
+                type="button"
+                className="primary-button"
+                onClick={createExclude}
+                disabled={excludeSaving}
+              >
+                {excludeSaving ? t("common.actions.loading") : t("data.excludes.add")}
+              </button>
+              <div className="form-hint" style={{ marginLeft: "8px" }}>
+                {t("data.excludes.hint")}
+              </div>
+            </div>
+            <div className="form-grid two-col" style={{ marginTop: "8px" }}>
+              <label className="form-label">{t("data.excludes.filter.label")}</label>
+              <select
+                className="form-input"
+                value={excludeFilter}
+                onChange={(e) => setExcludeFilter(e.target.value as "all" | "enabled")}
+              >
+                <option value="all">{t("data.excludes.filter.all")}</option>
+                <option value="enabled">{t("data.excludes.filter.enabled")}</option>
+              </select>
+            </div>
+            {excludeError && <div className="form-error">{excludeError}</div>}
+            {excludeLoading ? (
+              <div className="form-hint">{t("data.excludes.loading")}</div>
+            ) : excludeItems.length === 0 ? (
+              <div className="form-hint">{t("data.excludes.empty")}</div>
+            ) : (
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>{t("data.excludes.symbol")}</th>
+                    <th>{t("data.excludes.status")}</th>
+                    <th>{t("data.excludes.reason")}</th>
+                    <th>{t("data.excludes.source")}</th>
+                    <th>{t("data.excludes.updatedAt")}</th>
+                    <th>{t("data.excludes.actions")}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {excludeItems.map((item) => {
+                    const edit = excludeEdits[item.symbol] || {
+                      reason: item.reason || "",
+                      source: item.source || "manual/ui",
+                    };
+                    return (
+                      <tr key={item.symbol}>
+                        <td>{item.symbol}</td>
+                        <td>
+                          {item.enabled
+                            ? t("data.excludes.enabled")
+                            : t("data.excludes.disabled")}
+                        </td>
+                        <td>
+                          <input
+                            value={edit.reason}
+                            onChange={(e) =>
+                              updateExcludeEdit(item.symbol, "reason", e.target.value)
+                            }
+                            className="form-input"
+                          />
+                        </td>
+                        <td>
+                          <input
+                            value={edit.source}
+                            onChange={(e) =>
+                              updateExcludeEdit(item.symbol, "source", e.target.value)
+                            }
+                            className="form-input"
+                          />
+                        </td>
+                        <td>{item.updated_at ? formatDateTime(item.updated_at) : "-"}</td>
+                        <td>
+                          <div className="table-actions">
+                            <button
+                              type="button"
+                              className="button-secondary"
+                              onClick={() => saveExcludeEdit(item.symbol)}
+                              disabled={excludeSaving}
+                            >
+                              {t("data.excludes.save")}
+                            </button>
+                            <button
+                              type="button"
+                              className="button-secondary"
+                              onClick={() => toggleExcludeEnabled(item)}
+                              disabled={excludeSaving}
+                            >
+                              {item.enabled
+                                ? t("data.excludes.disable")
+                                : t("data.excludes.enable")}
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
         </div>
       </div>
     </div>

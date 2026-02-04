@@ -95,6 +95,10 @@ test("data page global excludes CRUD", async ({ page }) => {
   await page.goto("/data");
   await expect(page.getByText(/全局排除列表|Global Exclude List/)).toBeVisible();
 
+  const titles = await page.locator(".card-title").allTextContents();
+  const lastTitle = titles[titles.length - 1] || "";
+  expect(lastTitle).toMatch(/全局排除列表|Global Exclude List/);
+
   await page.fill("input[name='exclude-symbol']", "ZZZ");
   await page.click("button:has-text('添加'), button:has-text('Add')");
   await expect(page.getByText("ZZZ")).toBeVisible();
