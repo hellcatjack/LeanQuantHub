@@ -22,3 +22,16 @@ def test_extract_lgbm_ndcg_curves_from_evals():
     assert payload["valid"]["ndcg@10"] == [0.1, 0.2, 0.25]
     assert payload["valid"]["ndcg@50"] == [0.3, 0.31, 0.33]
     assert payload["valid"]["ndcg@100"] == [0.4, 0.41, 0.42]
+
+
+def test_attach_ndcg_curve_payload_in_metrics():
+    evals = {
+        "valid": {
+            "ndcg@10": [0.1],
+            "ndcg@50": [0.2],
+            "ndcg@100": [0.3],
+        }
+    }
+    metrics = {}
+    train_torch._attach_ndcg_curve(metrics, evals)
+    assert metrics["curve_ndcg"]["iterations"] == [1]

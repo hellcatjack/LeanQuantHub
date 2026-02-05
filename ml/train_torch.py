@@ -610,6 +610,31 @@ def _build_ndcg_curve_payload(evals_result: dict) -> dict | None:
     return {"metric": "ndcg", "iterations": iterations, "valid": curves}
 
 
+def _attach_ndcg_curve(metrics: dict, evals_result: dict) -> None:
+    payload = _build_ndcg_curve_payload(evals_result)
+    if payload:
+        metrics["curve_ndcg"] = payload
+
+
+def _aggregate_ndcg_curves(curves: dict[str, list[list[float]]]) -> dict | None:
+    series: dict[str, list[float]] = {}
+    for key, entries in curves.items():
+        agg = _aggregate_curves(entries)
+        if agg:
+            series[key] = agg
+    if not series:
+        return None
+    min_len = min(len(values) for values in series.values())
+    if min_len <= 0:
+        return None
+    trimmed = {key: values[:min_len] for key, values in series.items()}
+    return {
+        "metric": "ndcg",
+        "iterations": list(range(1, min_len + 1)),
+        "valid": trimmed,
+    }
+
+
 def _aggregate_curves(curves: list[list[float]]) -> list[float]:
     curves = [curve for curve in curves if curve]
     if not curves:
@@ -1286,6 +1311,7 @@ def main() -> None:
                 "ic": ic,
                 "rank_ic": rank_ic,
             }
+            _attach_ndcg_curve(metrics, getattr(model, "evals_result_", {}) or {})
             if weight_meta:
                 metrics["sample_weight"] = weight_meta
             curve_payload = _build_curve_payload(metric_name, train_curve, valid_curve)
@@ -1305,6 +1331,11 @@ def main() -> None:
         curve_metric: str | None = None
         train_curves: list[list[float]] = []
         valid_curves: list[list[float]] = []
+        ndcg_curves: dict[str, list[list[float]]] = {
+            "ndcg@10": [],
+            "ndcg@50": [],
+            "ndcg@100": [],
+        }
 
         total_windows = len(windows)
         for idx, window in enumerate(windows):
@@ -1351,6 +1382,10 @@ def main() -> None:
                 train_curves.append(train_curve)
             if valid_curve:
                 valid_curves.append(valid_curve)
+            ndcg_curve = _extract_lgbm_ndcg_curves(getattr(model, "evals_result_", {}) or {})
+            for key, values in ndcg_curve.items():
+                if key in ndcg_curves:
+                    ndcg_curves[key].append(values)
             window_metrics.append(
                 {
                     "train_start": window.train_start.date().isoformat(),
@@ -1445,17 +1480,17 @@ def main() -> None:
             _aggregate_curves(train_curves),
             _aggregate_curves(valid_curves),
         )
+        metrics_payload = {
+            "model_type": "lgbm_ranker",
+            "curve": curve_payload,
+            "walk_forward": {"windows": window_metrics, "config": walk_config},
+            **({"sample_weight": weight_meta} if weight_meta else {}),
+        }
+        ndcg_payload = _aggregate_ndcg_curves(ndcg_curves)
+        if ndcg_payload:
+            metrics_payload["curve_ndcg"] = ndcg_payload
         (output_dir / "torch_metrics.json").write_text(
-            json.dumps(
-                {
-                    "model_type": "lgbm_ranker",
-                    "curve": curve_payload,
-                    "walk_forward": {"windows": window_metrics, "config": walk_config},
-                    **({"sample_weight": weight_meta} if weight_meta else {}),
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
+            json.dumps(metrics_payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
 
