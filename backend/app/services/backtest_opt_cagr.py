@@ -60,7 +60,7 @@ def score_manifest(
         if not line.strip():
             continue
         row = json.loads(line)
-        run_id = row.get("id")
+        run_id = row.get("id") or row.get("run_id")
         params = row.get("params") or {}
         summary = artifacts_root / f"run_{run_id}" / "lean_results" / "-summary.json"
         if not summary.exists():
