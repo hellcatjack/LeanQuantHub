@@ -20,8 +20,14 @@ export const resolveApiBaseUrl = () => {
 };
 
 export const apiBaseUrl = resolveApiBaseUrl();
+export const LONG_API_TIMEOUT = 600000;
 
 export const api = axios.create({
   baseURL: apiBaseUrl,
   timeout: 10000,
+});
+
+export const apiLong = axios.create({
+  baseURL: apiBaseUrl,
+  timeout: LONG_API_TIMEOUT,
 });

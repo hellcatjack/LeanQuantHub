@@ -2482,15 +2482,15 @@ a {
   background: #64748b;
 }
 
-.ml-training-curve-legend-item.ndcg\\@10::before {
+.ml-training-curve-legend-item.ndcg-10::before {
   background: #2563eb;
 }
 
-.ml-training-curve-legend-item.ndcg\\@50::before {
+.ml-training-curve-legend-item.ndcg-50::before {
   background: #16a34a;
 }
 
-.ml-training-curve-legend-item.ndcg\\@100::before {
+.ml-training-curve-legend-item.ndcg-100::before {
   background: #f59e0b;
 }
 

@@ -184,11 +184,24 @@ export default function MlTrainingCurveChart({
       <div className="ml-training-curve-header">
         <div className="ml-training-curve-title">NDCG 曲线（验证集）</div>
         <div className="ml-training-curve-legend">
-          {(hover ? prepared : prepared).map((item) => (
-            <span key={item.key} className={`ml-training-curve-legend-item ${item.key}`}>
+          {prepared.map((item) => {
+            const classSuffix =
+              item.key === "ndcg@10"
+                ? "ndcg-10"
+                : item.key === "ndcg@50"
+                  ? "ndcg-50"
+                  : item.key === "ndcg@100"
+                    ? "ndcg-100"
+                    : "ndcg-other";
+            return (
+              <span
+                key={item.key}
+                className={`ml-training-curve-legend-item ${classSuffix}`}
+              >
               {item.label}: {formatValue(hover?.values[item.key] ?? latestValues[item.key])}
-            </span>
-          ))}
+              </span>
+            );
+          })}
           {hover && <span className="ml-training-curve-time">{hover.timeLabel}</span>}
         </div>
       </div>
