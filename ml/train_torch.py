@@ -575,6 +575,41 @@ def _extract_lgbm_curve(
     return metric_name, train_curve, valid_curve
 
 
+def _extract_lgbm_ndcg_curves(evals_result: dict) -> dict[str, list[float]]:
+    if not isinstance(evals_result, dict) or not evals_result:
+        return {}
+    valid_series = None
+    for key in ("valid", "valid_0"):
+        series = evals_result.get(key)
+        if isinstance(series, dict) and series:
+            valid_series = series
+            break
+    if not valid_series:
+        return {}
+    curves: dict[str, list[float]] = {}
+    for key in ("ndcg@10", "ndcg@50", "ndcg@100"):
+        values = valid_series.get(key)
+        if values:
+            curves[key] = [float(item) for item in values]
+    if not curves:
+        return {}
+    min_len = min(len(series) for series in curves.values() if series)
+    if min_len <= 0:
+        return {}
+    return {key: values[:min_len] for key, values in curves.items()}
+
+
+def _build_ndcg_curve_payload(evals_result: dict) -> dict | None:
+    curves = _extract_lgbm_ndcg_curves(evals_result)
+    if not curves:
+        return None
+    min_len = min(len(values) for values in curves.values())
+    if min_len <= 0:
+        return None
+    iterations = list(range(1, min_len + 1))
+    return {"metric": "ndcg", "iterations": iterations, "valid": curves}
+
+
 def _aggregate_curves(curves: list[list[float]]) -> list[float]:
     curves = [curve for curve in curves if curve]
     if not curves:
