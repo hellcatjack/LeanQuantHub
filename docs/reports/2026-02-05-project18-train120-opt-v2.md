@@ -1,0 +1,23 @@
+# 项目18 训练120可靠方向优化回测报告（v2）
+
+## 执行概览
+- 基准 run：622（风控骨架）
+- 训练任务：120
+- 风险资产：VGSH,IEF,GLD,TLT
+- 回测窗口：2020-01-01 ~ 最新数据
+- 回测次数：24（stage1）+ 6（stage2 可选）
+- 约束：MaxDD ≤ 0.15
+
+## Top3（按 DD 最低）
+1. run_id=... / CAGR=... / DD=... / params=...
+2. run_id=... / CAGR=... / DD=... / params=...
+3. run_id=... / CAGR=... / DD=... / params=...
+
+## Top3（按 CAGR 最高）
+1. run_id=... / CAGR=... / DD=... / params=...
+2. run_id=... / CAGR=... / DD=... / params=...
+3. run_id=... / CAGR=... / DD=... / params=...
+
+## 结论
+- 是否达标：是/否
+- 推荐参数：...
