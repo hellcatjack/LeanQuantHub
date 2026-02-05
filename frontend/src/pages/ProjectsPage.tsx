@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import IdChip from "../components/IdChip";
+import MlTrainingCurveChart from "../components/MlTrainingCurveChart";
 import PaginationBar from "../components/PaginationBar";
 import TopBar from "../components/TopBar";
 import { useI18n } from "../i18n";
@@ -10,6 +11,7 @@ import {
   buildMinorTickValues,
   buildTickIndices,
   computePaddedRange,
+  extractNdcgCurves,
   formatAxisValue,
 } from "../utils/mlCurve";
 
@@ -2593,6 +2595,10 @@ export default function ProjectsPage() {
   const mlDetailMetrics = useMemo(
     () => (mlDetailJob?.metrics as Record<string, any> | null) || null,
     [mlDetailJob]
+  );
+  const mlNdcgCurves = useMemo(
+    () => extractNdcgCurves(mlDetailMetrics),
+    [mlDetailMetrics]
   );
   const mlDetailSymbolSource = useMemo(() => {
     const meta = (mlDetailJob?.config as Record<string, any> | null)?.meta || {};
@@ -7418,10 +7424,19 @@ export default function ProjectsPage() {
                     )}
                   </div>
                 )}
-                {mlCurve && (
+                {mlNdcgCurves ? (
                   <div style={{ marginTop: "12px" }}>
-                    {renderMlCurve(mlCurve)}
+                    <MlTrainingCurveChart
+                      iterations={mlNdcgCurves.iterations}
+                      series={mlNdcgCurves.series}
+                    />
                   </div>
+                ) : (
+                  mlCurve && (
+                    <div style={{ marginTop: "12px" }}>
+                      {renderMlCurve(mlCurve)}
+                    </div>
+                  )
                 )}
               </div>
               <div className="card algorithm-top-decision">
