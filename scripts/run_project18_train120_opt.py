@@ -71,6 +71,24 @@ def _load_existing_params(path: Path) -> set[str]:
     return seen
 
 
+def _load_inflight_runs(path: Path, is_done_fn) -> list[int]:
+    if not path.exists():
+        return []
+    inflight: list[int] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        run_id = row.get("run_id")
+        if run_id is None:
+            continue
+        run_id = int(run_id)
+        if is_done_fn(run_id):
+            continue
+        inflight.append(run_id)
+    return inflight
+
+
 def fetch_baseline_params(run_id: int) -> dict:
     data = _request_with_retry("GET", f"{API}/api/backtests/{run_id}")
     params = data.get("params") or {}
@@ -129,7 +147,7 @@ def main() -> None:
         batch = batch[: args.limit]
 
     seen = _load_existing_params(OUT)
-    inflight: list[int] = []
+    inflight: list[int] = _load_inflight_runs(OUT, is_done)
     for item in batch:
         if _param_key(item) in seen:
             continue
