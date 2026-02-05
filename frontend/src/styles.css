@@ -2439,6 +2439,71 @@ a {
   background: #f97316;
 }
 
+.ml-training-curve {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid #e2e8f0;
+  background: #ffffff;
+}
+
+.ml-training-curve-header {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ml-training-curve-title {
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.ml-training-curve-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 12px;
+  color: #475569;
+}
+
+.ml-training-curve-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ml-training-curve-legend-item::before {
+  content: "";
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  display: inline-block;
+  background: #64748b;
+}
+
+.ml-training-curve-legend-item.ndcg\\@10::before {
+  background: #2563eb;
+}
+
+.ml-training-curve-legend-item.ndcg\\@50::before {
+  background: #16a34a;
+}
+
+.ml-training-curve-legend-item.ndcg\\@100::before {
+  background: #f59e0b;
+}
+
+.ml-training-curve-time {
+  font-variant-numeric: tabular-nums;
+  color: #0f172a;
+}
+
+.ml-training-curve-canvas {
+  width: 100%;
+  min-height: 240px;
+}
+
 .backtest-preview {
   margin-top: 18px;
 }
