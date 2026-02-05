@@ -54,6 +54,23 @@ def _request_with_retry(method: str, url: str, payload: dict | None = None) -> d
             time.sleep(1.0)
 
 
+def _param_key(params: dict) -> str:
+    return json.dumps(params, sort_keys=True)
+
+
+def _load_existing_params(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    seen: set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        params = row.get("params") or {}
+        seen.add(_param_key(params))
+    return seen
+
+
 def fetch_baseline_params(run_id: int) -> dict:
     data = _request_with_retry("GET", f"{API}/api/backtests/{run_id}")
     params = data.get("params") or {}
@@ -111,8 +128,11 @@ def main() -> None:
     if args.limit:
         batch = batch[: args.limit]
 
+    seen = _load_existing_params(OUT)
     inflight: list[int] = []
     for item in batch:
+        if _param_key(item) in seen:
+            continue
         while len(inflight) >= MAX_INFLIGHT:
             time.sleep(5)
             inflight = [rid for rid in inflight if not is_done(rid)]
