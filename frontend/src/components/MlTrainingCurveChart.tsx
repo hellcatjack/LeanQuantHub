@@ -27,6 +27,21 @@ const COLOR_MAP: Record<string, string> = {
   "ndcg@100": "#f59e0b",
 };
 
+export const formatEpochTick = (time: Time) => {
+  if (typeof time === "number" && Number.isFinite(time)) {
+    return String(time);
+  }
+  if (typeof time === "string") {
+    return time;
+  }
+  if (time && typeof time === "object" && "year" in time) {
+    const month = String(time.month).padStart(2, "0");
+    const day = String(time.day).padStart(2, "0");
+    return `${time.year}-${month}-${day}`;
+  }
+  return "-";
+};
+
 const toLineData = (points: ChartPoint[]) =>
   points
     .filter((item) => Number.isFinite(item.value))
@@ -60,7 +75,7 @@ const findNearestValue = (points: ChartPoint[], time: number) => {
   return points[Math.max(0, right)].value;
 };
 
-const formatIter = (time: number) => `Iter ${time}`;
+const formatIter = (time: number) => `Iter ${formatEpochTick(time)}`;
 
 const formatValue = (value?: number) =>
   Number.isFinite(value ?? NaN) ? Number(value).toFixed(4) : "-";
@@ -110,7 +125,10 @@ export default function MlTrainingCurveChart({
       },
       crosshair: { mode: CrosshairMode.Normal },
       rightPriceScale: { borderColor: "#e2e8f0", visible: true },
-      timeScale: { borderColor: "#e2e8f0" },
+      timeScale: {
+        borderColor: "#e2e8f0",
+        tickMarkFormatter: (time) => formatEpochTick(time),
+      },
     });
     chartRef.current = chart;
 
@@ -179,6 +197,25 @@ export default function MlTrainingCurveChart({
     return values;
   }, [prepared]);
 
+  const bestValues = useMemo(() => {
+    const values: Record<string, { value: number; time: number } | undefined> = {};
+    for (const item of prepared) {
+      let best: ChartPoint | null = null;
+      for (const point of item.points) {
+        if (!Number.isFinite(point.value)) {
+          continue;
+        }
+        if (!best || point.value > best.value) {
+          best = point;
+        }
+      }
+      if (best) {
+        values[item.key] = { value: best.value, time: best.time };
+      }
+    }
+    return values;
+  }, [prepared]);
+
   return (
     <div className="ml-training-curve">
       <div className="ml-training-curve-header">
@@ -193,12 +230,16 @@ export default function MlTrainingCurveChart({
                   : item.key === "ndcg@100"
                     ? "ndcg-100"
                     : "ndcg-other";
+            const best = bestValues[item.key];
             return (
               <span
                 key={item.key}
                 className={`ml-training-curve-legend-item ${classSuffix}`}
               >
-              {item.label}: {formatValue(hover?.values[item.key] ?? latestValues[item.key])}
+                {item.label}: {formatValue(hover?.values[item.key] ?? latestValues[item.key])}
+                {best
+                  ? `（最佳 ${formatValue(best.value)} @ Iter ${formatEpochTick(best.time)}）`
+                  : ""}
               </span>
             );
           })}
