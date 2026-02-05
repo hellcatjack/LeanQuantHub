@@ -129,3 +129,62 @@ export const buildMinorTickValues = (values: number[]): number[] => {
   }
   return minors;
 };
+
+type NdcgSeries = {
+  key: string;
+  label: string;
+  values: number[];
+};
+
+export const extractNdcgCurves = (
+  metrics?: Record<string, any> | null
+): { iterations: number[]; series: NdcgSeries[] } | null => {
+  if (!metrics) {
+    return null;
+  }
+  const curve =
+    metrics.curve_ndcg ||
+    metrics.walk_forward?.curve_ndcg ||
+    metrics.walkForward?.curve_ndcg;
+  if (!curve || typeof curve !== "object") {
+    return null;
+  }
+  const iterations = Array.isArray(curve.iterations) ? curve.iterations : [];
+  const valid = curve.valid as Record<string, any> | undefined;
+  if (!valid || typeof valid !== "object") {
+    return null;
+  }
+  const order = [
+    { key: "ndcg@10", label: "NDCG@10" },
+    { key: "ndcg@50", label: "NDCG@50" },
+    { key: "ndcg@100", label: "NDCG@100" },
+  ];
+  const series: NdcgSeries[] = [];
+  for (const entry of order) {
+    const values = valid[entry.key];
+    if (Array.isArray(values) && values.length) {
+      series.push({ ...entry, values: values.map((item) => Number(item)) });
+    }
+  }
+  if (!series.length) {
+    return null;
+  }
+  const lengths = series.map((item) => item.values.length).filter((len) => len > 0);
+  if (!lengths.length) {
+    return null;
+  }
+  let minLen = Math.min(...lengths);
+  if (iterations.length) {
+    minLen = Math.min(minLen, iterations.length);
+  }
+  if (minLen <= 0) {
+    return null;
+  }
+  const trimmedIterations = iterations.length
+    ? iterations.slice(0, minLen)
+    : Array.from({ length: minLen }, (_, idx) => idx + 1);
+  return {
+    iterations: trimmedIterations,
+    series: series.map((item) => ({ ...item, values: item.values.slice(0, minLen) })),
+  };
+};

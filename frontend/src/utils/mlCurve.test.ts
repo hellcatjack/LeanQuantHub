@@ -6,6 +6,7 @@ import {
   buildTickIndices,
   buildMinorTickValues,
   computePaddedRange,
+  extractNdcgCurves,
   formatAxisValue,
 } from "./mlCurve";
 
@@ -71,5 +72,24 @@ describe("ml curve styles", () => {
     expect(css).toContain(".ml-curve-grid-line.minor");
     expect(css).toContain("stroke: #cbd5e1");
     expect(css).toContain("opacity: 0.8");
+  });
+});
+
+describe("extractNdcgCurves", () => {
+  it("reads curve_ndcg.valid for ndcg series", () => {
+    const metrics = {
+      curve_ndcg: {
+        iterations: [1, 2, 3],
+        valid: {
+          "ndcg@10": [0.1, 0.2, 0.3],
+          "ndcg@50": [0.2, 0.3, 0.4],
+          "ndcg@100": [0.3, 0.4, 0.5],
+        },
+      },
+    };
+    const result = extractNdcgCurves(metrics);
+    expect(result?.iterations).toEqual([1, 2, 3]);
+    expect(result?.series[0].key).toBe("ndcg@10");
+    expect(result?.series[0].values).toEqual([0.1, 0.2, 0.3]);
   });
 });
