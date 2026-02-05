@@ -529,7 +529,7 @@ export const PIPELINE_BACKTEST_DEFAULTS: Record<string, any> = {
   market_ma_window: 200,
   risk_off_mode: "defensive",
   risk_off_pick: "lowest_vol",
-  risk_off_symbols: "SHY,IEF,GLD,TLT",
+  risk_off_symbols: "VGSH,IEF,GLD,TLT",
   rebalance_frequency: "Weekly",
   rebalance_day: "Monday",
   rebalance_time_minutes: 30,
@@ -3157,7 +3157,7 @@ export default function ProjectsPage() {
             onChange={(e) =>
               updatePipelineBacktestParam("risk_off_symbols", e.target.value)
             }
-            placeholder="SHY,IEF,GLD,TLT"
+            placeholder="VGSH,IEF,GLD,TLT"
           />
           <div className="form-hint">
             {t("projects.pipeline.backtest.hints.riskOffSymbols")}

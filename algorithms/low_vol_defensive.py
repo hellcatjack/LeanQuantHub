@@ -73,10 +73,10 @@ class LowVolatilityDefensive(QCAlgorithm):
         self.max_position = float(risk_params.get("max_position", 0.06))
 
         self.defensive_symbols = self._parse_symbol_list(
-            defensive_params.get("symbols", ["SHY", "IEF"])
+            defensive_params.get("symbols", ["VGSH", "IEF"])
         )
         if not self.defensive_symbols:
-            self.defensive_symbols = ["SHY", "IEF"]
+            self.defensive_symbols = ["VGSH", "IEF"]
 
         self.set_start_date(2021, 1, 1)
         self.set_end_date(2025, 12, 26)

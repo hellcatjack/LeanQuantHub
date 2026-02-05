@@ -116,7 +116,7 @@ const defaultParams: AlgorithmParams = {
     redistribute: "cash",
   },
   defensive: {
-    symbols: ["SHY", "IEF"],
+    symbols: ["VGSH", "IEF"],
   },
   theme_weights: {},
   blend: {
@@ -1440,7 +1440,7 @@ export default function AlgorithmsPage() {
                               .filter(Boolean),
                           })
                         }
-                        placeholder="SHY, IEF"
+                        placeholder="VGSH, IEF"
                       />
                       <div className="form-hint">{t("algorithms.params.defensiveHint")}</div>
                     </div>

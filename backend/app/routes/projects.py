@@ -354,7 +354,7 @@ def _load_default_config(session=None) -> dict[str, Any]:
         "market_ma_window": 200,
         "risk_off_mode": "defensive",
         "risk_off_pick": "lowest_vol",
-        "risk_off_symbols": "SHY,IEF,GLD,TLT",
+        "risk_off_symbols": "VGSH,IEF,GLD,TLT",
         "max_drawdown": 0.15,
         "max_drawdown_52w": 0.15,
         "drawdown_exposure_floor": 0.0,

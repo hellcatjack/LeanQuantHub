@@ -253,7 +253,7 @@ class MLOverlayScores(QCAlgorithm):
         risk_off_symbol_raw = (
             self.get_parameter("risk_off_symbol")
             or self.get_parameter("defensive_symbol")
-            or "SHY"
+            or "VGSH"
         )
         self.risk_off_symbol = risk_off_symbol_raw.strip().upper()
         risk_off_symbols_raw = self.get_parameter("risk_off_symbols")
