@@ -74,6 +74,7 @@ def build_execution_config(
     project_id: int,
     mode: str,
     client_id: int | None = None,
+    params_path: str | None = None,
     lean_bridge_output_dir: str | None = None,
 ) -> dict:
     payload = dict(_load_template_config())
@@ -84,6 +85,8 @@ def build_execution_config(
     payload.setdefault("data-folder", "/data/share/stock/data/lean")
     payload["brokerage"] = brokerage
     payload["execution-intent-path"] = intent_path
+    if params_path:
+        payload["execution-params-path"] = params_path
     payload["result-handler"] = "QuantConnect.Lean.Engine.Results.LeanBridgeResultHandler"
     output_dir = lean_bridge_output_dir or _bridge_output_dir()
     payload["lean-bridge-output-dir"] = output_dir

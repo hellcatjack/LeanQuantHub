@@ -18,7 +18,7 @@ from app.services.trade_guard import (
     get_or_create_guard_state,
     record_guard_event,
 )
-from app.services.trade_order_builder import build_orders
+from app.services.trade_order_builder import build_intent_orders, build_orders
 from app.services.trade_orders import create_trade_order, update_trade_order_status
 from app.services.trade_risk_engine import evaluate_orders
 from app.services.trade_alerts import notify_trade_alert
@@ -244,6 +244,10 @@ def determine_run_status(order_statuses: list[str]) -> tuple[str | None, dict[st
     if summary["rejected"] > 0 or summary["cancelled"] > 0:
         return "partial", summary
     return "done", summary
+
+
+def _should_skip_order_build(execution_source: str | None) -> bool:
+    return str(execution_source or "").strip().lower() == "lean"
 
 
 def _build_positions_map(positions_payload: dict | None) -> dict[str, dict[str, float | None]]:
@@ -666,6 +670,7 @@ def execute_trade_run(
 
         settings_row = session.query(TradeSettings).order_by(TradeSettings.id.desc()).first()
         execution_source = (settings_row.execution_data_source if settings_row else "lean") or "lean"
+        skip_build = _should_skip_order_build(execution_source)
         if execution_source.lower() != "lean":
             params = dict(run.params or {})
             params["execution_data_source"] = execution_source
@@ -771,12 +776,20 @@ def execute_trade_run(
                 run_id=run.id,
             )
             params["order_intent_path"] = intent_path
-            execution_params_path = write_execution_params(
-                output_dir=ARTIFACT_ROOT / "execution_params",
+            execution_params = {
+                "min_qty": int(params.get("min_qty") or 1),
+                "lot_size": int(params.get("lot_size") or 1),
+                "cash_buffer_ratio": float(params.get("cash_buffer_ratio") or 0.0),
+                "fee_bps": float(params.get("fee_bps") or 0.0),
+                "slippage_open_bps": float(params.get("slippage_open_bps") or 0.0),
+                "slippage_close_bps": float(params.get("slippage_close_bps") or 0.0),
+                "risk_overrides": params.get("risk_overrides") or {},
+            }
+            params["execution_params_path"] = write_execution_params(
+                output_dir=ARTIFACT_ROOT / "order_intents",
                 run_id=run.id,
-                params=params,
+                params=execution_params,
             )
-            params["execution_params_path"] = execution_params_path
             run.params = dict(params)
             run.updated_at = datetime.utcnow()
             session.commit()
@@ -802,7 +815,12 @@ def execute_trade_run(
                     if cash_available is not None:
                         params.setdefault("cash_available", cash_available)
             portfolio_value = float(params.get("portfolio_value") or 0.0)
-            if portfolio_value <= 0:
+            cash_buffer_ratio = float(params.get("cash_buffer_ratio") or 0.0)
+            lot_size = int(params.get("lot_size") or 1)
+            order_type = str(params.get("order_type") or "MKT")
+            limit_price = params.get("limit_price")
+            min_qty = int(params.get("min_qty") or 1)
+            if not skip_build and portfolio_value <= 0:
                 run.status = "failed"
                 run.message = "portfolio_value_required"
                 run.ended_at = datetime.utcnow()
@@ -817,22 +835,19 @@ def execute_trade_run(
                     message=run.message,
                     dry_run=dry_run,
                 )
-            cash_buffer_ratio = float(params.get("cash_buffer_ratio") or 0.0)
-            lot_size = int(params.get("lot_size") or 1)
-            order_type = str(params.get("order_type") or "MKT")
-            limit_price = params.get("limit_price")
-            min_qty = int(params.get("min_qty") or 1)
-
-            draft_orders = build_orders(
-                items,
-                price_map=price_map,
-                portfolio_value=portfolio_value,
-                cash_buffer_ratio=cash_buffer_ratio,
-                lot_size=lot_size,
-                order_type=order_type,
-                limit_price=limit_price,
-                min_qty=min_qty,
-            )
+            if skip_build:
+                draft_orders = build_intent_orders(items)
+            else:
+                draft_orders = build_orders(
+                    items,
+                    price_map=price_map,
+                    portfolio_value=portfolio_value,
+                    cash_buffer_ratio=cash_buffer_ratio,
+                    lot_size=lot_size,
+                    order_type=order_type,
+                    limit_price=limit_price,
+                    min_qty=min_qty,
+                )
             if not draft_orders:
                 run.status = "failed"
                 run.message = "orders_empty"
@@ -874,16 +889,17 @@ def execute_trade_run(
                 .order_by(TradeOrder.id.asc())
                 .all()
             )
-            params["builder"] = {
-                "portfolio_value": portfolio_value,
-                "cash_buffer_ratio": cash_buffer_ratio,
-                "lot_size": lot_size,
-                "order_type": order_type,
-                "limit_price": limit_price,
-                "min_qty": min_qty,
-                "rounding": "ceil",
-                "created_orders": created,
-            }
+            if not skip_build:
+                params["builder"] = {
+                    "portfolio_value": portfolio_value,
+                    "cash_buffer_ratio": cash_buffer_ratio,
+                    "lot_size": lot_size,
+                    "order_type": order_type,
+                    "limit_price": limit_price,
+                    "min_qty": min_qty,
+                    "rounding": "ceil",
+                    "created_orders": created,
+                }
             params["price_map"] = price_map
             run.params = dict(params)
             run.updated_at = datetime.utcnow()
@@ -1037,6 +1053,7 @@ def execute_trade_run(
             brokerage="InteractiveBrokersBrokerage",
             project_id=run.project_id,
             mode=run.mode,
+            params_path=params.get("execution_params_path"),
         )
         config_dir = ARTIFACT_ROOT / "lean_execution"
         config_dir.mkdir(parents=True, exist_ok=True)
