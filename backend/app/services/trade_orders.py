@@ -131,7 +131,11 @@ def _validate_order_payload(payload: dict[str, Any]) -> None:
         quantity_value = float(quantity)
     except (TypeError, ValueError):
         raise ValueError("quantity_invalid") from None
-    if quantity_value <= 0:
+    params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+    intent_only = params.get("intent_only") is True
+    if quantity_value < 0:
+        raise ValueError("quantity_invalid")
+    if quantity_value == 0 and not intent_only:
         raise ValueError("quantity_invalid")
     if order_type == "LMT" and payload.get("limit_price") is None:
         raise ValueError("limit_price_required")

@@ -879,6 +879,8 @@ def execute_trade_run(
                     "decision_snapshot_id": run.decision_snapshot_id,
                     "client_order_id_auto": True,
                 }
+                if skip_build:
+                    payload["params"]["intent_only"] = True
                 result = create_trade_order(session, payload, run_id=run.id)
                 if result.created:
                     created += 1

@@ -73,6 +73,7 @@ def resolve_backtest_run_link(
         .filter(
             BacktestRun.project_id == project_id,
             BacktestRun.status == "success",
+            BacktestRun.pipeline_id.is_(None),
         )
         .order_by(BacktestRun.created_at.desc())
         .first()
