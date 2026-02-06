@@ -64,3 +64,26 @@ def build_orders(
             }
         )
     return orders
+
+
+def build_intent_orders(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    orders: list[dict[str, Any]] = []
+    for item in items:
+        symbol = str(item.get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        try:
+            weight = float(item.get("weight"))
+        except (TypeError, ValueError):
+            continue
+        side = "BUY" if weight >= 0 else "SELL"
+        orders.append(
+            {
+                "symbol": symbol,
+                "side": side,
+                "quantity": 0,
+                "order_type": "MKT",
+                "limit_price": None,
+            }
+        )
+    return orders
