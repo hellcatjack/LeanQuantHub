@@ -10,7 +10,7 @@ import re
 
 from app.core.config import settings
 from app.db import SessionLocal
-from app.models import DecisionSnapshot, TradeOrder, TradeRun, TradeSettings
+from app.models import DecisionSnapshot, TradeFill, TradeOrder, TradeRun, TradeSettings
 from pathlib import Path
 
 from app.services.job_lock import JobLock
@@ -19,14 +19,15 @@ from app.services.trade_guard import (
     record_guard_event,
 )
 from app.services.trade_order_builder import build_orders
-from app.services.trade_orders import create_trade_order
+from app.services.trade_orders import create_trade_order, update_trade_order_status
 from app.services.trade_risk_engine import evaluate_orders
 from app.services.trade_alerts import notify_trade_alert
 from app.services.ib_account import fetch_account_summary
 from app.services.trade_order_intent import write_order_intent, ensure_order_intent_ids
 from app.services.lean_bridge_paths import resolve_bridge_root
-from app.services.lean_bridge_reader import read_bridge_status, read_quotes
+from app.services.lean_bridge_reader import read_bridge_status, read_positions, read_quotes
 from app.services.lean_execution import build_execution_config, launch_execution
+from app.services.lean_execution_params import write_execution_params
 from app.services.audit_log import record_audit
 from app.services.trade_run_progress import is_market_open, is_trade_run_stalled, update_trade_run_progress
 
@@ -78,6 +79,47 @@ def _bridge_connection_ok() -> bool:
     if status.get("stale") is True:
         return False
     return state in {"ok", "connected", "running"}
+
+
+def _resolve_lean_execution_log_path() -> Path:
+    launcher_path = Path(settings.lean_launcher_path) if settings.lean_launcher_path else None
+    if launcher_path:
+        base = launcher_path.parent if launcher_path.is_file() else launcher_path
+        candidate = base / "bin" / "Release" / "LeanBridgeExecutionAlgorithm-log.txt"
+        if candidate.exists():
+            return candidate
+    return Path("/app/stocklean/Lean_git/Launcher/bin/Release/LeanBridgeExecutionAlgorithm-log.txt")
+
+
+def _read_tail_text(path: Path, *, max_bytes: int = 400_000) -> str:
+    try:
+        size = path.stat().st_size
+        offset = max(size - max_bytes, 0)
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            data = handle.read()
+        return data.decode("utf-8", errors="ignore")
+    except OSError:
+        return ""
+
+
+def _lean_no_orders_submitted(run_id: int) -> bool:
+    if not run_id:
+        return False
+    log_path = _resolve_lean_execution_log_path()
+    if not log_path.exists():
+        return False
+    text = _read_tail_text(log_path)
+    marker = f"oi_{run_id}_"
+    pos = text.rfind(marker)
+    if pos < 0:
+        return False
+    tail = text[pos:]
+    if "LEAN_BRIDGE_NO_ORDERS_SUBMITTED" in tail:
+        return True
+    if "Quit(): no_orders_submitted" in tail:
+        return True
+    return False
 
 
 def _quote_price(item: dict[str, Any]) -> float | None:
@@ -204,10 +246,290 @@ def determine_run_status(order_statuses: list[str]) -> tuple[str | None, dict[st
     return "done", summary
 
 
+def _build_positions_map(positions_payload: dict | None) -> dict[str, dict[str, float | None]]:
+    if not isinstance(positions_payload, dict):
+        return {}
+    items = positions_payload.get("items") if isinstance(positions_payload.get("items"), list) else []
+    positions: dict[str, dict[str, float | None]] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        symbol = str(item.get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        quantity_value = item.get("quantity")
+        if quantity_value is None:
+            quantity_value = item.get("position")
+        if quantity_value is None:
+            continue
+        try:
+            quantity = float(quantity_value)
+        except (TypeError, ValueError):
+            continue
+        avg_cost_value = item.get("avg_cost")
+        avg_cost = None
+        if avg_cost_value is not None:
+            try:
+                avg_cost = float(avg_cost_value)
+            except (TypeError, ValueError):
+                avg_cost = None
+        positions[symbol] = {"quantity": quantity, "avg_cost": avg_cost}
+    return positions
+
+
+def _load_order_intent_items(path: str) -> list[dict[str, Any]]:
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    return []
+
+
+def _extract_intent_symbols(items: list[dict[str, Any]]) -> list[str]:
+    symbols = []
+    seen = set()
+    for item in items:
+        symbol = str(item.get("symbol") or "").strip().upper()
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        symbols.append(symbol)
+    return symbols
+
+
+def enforce_intent_order_match(
+    session,
+    run: TradeRun,
+    orders: list[TradeOrder],
+    intent_path: str,
+) -> bool:
+    if not intent_path:
+        return True
+    items = _load_order_intent_items(intent_path)
+    expected_symbols = _extract_intent_symbols(items)
+    if not expected_symbols:
+        return True
+    created_symbols = sorted({str(order.symbol or "").strip().upper() for order in orders if order.symbol})
+    expected_set = set(expected_symbols)
+    created_set = set(created_symbols)
+    missing = sorted(expected_set - created_set)
+    extra = sorted(created_set - expected_set)
+    if not missing and not extra:
+        return True
+    params = dict(run.params or {})
+    params["intent_order_mismatch"] = {
+        "intent_path": intent_path,
+        "expected_symbols": sorted(expected_set),
+        "created_symbols": created_symbols,
+        "missing_symbols": missing,
+        "extra_symbols": extra,
+    }
+    run.params = params
+    run.message = "intent_order_mismatch"
+    record_audit(
+        session,
+        action="trade_run.intent_order_mismatch",
+        resource_type="trade_run",
+        resource_id=run.id,
+        detail=params["intent_order_mismatch"],
+    )
+    force_close_run(session, run, reason="intent_order_mismatch")
+    return False
+
+
+def reconcile_run_with_positions(session, run: TradeRun, positions_payload: dict | None) -> dict[str, int]:
+    summary = {"checked": 0, "reconciled": 0, "skipped": 0}
+    if run is None or not isinstance(positions_payload, dict):
+        return summary
+    if positions_payload.get("stale") is True:
+        return summary
+    positions = _build_positions_map(positions_payload)
+    if not positions:
+        return summary
+    orders = session.query(TradeOrder).filter(TradeOrder.run_id == run.id).all()
+    for order in orders:
+        status = _normalize_order_status(order.status)
+        if status in _TERMINAL_ORDER_STATUSES:
+            continue
+        summary["checked"] += 1
+        if str(order.side or "").upper() != "BUY":
+            summary["skipped"] += 1
+            continue
+        pos = positions.get(str(order.symbol or "").strip().upper())
+        if not pos:
+            summary["skipped"] += 1
+            continue
+        pos_qty = float(pos.get("quantity") or 0.0)
+        if pos_qty <= 0:
+            summary["skipped"] += 1
+            continue
+        remaining = float(order.quantity) - float(order.filled_quantity or 0.0)
+        if remaining <= 0:
+            summary["skipped"] += 1
+            continue
+        if pos_qty + 1e-6 < float(order.quantity):
+            summary["skipped"] += 1
+            continue
+        exec_id = f"position_reconcile:{order.id}"
+        existing = (
+            session.query(TradeFill)
+            .filter(TradeFill.order_id == order.id, TradeFill.exec_id == exec_id)
+            .first()
+        )
+        if existing:
+            summary["skipped"] += 1
+            continue
+        fill_price = pos.get("avg_cost")
+        if not fill_price or float(fill_price) <= 0:
+            fallback = order.avg_fill_price or order.limit_price
+            if fallback is not None:
+                fill_price = float(fallback)
+        if not fill_price or float(fill_price) <= 0:
+            summary["skipped"] += 1
+            continue
+        current_status = _normalize_order_status(order.status)
+        if current_status == "NEW":
+            update_trade_order_status(session, order, {"status": "SUBMITTED"})
+        total_prev = float(order.filled_quantity or 0.0)
+        total_new = total_prev + remaining
+        avg_prev = float(order.avg_fill_price or 0.0)
+        avg_new = (avg_prev * total_prev + float(fill_price) * remaining) / total_new
+        target_status = "PARTIAL" if total_new < float(order.quantity) else "FILLED"
+        update_trade_order_status(
+            session,
+            order,
+            {
+                "status": target_status,
+                "filled_quantity": total_new,
+                "avg_fill_price": avg_new,
+                "params": {"already_held": True, "reconcile_source": "positions"},
+            },
+        )
+        fill = TradeFill(
+            order_id=order.id,
+            exec_id=exec_id,
+            fill_quantity=float(remaining),
+            fill_price=float(fill_price),
+            commission=None,
+            fill_time=datetime.utcnow(),
+            params={"source": "positions_reconcile", "already_held": True},
+        )
+        session.add(fill)
+        session.commit()
+        summary["reconciled"] += 1
+    return summary
+
+
+def force_close_run(session, run: TradeRun, *, reason: str | None = None) -> dict[str, int]:
+    summary = {"total": 0, "filled": 0, "cancelled": 0, "rejected": 0}
+    if run is None:
+        return summary
+    orders = session.query(TradeOrder).filter(TradeOrder.run_id == run.id).all()
+    for order in orders:
+        status = _normalize_order_status(order.status)
+        summary["total"] += 1
+        if status == "FILLED":
+            summary["filled"] += 1
+            continue
+        if status in _REJECTED_ORDER_STATUSES:
+            summary["rejected"] += 1
+            continue
+        if status in _TERMINAL_ORDER_STATUSES:
+            summary["cancelled"] += 1
+            continue
+        if status == "NEW":
+            update_trade_order_status(session, order, {"status": "SUBMITTED"})
+        update_trade_order_status(session, order, {"status": "CANCELED"})
+        summary["cancelled"] += 1
+    now = datetime.utcnow()
+    run.status = "failed"
+    run.ended_at = now
+    run.updated_at = now
+    run.stalled_at = None
+    run.stalled_reason = None
+    params = dict(run.params or {})
+    params["completion_summary"] = summary
+    params["force_closed"] = True
+    if reason:
+        params["force_close_reason"] = reason
+    run.params = params
+    if not run.message or run.message in {"submitted_lean", "stalled"}:
+        run.message = "force_closed"
+    session.commit()
+    record_audit(
+        session,
+        action="trade_run.force_closed",
+        resource_type="trade_run",
+        resource_id=run.id,
+        detail={
+            "reason": reason,
+            "summary": summary,
+        },
+    )
+    return summary
+
+
 def refresh_trade_run_status(session, run: TradeRun) -> bool:
     active_status = str(run.status or "").lower()
     if active_status not in {"running", "stalled"}:
         return False
+    positions_payload = read_positions(_resolve_bridge_root())
+    reconcile_run_with_positions(session, run, positions_payload)
+    if _lean_no_orders_submitted(run.id):
+        now = datetime.utcnow()
+        cancelled = 0
+        held_symbols: list[str] = []
+        update_trade_run_progress(session, run, "no_orders_submitted", reason="lean_execution", commit=True)
+        for order in (
+            session.query(TradeOrder)
+            .filter(TradeOrder.run_id == run.id)
+            .order_by(TradeOrder.id.asc())
+            .all()
+        ):
+            status = str(order.status or "").strip().upper()
+            if isinstance(order.params, dict) and order.params.get("already_held") is True:
+                symbol = str(order.symbol or "").strip().upper()
+                if symbol:
+                    held_symbols.append(symbol)
+            if status in {"NEW", "SUBMITTED", "PARTIAL"}:
+                try:
+                    update_trade_order_status(
+                        session,
+                        order,
+                        {"status": "CANCELED", "params": {"cancel_reason": "no_orders_submitted"}},
+                    )
+                except ValueError:
+                    continue
+                cancelled += 1
+        run.status = "failed"
+        run.message = "no_orders_submitted"
+        run.ended_at = now
+        run.updated_at = now
+        run.stalled_at = None
+        run.stalled_reason = None
+        params = dict(run.params or {})
+        params["completion_summary"] = {
+            "filled": 0,
+            "cancelled": cancelled,
+            "rejected": 0,
+            "skipped": 0,
+            "no_orders_submitted": True,
+        }
+        params["no_orders_submitted"] = True
+        if held_symbols:
+            params["already_held_orders"] = sorted(set(held_symbols))
+        run.params = params
+        session.commit()
+        record_audit(
+            session,
+            action="trade_run.no_orders_submitted",
+            resource_type="trade_run",
+            resource_id=run.id,
+            detail={"cancelled": cancelled},
+        )
+        return True
     statuses = [
         row[0]
         for row in session.query(TradeOrder.status).filter(TradeOrder.run_id == run.id).all()
@@ -449,6 +771,12 @@ def execute_trade_run(
                 run_id=run.id,
             )
             params["order_intent_path"] = intent_path
+            execution_params_path = write_execution_params(
+                output_dir=ARTIFACT_ROOT / "execution_params",
+                run_id=run.id,
+                params=params,
+            )
+            params["execution_params_path"] = execution_params_path
             run.params = dict(params)
             run.updated_at = datetime.utcnow()
             session.commit()
@@ -493,6 +821,7 @@ def execute_trade_run(
             lot_size = int(params.get("lot_size") or 1)
             order_type = str(params.get("order_type") or "MKT")
             limit_price = params.get("limit_price")
+            min_qty = int(params.get("min_qty") or 1)
 
             draft_orders = build_orders(
                 items,
@@ -502,6 +831,7 @@ def execute_trade_run(
                 lot_size=lot_size,
                 order_type=order_type,
                 limit_price=limit_price,
+                min_qty=min_qty,
             )
             if not draft_orders:
                 run.status = "failed"
@@ -550,12 +880,28 @@ def execute_trade_run(
                 "lot_size": lot_size,
                 "order_type": order_type,
                 "limit_price": limit_price,
+                "min_qty": min_qty,
+                "rounding": "ceil",
                 "created_orders": created,
             }
             params["price_map"] = price_map
             run.params = dict(params)
             run.updated_at = datetime.utcnow()
             session.commit()
+
+        intent_path = params.get("order_intent_path")
+        if intent_path:
+            if not enforce_intent_order_match(session, run, orders, intent_path):
+                return TradeExecutionResult(
+                    run_id=run.id,
+                    status=run.status,
+                    filled=0,
+                    cancelled=0,
+                    rejected=0,
+                    skipped=0,
+                    message=run.message,
+                    dry_run=dry_run,
+                )
 
         if not price_map:
             symbols = sorted({order.symbol for order in orders})
