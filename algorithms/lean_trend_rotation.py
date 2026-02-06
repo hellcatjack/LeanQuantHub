@@ -2,10 +2,22 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 from pathlib import Path
 from typing import List
 
 from AlgorithmImports import *
+
+
+def _apply_execution_constraints(*, raw_qty: float, lot_size: int, min_qty: int) -> int:
+    lot = max(1, int(lot_size))
+    min_qty_value = max(1, int(min_qty))
+    if min_qty_value % lot != 0:
+        min_qty_value = int(math.ceil(min_qty_value / lot)) * lot
+    qty = int(math.ceil(raw_qty / lot)) * lot
+    if qty < min_qty_value:
+        qty = min_qty_value
+    return max(0, qty)
 
 
 class BpsFeeModel(FeeModel):
