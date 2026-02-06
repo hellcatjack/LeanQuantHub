@@ -34,7 +34,11 @@ test("live trade paper workflow", async ({ page }) => {
   const pretradeStatus = page.getByTestId("pretrade-weekly-status");
   const initialPretradeValue = (await pretradeStatus.getAttribute("data-status")) || "";
   if (!initialPretradeValue) {
-    await page.getByTestId("pretrade-weekly-run").click();
+    const runButton = page.getByTestId("pretrade-weekly-run");
+    // When a run is already active the button can be disabled while status is still loading.
+    if (await runButton.isEnabled()) {
+      await runButton.click();
+    }
   }
   await expect(pretradeStatus).toHaveAttribute(
     "data-status",

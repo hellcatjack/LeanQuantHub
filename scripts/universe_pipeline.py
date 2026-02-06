@@ -1225,6 +1225,9 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
     rebalance_cfg = str(weights_cfg.get("rebalance", "W")).strip().upper()
     rebalance_mode = str(weights_cfg.get("rebalance_mode", "week_open")).strip().lower()
     use_pit = bool(weights_cfg.get("use_pit_weekly", True))
+    allow_future_rebalance = bool(
+        weights_cfg.get("allow_future_rebalance") or weights_cfg.get("forward_snapshot")
+    )
     category_weights: dict[str, float] = weights_cfg.get("category_weights", {})
     risk_free = float(weights_cfg.get("risk_free_rate", 0.0))
     price_source_policy = str(weights_cfg.get("price_source_policy", "adjusted_only")).strip().lower()
@@ -2105,6 +2108,15 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
         if not snapshot_idx.size or snapshot_idx[0] < 0:
             continue
         snapshot_pos = snapshot_idx[0]
+        # For forward-looking snapshots, the pit rebalance date can be beyond the last available
+        # bar in our daily dataset (e.g., Friday snapshot + next Monday rebalance). In that case,
+        # we pad execution-time checks to the last available bar so we can still emit weights.
+        rebalance_ts = pd.Timestamp(rebalance)
+        rebalance_exec_ts = rebalance_ts if rebalance_ts in trade_prices.index else None
+        if rebalance_exec_ts is None and allow_future_rebalance and not trade_prices.index.empty:
+            padded = trade_prices.index.get_indexer([rebalance_ts], method="pad")
+            if padded.size and padded[0] >= 0:
+                rebalance_exec_ts = trade_prices.index[padded[0]]
         counts_at_snapshot = (
             valid_counts.iloc[snapshot_pos] if min_history_days > 0 else None
         )
@@ -2160,12 +2172,13 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
             ranges = membership_ranges.get(symbol)
             if ranges and not active_in_ranges(ranges, check_date):
                 reasons.append("not_in_membership")
-            rebalance_ts = pd.Timestamp(rebalance)
-            if rebalance_ts not in trade_prices.index:
+            if rebalance_exec_ts is None:
                 reasons.append("missing_rebalance_price")
             price = (
-                trade_prices.at[rebalance_ts, symbol]
-                if rebalance_ts in trade_prices.index and symbol in trade_prices.columns
+                trade_prices.at[rebalance_exec_ts, symbol]
+                if rebalance_exec_ts is not None
+                and rebalance_exec_ts in trade_prices.index
+                and symbol in trade_prices.columns
                 else float("nan")
             )
             if math.isnan(price):
@@ -2387,12 +2400,20 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
                 turnover_limit, cold_start_turnover, prev_weight_sum
             )
             weight_series = pd.Series(0.0, index=prices.columns)
-            start_idx = prices.index.get_loc(pd.Timestamp(rebalance))
-            end_idx = (
-                prices.index.get_loc(pd.Timestamp(rebalance_dates[idx + 1]))
-                if idx + 1 < len(rebalance_dates)
-                else len(prices.index)
-            )
+            start_exec_ts = rebalance_exec_ts or pd.Timestamp(rebalance)
+            if start_exec_ts not in prices.index:
+                continue
+            start_idx = prices.index.get_loc(start_exec_ts)
+            if idx + 1 < len(rebalance_dates):
+                next_ts = pd.Timestamp(rebalance_dates[idx + 1])
+                next_exec_ts = next_ts
+                if allow_future_rebalance and next_exec_ts not in prices.index and not prices.index.empty:
+                    padded = prices.index.get_indexer([next_ts], method="pad")
+                    if padded.size and padded[0] >= 0:
+                        next_exec_ts = prices.index[padded[0]]
+                end_idx = prices.index.get_loc(next_exec_ts) if next_exec_ts in prices.index else len(prices.index)
+            else:
+                end_idx = len(prices.index)
             weights.iloc[start_idx:end_idx] = weight_series
             prev_weights_row = weight_series
             cash_weight_sum += 1.0
@@ -2504,12 +2525,20 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
                     "score": score_value,
                 }
             )
-        start_idx = prices.index.get_loc(pd.Timestamp(rebalance))
-        end_idx = (
-            prices.index.get_loc(pd.Timestamp(rebalance_dates[idx + 1]))
-            if idx + 1 < len(rebalance_dates)
-            else len(prices.index)
-        )
+        start_exec_ts = rebalance_exec_ts or pd.Timestamp(rebalance)
+        if start_exec_ts not in prices.index:
+            continue
+        start_idx = prices.index.get_loc(start_exec_ts)
+        if idx + 1 < len(rebalance_dates):
+            next_ts = pd.Timestamp(rebalance_dates[idx + 1])
+            next_exec_ts = next_ts
+            if allow_future_rebalance and next_exec_ts not in prices.index and not prices.index.empty:
+                padded = prices.index.get_indexer([next_ts], method="pad")
+                if padded.size and padded[0] >= 0:
+                    next_exec_ts = prices.index[padded[0]]
+            end_idx = prices.index.get_loc(next_exec_ts) if next_exec_ts in prices.index else len(prices.index)
+        else:
+            end_idx = len(prices.index)
         weights.iloc[start_idx:end_idx] = weight_series
         prev_weights_row = weight_series
         _append_snapshot_row(

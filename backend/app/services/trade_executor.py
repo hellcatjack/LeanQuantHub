@@ -26,7 +26,10 @@ from app.services.ib_account import fetch_account_summary
 from app.services.trade_order_intent import write_order_intent, ensure_order_intent_ids
 from app.services.lean_bridge_paths import resolve_bridge_root
 from app.services.lean_bridge_reader import read_bridge_status, read_positions, read_quotes
-from app.services.lean_execution import build_execution_config, launch_execution
+from app.services.lean_execution import (
+    build_execution_config,
+    launch_execution_async,
+)
 from app.services.lean_execution_params import write_execution_params
 from app.services.audit_log import record_audit
 from app.services.trade_run_progress import is_market_open, is_trade_run_stalled, update_trade_run_progress
@@ -301,6 +304,45 @@ def _extract_intent_symbols(items: list[dict[str, Any]]) -> list[str]:
         seen.add(symbol)
         symbols.append(symbol)
     return symbols
+
+
+def _build_sized_qty_map_from_intent(
+    intent_path: str,
+    *,
+    price_map: dict[str, float],
+    portfolio_value: float,
+    cash_buffer_ratio: float,
+    lot_size: int,
+    min_qty: int,
+) -> dict[tuple[str, str], int]:
+    items = _load_order_intent_items(intent_path)
+    if not items:
+        return {}
+    sized = build_orders(
+        items,
+        price_map=price_map,
+        portfolio_value=portfolio_value,
+        cash_buffer_ratio=cash_buffer_ratio,
+        lot_size=lot_size,
+        order_type="MKT",
+        limit_price=None,
+        min_qty=min_qty,
+    )
+    out: dict[tuple[str, str], int] = {}
+    for draft in sized:
+        symbol = str(draft.get("symbol") or "").strip().upper()
+        side = str(draft.get("side") or "").strip().upper()
+        qty = draft.get("quantity")
+        if not symbol or not side:
+            continue
+        try:
+            qty_value = int(qty)
+        except (TypeError, ValueError):
+            continue
+        if qty_value <= 0:
+            continue
+        out[(symbol, side)] = qty_value
+    return out
 
 
 def enforce_intent_order_match(
@@ -956,6 +998,101 @@ def execute_trade_run(
 
         risk_bypass = bool(params.get("risk_bypass"))
         if not risk_bypass:
+            intent_path = params.get("order_intent_path")
+            cash_buffer_ratio = float(params.get("cash_buffer_ratio") or 0.0)
+            lot_size = int(params.get("lot_size") or 1)
+            min_qty = int(params.get("min_qty") or 1)
+            notional_limits_enabled = any(
+                value is not None
+                for value in (
+                    max_order_notional,
+                    max_position_ratio,
+                    max_total_notional,
+                )
+            )
+            if skip_build and intent_path:
+                # In lean execution mode, orders may be created as "intent only" drafts with
+                # quantity=0. This breaks notional-based risk checks. We size the draft orders
+                # from intent weights when portfolio_value and prices are available.
+                needs_sizing = any(float(order.quantity or 0.0) <= 0 for order in orders)
+                pv_value = None
+                if portfolio_value not in (None, ""):
+                    try:
+                        pv_value = float(portfolio_value)
+                    except (TypeError, ValueError):
+                        pv_value = None
+                if needs_sizing and notional_limits_enabled and (pv_value is None or pv_value <= 0):
+                    run.status = "blocked"
+                    run.message = "risk_portfolio_value_required"
+                    params["risk_blocked"] = {
+                        "reasons": ["risk_portfolio_value_required"],
+                        "count": len(orders),
+                        "risk_effective": risk_params,
+                    }
+                    run.params = dict(params)
+                    run.ended_at = datetime.utcnow()
+                    run.updated_at = datetime.utcnow()
+                    session.commit()
+                    return TradeExecutionResult(
+                        run_id=run.id,
+                        status=run.status,
+                        filled=0,
+                        cancelled=0,
+                        rejected=0,
+                        skipped=0,
+                        message=run.message,
+                        dry_run=dry_run,
+                    )
+                if needs_sizing and pv_value and pv_value > 0:
+                    size_map = _build_sized_qty_map_from_intent(
+                        intent_path,
+                        price_map=price_map,
+                        portfolio_value=pv_value,
+                        cash_buffer_ratio=cash_buffer_ratio,
+                        lot_size=lot_size,
+                        min_qty=min_qty,
+                    )
+                    sized = 0
+                    missing: list[str] = []
+                    for order in orders:
+                        if float(order.quantity or 0.0) > 0:
+                            continue
+                        symbol = str(order.symbol or "").strip().upper()
+                        side = str(order.side or "").strip().upper()
+                        if not symbol or not side:
+                            continue
+                        qty_value = size_map.get((symbol, side))
+                        if qty_value is None:
+                            missing.append(symbol)
+                            continue
+                        order.quantity = float(qty_value)
+                        sized += 1
+                    if sized:
+                        session.commit()
+                    if notional_limits_enabled and any(float(order.quantity or 0.0) <= 0 for order in orders):
+                        run.status = "blocked"
+                        run.message = "risk_sizing_incomplete"
+                        params["risk_blocked"] = {
+                            "reasons": ["risk_sizing_incomplete"],
+                            "count": len(orders),
+                            "missing_symbols": sorted(set(missing))[:50],
+                            "risk_effective": risk_params,
+                        }
+                        run.params = dict(params)
+                        run.ended_at = datetime.utcnow()
+                        run.updated_at = datetime.utcnow()
+                        session.commit()
+                        return TradeExecutionResult(
+                            run_id=run.id,
+                            status=run.status,
+                            filled=0,
+                            cancelled=0,
+                            rejected=0,
+                            skipped=0,
+                            message=run.message,
+                            dry_run=dry_run,
+                        )
+
             risk_orders = []
             for order in orders:
                 price = price_map.get(order.symbol)
@@ -1050,6 +1187,25 @@ def execute_trade_run(
             )
         ensure_order_intent_ids(intent_path, snapshot_id=run.decision_snapshot_id)
 
+        if not params.get("execution_params_path"):
+            execution_params = {
+                "min_qty": int(params.get("min_qty") or 1),
+                "lot_size": int(params.get("lot_size") or 1),
+                "cash_buffer_ratio": float(params.get("cash_buffer_ratio") or 0.0),
+                "fee_bps": float(params.get("fee_bps") or 0.0),
+                "slippage_open_bps": float(params.get("slippage_open_bps") or 0.0),
+                "slippage_close_bps": float(params.get("slippage_close_bps") or 0.0),
+                "risk_overrides": params.get("risk_overrides") or {},
+            }
+            params["execution_params_path"] = write_execution_params(
+                output_dir=ARTIFACT_ROOT / "order_intents",
+                run_id=run.id,
+                params=execution_params,
+            )
+            run.params = dict(params)
+            run.updated_at = datetime.utcnow()
+            session.commit()
+
         config = build_execution_config(
             intent_path=intent_path,
             brokerage="InteractiveBrokersBrokerage",
@@ -1061,7 +1217,19 @@ def execute_trade_run(
         config_dir.mkdir(parents=True, exist_ok=True)
         config_path = config_dir / f"trade_run_{run.id}.json"
         config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
-        launch_execution(config_path=str(config_path))
+        pid = launch_execution_async(config_path=str(config_path))
+        params.setdefault("lean_execution", {})
+        if isinstance(params.get("lean_execution"), dict):
+            params["lean_execution"].update(
+                {
+                    "config_path": str(config_path),
+                    "pid": pid,
+                    "submitted_at": datetime.utcnow().isoformat() + "Z",
+                }
+            )
+        run.params = dict(params)
+        run.updated_at = datetime.utcnow()
+        session.commit()
         run.status = "running"
         run.message = "submitted_lean"
         run.updated_at = datetime.utcnow()

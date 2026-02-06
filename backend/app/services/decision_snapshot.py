@@ -135,6 +135,9 @@ def _resolve_latest_pit_snapshot() -> str | None:
     pit_dir = _resolve_data_root() / "universe" / "pit_weekly"
     if not pit_dir.exists():
         return None
+    # pit_weekly may contain future-dated snapshots (calendar pre-generated). Decision snapshot
+    # should never default to a date beyond today because price coverage cannot exist in the future.
+    utc_today = datetime.utcnow().date()
     latest: str | None = None
     for path in pit_dir.glob("pit_*.csv"):
         stem = path.stem
@@ -145,9 +148,12 @@ def _resolve_latest_pit_snapshot() -> str | None:
         if len(raw) != 8 or not raw.isdigit():
             continue
         try:
-            parsed = datetime.strptime(raw, "%Y%m%d").date().isoformat()
+            parsed_date = datetime.strptime(raw, "%Y%m%d").date()
         except ValueError:
             continue
+        if parsed_date > utc_today:
+            continue
+        parsed = parsed_date.isoformat()
         if latest is None or parsed > latest:
             latest = parsed
     return latest
@@ -332,6 +338,10 @@ def _build_decision_configs(
         weights_payload["signal_mode"] = weights_payload.get("signal_mode") or "theme_weights"
 
     weights_payload["record_universe"] = True
+    # Decision snapshots are forward-looking: the pit rebalance date can be beyond the last
+    # bar in our daily dataset (e.g., Friday snapshot + next Monday rebalance). Allow the
+    # pipeline to emit weights without requiring rebalance-date prices to exist yet.
+    weights_payload["allow_future_rebalance"] = True
     weights_payload["output_dir"] = str(output_dir)
     effective_snapshot = snapshot_date or _resolve_latest_pit_snapshot()
     if effective_snapshot:

@@ -39,6 +39,9 @@ def build_orders(
             weight_value = float(weight)
         except (TypeError, ValueError):
             continue
+        # Skip zero-weight items to avoid generating min-qty dust orders.
+        if abs(weight_value) <= 1e-12:
+            continue
         price = price_map.get(symbol)
         if price is None or price <= 0:
             continue

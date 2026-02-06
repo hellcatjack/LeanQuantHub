@@ -10,7 +10,7 @@ import {
 import TopBar from "../components/TopBar";
 import IdChip from "../components/IdChip";
 import PaginationBar from "../components/PaginationBar";
-import { api } from "../api";
+import { api, apiLong } from "../api";
 import { useI18n } from "../i18n";
 import { resolveAccountSummaryLabel } from "../utils/accountSummary";
 import { buildOrderTag } from "../utils/orderTag";
@@ -1650,7 +1650,11 @@ export default function LiveTradePage() {
         force: false,
         live_confirm_token: executeForm.live_confirm_token || undefined,
       };
-      const res = await api.post<TradeRunExecuteOut>(`/api/trade/runs/${runId}/execute`, payload);
+      // Execution may take longer than 10s (IB checks, order builds, Lean submit), so use long-timeout client.
+      const res = await apiLong.post<TradeRunExecuteOut>(
+        `/api/trade/runs/${runId}/execute`,
+        payload
+      );
       setExecuteResult(t("trade.executeSuccess"));
       setTradeError("");
       if (res.data?.status) {

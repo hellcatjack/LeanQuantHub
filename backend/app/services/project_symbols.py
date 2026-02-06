@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 from collections import deque
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from app.models import Project, DecisionSnapshot
 from app.routes.projects import (
@@ -14,6 +14,49 @@ from app.routes.projects import (
     _resolve_theme_memberships,
     _safe_read_csv,
 )
+
+
+def _parse_csv_symbols(value: Any) -> list[str]:
+    if value is None:
+        return []
+    items: list[str] = []
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return []
+        items = [part.strip() for part in raw.split(",")]
+    elif isinstance(value, (list, tuple, set)):
+        items = [str(item).strip() for item in value]
+    else:
+        return []
+    symbols: list[str] = []
+    for item in items:
+        symbol = str(item).strip().upper()
+        if symbol:
+            symbols.append(symbol)
+    # De-dupe while preserving order.
+    return list(dict.fromkeys(symbols))
+
+
+def _collect_risk_off_symbols(config: dict) -> list[str]:
+    symbols: list[str] = []
+
+    def add_from(value: Any) -> None:
+        nonlocal symbols
+        if not isinstance(value, dict):
+            return
+        symbols.extend(_parse_csv_symbols(value.get("risk_off_symbols")))
+        symbols.extend(
+            _parse_csv_symbols(
+                value.get("risk_off_symbol") or value.get("defensive_symbol")
+            )
+        )
+
+    add_from(config)
+    add_from(config.get("backtest_params"))
+
+    # De-dupe while preserving order.
+    return list(dict.fromkeys([item for item in symbols if item]))
 
 
 def _extract_asset_type_filter(config: dict) -> set[str]:
@@ -117,6 +160,7 @@ def collect_active_project_symbols(session) -> tuple[list[str], list[str]]:
     for project in projects:
         config = _resolve_project_config(session, project.id)
         symbols.update(collect_project_symbols(config))
+        symbols.update(_collect_risk_off_symbols(config))
         benchmark = str(config.get("benchmark") or "SPY").strip().upper()
         if benchmark:
             benchmarks.add(benchmark)
