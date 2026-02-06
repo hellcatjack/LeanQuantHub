@@ -472,6 +472,7 @@ const PIPELINE_BACKTEST_FIELDS = [
   "market_ma_window",
   "risk_off_mode",
   "risk_off_pick",
+  "risk_off_lookback_days",
   "risk_off_symbols",
   "risk_off_symbol",
   "max_drawdown",
@@ -506,6 +507,7 @@ const PIPELINE_BACKTEST_NUMBER_FIELDS = new Set([
   "score_smoothing_alpha",
   "retain_top_n",
   "market_ma_window",
+  "risk_off_lookback_days",
   "max_drawdown",
   "max_drawdown_52w",
   "drawdown_recovery_ratio",
@@ -529,6 +531,7 @@ export const PIPELINE_BACKTEST_DEFAULTS: Record<string, any> = {
   market_ma_window: 200,
   risk_off_mode: "defensive",
   risk_off_pick: "lowest_vol",
+  risk_off_lookback_days: 120,
   risk_off_symbols: "VGSH,IEF,GLD,TLT",
   rebalance_frequency: "Weekly",
   rebalance_day: "Monday",
@@ -2738,6 +2741,7 @@ export default function ProjectsPage() {
       { key: "market_ma_window", label: t("projects.pipeline.backtest.fields.marketMa"), value: algoParams.market_ma_window },
       { key: "risk_off_mode", label: t("projects.pipeline.backtest.fields.riskOffMode"), value: algoParams.risk_off_mode },
       { key: "risk_off_pick", label: t("projects.pipeline.backtest.fields.riskOffPick"), value: algoParams.risk_off_pick },
+      { key: "risk_off_lookback_days", label: t("projects.pipeline.backtest.fields.riskOffLookbackDays"), value: algoParams.risk_off_lookback_days },
       { key: "risk_off_symbols", label: t("projects.pipeline.backtest.fields.riskOffSymbols"), value: algoParams.risk_off_symbols },
       { key: "risk_off_symbol", label: t("projects.pipeline.backtest.fields.riskOffSymbol"), value: algoParams.risk_off_symbol },
       { key: "max_drawdown", label: t("projects.pipeline.backtest.fields.maxDrawdown"), value: algoParams.max_drawdown },
@@ -3145,6 +3149,24 @@ export default function ProjectsPage() {
           </select>
           <div className="form-hint">
             {t("projects.pipeline.backtest.hints.riskOffPick")}
+          </div>
+        </div>
+        <div className="form-row">
+          <label className="form-label">
+            {t("projects.pipeline.backtest.fields.riskOffLookbackDays")}
+          </label>
+          <input
+            type="number"
+            min={1}
+            step={1}
+            className="form-input"
+            value={pipelineBacktestParams.risk_off_lookback_days ?? ""}
+            onChange={(e) =>
+              updatePipelineBacktestParam("risk_off_lookback_days", e.target.value)
+            }
+          />
+          <div className="form-hint">
+            {t("projects.pipeline.backtest.hints.riskOffLookbackDays")}
           </div>
         </div>
         <div className="form-row">

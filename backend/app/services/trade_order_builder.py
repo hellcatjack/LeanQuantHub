@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+import math
 
 
 @dataclass
@@ -22,6 +23,7 @@ def build_orders(
     lot_size: int = 1,
     order_type: str = "MKT",
     limit_price: float | None = None,
+    min_qty: int = 1,
 ) -> list[dict[str, Any]]:
     orders: list[dict[str, Any]] = []
     normalized_order_type = str(order_type or "MKT").strip().upper()
@@ -44,7 +46,12 @@ def build_orders(
         target = abs(weight_value) * effective_value
         raw_qty = target / price
         lot = max(1, int(lot_size))
-        qty = int(raw_qty / lot + 0.5) * lot
+        min_qty_value = max(1, int(min_qty))
+        if min_qty_value % lot != 0:
+            min_qty_value = int(math.ceil(min_qty_value / lot)) * lot
+        qty = int(math.ceil(raw_qty / lot)) * lot
+        if qty < min_qty_value:
+            qty = min_qty_value
         if qty <= 0:
             continue
         orders.append(

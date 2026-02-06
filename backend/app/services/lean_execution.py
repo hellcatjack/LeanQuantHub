@@ -206,10 +206,31 @@ def ingest_execution_events(path: str, *, session=None) -> dict:
 def _parse_event_time(value: str | None) -> datetime:
     if not value:
         return datetime.now(timezone.utc)
+    text = value.replace("Z", "+00:00")
+    if "." in text:
+        head, tail = text.split(".", 1)
+        tz = ""
+        tz_index = None
+        for sep in ("+", "-"):
+            idx = tail.find(sep)
+            if idx > 0:
+                tz_index = idx
+                break
+        if tz_index is not None:
+            frac = tail[:tz_index]
+            tz = tail[tz_index:]
+        else:
+            frac = tail
+        if len(frac) > 6:
+            frac = frac[:6]
+        text = f"{head}.{frac}{tz}"
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(text)
     except ValueError:
         return datetime.now(timezone.utc)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _apply_fill_to_order(

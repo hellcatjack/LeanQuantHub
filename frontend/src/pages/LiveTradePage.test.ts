@@ -2,7 +2,7 @@ import React from "react";
 import ReactDOMServer from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { I18nProvider, useI18n } from "../i18n";
-import LiveTradePage from "./LiveTradePage";
+import LiveTradePage, { TradeIntentMismatchCard } from "./LiveTradePage";
 
 const PipelineLabel = () => {
   const { t } = useI18n();
@@ -105,5 +105,28 @@ describe("LiveTradePage", () => {
     const html = ReactDOMServer.renderToString(React.createElement(LiveTradePage));
     expect(html).toContain("pipeline-keyword-input");
     expect(html).toContain("pipeline-event-highlight");
+  });
+
+  it("renders intent/order mismatch card with symbols", () => {
+    const html = ReactDOMServer.renderToString(
+      React.createElement(
+        I18nProvider,
+        null,
+        React.createElement(TradeIntentMismatchCard, {
+          mismatch: {
+            missing_symbols: ["AXON", "KLAC"],
+            extra_symbols: ["TSLA"],
+            missing_count: 2,
+            extra_count: 1,
+            intent_path: "/tmp/intent_orders.json",
+          },
+        })
+      )
+    );
+    expect(html).toContain("订单意图与创建订单不一致");
+    expect(html).toContain("AXON");
+    expect(html).toContain("TSLA");
+    expect(html).toContain("意图文件");
+    expect(html).toContain("intent_orders.json");
   });
 });

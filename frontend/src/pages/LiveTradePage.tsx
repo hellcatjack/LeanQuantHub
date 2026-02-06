@@ -169,6 +169,7 @@ interface TradeRun {
   decision_snapshot_id?: number | null;
   mode: string;
   status: string;
+  params?: Record<string, any> | null;
   message?: string | null;
   created_at: string;
   started_at?: string | null;
@@ -292,6 +293,16 @@ interface TradeRunDetail {
   last_update_at?: string | null;
 }
 
+interface IntentOrderMismatch {
+  missing_symbols?: string[];
+  extra_symbols?: string[];
+  missing_count?: number;
+  extra_count?: number;
+  intent_path?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
 interface TradeSymbolSummary {
   symbol: string;
   target_weight?: number | null;
@@ -354,6 +365,92 @@ const normalizeSymbols = (raw: string) =>
     .split(/[,\\s]+/)
     .map((item) => item.trim().toUpperCase())
     .filter((item) => item.length > 0);
+
+const normalizeSymbolList = (raw: unknown) => {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  return raw
+    .map((item) => String(item ?? "").trim().toUpperCase())
+    .filter((item) => item.length > 0);
+};
+
+export const TradeIntentMismatchCard = ({
+  mismatch,
+  message,
+}: {
+  mismatch?: IntentOrderMismatch | null;
+  message?: string | null;
+}) => {
+  const { t } = useI18n();
+  const hasMismatch = Boolean(mismatch) || message === "intent_order_mismatch";
+  if (!hasMismatch) {
+    return null;
+  }
+  const missingSymbols = normalizeSymbolList(mismatch?.missing_symbols);
+  const extraSymbols = normalizeSymbolList(mismatch?.extra_symbols);
+  const missingCount =
+    typeof mismatch?.missing_count === "number"
+      ? mismatch.missing_count
+      : missingSymbols.length;
+  const extraCount =
+    typeof mismatch?.extra_count === "number" ? mismatch.extra_count : extraSymbols.length;
+  const intentPath = mismatch?.intent_path ? String(mismatch.intent_path) : "";
+  return (
+    <div
+      className="form-hint danger"
+      style={{
+        marginTop: "12px",
+        padding: "10px 12px",
+        borderRadius: "12px",
+        border: "1px solid rgba(214, 69, 69, 0.35)",
+        background: "rgba(214, 69, 69, 0.08)",
+      }}
+    >
+      <div style={{ fontWeight: 600, marginBottom: "6px" }}>
+        {t("trade.runIntentMismatchTitle")}
+      </div>
+      <div style={{ display: "flex", gap: "12px", flexWrap: "wrap" }}>
+        <span>
+          {t("trade.runIntentMismatchSummary", {
+            missing: missingCount,
+            extra: extraCount,
+          })}
+        </span>
+        {intentPath ? (
+          <span>{t("trade.runIntentMismatchPath", { path: intentPath })}</span>
+        ) : null}
+      </div>
+      {missingSymbols.length ? (
+        <div style={{ marginTop: "10px" }}>
+          <div style={{ marginBottom: "6px" }}>{t("trade.runIntentMismatchMissing")}</div>
+          <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+            {missingSymbols.map((symbol) => (
+              <span key={`missing-${symbol}`} className="pill danger">
+                {symbol}
+              </span>
+            ))}
+          </div>
+        </div>
+      ) : null}
+      {extraSymbols.length ? (
+        <div style={{ marginTop: "10px" }}>
+          <div style={{ marginBottom: "6px" }}>{t("trade.runIntentMismatchExtra")}</div>
+          <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+            {extraSymbols.map((symbol) => (
+              <span key={`extra-${symbol}`} className="pill warn">
+                {symbol}
+              </span>
+            ))}
+          </div>
+        </div>
+      ) : null}
+      {!missingSymbols.length && !extraSymbols.length ? (
+        <div style={{ marginTop: "8px" }}>{t("trade.runIntentMismatchEmpty")}</div>
+      ) : null}
+    </div>
+  );
+};
 
 export default function LiveTradePage() {
   const { t, formatDateTime, getMessage } = useI18n();
@@ -1851,6 +1948,13 @@ export default function LiveTradePage() {
   const activeTradeRun = runDetail?.run ?? latestTradeRun ?? null;
   const canResumeRun = activeTradeRun?.status === "stalled";
   const canTerminateRun = !!activeTradeRun && !["done", "partial", "failed"].includes(activeTradeRun.status);
+  const intentOrderMismatch = useMemo(() => {
+    const raw = activeTradeRun?.params?.intent_order_mismatch;
+    if (!raw || typeof raw !== "object") {
+      return null;
+    }
+    return raw as IntentOrderMismatch;
+  }, [activeTradeRun?.params]);
 
   useEffect(() => {
     if (latestTradeRun?.project_id && !ibStreamForm.project_id) {
@@ -3920,6 +4024,10 @@ export default function LiveTradePage() {
             ) : null}
           </div>
         ) : null}
+        <TradeIntentMismatchCard
+          mismatch={intentOrderMismatch}
+          message={activeTradeRun?.message}
+        />
         {activeTradeRun?.status === "stalled" ? (
           <div className="form-hint warn" style={{ marginTop: "8px" }}>
             {t("trade.runStalledHint")}

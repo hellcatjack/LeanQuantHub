@@ -120,3 +120,56 @@ def test_apply_execution_events_idempotent(monkeypatch):
             verify_session.close()
     finally:
         session.close()
+
+
+def test_apply_execution_events_idempotent_with_fractional_time(monkeypatch):
+    engine = _make_engine()
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    session = Session()
+    try:
+        payload = {
+            "client_order_id": "oi_0_0_789",
+            "symbol": "NVDA",
+            "side": "BUY",
+            "quantity": 1,
+            "order_type": "MKT",
+        }
+        result = create_trade_order(session, payload)
+        session.commit()
+
+        monkeypatch.setattr(lean_execution, "SessionLocal", Session, raising=False)
+
+        events = [
+            {
+                "tag": "oi_0_0_789",
+                "status": "Submitted",
+                "order_id": 3001,
+                "time": "2026-01-28T00:00:00.1234567Z",
+            },
+            {
+                "tag": "oi_0_0_789",
+                "status": "Filled",
+                "filled": 1,
+                "fill_price": 500.0,
+                "time": "2026-01-28T00:00:01.1234567Z",
+            },
+        ]
+        lean_execution.apply_execution_events(events)
+        lean_execution.apply_execution_events(events)
+
+        verify_session = Session()
+        try:
+            refreshed = (
+                verify_session.query(TradeOrder)
+                .filter_by(client_order_id="oi_0_0_789")
+                .one()
+            )
+            assert refreshed.status == "FILLED"
+            assert refreshed.filled_quantity == 1
+            assert refreshed.avg_fill_price == 500.0
+            assert refreshed.ib_order_id == 3001
+            assert verify_session.query(TradeFill).count() == 1
+        finally:
+            verify_session.close()
+    finally:
+        session.close()

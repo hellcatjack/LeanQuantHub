@@ -10,7 +10,7 @@ if str(BACKEND_ROOT) not in sys.path:
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.models import Base, Project, TradeRun
+from app.models import Base, Project, TradeOrder, TradeRun
 from app.schemas import TradeRunActionRequest
 from app.services import trade_executor
 import app.routes.trade as trade_routes
@@ -52,6 +52,112 @@ def test_refresh_trade_run_marks_stalled(monkeypatch):
         assert updated is True
         assert run.status == "stalled"
         assert run.stalled_at is not None
+    finally:
+        session.close()
+
+
+def test_refresh_trade_run_marks_failed_when_no_orders_submitted(monkeypatch):
+    session = _make_session()
+    try:
+        project = _seed_project(session)
+        run = TradeRun(
+            project_id=project.id,
+            decision_snapshot_id=1,
+            mode="paper",
+            status="running",
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        order_a = TradeOrder(
+            run_id=run.id,
+            client_order_id="oi_1032_1",
+            symbol="AAPL",
+            side="BUY",
+            quantity=10,
+            status="NEW",
+        )
+        order_b = TradeOrder(
+            run_id=run.id,
+            client_order_id="oi_1032_2",
+            symbol="MSFT",
+            side="BUY",
+            quantity=5,
+            status="NEW",
+        )
+        session.add_all([order_a, order_b])
+        session.commit()
+
+        monkeypatch.setattr(trade_executor, "_lean_no_orders_submitted", lambda *_a, **_k: True)
+        updated = trade_executor.refresh_trade_run_status(session, run)
+        assert updated is True
+        assert run.status == "failed"
+        assert run.message == "no_orders_submitted"
+        assert run.ended_at is not None
+
+        orders = session.query(TradeOrder).filter(TradeOrder.run_id == run.id).all()
+        assert orders
+        assert all(order.status == "CANCELED" for order in orders)
+    finally:
+        session.close()
+
+
+def test_refresh_trade_run_marks_already_held_from_positions(monkeypatch):
+    session = _make_session()
+    try:
+        project = _seed_project(session)
+        run = TradeRun(
+            project_id=project.id,
+            decision_snapshot_id=1,
+            mode="paper",
+            status="running",
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        order_a = TradeOrder(
+            run_id=run.id,
+            client_order_id="oi_1032_1",
+            symbol="AAPL",
+            side="BUY",
+            quantity=10,
+            status="NEW",
+        )
+        order_b = TradeOrder(
+            run_id=run.id,
+            client_order_id="oi_1032_2",
+            symbol="MSFT",
+            side="BUY",
+            quantity=5,
+            status="NEW",
+        )
+        session.add_all([order_a, order_b])
+        session.commit()
+
+        monkeypatch.setattr(
+            trade_executor,
+            "read_positions",
+            lambda *_a, **_k: {
+                "stale": False,
+                "items": [
+                    {"symbol": "AAPL", "quantity": 10, "avg_cost": 100.0},
+                ],
+            },
+        )
+        monkeypatch.setattr(trade_executor, "_lean_no_orders_submitted", lambda *_a, **_k: True)
+        updated = trade_executor.refresh_trade_run_status(session, run)
+        assert updated is True
+        assert run.status == "failed"
+        assert run.message == "no_orders_submitted"
+        assert run.params.get("already_held_orders") == ["AAPL"]
+
+        refreshed_a = session.query(TradeOrder).filter(TradeOrder.symbol == "AAPL").one()
+        refreshed_b = session.query(TradeOrder).filter(TradeOrder.symbol == "MSFT").one()
+        assert refreshed_a.status == "FILLED"
+        assert refreshed_a.params.get("already_held") is True
+        assert refreshed_b.status == "CANCELED"
     finally:
         session.close()
 
