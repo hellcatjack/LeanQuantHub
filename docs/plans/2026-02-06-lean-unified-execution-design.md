@@ -70,3 +70,10 @@
 - 回测与实盘订单方向/数量一致
 - 执行参数可审计
 - 无额外风控绕过
+
+## 实施进度（2026-02-06）
+- 已新增执行参数写入与测试（`backend/app/services/lean_execution_params.py`）。
+- 已新增意图订单生成（`build_intent_orders`）与对应测试。
+- 交易执行支持 Lean 意图 + 参数下发，并在配置中传递 `execution-params-path`。
+- 回测入口新增执行参数 payload 构建函数与测试。
+- Lean 算法新增执行约束函数与测试。
