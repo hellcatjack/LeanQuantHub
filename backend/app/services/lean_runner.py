@@ -126,6 +126,17 @@ def _coerce_float(value: object) -> float | None:
         return None
 
 
+def _build_execution_params_payload(params: dict) -> dict:
+    return {
+        "min_qty": int(params.get("min_qty") or 1),
+        "lot_size": int(params.get("lot_size") or 1),
+        "cash_buffer_ratio": float(params.get("cash_buffer_ratio") or 0.0),
+        "fee_bps": float(params.get("fee_bps") or 0.0),
+        "slippage_open_bps": float(params.get("slippage_open_bps") or 0.0),
+        "slippage_close_bps": float(params.get("slippage_close_bps") or 0.0),
+    }
+
+
 def _read_fee_bps(costs: object) -> float | None:
     if not isinstance(costs, dict):
         return None
