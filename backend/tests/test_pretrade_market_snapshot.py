@@ -21,6 +21,15 @@ def _no_sleep(monkeypatch):
     monkeypatch.setattr(pretrade_runner.time, "sleep", lambda *_args, **_kwargs: None)
 
 
+@pytest.fixture(autouse=True)
+def _no_positions(monkeypatch):
+    monkeypatch.setattr(
+        pretrade_runner,
+        "read_positions",
+        lambda *_args, **_kwargs: {"items": [], "stale": False},
+    )
+
+
 def _make_session():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
