@@ -37,7 +37,12 @@ test("live trade paper workflow", async ({ page }) => {
     const runButton = page.getByTestId("pretrade-weekly-run");
     // When a run is already active the button can be disabled while status is still loading.
     if (await runButton.isEnabled()) {
-      await runButton.click();
+      try {
+        // Avoid hanging the whole test when UI state flips to disabled mid-click.
+        await runButton.click({ timeout: 5_000 });
+      } catch {
+        // If the button became disabled (run already active), just continue and wait for status.
+      }
     }
   }
   await expect(pretradeStatus).toHaveAttribute(

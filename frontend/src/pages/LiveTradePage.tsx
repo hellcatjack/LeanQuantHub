@@ -200,6 +200,8 @@ interface TradeOrder {
   symbol: string;
   side: string;
   quantity: number;
+  order_type?: string | null;
+  limit_price?: number | null;
   status: string;
   realized_pnl?: number | null;
   created_at: string;
@@ -492,6 +494,7 @@ export default function LiveTradePage() {
   const [positionSelections, setPositionSelections] = useState<Record<string, boolean>>({});
   const [positionQuantities, setPositionQuantities] = useState<Record<string, string>>({});
   const [positionSessions, setPositionSessions] = useState<Record<string, string>>({});
+  const [positionOrderTypes, setPositionOrderTypes] = useState<Record<string, string>>({});
   const [positionLimitPrices, setPositionLimitPrices] = useState<Record<string, string>>({});
   const [positionActionLoading, setPositionActionLoading] = useState(false);
   const [positionActionError, setPositionActionError] = useState("");
@@ -902,10 +905,73 @@ export default function LiveTradePage() {
     return "rth";
   };
 
+  const normalizeOrderType = (value: string) => {
+    const normalized = String(value || "").trim().toUpperCase();
+    if (!normalized) {
+      return "MKT";
+    }
+    const cleaned = normalized
+      .replace(/\(.*?\)/g, "")
+      .replace(/[\s-]+/g, "_")
+      .trim();
+    if (["MKT", "MARKET", "MARKET_ORDER"].includes(cleaned)) {
+      return "MKT";
+    }
+    if (["LMT", "LIMIT", "LIMIT_ORDER"].includes(cleaned)) {
+      return "LMT";
+    }
+    if (["ADAPTIVE", "ADAPTIVE_LMT", "ADAPTIVELMT", "ADAPTIVE_LIMIT"].includes(cleaned)) {
+      return "ADAPTIVE_LMT";
+    }
+    if (["PEG_MID", "PEGMID", "MIDPOINT", "PEG_MIDPOINT"].includes(cleaned)) {
+      return "PEG_MID";
+    }
+    return cleaned;
+  };
+
+  const formatOrderTypeLabel = (value?: string | null) => {
+    const normalized = normalizeOrderType(String(value || ""));
+    if (normalized === "MKT") {
+      return t("trade.orderType.mkt");
+    }
+    if (normalized === "LMT") {
+      return t("trade.orderType.lmt");
+    }
+    if (normalized === "ADAPTIVE_LMT") {
+      return t("trade.orderType.adaptiveLmt");
+    }
+    if (normalized === "PEG_MID") {
+      return t("trade.orderType.pegMid");
+    }
+    return normalized || t("common.none");
+  };
+
+  const isLimitLikeOrderType = (value: string) => normalizeOrderType(value) !== "MKT";
+
   const updatePositionSession = (row: IBAccountPosition, key: string, session: string) => {
     const normalized = normalizeTradeSession(session);
     setPositionSessions((prev) => ({ ...prev, [key]: normalized }));
     if (normalized === "rth") {
+      return;
+    }
+    setPositionOrderTypes((prev) => ({ ...prev, [key]: "LMT" }));
+    setPositionLimitPrices((prev) => {
+      const existing = prev[key];
+      if (existing != null && String(existing).trim() !== "") {
+        return prev;
+      }
+      const fallback = Number(row.market_price ?? null);
+      if (!Number.isFinite(fallback) || fallback <= 0) {
+        return prev;
+      }
+      return { ...prev, [key]: String(fallback) };
+    });
+  };
+
+  const updatePositionOrderType = (row: IBAccountPosition, key: string, orderType: string) => {
+    const normalized = normalizeOrderType(orderType);
+    setPositionOrderTypes((prev) => ({ ...prev, [key]: normalized }));
+    if (!isLimitLikeOrderType(normalized)) {
       return;
     }
     setPositionLimitPrices((prev) => {
@@ -1047,14 +1113,16 @@ export default function LiveTradePage() {
     }
     const session = normalizeTradeSession(positionSessions[key] ?? "rth");
     const isExtended = session !== "rth";
-    const orderType = isExtended ? "LMT" : "MKT";
-    const limitPrice = isExtended ? resolvePositionLimitPrice(row, key) : null;
-    if (orderType === "LMT" && !limitPrice) {
+    const rawOrderType = normalizeOrderType(positionOrderTypes[key] ?? "MKT");
+    const orderType = isExtended ? "LMT" : rawOrderType;
+    const needsLimit = isLimitLikeOrderType(orderType);
+    const limitPrice = needsLimit ? resolvePositionLimitPrice(row, key) : null;
+    if (needsLimit && !limitPrice) {
       setPositionActionError(t("trade.positionActionErrorInvalidLimitPrice"));
       return;
     }
     const confirmed = window.confirm(
-      orderType === "LMT"
+      needsLimit
         ? t("trade.positionOrderConfirmLimit", {
             side,
             symbol: row.symbol,
@@ -1077,7 +1145,7 @@ export default function LiveTradePage() {
       side,
       quantity,
       order_type: orderType,
-      limit_price: orderType === "LMT" ? limitPrice : undefined,
+      limit_price: needsLimit ? limitPrice : undefined,
       params: {
         account: row.account || undefined,
         currency: row.currency || undefined,
@@ -1101,14 +1169,16 @@ export default function LiveTradePage() {
     const side: "BUY" | "SELL" = (row.position ?? 0) >= 0 ? "SELL" : "BUY";
     const session = normalizeTradeSession(positionSessions[key] ?? "rth");
     const isExtended = session !== "rth";
-    const orderType = isExtended ? "LMT" : "MKT";
-    const limitPrice = isExtended ? resolvePositionLimitPrice(row, key) : null;
-    if (orderType === "LMT" && !limitPrice) {
+    const rawOrderType = normalizeOrderType(positionOrderTypes[key] ?? "MKT");
+    const orderType = isExtended ? "LMT" : rawOrderType;
+    const needsLimit = isLimitLikeOrderType(orderType);
+    const limitPrice = needsLimit ? resolvePositionLimitPrice(row, key) : null;
+    if (needsLimit && !limitPrice) {
       setPositionActionError(t("trade.positionActionErrorInvalidLimitPrice"));
       return;
     }
     const confirmed = window.confirm(
-      orderType === "LMT"
+      needsLimit
         ? t("trade.positionOrderConfirmLimit", {
             side,
             symbol: row.symbol,
@@ -1131,7 +1201,7 @@ export default function LiveTradePage() {
       side,
       quantity: qtyValue,
       order_type: orderType,
-      limit_price: orderType === "LMT" ? limitPrice : undefined,
+      limit_price: needsLimit ? limitPrice : undefined,
       params: {
         account: row.account || undefined,
         currency: row.currency || undefined,
@@ -1160,20 +1230,37 @@ export default function LiveTradePage() {
       }
     }
     const baseRunId = selectedRunId ?? latestTradeRun?.id ?? 0;
-    const orders = positions.map((row, idx) => ({
-      client_order_id: buildOrderTag(baseRunId, idx),
-      symbol: row.symbol,
-      side: row.position >= 0 ? "SELL" : "BUY",
-      quantity: Math.abs(row.position ?? 0),
-      order_type: "MKT",
-      params: {
-        account: row.account || undefined,
-        currency: row.currency || undefined,
-        source: "manual",
-        project_id: selectedProjectId ? Number(selectedProjectId) : undefined,
-        mode: ibSettings?.mode || ibSettingsForm.mode || "paper",
-      },
-    }));
+    const orders: Array<Record<string, any>> = [];
+    for (const [idx, row] of positions.entries()) {
+      const key = buildPositionKey(row);
+      const session = normalizeTradeSession(positionSessions[key] ?? "rth");
+      const isExtended = session !== "rth";
+      const rawOrderType = normalizeOrderType(positionOrderTypes[key] ?? "MKT");
+      const orderType = isExtended ? "LMT" : rawOrderType;
+      const needsLimit = isLimitLikeOrderType(orderType);
+      const limitPrice = needsLimit ? resolvePositionLimitPrice(row, key) : null;
+      if (needsLimit && !limitPrice) {
+        setPositionActionError(t("trade.positionActionErrorInvalidLimitPrice"));
+        return;
+      }
+      orders.push({
+        client_order_id: buildOrderTag(baseRunId, idx),
+        symbol: row.symbol,
+        side: row.position >= 0 ? "SELL" : "BUY",
+        quantity: Math.abs(row.position ?? 0),
+        order_type: orderType,
+        limit_price: needsLimit ? limitPrice : undefined,
+        params: {
+          account: row.account || undefined,
+          currency: row.currency || undefined,
+          source: "manual",
+          project_id: selectedProjectId ? Number(selectedProjectId) : undefined,
+          mode: ibSettings?.mode || ibSettingsForm.mode || "paper",
+          session,
+          allow_outside_rth: isExtended,
+        },
+      });
+    }
     await submitPositionOrders(orders);
   };
 
@@ -3106,6 +3193,8 @@ export default function LiveTradePage() {
                   const qtyValue =
                     positionQuantities[key] ?? String(Math.abs(row.position ?? 0) || 1);
                   const sessionValue = normalizeTradeSession(positionSessions[key] ?? "rth");
+                  const rawOrderType = normalizeOrderType(positionOrderTypes[key] ?? "MKT");
+                  const orderTypeValue = sessionValue === "rth" ? rawOrderType : "LMT";
                   const fallbackLimit = Number(row.market_price ?? null);
                   const limitValue =
                     positionLimitPrices[key] ??
@@ -3156,7 +3245,24 @@ export default function LiveTradePage() {
                             <option value="post">{t("trade.manualSession.post")}</option>
                             <option value="night">{t("trade.manualSession.night")}</option>
                           </select>
-                          {sessionValue !== "rth" && (
+                          <select
+                            className="form-select positions-action-select"
+                            style={{ width: "150px" }}
+                            value={orderTypeValue}
+                            data-testid="positions-action-order-type"
+                            disabled={sessionValue !== "rth"}
+                            onChange={(event) =>
+                              updatePositionOrderType(row, key, event.target.value)
+                            }
+                          >
+                            <option value="MKT">{formatOrderTypeLabel("MKT")}</option>
+                            <option value="LMT">{formatOrderTypeLabel("LMT")}</option>
+                            <option value="ADAPTIVE_LMT">
+                              {formatOrderTypeLabel("ADAPTIVE_LMT")}
+                            </option>
+                            <option value="PEG_MID">{formatOrderTypeLabel("PEG_MID")}</option>
+                          </select>
+                          {isLimitLikeOrderType(orderTypeValue) && (
                             <input
                               className="form-input positions-action-limit"
                               style={{ width: "110px" }}
@@ -3260,6 +3366,7 @@ export default function LiveTradePage() {
                     <th>{t("trade.orderTable.symbol")}</th>
                     <th>{t("trade.orderTable.side")}</th>
                     <th>{t("trade.orderTable.qty")}</th>
+                    <th>{t("trade.orderTable.type")}</th>
                     <th>{t("trade.orderTable.realizedPnl")}</th>
                     <th>{t("trade.orderTable.status")}</th>
                     <th>{t("trade.orderTable.createdAt")}</th>
@@ -3274,6 +3381,15 @@ export default function LiveTradePage() {
                         <td>{order.symbol || t("common.none")}</td>
                         <td>{formatSide(order.side)}</td>
                         <td>{order.quantity ?? t("common.none")}</td>
+                        <td>
+                          {formatOrderTypeLabel(order.order_type)}
+                          {order.limit_price != null ? (
+                            <span style={{ opacity: 0.75 }}>
+                              {" "}
+                              @ {formatNumber(order.limit_price, 4)}
+                            </span>
+                          ) : null}
+                        </td>
                         <td>{formatNumber(order.realized_pnl ?? null)}</td>
                         <td>{formatStatus(order.status)}</td>
                         <td>{formatDateTime(order.created_at)}</td>
@@ -3281,7 +3397,7 @@ export default function LiveTradePage() {
                     ))
                   ) : (
                     <tr>
-                      <td colSpan={8} className="empty-state">
+                      <td colSpan={9} className="empty-state">
                         {t("trade.orderEmpty")}
                       </td>
                     </tr>

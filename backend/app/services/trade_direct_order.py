@@ -13,6 +13,7 @@ from app.services.lean_bridge_paths import resolve_bridge_root
 from app.services.lean_bridge_reader import read_quotes
 from app.services.trade_direct_intent import build_direct_intent_items
 from app.services.trade_orders import create_trade_order
+from app.services.trade_order_types import is_limit_like, normalize_order_type, validate_order_type
 from app.services.ib_client_id_pool import (
     ClientIdPoolExhausted,
     attach_lease_pid,
@@ -53,13 +54,12 @@ def validate_direct_order_payload(payload: dict[str, Any]) -> tuple[bool, str]:
     if side not in {"BUY", "SELL"}:
         return False, "side_invalid"
 
-    order_type = str(payload.get("order_type") or "MKT").strip().upper()
-    if order_type == "LIMIT":
-        order_type = "LMT"
-    if order_type not in {"MKT", "LMT"}:
+    try:
+        order_type = validate_order_type(payload.get("order_type") or "MKT")
+    except ValueError:
         return False, "order_type_invalid"
 
-    if order_type == "LMT" and payload.get("limit_price") is not None:
+    if is_limit_like(order_type) and payload.get("limit_price") is not None:
         try:
             value = float(payload.get("limit_price"))
         except (TypeError, ValueError):
@@ -143,7 +143,7 @@ def _infer_outside_rth(params: dict[str, Any] | None) -> tuple[bool, str]:
     return False, session
 
 
-def _pick_quote_limit_price(item: dict[str, Any], *, side: str) -> float | None:
+def _pick_quote_limit_price(item: dict[str, Any], *, side: str, prefer_mid: bool = False) -> float | None:
     if not isinstance(item, dict):
         return None
     last = item.get("last")
@@ -162,10 +162,14 @@ def _pick_quote_limit_price(item: dict[str, Any], *, side: str) -> float | None:
     except (TypeError, ValueError):
         ask_value = None
 
+    if prefer_mid and bid_value is not None and ask_value is not None and bid_value > 0 and ask_value > 0:
+        return (bid_value + ask_value) / 2.0
+
     # Prefer last trade if available. Otherwise prefer a reasonable point for the side.
     if last_value is not None and last_value > 0:
         return last_value
-    if bid_value is not None and ask_value is not None and bid_value > 0 and ask_value > 0:
+
+    if (not prefer_mid) and bid_value is not None and ask_value is not None and bid_value > 0 and ask_value > 0:
         return (bid_value + ask_value) / 2.0
     normalized_side = str(side or "").strip().upper()
     if normalized_side == "BUY":
@@ -185,7 +189,7 @@ def _pick_quote_limit_price(item: dict[str, Any], *, side: str) -> float | None:
     return None
 
 
-def _resolve_limit_price_from_bridge(*, symbol: str, side: str) -> float | None:
+def _resolve_limit_price_from_bridge(*, symbol: str, side: str, prefer_mid: bool = False) -> float | None:
     symbol_key = _normalize_symbol(symbol)
     if not symbol_key:
         return None
@@ -196,7 +200,7 @@ def _resolve_limit_price_from_bridge(*, symbol: str, side: str) -> float | None:
             continue
         if _normalize_symbol(item.get("symbol")) != symbol_key:
             continue
-        price = _pick_quote_limit_price(item, side=side)
+        price = _pick_quote_limit_price(item, side=side, prefer_mid=prefer_mid)
         if price is not None and price > 0:
             return float(price)
     return None
@@ -365,12 +369,14 @@ def submit_direct_order(session, payload: dict[str, Any]) -> TradeDirectOrderOut
     params.setdefault("mode", mode)
     params.setdefault("project_id", project_id)
 
-    order_type = str(payload.get("order_type") or "MKT").strip().upper() or "MKT"
-    if order_type == "LIMIT":
-        order_type = "LMT"
+    order_type = validate_order_type(payload.get("order_type") or "MKT")
     limit_price = payload.get("limit_price")
-    if order_type == "LMT" and limit_price is None:
-        picked = _resolve_limit_price_from_bridge(symbol=str(payload.get("symbol") or ""), side=str(payload.get("side") or ""))
+    if is_limit_like(order_type) and limit_price is None:
+        picked = _resolve_limit_price_from_bridge(
+            symbol=str(payload.get("symbol") or ""),
+            side=str(payload.get("side") or ""),
+            prefer_mid=order_type == "PEG_MID",
+        )
         if picked is None:
             raise ValueError("limit_price_unavailable")
         limit_price = float(picked)

@@ -11,6 +11,10 @@ def write_order_intent(
     items: list[dict],
     output_dir: Path,
     run_id: int | None = None,
+    order_type: str | None = None,
+    limit_price_map: dict[str, float] | None = None,
+    outside_rth: bool | None = None,
+    execution_session: str | None = None,
 ) -> str:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -23,15 +27,24 @@ def write_order_intent(
             intent_id = f"{intent_prefix}_{idx}"
         else:
             intent_id = f"{intent_prefix}:{idx}:{symbol or 'NA'}"
-        payload.append(
-            {
-                "order_intent_id": intent_id,
-                "symbol": symbol or item.get("symbol"),
-                "weight": item.get("weight"),
-                "snapshot_date": item.get("snapshot_date"),
-                "rebalance_date": item.get("rebalance_date"),
-            }
-        )
+        record = {
+            "order_intent_id": intent_id,
+            "symbol": symbol or item.get("symbol"),
+            "weight": item.get("weight"),
+            "snapshot_date": item.get("snapshot_date"),
+            "rebalance_date": item.get("rebalance_date"),
+        }
+        if order_type:
+            record["order_type"] = order_type
+        if limit_price_map is not None and symbol:
+            picked = limit_price_map.get(symbol)
+            if picked is not None:
+                record["limit_price"] = picked
+        if outside_rth is not None:
+            record["outside_rth"] = bool(outside_rth)
+        if execution_session:
+            record["session"] = str(execution_session).strip().lower()
+        payload.append(record)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return str(path)
 

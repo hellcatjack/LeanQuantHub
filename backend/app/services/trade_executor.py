@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, time, timezone
 from typing import Any
 import csv
 import json
 import os
 import re
+from zoneinfo import ZoneInfo
 
 from app.core.config import settings
 from app.db import SessionLocal
@@ -20,6 +21,7 @@ from app.services.trade_guard import (
 )
 from app.services.trade_order_builder import build_intent_orders, build_orders
 from app.services.trade_orders import create_trade_order, update_trade_order_status
+from app.services.trade_order_types import is_limit_like, normalize_order_type, validate_order_type
 from app.services.trade_risk_engine import evaluate_orders
 from app.services.trade_alerts import notify_trade_alert
 from app.services.ib_account import fetch_account_summary
@@ -61,6 +63,129 @@ def _pick_price(snapshot: dict[str, Any] | None) -> float | None:
             except (TypeError, ValueError):
                 continue
     return None
+
+
+def _pick_quote_limit_price(
+    snapshot: dict[str, Any] | None,
+    *,
+    side: str,
+    prefer_mid: bool = False,
+) -> float | None:
+    if not snapshot:
+        return None
+    last = snapshot.get("last")
+    bid = snapshot.get("bid")
+    ask = snapshot.get("ask")
+    try:
+        last_value = float(last) if last is not None else None
+    except (TypeError, ValueError):
+        last_value = None
+    try:
+        bid_value = float(bid) if bid is not None else None
+    except (TypeError, ValueError):
+        bid_value = None
+    try:
+        ask_value = float(ask) if ask is not None else None
+    except (TypeError, ValueError):
+        ask_value = None
+
+    if prefer_mid and bid_value is not None and ask_value is not None and bid_value > 0 and ask_value > 0:
+        return (bid_value + ask_value) / 2.0
+
+    if last_value is not None and last_value > 0:
+        return last_value
+
+    if (not prefer_mid) and bid_value is not None and ask_value is not None and bid_value > 0 and ask_value > 0:
+        return (bid_value + ask_value) / 2.0
+
+    normalized_side = str(side or "").strip().upper()
+    if normalized_side == "BUY":
+        if ask_value is not None and ask_value > 0:
+            return ask_value
+        if bid_value is not None and bid_value > 0:
+            return bid_value
+    if normalized_side == "SELL":
+        if bid_value is not None and bid_value > 0:
+            return bid_value
+        if ask_value is not None and ask_value > 0:
+            return ask_value
+    if bid_value is not None and bid_value > 0:
+        return bid_value
+    if ask_value is not None and ask_value > 0:
+        return ask_value
+    return None
+
+
+def _infer_auto_session(now: datetime) -> tuple[str, bool]:
+    """Infer execution session for auto (snapshot-based) runs.
+
+    We use settings.market_timezone/open/close to decide "rth" vs extended sessions.
+    """
+
+    current = now
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    try:
+        zone = ZoneInfo(settings.market_timezone)
+    except Exception:
+        zone = timezone.utc
+    local = current.astimezone(zone)
+    if is_market_open(current):
+        return "rth", False
+    # Extended hours split for better UI/logging. Defaults follow US equities convention.
+    # pre: 04:00 - open, post: close - 20:00, night: others.
+    open_time = time(9, 30)
+    close_time = time(16, 0)
+    pre_start = time(4, 0)
+    post_end = time(20, 0)
+    now_time = local.time()
+    if local.weekday() >= 5:
+        return "night", True
+    if pre_start <= now_time < open_time:
+        return "pre", True
+    if close_time < now_time <= post_end:
+        return "post", True
+    return "night", True
+
+
+def _build_limit_price_map(
+    symbols: list[str],
+    *,
+    side_map: dict[str, str],
+    order_type: str,
+    fallback_prices: dict[str, float] | None = None,
+) -> dict[str, float]:
+    symbol_set = {symbol for symbol in symbols if symbol}
+    quotes = read_quotes(_resolve_bridge_root())
+    items = quotes.get("items") if isinstance(quotes.get("items"), list) else []
+    quote_map: dict[str, dict[str, Any]] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        symbol = str(item.get("symbol") or "").strip().upper()
+        if not symbol or symbol not in symbol_set:
+            continue
+        payload = item.get("data") if isinstance(item.get("data"), dict) else item
+        quote_map[symbol] = payload if isinstance(payload, dict) else {}
+
+    prefer_mid = normalize_order_type(order_type) == "PEG_MID"
+    out: dict[str, float] = {}
+    for symbol in sorted(symbol_set):
+        snapshot = quote_map.get(symbol)
+        side = side_map.get(symbol, "")
+        picked = _pick_quote_limit_price(snapshot, side=side, prefer_mid=prefer_mid)
+        if picked is not None and picked > 0:
+            out[symbol] = float(picked)
+
+    if fallback_prices:
+        for symbol, price in fallback_prices.items():
+            if symbol in symbol_set and symbol not in out and price is not None and float(price) > 0:
+                out[symbol] = float(price)
+
+    missing = sorted(symbol_set - set(out.keys()))
+    if missing:
+        out.update(_load_fallback_prices(missing))
+    return out
 
 
 def _resolve_bridge_root() -> Path:
@@ -810,12 +935,78 @@ def execute_trade_run(
                     dry_run=dry_run,
                 )
 
+            symbols = sorted({item.get("symbol") for item in items if item.get("symbol")})
+            price_map = _build_price_map(symbols)
+
+            now = datetime.utcnow()
+            session_value = str(
+                params.get("session")
+                or params.get("execution_session")
+                or params.get("trading_session")
+                or ""
+            ).strip().lower()
+            allow_outside = params.get("allow_outside_rth")
+            if allow_outside is None:
+                allow_outside = params.get("outside_rth")
+            extended = {
+                "pre",
+                "premarket",
+                "pre_market",
+                "post",
+                "after",
+                "afterhours",
+                "after_hours",
+                "night",
+                "overnight",
+            }
+            if allow_outside is None and session_value:
+                allow_outside = session_value in extended
+            if not session_value or allow_outside is None:
+                inferred_session, inferred_outside = _infer_auto_session(now)
+                if not session_value:
+                    session_value = inferred_session
+                if allow_outside is None:
+                    allow_outside = inferred_outside
+
+            order_type_raw = params.get("order_type")
+            if order_type_raw:
+                order_type = validate_order_type(order_type_raw)
+            else:
+                order_type = "ADAPTIVE_LMT" if session_value == "rth" else "LMT"
+            params["order_type"] = order_type
+            params.setdefault("execution_session", session_value)
+            params.setdefault("allow_outside_rth", bool(allow_outside))
+
+            side_map: dict[str, str] = {}
+            for item in items:
+                symbol = str(item.get("symbol") or "").strip().upper()
+                if not symbol:
+                    continue
+                try:
+                    weight = float(item.get("weight") or 0.0)
+                except (TypeError, ValueError):
+                    weight = 0.0
+                side_map[symbol] = "BUY" if weight >= 0 else "SELL"
+
+            limit_price_map: dict[str, float] | None = None
+            if is_limit_like(order_type):
+                limit_price_map = _build_limit_price_map(
+                    symbols,
+                    side_map=side_map,
+                    order_type=order_type,
+                    fallback_prices=price_map,
+                )
+
             intent_path = write_order_intent(
                 session,
                 snapshot_id=run.decision_snapshot_id,
                 items=items,
                 output_dir=ARTIFACT_ROOT / "order_intents",
                 run_id=run.id,
+                order_type=order_type,
+                limit_price_map=limit_price_map,
+                outside_rth=bool(allow_outside),
+                execution_session=session_value,
             )
             params["order_intent_path"] = intent_path
             execution_params = {
@@ -835,9 +1026,6 @@ def execute_trade_run(
             run.params = dict(params)
             run.updated_at = datetime.utcnow()
             session.commit()
-
-            symbols = sorted({item.get("symbol") for item in items if item.get("symbol")})
-            price_map = _build_price_map(symbols)
 
             if "portfolio_value" not in params:
                 account_summary = fetch_account_summary(session)
@@ -859,7 +1047,7 @@ def execute_trade_run(
             portfolio_value = float(params.get("portfolio_value") or 0.0)
             cash_buffer_ratio = float(params.get("cash_buffer_ratio") or 0.0)
             lot_size = int(params.get("lot_size") or 1)
-            order_type = str(params.get("order_type") or "MKT")
+            order_type = validate_order_type(params.get("order_type") or "MKT")
             limit_price = params.get("limit_price")
             min_qty = int(params.get("min_qty") or 1)
             if not skip_build and portfolio_value <= 0:
@@ -878,7 +1066,11 @@ def execute_trade_run(
                     dry_run=dry_run,
                 )
             if skip_build:
-                draft_orders = build_intent_orders(items)
+                draft_orders = build_intent_orders(
+                    items,
+                    order_type=order_type,
+                    limit_price_map=limit_price_map,
+                )
             else:
                 draft_orders = build_orders(
                     items,

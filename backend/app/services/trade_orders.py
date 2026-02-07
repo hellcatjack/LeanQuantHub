@@ -8,6 +8,7 @@ from sqlalchemy import func
 
 from app.models import TradeOrder, TradeOrderClientIdSeq, TradeRun
 from app.services.trade_run_progress import update_trade_run_progress
+from app.services.trade_order_types import is_limit_like, validate_order_type
 
 
 ALLOWED_TRANSITIONS: dict[str, set[str]] = {
@@ -37,7 +38,7 @@ def _normalize_side(value: str) -> str:
 
 
 def _normalize_order_type(value: str) -> str:
-    return str(value or "").strip().upper()
+    return validate_order_type(value)
 
 
 def _base36(value: int) -> str:
@@ -123,9 +124,7 @@ def _validate_order_payload(payload: dict[str, Any]) -> None:
     side = _normalize_side(payload.get("side"))
     if side not in {"BUY", "SELL"}:
         raise ValueError("side_invalid")
-    order_type = _normalize_order_type(payload.get("order_type") or "MKT")
-    if order_type not in {"MKT", "LMT"}:
-        raise ValueError("order_type_invalid")
+    order_type = validate_order_type(payload.get("order_type") or "MKT")
     quantity = payload.get("quantity")
     try:
         quantity_value = float(quantity)
@@ -137,8 +136,15 @@ def _validate_order_payload(payload: dict[str, Any]) -> None:
         raise ValueError("quantity_invalid")
     if quantity_value == 0 and not intent_only:
         raise ValueError("quantity_invalid")
-    if order_type == "LMT" and payload.get("limit_price") is None:
-        raise ValueError("limit_price_required")
+    if is_limit_like(order_type):
+        if payload.get("limit_price") is None:
+            raise ValueError("limit_price_required")
+        try:
+            limit_price = float(payload.get("limit_price"))
+        except (TypeError, ValueError):
+            raise ValueError("limit_price_invalid") from None
+        if limit_price <= 0:
+            raise ValueError("limit_price_invalid")
 
 
 def create_trade_order(session, payload: dict[str, Any], run_id: int | None = None) -> OrderCreateResult:
