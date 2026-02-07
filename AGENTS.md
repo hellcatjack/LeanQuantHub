@@ -170,10 +170,14 @@ Agent **不得** 因为担心 token / context 容量不足而降低工程质量�
 
 ---
 
-## 3. 子代理执行规则（强制）
-1) 子代理生命周期内禁止停下来询问问题（除非主代理明确要求其提问）。
-2) 所有需求与澄清由主代理先确认后再下发给子代理。
-3) 子代理必须自动闭环：实现 → 测试 → 修复 → 复测 → 提交 → 自检；不得半途等待或挂起。
+## 3. 子代理执行规则
+1) 子代理必须自动闭环：实现 → 测试 → 修复 → 复测 → 提交 → 自检；不得半途等待或挂起。
+2) Multi-agent safety: do not create/apply/drop git stash entries unless explicitly requested (this includes git pull --rebase --autostash). Assume other agents may be working; keep unrelated WIP untouched and avoid cross-cutting state changes.
+3) Multi-agent safety: when the user says "push", you may git pull --rebase to integrate latest changes (never discard other agents' work). When the user says "commit", scope to your changes only. When the user says "commit all", commit everything in grouped chunks.
+4) Multi-agent safety: do not create/remove/modify git worktree checkouts (or edit .worktrees/*) unless explicitly requested.
+5) Multi-agent safety: do not switch branches / check out a different branch unless explicitly requested.
+6) Multi-agent safety: running multiple agents is OK as long as each agent has its own session.
+7) Multi-agent safety: when you see unrecognized files, keep going; focus on your changes and commit only those.
 
 ---
 
