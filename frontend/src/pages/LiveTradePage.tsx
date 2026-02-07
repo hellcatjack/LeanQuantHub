@@ -726,13 +726,26 @@ export default function LiveTradePage() {
   );
 
   const createTradeRun = async () => {
+    setCreateRunError("");
+    setCreateRunResult("");
     if (!selectedProjectId) {
       setCreateRunError(t("trade.executeBlockedProject"));
       return;
     }
+    if (!snapshot?.id) {
+      setCreateRunError(t("trade.snapshotMissing"));
+      return;
+    }
+    if (!snapshotReady) {
+      const raw = String(snapshot?.status || "").trim();
+      const key = raw ? `common.status.${raw}` : "";
+      const translated = key ? t(key) : "";
+      const normalized =
+        translated && !translated.startsWith("common.status.") ? translated : raw || "unknown";
+      setCreateRunError(t("trade.snapshotNotReady", { status: normalized }));
+      return;
+    }
     setCreateRunLoading(true);
-    setCreateRunError("");
-    setCreateRunResult("");
     try {
       const mode = (ibSettings?.mode || ibSettingsForm.mode || "paper").toLowerCase();
       const payload = {
@@ -2419,12 +2432,32 @@ export default function LiveTradePage() {
     return projects.find((project) => String(project.id) === selectedProjectId) || null;
   }, [projects, selectedProjectId]);
 
-  const snapshotReady = useMemo(() => Boolean(snapshot?.id), [snapshot?.id]);
+  const snapshotReady = useMemo(() => {
+    if (!snapshot?.id) {
+      return false;
+    }
+    return String(snapshot.status || "").toLowerCase() === "success";
+  }, [snapshot?.id, snapshot?.status]);
 
-  const canExecute = useMemo(
-    () => Boolean(selectedProjectId) && snapshotReady,
-    [selectedProjectId, snapshotReady]
-  );
+  const snapshotStatusText = useMemo(() => {
+    if (snapshotLoading) {
+      return t("common.actions.loading");
+    }
+    if (!snapshot?.id) {
+      return t("trade.snapshotMissing");
+    }
+    if (String(snapshot.status || "").toLowerCase() === "success") {
+      return t("trade.snapshotReady");
+    }
+    const raw = String(snapshot.status || "").trim();
+    const key = raw ? `common.status.${raw}` : "";
+    const translated = key ? t(key) : "";
+    const normalized =
+      translated && !translated.startsWith("common.status.") ? translated : raw || "unknown";
+    return t("trade.snapshotNotReady", { status: normalized });
+  }, [snapshot?.id, snapshot?.status, snapshotLoading, t]);
+
+  const canExecute = useMemo(() => Boolean(selectedProjectId), [selectedProjectId]);
 
   const statusLabel = useMemo(() => {
     if (!isConfigured) {
@@ -2985,13 +3018,7 @@ export default function LiveTradePage() {
             <div className="meta-list" style={{ marginTop: "12px" }}>
               <div className="meta-row">
                 <span>{t("trade.snapshotStatus")}</span>
-                <strong data-testid="live-trade-snapshot-status">
-                  {snapshotLoading
-                    ? t("common.actions.loading")
-                    : snapshotReady
-                      ? t("trade.snapshotReady")
-                      : t("trade.snapshotMissing")}
-                </strong>
+                <strong data-testid="live-trade-snapshot-status">{snapshotStatusText}</strong>
               </div>
               <div className="meta-row">
                 <span>{t("trade.snapshotDate")}</span>
