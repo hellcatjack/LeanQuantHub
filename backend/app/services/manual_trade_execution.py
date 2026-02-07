@@ -6,6 +6,7 @@ from pathlib import Path
 
 from app.core.config import settings
 from app.models import TradeOrder
+from app.services.lean_bridge_paths import resolve_bridge_root
 from app.services.lean_execution import build_execution_config, launch_execution_async
 
 ARTIFACT_ROOT = Path(settings.artifact_root) if settings.artifact_root else Path("/app/stocklean/artifacts")
@@ -64,11 +65,14 @@ def execute_manual_order(
     mode: str,
 ) -> str:
     intent_path = write_manual_order_intent(order, output_dir=ARTIFACT_ROOT / "order_intents")
+    bridge_root = resolve_bridge_root()
+    output_dir = bridge_root / f"direct_{order.id}"
     config = build_execution_config(
         intent_path=intent_path,
         brokerage="InteractiveBrokersBrokerage",
         project_id=project_id,
         mode=mode,
+        lean_bridge_output_dir=str(output_dir),
     )
     config_dir = ARTIFACT_ROOT / "lean_execution"
     config_dir.mkdir(parents=True, exist_ok=True)

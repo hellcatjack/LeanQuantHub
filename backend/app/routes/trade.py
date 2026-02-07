@@ -538,21 +538,75 @@ def list_trade_orders(
                 ingest_execution_events(str(events_path), session=session)
             else:
                 ingest_execution_events(str(events_path))
+        # Ingest per-run / per-direct execution events for active orders before reconciling
+        # open orders. This prevents us from incorrectly treating filled orders (which drop out
+        # of the open-orders snapshot) as canceled when the only fill signal lives in the
+        # run-specific execution output directory.
+        active_statuses = ["NEW", "SUBMITTED", "PARTIAL"]
+        active_query = (
+            session.query(TradeOrder.id, TradeOrder.run_id)
+            .filter(TradeOrder.status.in_(active_statuses))
+            .order_by(TradeOrder.id.asc())
+        )
+        if run_id is not None:
+            active_query = active_query.filter(TradeOrder.run_id == run_id)
+        active_rows = active_query.all()
+        run_ids = sorted({row.run_id for row in active_rows if row.run_id})
+        if run_ids:
+            for run in session.query(TradeRun).filter(TradeRun.id.in_(run_ids)).all():
+                exec_output_dir = None
+                if isinstance(run.params, dict):
+                    lean_exec = run.params.get("lean_execution")
+                    if isinstance(lean_exec, dict):
+                        exec_output_dir = lean_exec.get("output_dir") or None
+                if not exec_output_dir:
+                    continue
+                run_events = Path(str(exec_output_dir)) / "execution_events.jsonl"
+                if not run_events.exists():
+                    continue
+                if "session" in ingest_params:
+                    ingest_execution_events(str(run_events), session=session)
+                else:
+                    ingest_execution_events(str(run_events))
+        for row in active_rows:
+            if row.run_id:
+                continue
+            direct_events = bridge_root / f"direct_{row.id}" / "execution_events.jsonl"
+            if not direct_events.exists():
+                continue
+            if "session" in ingest_params:
+                ingest_execution_events(str(direct_events), session=session)
+            else:
+                ingest_execution_events(str(direct_events))
         open_orders_payload = read_open_orders(bridge_root)
-        sync_trade_orders_from_open_orders(session, open_orders_payload, mode=mode)
+        sync_trade_orders_from_open_orders(session, open_orders_payload, mode=mode, run_id=run_id)
         positions_payload = read_positions(resolve_bridge_root())
         baseline = ensure_positions_baseline(resolve_bridge_root(), positions_payload)
         realized = compute_realized_pnl(session, baseline)
-        query = session.query(TradeOrder).order_by(TradeOrder.created_at.desc())
+        query = session.query(TradeOrder).order_by(TradeOrder.updated_at.desc(), TradeOrder.id.desc())
         if run_id is not None:
             query = query.filter(TradeOrder.run_id == run_id)
         total = query.order_by(None).count()
         response.headers["X-Total-Count"] = str(total)
         orders = query.offset(offset).limit(limit).all()
-        # Direct orders are executed via per-order Lean bridge runs that write events into
-        # `lean_bridge/direct_{id}/execution_events.jsonl`. Ingest them for the returned page
-        # so the UI doesn't depend on visiting the receipts screen to see updated statuses.
+        # Best-effort ingest for the returned page so the UI sees latest statuses even if
+        # orders transitioned to terminal states before they were included in the active set.
         for order in orders:
+            if order.run_id:
+                run = session.get(TradeRun, order.run_id)
+                exec_output_dir = None
+                if run is not None and isinstance(run.params, dict):
+                    lean_exec = run.params.get("lean_execution")
+                    if isinstance(lean_exec, dict):
+                        exec_output_dir = lean_exec.get("output_dir") or None
+                if exec_output_dir:
+                    run_events = Path(str(exec_output_dir)) / "execution_events.jsonl"
+                    if run_events.exists():
+                        if "session" in ingest_params:
+                            ingest_execution_events(str(run_events), session=session)
+                        else:
+                            ingest_execution_events(str(run_events))
+                continue
             direct_events = bridge_root / f"direct_{order.id}" / "execution_events.jsonl"
             if not direct_events.exists():
                 continue
@@ -595,7 +649,14 @@ def get_trade_run_orders(
 ):
     with get_session() as session:
         bridge_root = resolve_bridge_root()
-        events_path = bridge_root / "execution_events.jsonl"
+        run = session.get(TradeRun, run_id)
+        events_path = None
+        if run is not None and isinstance(run.params, dict):
+            lean_exec = run.params.get("lean_execution")
+            if isinstance(lean_exec, dict) and lean_exec.get("output_dir"):
+                events_path = Path(str(lean_exec["output_dir"])) / "execution_events.jsonl"
+        if events_path is None:
+            events_path = bridge_root / "execution_events.jsonl"
         if events_path.exists():
             try:
                 ingest_params = inspect.signature(ingest_execution_events).parameters
@@ -605,14 +666,8 @@ def get_trade_run_orders(
                 ingest_execution_events(str(events_path), session=session)
             else:
                 ingest_execution_events(str(events_path))
-
-        try:
-            settings_row = get_or_create_ib_settings(session)
-            mode = str(getattr(settings_row, "mode", "") or "paper").strip().lower() or "paper"
-        except Exception:
-            mode = None
-        open_orders_payload = read_open_orders(bridge_root)
-        sync_trade_orders_from_open_orders(session, open_orders_payload, mode=mode)
+        if run is not None and trade_executor.refresh_trade_run_status(session, run):
+            session.commit()
         positions_payload = read_positions(resolve_bridge_root())
         baseline = ensure_positions_baseline(resolve_bridge_root(), positions_payload)
         realized = compute_realized_pnl(session, baseline)

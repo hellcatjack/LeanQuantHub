@@ -34,7 +34,17 @@ def test_reconcile_run_with_positions_marks_filled():
     Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
     session = Session()
     try:
-        run = TradeRun(project_id=1, status="running", mode="paper")
+        run = TradeRun(
+            project_id=1,
+            status="running",
+            mode="paper",
+            params={
+                "positions_baseline": {
+                    "refreshed_at": "2026-02-07T00:00:00Z",
+                    "items": [{"symbol": "AAPL", "quantity": 0.0}],
+                }
+            },
+        )
         session.add(run)
         session.commit()
         session.refresh(run)

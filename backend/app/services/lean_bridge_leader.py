@@ -208,6 +208,8 @@ def _build_leader_config(session, *, mode: str, watchlist_path: Path) -> tuple[d
     client_id = _resolve_leader_client_id(settings_row, mode=mode)
     payload["algorithm-type-name"] = "LeanBridgeSmokeAlgorithm"
     payload["brokerage"] = "InteractiveBrokersBrokerage"
+    # Prevent Lean console launcher from blocking on "Press any key to continue." if it ever exits.
+    payload.setdefault("close-automatically", True)
     payload.setdefault("data-folder", "/data/share/stock/data/lean")
     payload["ib-host"] = settings_row.host
     payload["ib-port"] = int(settings_row.port)

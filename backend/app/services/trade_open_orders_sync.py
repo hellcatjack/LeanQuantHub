@@ -7,7 +7,7 @@ from app.models import TradeOrder, TradeRun
 from app.services.trade_orders import update_trade_order_status
 
 
-_ACTIVE_ORDER_STATUSES = {"NEW", "SUBMITTED", "PARTIAL"}
+_ACTIVE_ORDER_STATUSES = {"SUBMITTED", "PARTIAL"}
 _TERMINAL_ORDER_STATUSES = {"FILLED", "CANCELED", "CANCELLED", "REJECTED"}
 
 
@@ -39,6 +39,9 @@ def sync_trade_orders_from_open_orders(
     open_orders_payload: dict[str, Any] | None,
     *,
     mode: str | None = None,
+    run_id: int | None = None,
+    manual_only: bool = False,
+    include_new: bool = False,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Reconcile TradeOrder.status with IB open orders snapshot from Lean bridge.
@@ -50,8 +53,13 @@ def sync_trade_orders_from_open_orders(
     mode_value = str(mode or "").strip().lower()
     summary: dict[str, Any] = {
         "mode": mode_value or None,
+        "run_id": int(run_id) if run_id is not None else None,
+        "manual_only": bool(manual_only),
+        "include_new": bool(include_new),
         "checked": 0,
         "updated": 0,
+        "updated_new_to_submitted": 0,
+        "updated_missing_to_canceled": 0,
         "skipped": 0,
         "skipped_no_tag": 0,
         "skipped_mode_mismatch": 0,
@@ -62,16 +70,23 @@ def sync_trade_orders_from_open_orders(
         return summary
 
     open_tags = _extract_open_tags(open_orders_payload)
-    if not open_tags:
-        # Still reconcile: if there are no open tags, all active orders with a tag can be closed.
-        open_tags = set()
+    open_items = open_orders_payload.get("items") if isinstance(open_orders_payload.get("items"), list) else []
+    if not open_tags and open_items:
+        # If IB returns open orders but none of them have tags, we can't safely reconcile by tag.
+        # This can happen when older orders were placed without OrderRef propagation. Treat the
+        # snapshot as unusable and avoid incorrectly cancelling active orders.
+        summary["skipped_no_tag"] = summary.get("skipped_no_tag", 0) + 1
+        return summary
 
-    orders = (
-        session.query(TradeOrder)
-        .filter(TradeOrder.status.in_(sorted(_ACTIVE_ORDER_STATUSES)))
-        .order_by(TradeOrder.id.asc())
-        .all()
-    )
+    statuses = set(_ACTIVE_ORDER_STATUSES)
+    if include_new:
+        statuses.add("NEW")
+    query = session.query(TradeOrder).filter(TradeOrder.status.in_(sorted(statuses)))
+    if run_id is not None:
+        query = query.filter(TradeOrder.run_id == int(run_id))
+    elif manual_only:
+        query = query.filter(TradeOrder.run_id.is_(None))
+    orders = query.order_by(TradeOrder.id.asc()).all()
 
     run_ids = {order.run_id for order in orders if order.run_id}
     run_modes: dict[int, str] = {}
@@ -109,6 +124,28 @@ def sync_trade_orders_from_open_orders(
             continue
 
         if tag in open_tags:
+            current_status = str(order.status or "").strip().upper()
+            if include_new and current_status == "NEW":
+                try:
+                    update_trade_order_status(
+                        session,
+                        order,
+                        {
+                            "status": "SUBMITTED",
+                            "params": {
+                                "event_source": "lean_open_orders",
+                                "event_tag": tag,
+                                "event_time": event_time,
+                                "event_status": "SUBMITTED",
+                                "sync_reason": "present_in_open_orders",
+                            },
+                        },
+                    )
+                except ValueError:
+                    summary["skipped"] += 1
+                else:
+                    summary["updated"] += 1
+                    summary["updated_new_to_submitted"] += 1
             continue
 
         try:
@@ -131,6 +168,6 @@ def sync_trade_orders_from_open_orders(
             continue
 
         summary["updated"] += 1
+        summary["updated_missing_to_canceled"] += 1
 
     return summary
-

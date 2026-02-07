@@ -27,13 +27,21 @@ from app.services.trade_alerts import notify_trade_alert
 from app.services.ib_account import fetch_account_summary
 from app.services.trade_order_intent import write_order_intent, ensure_order_intent_ids
 from app.services.lean_bridge_paths import resolve_bridge_root
-from app.services.lean_bridge_reader import read_bridge_status, read_positions, read_quotes
+from app.services.lean_bridge_reader import (
+    parse_bridge_timestamp,
+    read_bridge_status,
+    read_open_orders,
+    read_positions,
+    read_quotes,
+)
 from app.services.lean_execution import (
     build_execution_config,
+    ingest_execution_events,
     launch_execution_async,
 )
 from app.services.lean_execution_params import write_execution_params
 from app.services.audit_log import record_audit
+from app.services.trade_open_orders_sync import sync_trade_orders_from_open_orders
 from app.services.trade_run_progress import is_market_open, is_trade_run_stalled, update_trade_run_progress
 
 
@@ -512,11 +520,58 @@ def enforce_intent_order_match(
     return False
 
 
-def reconcile_run_with_positions(session, run: TradeRun, positions_payload: dict | None) -> dict[str, int]:
+def _extract_open_tags(open_orders_payload: dict | None) -> set[str]:
+    if not isinstance(open_orders_payload, dict):
+        return set()
+    items = open_orders_payload.get("items") if isinstance(open_orders_payload.get("items"), list) else []
+    tags: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        tag = str(item.get("tag") or "").strip()
+        if tag:
+            tags.add(tag)
+    return tags
+
+
+def _load_positions_baseline(run: TradeRun | None) -> dict[str, float]:
+    if run is None or not isinstance(run.params, dict):
+        return {}
+    baseline = run.params.get("positions_baseline")
+    if not isinstance(baseline, dict):
+        return {}
+    items = baseline.get("items") if isinstance(baseline.get("items"), list) else []
+    out: dict[str, float] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        symbol = str(item.get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        try:
+            qty = float(item.get("quantity") or 0.0)
+        except (TypeError, ValueError):
+            qty = 0.0
+        out[symbol] = qty
+    return out
+
+
+def reconcile_run_with_positions(
+    session,
+    run: TradeRun,
+    positions_payload: dict | None,
+    *,
+    open_tags: set[str] | None = None,
+) -> dict[str, int]:
     summary = {"checked": 0, "reconciled": 0, "skipped": 0}
     if run is None or not isinstance(positions_payload, dict):
         return summary
     if positions_payload.get("stale") is True:
+        return summary
+    baseline = _load_positions_baseline(run)
+    if not baseline:
+        # Without a pre-run baseline we can't safely infer fills from holdings (would treat
+        # already-held positions as filled orders).
         return summary
     positions = _build_positions_map(positions_payload)
     if not positions:
@@ -527,7 +582,9 @@ def reconcile_run_with_positions(session, run: TradeRun, positions_payload: dict
         if status in _TERMINAL_ORDER_STATUSES:
             continue
         summary["checked"] += 1
-        if str(order.side or "").upper() != "BUY":
+        tag = str(order.client_order_id or "").strip()
+        if open_tags and tag and tag in open_tags:
+            # Still present in IB open orders, so do not infer terminal fills from holdings yet.
             summary["skipped"] += 1
             continue
         pos = positions.get(str(order.symbol or "").strip().upper())
@@ -535,23 +592,36 @@ def reconcile_run_with_positions(session, run: TradeRun, positions_payload: dict
             summary["skipped"] += 1
             continue
         pos_qty = float(pos.get("quantity") or 0.0)
-        if pos_qty <= 0:
+        symbol_key = str(order.symbol or "").strip().upper()
+        base_qty = float(baseline.get(symbol_key, 0.0))
+
+        side = str(order.side or "").strip().upper()
+        if side == "BUY":
+            delta = pos_qty - base_qty
+        elif side == "SELL":
+            delta = base_qty - pos_qty
+        else:
             summary["skipped"] += 1
             continue
-        remaining = float(order.quantity) - float(order.filled_quantity or 0.0)
-        if remaining <= 0:
+        if delta <= 0:
             summary["skipped"] += 1
             continue
-        if pos_qty + 1e-6 < float(order.quantity):
+        target_filled = min(float(order.quantity), float(delta))
+        prev_filled = float(order.filled_quantity or 0.0)
+        if target_filled <= prev_filled + 1e-6:
             summary["skipped"] += 1
             continue
-        exec_id = f"position_reconcile:{order.id}"
-        existing = (
+        incremental = target_filled - prev_filled
+
+        # Idempotency: exec_id is deterministic for a given reconciled filled-quantity watermark.
+        watermark = int(round(target_filled * 1_000_000))
+        exec_id = f"positions_reconcile:{order.id}:{watermark}"
+        if (
             session.query(TradeFill)
             .filter(TradeFill.order_id == order.id, TradeFill.exec_id == exec_id)
             .first()
-        )
-        if existing:
+            is not None
+        ):
             summary["skipped"] += 1
             continue
         fill_price = pos.get("avg_cost")
@@ -565,11 +635,10 @@ def reconcile_run_with_positions(session, run: TradeRun, positions_payload: dict
         current_status = _normalize_order_status(order.status)
         if current_status == "NEW":
             update_trade_order_status(session, order, {"status": "SUBMITTED"})
-        total_prev = float(order.filled_quantity or 0.0)
-        total_new = total_prev + remaining
+        total_new = target_filled
         avg_prev = float(order.avg_fill_price or 0.0)
-        avg_new = (avg_prev * total_prev + float(fill_price) * remaining) / total_new
-        target_status = "PARTIAL" if total_new < float(order.quantity) else "FILLED"
+        avg_new = (avg_prev * prev_filled + float(fill_price) * incremental) / total_new
+        target_status = "PARTIAL" if total_new + 1e-6 < float(order.quantity) else "FILLED"
         update_trade_order_status(
             session,
             order,
@@ -577,17 +646,25 @@ def reconcile_run_with_positions(session, run: TradeRun, positions_payload: dict
                 "status": target_status,
                 "filled_quantity": total_new,
                 "avg_fill_price": avg_new,
-                "params": {"already_held": True, "reconcile_source": "positions"},
+                "params": {
+                    "reconcile_source": "positions",
+                    "baseline_quantity": base_qty,
+                    "current_position_quantity": pos_qty,
+                },
             },
         )
         fill = TradeFill(
             order_id=order.id,
             exec_id=exec_id,
-            fill_quantity=float(remaining),
+            fill_quantity=float(incremental),
             fill_price=float(fill_price),
             commission=None,
             fill_time=datetime.utcnow(),
-            params={"source": "positions_reconcile", "already_held": True},
+            params={
+                "source": "positions_reconcile",
+                "baseline_quantity": base_qty,
+                "current_position_quantity": pos_qty,
+            },
         )
         session.add(fill)
         session.commit()
@@ -648,12 +725,55 @@ def refresh_trade_run_status(session, run: TradeRun) -> bool:
     active_status = str(run.status or "").lower()
     if active_status not in {"running", "stalled"}:
         return False
+    open_orders_payload = read_open_orders(_resolve_bridge_root())
+    open_tags = _extract_open_tags(open_orders_payload)
+    # Ingest per-run execution events if available.
+    exec_output_dir = None
+    if isinstance(run.params, dict):
+        lean_exec = run.params.get("lean_execution")
+        if isinstance(lean_exec, dict):
+            exec_output_dir = lean_exec.get("output_dir") or None
+    if exec_output_dir:
+        events_path = Path(str(exec_output_dir)) / "execution_events.jsonl"
+        if events_path.exists():
+            ingest_execution_events(str(events_path), session=session)
+    # Avoid prematurely cancelling newly-created orders: if the open-orders snapshot is older than the
+    # Lean execution submission timestamp, it can't include those orders yet.
+    submitted_at = None
+    if isinstance(run.params, dict):
+        lean_exec = run.params.get("lean_execution")
+        if isinstance(lean_exec, dict):
+            submitted_at = lean_exec.get("submitted_at")
+    submitted_dt = parse_bridge_timestamp({"submitted_at": submitted_at}, ["submitted_at"])
+    open_refreshed_dt = parse_bridge_timestamp(open_orders_payload, ["refreshed_at", "updated_at"])
+    if not (submitted_dt and open_refreshed_dt and open_refreshed_dt < submitted_dt):
+        include_new = False
+        if submitted_dt and open_refreshed_dt:
+            try:
+                include_new = (open_refreshed_dt - submitted_dt).total_seconds() >= 5
+            except Exception:
+                include_new = False
+        sync_trade_orders_from_open_orders(
+            session,
+            open_orders_payload,
+            mode=run.mode,
+            run_id=run.id,
+            include_new=include_new,
+        )
     positions_payload = read_positions(_resolve_bridge_root())
-    reconcile_run_with_positions(session, run, positions_payload)
+    reconcile_run_with_positions(session, run, positions_payload, open_tags=open_tags)
     if _lean_no_orders_submitted(run.id):
         now = datetime.utcnow()
         cancelled = 0
+        filled = 0
         held_symbols: list[str] = []
+        positions_map = _build_positions_map(positions_payload)
+        baseline = _load_positions_baseline(run)
+        if not baseline and positions_map:
+            # When Lean exits with "no orders submitted", it implies positions didn't change.
+            # If we don't have a pre-run baseline (older runs/tests), treat current holdings as baseline
+            # for the purpose of detecting already-held targets.
+            baseline = {symbol: float(item.get("quantity") or 0.0) for symbol, item in positions_map.items()}
         update_trade_run_progress(session, run, "no_orders_submitted", reason="lean_execution", commit=True)
         for order in (
             session.query(TradeOrder)
@@ -667,6 +787,54 @@ def refresh_trade_run_status(session, run: TradeRun) -> bool:
                 if symbol:
                     held_symbols.append(symbol)
             if status in {"NEW", "SUBMITTED", "PARTIAL"}:
+                symbol_key = str(order.symbol or "").strip().upper()
+                side = str(order.side or "").strip().upper()
+                base_qty = float(baseline.get(symbol_key, 0.0))
+                qty = float(order.quantity or 0.0)
+                if side == "BUY" and qty > 0 and base_qty >= qty - 1e-6:
+                    fill_price = None
+                    pos = positions_map.get(symbol_key) or {}
+                    avg_cost = pos.get("avg_cost")
+                    if avg_cost is not None:
+                        try:
+                            avg_cost_value = float(avg_cost)
+                        except (TypeError, ValueError):
+                            avg_cost_value = None
+                        if avg_cost_value is not None and avg_cost_value > 0:
+                            fill_price = float(avg_cost_value)
+                    if fill_price is None:
+                        fallback = order.avg_fill_price or order.limit_price
+                        if fallback is not None:
+                            try:
+                                fallback_value = float(fallback)
+                            except (TypeError, ValueError):
+                                fallback_value = None
+                            if fallback_value is not None and fallback_value > 0:
+                                fill_price = float(fallback_value)
+                    try:
+                        if status == "NEW":
+                            update_trade_order_status(
+                                session,
+                                order,
+                                {"status": "SUBMITTED", "params": {"already_held": True}},
+                            )
+                        update_trade_order_status(
+                            session,
+                            order,
+                            {
+                                "status": "FILLED",
+                                "filled_quantity": qty,
+                                "avg_fill_price": fill_price,
+                                "params": {"already_held": True},
+                            },
+                        )
+                    except ValueError:
+                        pass
+                    else:
+                        filled += 1
+                        if symbol_key:
+                            held_symbols.append(symbol_key)
+                        continue
                 try:
                     update_trade_order_status(
                         session,
@@ -684,7 +852,7 @@ def refresh_trade_run_status(session, run: TradeRun) -> bool:
         run.stalled_reason = None
         params = dict(run.params or {})
         params["completion_summary"] = {
-            "filled": 0,
+            "filled": filled,
             "cancelled": cancelled,
             "rejected": 0,
             "skipped": 0,
@@ -1421,12 +1589,36 @@ def execute_trade_run(
             run.updated_at = datetime.utcnow()
             session.commit()
 
+        # Record a pre-run positions baseline so holdings-based reconciliation can infer fills
+        # without treating already-held positions as executed orders.
+        if not params.get("positions_baseline"):
+            symbols = sorted({str(order.symbol or "").strip().upper() for order in orders if order.symbol})
+            positions_payload = read_positions(_resolve_bridge_root())
+            if isinstance(positions_payload, dict) and positions_payload.get("stale") is not True and symbols:
+                pos_map = _build_positions_map(positions_payload)
+                baseline_items = []
+                for symbol in symbols:
+                    try:
+                        qty = float((pos_map.get(symbol) or {}).get("quantity") or 0.0)
+                    except (TypeError, ValueError):
+                        qty = 0.0
+                    baseline_items.append({"symbol": symbol, "quantity": qty})
+                params["positions_baseline"] = {
+                    "refreshed_at": positions_payload.get("refreshed_at") or positions_payload.get("updated_at"),
+                    "items": baseline_items,
+                }
+                run.params = dict(params)
+                run.updated_at = datetime.utcnow()
+                session.commit()
+
+        exec_output_dir = ARTIFACT_ROOT / "lean_bridge_runs" / f"run_{run.id}"
         config = build_execution_config(
             intent_path=intent_path,
             brokerage="InteractiveBrokersBrokerage",
             project_id=run.project_id,
             mode=run.mode,
             params_path=params.get("execution_params_path"),
+            lean_bridge_output_dir=str(exec_output_dir),
         )
         config_dir = ARTIFACT_ROOT / "lean_execution"
         config_dir.mkdir(parents=True, exist_ok=True)
@@ -1439,6 +1631,7 @@ def execute_trade_run(
                 {
                     "config_path": str(config_path),
                     "pid": pid,
+                    "output_dir": str(exec_output_dir),
                     "submitted_at": datetime.utcnow().isoformat() + "Z",
                 }
             )

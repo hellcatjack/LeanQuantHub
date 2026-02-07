@@ -80,6 +80,8 @@ def build_execution_config(
     payload = dict(_load_template_config())
     payload["environment"] = _resolve_environment(brokerage, mode)
     payload["algorithm-type-name"] = "LeanBridgeExecutionAlgorithm"
+    # Prevent Lean console launcher from blocking on "Press any key to continue." after completion.
+    payload["close-automatically"] = True
     if payload.get("algorithm-type-name") in {"LeanBridgeExecutionAlgorithm", "LeanBridgeSmokeAlgorithm"}:
         payload["algorithm-language"] = "CSharp"
     payload.setdefault("data-folder", "/data/share/stock/data/lean")
