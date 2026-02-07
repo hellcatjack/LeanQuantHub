@@ -57,10 +57,11 @@ def test_execute_manual_order_launches(monkeypatch, tmp_path):
 
         calls = {"config_path": None}
 
-        def _fake_launch(config_path: str) -> None:
+        def _fake_launch(config_path: str) -> int:
             calls["config_path"] = config_path
+            return 12345
 
-        monkeypatch.setattr(manual_trade_execution, "launch_execution", _fake_launch, raising=False)
+        monkeypatch.setattr(manual_trade_execution, "launch_execution_async", _fake_launch, raising=False)
         monkeypatch.setattr(manual_trade_execution, "ARTIFACT_ROOT", tmp_path, raising=False)
 
         manual_trade_execution.execute_manual_order(
@@ -73,5 +74,6 @@ def test_execute_manual_order_launches(monkeypatch, tmp_path):
         assert calls["config_path"] is not None
         assert order.params["manual_execution"]["project_id"] == 16
         assert order.params["manual_execution"]["mode"] == "paper"
+        assert order.params["manual_execution"]["pid"] == 12345
     finally:
         session.close()

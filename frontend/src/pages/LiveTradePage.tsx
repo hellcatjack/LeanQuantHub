@@ -491,6 +491,8 @@ export default function LiveTradePage() {
   const [accountPositionsError, setAccountPositionsError] = useState("");
   const [positionSelections, setPositionSelections] = useState<Record<string, boolean>>({});
   const [positionQuantities, setPositionQuantities] = useState<Record<string, string>>({});
+  const [positionSessions, setPositionSessions] = useState<Record<string, string>>({});
+  const [positionLimitPrices, setPositionLimitPrices] = useState<Record<string, string>>({});
   const [positionActionLoading, setPositionActionLoading] = useState(false);
   const [positionActionError, setPositionActionError] = useState("");
   const [positionActionResult, setPositionActionResult] = useState("");
@@ -880,6 +882,76 @@ export default function LiveTradePage() {
     setPositionQuantities((prev) => ({ ...prev, [key]: value }));
   };
 
+  const normalizeTradeSession = (value: string) => {
+    const normalized = String(value || "").trim().toLowerCase();
+    if (!normalized) {
+      return "rth";
+    }
+    if (["rth", "regular", "regular_hours"].includes(normalized)) {
+      return "rth";
+    }
+    if (["pre", "premarket", "pre_market"].includes(normalized)) {
+      return "pre";
+    }
+    if (["post", "after", "afterhours", "after_hours"].includes(normalized)) {
+      return "post";
+    }
+    if (["night", "overnight"].includes(normalized)) {
+      return "night";
+    }
+    return "rth";
+  };
+
+  const updatePositionSession = (row: IBAccountPosition, key: string, session: string) => {
+    const normalized = normalizeTradeSession(session);
+    setPositionSessions((prev) => ({ ...prev, [key]: normalized }));
+    if (normalized === "rth") {
+      return;
+    }
+    setPositionLimitPrices((prev) => {
+      const existing = prev[key];
+      if (existing != null && String(existing).trim() !== "") {
+        return prev;
+      }
+      const fallback = Number(row.market_price ?? null);
+      if (!Number.isFinite(fallback) || fallback <= 0) {
+        return prev;
+      }
+      return { ...prev, [key]: String(fallback) };
+    });
+  };
+
+  const updatePositionLimitPrice = (key: string, value: string) => {
+    setPositionLimitPrices((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const resolvePositionLimitPrice = (row: IBAccountPosition, key: string) => {
+    const raw = positionLimitPrices[key];
+    if (raw != null && raw !== "") {
+      const parsed = Number(raw);
+      if (Number.isFinite(parsed) && parsed > 0) {
+        return parsed;
+      }
+      return null;
+    }
+    const fallback = Number(row.market_price ?? null);
+    return Number.isFinite(fallback) && fallback > 0 ? fallback : null;
+  };
+
+  const formatTradeSessionLabel = (session: string) => {
+    const normalized = normalizeTradeSession(session);
+    if (normalized === "pre") {
+      return t("trade.manualSession.pre");
+    }
+    if (normalized === "post") {
+      return t("trade.manualSession.post");
+    }
+    if (normalized === "night") {
+      return t("trade.manualSession.night");
+    }
+    return t("trade.manualSession.rth");
+  };
+
   const toggleSelectAllPositions = () => {
     if (allPositionsSelected) {
       setPositionSelections({});
@@ -973,12 +1045,28 @@ export default function LiveTradePage() {
       setPositionActionError(t("trade.positionActionErrorInvalidQty"));
       return;
     }
+    const session = normalizeTradeSession(positionSessions[key] ?? "rth");
+    const isExtended = session !== "rth";
+    const orderType = isExtended ? "LMT" : "MKT";
+    const limitPrice = isExtended ? resolvePositionLimitPrice(row, key) : null;
+    if (orderType === "LMT" && !limitPrice) {
+      setPositionActionError(t("trade.positionActionErrorInvalidLimitPrice"));
+      return;
+    }
     const confirmed = window.confirm(
-      t("trade.positionOrderConfirm", {
-        side,
-        symbol: row.symbol,
-        qty: formatNumber(quantity ?? null),
-      })
+      orderType === "LMT"
+        ? t("trade.positionOrderConfirmLimit", {
+            side,
+            symbol: row.symbol,
+            qty: formatNumber(quantity ?? null),
+            session: formatTradeSessionLabel(session),
+            price: formatNumber(limitPrice, 4),
+          })
+        : t("trade.positionOrderConfirm", {
+            side,
+            symbol: row.symbol,
+            qty: formatNumber(quantity ?? null),
+          })
     );
     if (!confirmed) {
       return;
@@ -988,13 +1076,70 @@ export default function LiveTradePage() {
       symbol: row.symbol,
       side,
       quantity,
-      order_type: "MKT",
+      order_type: orderType,
+      limit_price: orderType === "LMT" ? limitPrice : undefined,
       params: {
         account: row.account || undefined,
         currency: row.currency || undefined,
         source: "manual",
         project_id: selectedProjectId ? Number(selectedProjectId) : undefined,
         mode: ibSettings?.mode || ibSettingsForm.mode || "paper",
+        session,
+        allow_outside_rth: isExtended,
+      },
+    };
+    await submitPositionOrders([payload]);
+  };
+
+  const handleClosePosition = async (row: IBAccountPosition, index: number) => {
+    const key = buildPositionKey(row);
+    const qtyValue = Math.abs(row.position ?? 0);
+    if (!qtyValue) {
+      setPositionActionError(t("trade.positionActionErrorNoSelection"));
+      return;
+    }
+    const side: "BUY" | "SELL" = (row.position ?? 0) >= 0 ? "SELL" : "BUY";
+    const session = normalizeTradeSession(positionSessions[key] ?? "rth");
+    const isExtended = session !== "rth";
+    const orderType = isExtended ? "LMT" : "MKT";
+    const limitPrice = isExtended ? resolvePositionLimitPrice(row, key) : null;
+    if (orderType === "LMT" && !limitPrice) {
+      setPositionActionError(t("trade.positionActionErrorInvalidLimitPrice"));
+      return;
+    }
+    const confirmed = window.confirm(
+      orderType === "LMT"
+        ? t("trade.positionOrderConfirmLimit", {
+            side,
+            symbol: row.symbol,
+            qty: formatNumber(qtyValue ?? null),
+            session: formatTradeSessionLabel(session),
+            price: formatNumber(limitPrice, 4),
+          })
+        : t("trade.positionOrderConfirm", {
+            side,
+            symbol: row.symbol,
+            qty: formatNumber(qtyValue ?? null),
+          })
+    );
+    if (!confirmed) {
+      return;
+    }
+    const payload = {
+      client_order_id: buildOrderTag(selectedRunId ?? latestTradeRun?.id ?? 0, index),
+      symbol: row.symbol,
+      side,
+      quantity: qtyValue,
+      order_type: orderType,
+      limit_price: orderType === "LMT" ? limitPrice : undefined,
+      params: {
+        account: row.account || undefined,
+        currency: row.currency || undefined,
+        source: "manual",
+        project_id: selectedProjectId ? Number(selectedProjectId) : undefined,
+        mode: ibSettings?.mode || ibSettingsForm.mode || "paper",
+        session,
+        allow_outside_rth: isExtended,
       },
     };
     await submitPositionOrders([payload]);
@@ -1853,6 +1998,27 @@ export default function LiveTradePage() {
       return next;
     });
     setPositionQuantities((prev) => {
+      const next: Record<string, string> = {};
+      accountPositions.forEach((row) => {
+        const key = buildPositionKey(row);
+        if (prev[key] != null) {
+          next[key] = prev[key];
+        }
+      });
+      return next;
+    });
+    setPositionSessions((prev) => {
+      const next: Record<string, string> = {};
+      accountPositions.forEach((row) => {
+        const key = buildPositionKey(row);
+        const value = prev[key];
+        if (value) {
+          next[key] = normalizeTradeSession(value);
+        }
+      });
+      return next;
+    });
+    setPositionLimitPrices((prev) => {
       const next: Record<string, string> = {};
       accountPositions.forEach((row) => {
         const key = buildPositionKey(row);
@@ -2939,6 +3105,11 @@ export default function LiveTradePage() {
                   const key = buildPositionKey(row);
                   const qtyValue =
                     positionQuantities[key] ?? String(Math.abs(row.position ?? 0) || 1);
+                  const sessionValue = normalizeTradeSession(positionSessions[key] ?? "rth");
+                  const fallbackLimit = Number(row.market_price ?? null);
+                  const limitValue =
+                    positionLimitPrices[key] ??
+                    (Number.isFinite(fallbackLimit) && fallbackLimit > 0 ? String(fallbackLimit) : "");
                   return (
                     <tr key={key}>
                       <td>
@@ -2973,6 +3144,33 @@ export default function LiveTradePage() {
                               updatePositionQuantity(key, event.target.value)
                             }
                           />
+                          <select
+                            className="form-select positions-action-select"
+                            style={{ width: "110px" }}
+                            value={sessionValue}
+                            data-testid="positions-action-session"
+                            onChange={(event) => updatePositionSession(row, key, event.target.value)}
+                          >
+                            <option value="rth">{t("trade.manualSession.rth")}</option>
+                            <option value="pre">{t("trade.manualSession.pre")}</option>
+                            <option value="post">{t("trade.manualSession.post")}</option>
+                            <option value="night">{t("trade.manualSession.night")}</option>
+                          </select>
+                          {sessionValue !== "rth" && (
+                            <input
+                              className="form-input positions-action-limit"
+                              style={{ width: "110px" }}
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              placeholder={t("trade.positionLimitPricePlaceholder")}
+                              value={limitValue}
+                              data-testid="positions-action-limit-price"
+                              onChange={(event) =>
+                                updatePositionLimitPrice(key, event.target.value)
+                              }
+                            />
+                          )}
                           <button
                             className="button-compact positions-action-button"
                             onClick={() => handlePositionOrder(row, "BUY", index)}
@@ -2989,7 +3187,7 @@ export default function LiveTradePage() {
                           </button>
                           <button
                             className="button-compact positions-action-button"
-                            onClick={() => handleClosePositions([row])}
+                            onClick={() => handleClosePosition(row, index)}
                             disabled={positionActionLoading}
                           >
                             {t("trade.positionActionClose")}

@@ -65,18 +65,44 @@ def write_order_intent_manual(*, run_id: int, orders: list[dict], output_dir: Pa
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f"order_intent_manual_run_{run_id}.json"
     payload = []
+    extended = {
+        "pre",
+        "premarket",
+        "pre_market",
+        "post",
+        "after",
+        "afterhours",
+        "after_hours",
+        "night",
+        "overnight",
+    }
     for idx, order in enumerate(orders):
         client_order_id = str(order.get("client_order_id") or f"oi_{run_id}_{idx}").strip()
         symbol = order.get("symbol")
         side = str(order.get("side") or "").strip().upper()
         quantity = float(order.get("quantity") or 0)
         signed_qty = -abs(quantity) if side == "SELL" else abs(quantity)
+        params = order.get("params") if isinstance(order.get("params"), dict) else {}
+        session = str(params.get("session") or params.get("execution_session") or params.get("trading_session") or "").strip().lower()
+        allow_outside = params.get("allow_outside_rth")
+        if allow_outside is None:
+            allow_outside = params.get("outside_rth")
+        if allow_outside is None:
+            allow_outside = session in extended
+        order_type = str(order.get("order_type") or "MKT").strip().upper() or "MKT"
+        if order_type == "LIMIT":
+            order_type = "LMT"
+        limit_price = order.get("limit_price")
         payload.append(
             {
                 "order_intent_id": client_order_id,
                 "symbol": symbol,
                 "quantity": signed_qty,
                 "weight": 0,
+                "order_type": order_type,
+                "limit_price": limit_price,
+                "outside_rth": bool(allow_outside),
+                "session": session or None,
             }
         )
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -241,7 +241,7 @@ def test_execute_rewrites_intent_ids_when_missing(tmp_path, monkeypatch):
         raising=False,
     )
     monkeypatch.setattr(trade_executor, "fetch_account_summary", lambda *_a, **_k: {"NetLiquidation": 10000})
-    monkeypatch.setattr(trade_executor, "launch_execution", lambda **_kwargs: None)
+    monkeypatch.setattr(trade_executor, "launch_execution_async", lambda **_kwargs: 123)
 
     intent_path = tmp_path / "intent.json"
     intent_path.write_text('[{"symbol":"AAA","weight":0.1}]', encoding="utf-8")

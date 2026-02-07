@@ -1709,6 +1709,15 @@ a {
   line-height: 1;
 }
 
+.positions-action-select,
+.positions-action-limit {
+  min-height: 22px !important;
+  height: 22px !important;
+  padding: 1px 4px !important;
+  font-size: 12px;
+  line-height: 1;
+}
+
 .positions-action-button {
   min-height: 22px !important;
   height: 22px !important;
