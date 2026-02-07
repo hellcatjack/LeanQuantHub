@@ -734,10 +734,13 @@ export default function LiveTradePage() {
     setCreateRunError("");
     setCreateRunResult("");
     try {
+      const mode = (ibSettings?.mode || ibSettingsForm.mode || "paper").toLowerCase();
       const payload = {
         project_id: Number(selectedProjectId),
         decision_snapshot_id: snapshot?.id ?? undefined,
-        mode: ibSettings?.mode || ibSettingsForm.mode || "paper",
+        mode,
+        live_confirm_token:
+          mode === "live" ? executeForm.live_confirm_token || undefined : undefined,
       };
       const res = await api.post<TradeRun>("/api/trade/runs", payload);
       if (res.data?.id) {
@@ -1812,6 +1815,7 @@ export default function LiveTradePage() {
         await api.post(`/api/trade/runs/${runId}/execute`, {
           dry_run: false,
           force: false,
+          live_confirm_token: executeForm.live_confirm_token || undefined,
         });
       },
       t("trade.pipeline.actions.executeSuccess")
