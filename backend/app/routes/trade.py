@@ -235,16 +235,26 @@ def create_trade_run(payload: TradeRunCreate):
             if token != "LIVE":
                 raise HTTPException(status_code=403, detail="live_confirm_required")
         params = payload.model_dump(exclude={"orders"})
+        orders = payload.orders or []
         snapshot_id = payload.decision_snapshot_id
         if snapshot_id is None:
             latest = (
                 session.query(DecisionSnapshot)
                 .filter(DecisionSnapshot.project_id == payload.project_id)
+                .filter(DecisionSnapshot.status == "success")
                 .order_by(DecisionSnapshot.created_at.desc())
                 .first()
             )
             if latest:
                 snapshot_id = latest.id
+        if not orders:
+            if snapshot_id is None:
+                raise HTTPException(status_code=409, detail="decision_snapshot_required")
+            snapshot = session.get(DecisionSnapshot, snapshot_id)
+            if snapshot is None:
+                raise HTTPException(status_code=404, detail="decision_snapshot_not_found")
+            if str(snapshot.status or "").lower() != "success" or not snapshot.items_path:
+                raise HTTPException(status_code=409, detail="decision_snapshot_not_ready")
         day_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
         existing = (
             session.query(TradeRun)
@@ -273,8 +283,6 @@ def create_trade_run(payload: TradeRunCreate):
         session.add(run)
         session.commit()
         session.refresh(run)
-
-        orders = payload.orders or []
 
         if orders and payload.require_market_health:
             symbols = _build_market_symbols(orders)

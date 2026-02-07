@@ -152,6 +152,55 @@ def test_apply_execution_events_reuses_existing_order(tmp_path):
         session.close()
 
 
+def test_apply_execution_events_submitted_matches_existing_order_without_intent_quantity(tmp_path):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    try:
+        run = TradeRun(project_id=1, decision_snapshot_id=25, status="running", params={})
+        session.add(run)
+        session.commit()
+        intent_path = tmp_path / "order_intent.json"
+        _write_intent_file(intent_path, run.id)
+        run.params = {"order_intent_path": str(intent_path)}
+        session.commit()
+
+        existing = TradeOrder(
+            run_id=run.id,
+            client_order_id=f"{run.id}:AMAT:BUY:{run.decision_snapshot_id}",
+            symbol="AMAT",
+            side="BUY",
+            quantity=3,
+            order_type="MKT",
+            status="NEW",
+        )
+        session.add(existing)
+        session.commit()
+
+        events = [
+            {
+                "order_id": 101,
+                "symbol": "AMAT",
+                "status": "Submitted",
+                "filled": 0.0,
+                "fill_price": 0.0,
+                "direction": "Buy",
+                "time": "2026-01-27T15:25:46.9105632Z",
+                "tag": f"oi_{run.id}_1",
+            }
+        ]
+
+        apply_execution_events(events, session=session)
+
+        assert session.query(TradeOrder).count() == 1
+        refreshed = session.query(TradeOrder).filter_by(id=existing.id).one()
+        assert refreshed.status == "SUBMITTED"
+        assert refreshed.ib_order_id == 101
+    finally:
+        session.close()
+
+
 def test_apply_execution_events_merges_mismatched_run(tmp_path):
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)

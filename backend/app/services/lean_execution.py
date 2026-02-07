@@ -478,9 +478,6 @@ def apply_execution_events(events: list[dict], *, session=None) -> dict:
                         continue
                     filled_qty = float(event.get("filled") or 0.0)
                     quantity = abs(filled_qty) if filled_qty else float(intent.get("quantity") or 0.0)
-                    if quantity <= 0:
-                        summary["skipped_not_found"] += 1
-                        continue
                     existing_orders = (
                         session.query(TradeOrder)
                         .filter(
@@ -492,15 +489,21 @@ def apply_execution_events(events: list[dict], *, session=None) -> dict:
                     )
                     matched = None
                     if existing_orders:
-                        for candidate in existing_orders:
-                            if abs(float(candidate.quantity) - float(quantity)) < 1e-6:
-                                matched = candidate
-                                break
+                        if quantity > 0:
+                            for candidate in existing_orders:
+                                if abs(float(candidate.quantity) - float(quantity)) < 1e-6:
+                                    matched = candidate
+                                    break
+                        # For SUBMITTED events, filled quantity is 0 and intent drafts may omit quantity.
+                        # In that case, fall back to symbol+side match when it is unambiguous.
                         if matched is None and len(existing_orders) == 1:
                             matched = existing_orders[0]
                     if matched is not None:
                         order = matched
                     else:
+                        if quantity <= 0:
+                            summary["skipped_not_found"] += 1
+                            continue
                         payload = {
                             "client_order_id": intent_id,
                             "symbol": symbol,

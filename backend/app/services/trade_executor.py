@@ -206,7 +206,9 @@ def _bridge_connection_ok() -> bool:
     state = str(status.get("status") or "").lower()
     if status.get("stale") is True:
         return False
-    return state in {"ok", "connected", "running"}
+    # "degraded" still has a fresh heartbeat. We rely on fallback prices for sizing and let
+    # the execution algorithm decide whether it can submit orders.
+    return state in {"ok", "connected", "running", "degraded"}
 
 
 def _resolve_lean_execution_log_path() -> Path:
@@ -1098,14 +1100,35 @@ def execute_trade_run(
                     dry_run=dry_run,
                 )
 
+            intent_id_map: dict[tuple[str, str], str] = {}
+            if skip_build and intent_path:
+                for intent_item in _load_order_intent_items(intent_path):
+                    intent_id = str(intent_item.get("order_intent_id") or "").strip()
+                    symbol = str(intent_item.get("symbol") or "").strip().upper()
+                    if not intent_id or not symbol:
+                        continue
+                    try:
+                        weight = float(intent_item.get("weight") or 0.0)
+                    except (TypeError, ValueError):
+                        weight = 0.0
+                    side = "BUY" if weight >= 0 else "SELL"
+                    intent_id_map[(symbol, side)] = intent_id
+
             created = 0
             for draft in draft_orders:
-                client_order_id = _build_client_order_id(
-                    run.id,
-                    run.decision_snapshot_id,
-                    str(draft.get("symbol")),
-                    str(draft.get("side")),
-                )
+                symbol_value = str(draft.get("symbol") or "").strip().upper()
+                side_value = str(draft.get("side") or "").strip().upper()
+                if skip_build and symbol_value and side_value:
+                    client_order_id = intent_id_map.pop((symbol_value, side_value), None)
+                else:
+                    client_order_id = None
+                if not client_order_id:
+                    client_order_id = _build_client_order_id(
+                        run.id,
+                        run.decision_snapshot_id,
+                        str(draft.get("symbol")),
+                        str(draft.get("side")),
+                    )
                 payload = dict(draft)
                 payload["client_order_id"] = client_order_id
                 payload["params"] = {

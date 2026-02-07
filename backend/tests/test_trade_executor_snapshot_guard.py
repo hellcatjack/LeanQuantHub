@@ -59,3 +59,75 @@ def test_create_trade_run_uses_latest_snapshot(monkeypatch):
         assert result.decision_snapshot_id == snapshot.id
     finally:
         session.close()
+
+
+def test_create_trade_run_rejects_snapshot_not_ready(monkeypatch):
+    session = _make_session()
+    try:
+        project = Project(name="p", description="")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        snapshot = DecisionSnapshot(project_id=project.id, status="running", items_path=None)
+        session.add(snapshot)
+        session.commit()
+        session.refresh(snapshot)
+
+        @contextmanager
+        def _get_session():
+            yield session
+
+        monkeypatch.setattr(trade_routes, "get_session", _get_session)
+        monkeypatch.setattr(trade_routes, "check_market_health", lambda *_a, **_k: {"status": "ok"})
+
+        payload = trade_routes.TradeRunCreate(
+            project_id=project.id,
+            decision_snapshot_id=snapshot.id,
+            mode="paper",
+            orders=[],
+            require_market_health=False,
+        )
+        try:
+            trade_routes.create_trade_run(payload)
+            raise AssertionError("expected decision_snapshot_not_ready")
+        except Exception as exc:
+            assert "decision_snapshot_not_ready" in str(exc)
+    finally:
+        session.close()
+
+
+def test_create_trade_run_requires_snapshot_for_auto_mode(monkeypatch):
+    session = _make_session()
+    try:
+        project = Project(name="p", description="")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        snapshot = DecisionSnapshot(project_id=project.id, status="running", items_path=None)
+        session.add(snapshot)
+        session.commit()
+        session.refresh(snapshot)
+
+        @contextmanager
+        def _get_session():
+            yield session
+
+        monkeypatch.setattr(trade_routes, "get_session", _get_session)
+        monkeypatch.setattr(trade_routes, "check_market_health", lambda *_a, **_k: {"status": "ok"})
+
+        payload = trade_routes.TradeRunCreate(
+            project_id=project.id,
+            decision_snapshot_id=None,
+            mode="paper",
+            orders=[],
+            require_market_health=False,
+        )
+        try:
+            trade_routes.create_trade_run(payload)
+            raise AssertionError("expected decision_snapshot_required")
+        except Exception as exc:
+            assert "decision_snapshot_required" in str(exc)
+    finally:
+        session.close()
