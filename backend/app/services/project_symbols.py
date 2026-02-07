@@ -159,7 +159,10 @@ def collect_active_project_symbols(session) -> tuple[list[str], list[str]]:
     benchmarks: set[str] = set()
     for project in projects:
         config = _resolve_project_config(session, project.id)
-        symbols.update(collect_project_symbols(config))
+        # Keep this list intentionally small to avoid triggering full-universe syncs.
+        # We only sync what active projects actually reference today: latest snapshot holdings
+        # plus the defensive (risk-off) basket configured on the project.
+        symbols.update(_collect_latest_snapshot_symbols(session, project.id))
         symbols.update(_collect_risk_off_symbols(config))
         benchmark = str(config.get("benchmark") or "SPY").strip().upper()
         if benchmark:
@@ -193,15 +196,15 @@ def _collect_active_project_watchlist_inputs(session) -> list[dict]:
     items: list[dict] = []
     for project in projects:
         config = _resolve_project_config(session, project.id)
-        symbols = collect_project_symbols(config)
         snapshot_symbols = _collect_latest_snapshot_symbols(session, project.id)
+        risk_off_symbols = _collect_risk_off_symbols(config)
         benchmark = str(config.get("benchmark") or "SPY").strip().upper()
         items.append(
             {
                 "id": project.id,
                 "benchmark": benchmark,
-                "symbols": symbols,
                 "snapshot_symbols": snapshot_symbols,
+                "risk_off_symbols": risk_off_symbols,
             }
         )
     return items
@@ -279,6 +282,17 @@ def build_leader_watchlist(session, *, max_symbols: int = 200) -> list[str]:
         }
         snapshot_queues.append(deque(sorted(normalized)))
     _drain_round_robin(snapshot_queues)
+
+    risk_off_queues: list[deque[str]] = []
+    for item in items:
+        risk_symbols = item.get("risk_off_symbols") or []
+        normalized = {
+            str(symbol).strip().upper()
+            for symbol in risk_symbols
+            if str(symbol).strip()
+        }
+        risk_off_queues.append(deque(sorted(normalized)))
+    _drain_round_robin(risk_off_queues)
 
     queues: list[deque[str]] = []
     for item in items:

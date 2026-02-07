@@ -125,3 +125,23 @@ def read_quotes(root: Path) -> dict:
     data.setdefault("items", [])
     data.setdefault("stale", False)
     return data
+
+
+def read_open_orders(root: Path) -> dict:
+    path = root / "open_orders.json"
+    data = _read_json(path)
+    if not isinstance(data, dict):
+        return {"items": [], "stale": True}
+    data.setdefault("items", [])
+    # Treat missing/old/errored snapshots as stale to avoid incorrectly cancelling orders.
+    refreshed_at = parse_bridge_timestamp(data, ["refreshed_at", "updated_at"])
+    stale = bool(data.get("stale") is True)
+    if refreshed_at is None:
+        stale = True
+    else:
+        stale = stale or _is_stale(refreshed_at, stale_seconds=30)
+    source_detail = str(data.get("source_detail") or "").strip().lower()
+    if source_detail in {"brokerage_unavailable", "ib_open_orders_error"}:
+        stale = True
+    data["stale"] = stale
+    return data

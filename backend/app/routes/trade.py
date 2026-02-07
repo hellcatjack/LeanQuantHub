@@ -47,8 +47,10 @@ from app.services.trade_direct_order import submit_direct_order, retry_direct_or
 from app.services.trade_orders import create_trade_order, update_trade_order_status
 from app.services.trade_order_recovery import run_auto_recovery
 from app.services.trade_receipts import list_trade_receipts as build_trade_receipts
+from app.services.trade_open_orders_sync import sync_trade_orders_from_open_orders
 from app.services.lean_bridge_paths import resolve_bridge_root
-from app.services.lean_bridge_reader import read_positions
+from app.services.lean_bridge_reader import read_open_orders, read_positions
+from app.services.ib_settings import get_or_create_ib_settings
 from app.services.realized_pnl import compute_realized_pnl
 from app.services.realized_pnl_baseline import ensure_positions_baseline
 from app.services.trade_order_intent import write_order_intent_manual
@@ -523,6 +525,11 @@ def list_trade_orders(
         response = Response()
     with get_session() as session:
         try:
+            settings_row = get_or_create_ib_settings(session)
+            mode = str(getattr(settings_row, "mode", "") or "paper").strip().lower() or "paper"
+        except Exception:
+            mode = None
+        try:
             ingest_params = inspect.signature(ingest_execution_events).parameters
         except (TypeError, ValueError):
             ingest_params = {}
@@ -531,6 +538,8 @@ def list_trade_orders(
                 ingest_execution_events(str(events_path), session=session)
             else:
                 ingest_execution_events(str(events_path))
+        open_orders_payload = read_open_orders(bridge_root)
+        sync_trade_orders_from_open_orders(session, open_orders_payload, mode=mode)
         positions_payload = read_positions(resolve_bridge_root())
         baseline = ensure_positions_baseline(resolve_bridge_root(), positions_payload)
         realized = compute_realized_pnl(session, baseline)
@@ -585,6 +594,25 @@ def get_trade_run_orders(
     offset: int = Query(0, ge=0),
 ):
     with get_session() as session:
+        bridge_root = resolve_bridge_root()
+        events_path = bridge_root / "execution_events.jsonl"
+        if events_path.exists():
+            try:
+                ingest_params = inspect.signature(ingest_execution_events).parameters
+            except (TypeError, ValueError):
+                ingest_params = {}
+            if "session" in ingest_params:
+                ingest_execution_events(str(events_path), session=session)
+            else:
+                ingest_execution_events(str(events_path))
+
+        try:
+            settings_row = get_or_create_ib_settings(session)
+            mode = str(getattr(settings_row, "mode", "") or "paper").strip().lower() or "paper"
+        except Exception:
+            mode = None
+        open_orders_payload = read_open_orders(bridge_root)
+        sync_trade_orders_from_open_orders(session, open_orders_payload, mode=mode)
         positions_payload = read_positions(resolve_bridge_root())
         baseline = ensure_positions_baseline(resolve_bridge_root(), positions_payload)
         realized = compute_realized_pnl(session, baseline)

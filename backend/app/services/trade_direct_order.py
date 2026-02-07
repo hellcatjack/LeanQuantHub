@@ -396,6 +396,14 @@ def submit_direct_order(session, payload: dict[str, Any]) -> TradeDirectOrderOut
     session.refresh(result.order)
     order = result.order
 
+    # Direct executions are tagged by Lean as `direct:{trade_order_id}`. Persist the tag early so
+    # open-orders reconciliation can match the order even if execution events are not ingested yet.
+    params = dict(order.params or {})
+    params.setdefault("event_tag", f"direct:{order.id}")
+    order.params = params
+    session.commit()
+    session.refresh(order)
+
     intent_path = _ensure_direct_intent(order)
     output_dir = Path(settings.data_root or "/data/share/stock/data") / "lean_bridge" / f"direct_{order.id}"
     output_dir.mkdir(parents=True, exist_ok=True)

@@ -375,6 +375,15 @@ def apply_execution_events(events: list[dict], *, session=None) -> dict:
                     summary["skipped_not_found"] += 1
                     continue
 
+                lean_order_id = event.get("order_id")
+                if lean_order_id is not None and order.ib_order_id is None:
+                    try:
+                        order.ib_order_id = int(lean_order_id)
+                        session.commit()
+                        session.refresh(order)
+                    except (TypeError, ValueError):
+                        pass
+
                 if status in {"SUBMITTED", "NEW"}:
                     current_status = str(order.status or "").strip().upper()
                     if current_status in {"NEW", "SUBMITTED"}:
@@ -522,16 +531,44 @@ def apply_execution_events(events: list[dict], *, session=None) -> dict:
                 order.ib_order_id = int(order_id)
                 session.commit()
                 session.refresh(order)
-            if status == "SUBMITTED":
-                current_status = str(order.status or "").strip().upper()
+            current_status = str(order.status or "").strip().upper()
+
+            if status in {"SUBMITTED", "NEW"}:
                 if current_status in {"NEW", "SUBMITTED"}:
                     try:
-                        update_trade_order_status(session, order, {"status": "SUBMITTED"})
+                        update_trade_order_status(
+                            session, order, {"status": "SUBMITTED", "params": event_params}
+                        )
                     except ValueError:
                         continue
                 summary["processed"] += 1
                 continue
-            if status == "FILLED":
+
+            if status in {"CANCELED", "CANCELLED"}:
+                if current_status not in {"CANCELED", "CANCELLED", "REJECTED", "FILLED"}:
+                    try:
+                        update_trade_order_status(
+                            session, order, {"status": "CANCELED", "params": event_params}
+                        )
+                    except ValueError:
+                        continue
+                summary["processed"] += 1
+                continue
+
+            if status in {"REJECTED", "INVALID"}:
+                if current_status != "REJECTED":
+                    update_payload = {"status": "REJECTED", "params": dict(event_params)}
+                    reason = event.get("reason") or event.get("message")
+                    if reason:
+                        update_payload["params"]["reason"] = str(reason)
+                    try:
+                        update_trade_order_status(session, order, update_payload)
+                    except ValueError:
+                        continue
+                summary["processed"] += 1
+                continue
+
+            if status in {"FILLED", "PARTIALLYFILLED", "PARTIAL"} or filled_value > 0:
                 filled_qty = float(event.get("filled") or 0.0)
                 if filled_qty <= 0:
                     summary["skipped_not_found"] += 1
@@ -539,14 +576,6 @@ def apply_execution_events(events: list[dict], *, session=None) -> dict:
                 fill_price = float(event.get("fill_price") or 0.0)
                 fill_time = _parse_event_time(event.get("time"))
                 exec_id = event.get("exec_id") or f"lean:{order.id}:{int(fill_time.timestamp() * 1000)}"
-                existing = (
-                    session.query(TradeFill)
-                    .filter(TradeFill.order_id == order.id, TradeFill.exec_id == exec_id)
-                    .first()
-                )
-                if existing:
-                    summary["processed"] += 1
-                    continue
                 try:
                     _apply_fill_to_order(
                         session,
@@ -556,9 +585,19 @@ def apply_execution_events(events: list[dict], *, session=None) -> dict:
                         fill_time=fill_time,
                         exec_id=exec_id,
                     )
+                    # Preserve event metadata on the order for UI/debugging.
+                    try:
+                        update_trade_order_status(
+                            session, order, {"status": str(order.status or "FILLED"), "params": event_params}
+                        )
+                    except ValueError:
+                        pass
                 except ValueError:
                     continue
                 summary["processed"] += 1
+                continue
+
+            summary["skipped_invalid_tag"] += 1
     finally:
         if own_session:
             session.close()

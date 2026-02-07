@@ -165,7 +165,9 @@ def _should_restart(status: dict, state: dict | None, *, timeout_seconds: int, n
 
 def _write_watchlist(session) -> Path:
     root = _bridge_root()
-    refresh_leader_watchlist(session, max_symbols=200, bridge_root=root)
+    # IB accounts have a market data subscription cap. Keep the leader watchlist small and
+    # prioritize positions/active intents/latest snapshots plus risk-off symbols.
+    refresh_leader_watchlist(session, max_symbols=100, bridge_root=root)
     return root / "watchlist.json"
 
 
@@ -216,6 +218,7 @@ def _build_leader_config(session, *, mode: str, watchlist_path: Path) -> tuple[d
     payload.setdefault("lean-bridge-heartbeat-seconds", "2")
     payload.setdefault("lean-bridge-watchlist-refresh-seconds", "5")
     payload.setdefault("lean-bridge-snapshot-seconds", "2")
+    payload.setdefault("lean-bridge-open-orders-seconds", "10")
     return payload, client_id
 
 

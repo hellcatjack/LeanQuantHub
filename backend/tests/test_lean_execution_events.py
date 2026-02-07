@@ -282,3 +282,185 @@ def test_apply_execution_events_merges_mismatched_run(tmp_path):
         assert moved_fill.order_id == canonical.id
     finally:
         session.close()
+
+
+def test_apply_execution_events_marks_oi_order_canceled(tmp_path):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    try:
+        run = TradeRun(project_id=1, decision_snapshot_id=25, status="running", params={})
+        session.add(run)
+        session.commit()
+
+        intent_path = tmp_path / "order_intent.json"
+        intent_payload = [
+            {
+                "order_intent_id": f"oi_{run.id}_1",
+                "symbol": "AAPL",
+                "quantity": 1,
+                "weight": 0,
+            }
+        ]
+        intent_path.write_text(json.dumps(intent_payload), encoding="utf-8")
+        run.params = {"order_intent_path": str(intent_path)}
+        session.commit()
+
+        order = TradeOrder(
+            run_id=run.id,
+            client_order_id=f"oi_{run.id}_1",
+            symbol="AAPL",
+            side="BUY",
+            quantity=1,
+            order_type="LMT",
+            limit_price=100.0,
+            status="SUBMITTED",
+        )
+        session.add(order)
+        session.commit()
+
+        events = [
+            {
+                "order_id": 123,
+                "symbol": "AAPL",
+                "status": "Canceled",
+                "filled": 0.0,
+                "fill_price": 0.0,
+                "direction": "Buy",
+                "time": "2026-01-27T15:25:46.9105632Z",
+                "tag": f"oi_{run.id}_1",
+            }
+        ]
+
+        apply_execution_events(events, session=session)
+
+        refreshed = session.query(TradeOrder).filter_by(id=order.id).one()
+        assert refreshed.status == "CANCELED"
+        assert refreshed.ib_order_id == 123
+        assert isinstance(refreshed.params, dict)
+        assert refreshed.params.get("event_tag") == f"oi_{run.id}_1"
+        assert refreshed.params.get("event_status") == "CANCELED"
+    finally:
+        session.close()
+
+
+def test_apply_execution_events_marks_oi_order_rejected(tmp_path):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    try:
+        run = TradeRun(project_id=1, decision_snapshot_id=25, status="running", params={})
+        session.add(run)
+        session.commit()
+
+        intent_path = tmp_path / "order_intent.json"
+        intent_payload = [
+            {
+                "order_intent_id": f"oi_{run.id}_1",
+                "symbol": "AAPL",
+                "quantity": 1,
+                "weight": 0,
+            }
+        ]
+        intent_path.write_text(json.dumps(intent_payload), encoding="utf-8")
+        run.params = {"order_intent_path": str(intent_path)}
+        session.commit()
+
+        order = TradeOrder(
+            run_id=run.id,
+            client_order_id=f"oi_{run.id}_1",
+            symbol="AAPL",
+            side="BUY",
+            quantity=1,
+            order_type="MKT",
+            status="NEW",
+        )
+        session.add(order)
+        session.commit()
+
+        events = [
+            {
+                "order_id": 77,
+                "symbol": "AAPL",
+                "status": "Rejected",
+                "filled": 0.0,
+                "fill_price": 0.0,
+                "direction": "Buy",
+                "time": "2026-01-27T15:25:46.9105632Z",
+                "tag": f"oi_{run.id}_1",
+                "reason": "Order rejected by exchange",
+            }
+        ]
+
+        apply_execution_events(events, session=session)
+
+        refreshed = session.query(TradeOrder).filter_by(id=order.id).one()
+        assert refreshed.status == "REJECTED"
+        assert refreshed.ib_order_id == 77
+        assert isinstance(refreshed.params, dict)
+        assert refreshed.params.get("event_status") == "REJECTED"
+        assert "reason" in (refreshed.params or {})
+    finally:
+        session.close()
+
+
+def test_apply_execution_events_marks_oi_order_partial_fill(tmp_path):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    try:
+        run = TradeRun(project_id=1, decision_snapshot_id=25, status="running", params={})
+        session.add(run)
+        session.commit()
+
+        intent_path = tmp_path / "order_intent.json"
+        intent_payload = [
+            {
+                "order_intent_id": f"oi_{run.id}_1",
+                "symbol": "AAPL",
+                "quantity": 2,
+                "weight": 0,
+            }
+        ]
+        intent_path.write_text(json.dumps(intent_payload), encoding="utf-8")
+        run.params = {"order_intent_path": str(intent_path)}
+        session.commit()
+
+        order = TradeOrder(
+            run_id=run.id,
+            client_order_id=f"oi_{run.id}_1",
+            symbol="AAPL",
+            side="BUY",
+            quantity=2,
+            order_type="MKT",
+            status="SUBMITTED",
+        )
+        session.add(order)
+        session.commit()
+
+        events = [
+            {
+                "order_id": 88,
+                "symbol": "AAPL",
+                "status": "PartiallyFilled",
+                "filled": 1.0,
+                "fill_price": 100.0,
+                "direction": "Buy",
+                "time": "2026-01-27T15:25:46.9105632Z",
+                "tag": f"oi_{run.id}_1",
+            }
+        ]
+
+        apply_execution_events(events, session=session)
+
+        refreshed = session.query(TradeOrder).filter_by(id=order.id).one()
+        assert refreshed.status == "PARTIAL"
+        assert float(refreshed.filled_quantity) == 1.0
+        assert float(refreshed.avg_fill_price) == 100.0
+        fills = session.query(TradeFill).filter(TradeFill.order_id == order.id).all()
+        assert len(fills) == 1
+    finally:
+        session.close()
