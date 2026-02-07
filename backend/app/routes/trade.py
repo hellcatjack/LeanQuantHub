@@ -509,16 +509,16 @@ def list_trade_orders(
     offset: int = Query(0, ge=0),
     run_id: int | None = None,
 ):
-    events_root = settings.data_root or "/data/share/stock/data"
-    events_path = Path(events_root) / "lean_bridge" / "execution_events.jsonl"
+    bridge_root = resolve_bridge_root()
+    events_path = bridge_root / "execution_events.jsonl"
     if response is None:
         response = Response()
     with get_session() as session:
+        try:
+            ingest_params = inspect.signature(ingest_execution_events).parameters
+        except (TypeError, ValueError):
+            ingest_params = {}
         if events_path.exists():
-            try:
-                ingest_params = inspect.signature(ingest_execution_events).parameters
-            except (TypeError, ValueError):
-                ingest_params = {}
             if "session" in ingest_params:
                 ingest_execution_events(str(events_path), session=session)
             else:
@@ -532,6 +532,17 @@ def list_trade_orders(
         total = query.order_by(None).count()
         response.headers["X-Total-Count"] = str(total)
         orders = query.offset(offset).limit(limit).all()
+        # Direct orders are executed via per-order Lean bridge runs that write events into
+        # `lean_bridge/direct_{id}/execution_events.jsonl`. Ingest them for the returned page
+        # so the UI doesn't depend on visiting the receipts screen to see updated statuses.
+        for order in orders:
+            direct_events = bridge_root / f"direct_{order.id}" / "execution_events.jsonl"
+            if not direct_events.exists():
+                continue
+            if "session" in ingest_params:
+                ingest_execution_events(str(direct_events), session=session)
+            else:
+                ingest_execution_events(str(direct_events))
         return [
             TradeOrderOut.model_validate(
                 {
@@ -660,6 +671,18 @@ def get_trade_order(order_id: int):
         order = session.get(TradeOrder, order_id)
         if not order:
             raise HTTPException(status_code=404, detail="order not found")
+        bridge_root = resolve_bridge_root()
+        direct_events = bridge_root / f"direct_{order_id}" / "execution_events.jsonl"
+        if direct_events.exists():
+            try:
+                ingest_params = inspect.signature(ingest_execution_events).parameters
+            except (TypeError, ValueError):
+                ingest_params = {}
+            if "session" in ingest_params:
+                ingest_execution_events(str(direct_events), session=session)
+            else:
+                ingest_execution_events(str(direct_events))
+            session.refresh(order)
         return TradeOrderOut.model_validate(order, from_attributes=True)
 
 

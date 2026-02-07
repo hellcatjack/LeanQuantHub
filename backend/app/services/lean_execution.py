@@ -347,9 +347,106 @@ def apply_execution_events(events: list[dict], *, session=None) -> dict:
     try:
         for event in events or []:
             tag = str(event.get("tag") or "").strip()
-            if not tag or not tag.startswith("oi_"):
+            if not tag:
                 summary["skipped_invalid_tag"] += 1
                 continue
+
+            status = str(event.get("status") or "").strip().upper()
+            filled_value = float(event.get("filled") or 0.0)
+            event_time_iso = str(event.get("time") or "").strip()
+            event_params = {
+                "event_source": "lean",
+                "event_tag": tag,
+                "event_time": event_time_iso,
+                "event_status": status,
+            }
+
+            # Direct order events use tag `direct:{trade_order_id}` and are stored under
+            # `lean_bridge/direct_{trade_order_id}/execution_events.jsonl`.
+            if tag.startswith("direct:"):
+                raw = tag[len("direct:") :].strip()
+                try:
+                    order_id = int(raw)
+                except ValueError:
+                    summary["skipped_invalid_tag"] += 1
+                    continue
+                order = session.get(TradeOrder, order_id)
+                if order is None:
+                    summary["skipped_not_found"] += 1
+                    continue
+
+                if status in {"SUBMITTED", "NEW"}:
+                    current_status = str(order.status or "").strip().upper()
+                    if current_status in {"NEW", "SUBMITTED"}:
+                        try:
+                            update_trade_order_status(
+                                session, order, {"status": "SUBMITTED", "params": event_params}
+                            )
+                        except ValueError:
+                            continue
+                    summary["processed"] += 1
+                    continue
+
+                if status in {"CANCELED", "CANCELLED"}:
+                    current_status = str(order.status or "").strip().upper()
+                    if current_status not in {"CANCELED", "CANCELLED", "REJECTED", "FILLED"}:
+                        try:
+                            update_trade_order_status(
+                                session, order, {"status": "CANCELED", "params": event_params}
+                            )
+                        except ValueError:
+                            continue
+                    summary["processed"] += 1
+                    continue
+
+                if status in {"REJECTED", "INVALID"}:
+                    if str(order.status or "").strip().upper() != "REJECTED":
+                        update_payload = {"status": "REJECTED", "params": dict(event_params)}
+                        reason = event.get("reason") or event.get("message")
+                        if reason:
+                            update_payload["params"]["reason"] = str(reason)
+                        try:
+                            update_trade_order_status(session, order, update_payload)
+                        except ValueError:
+                            continue
+                    summary["processed"] += 1
+                    continue
+
+                if status in {"FILLED", "PARTIALLYFILLED", "PARTIAL"} or filled_value > 0:
+                    if filled_value <= 0:
+                        summary["skipped_not_found"] += 1
+                        continue
+                    fill_price = float(event.get("fill_price") or 0.0)
+                    fill_time = _parse_event_time(event.get("time"))
+                    exec_id = event.get("exec_id") or f"lean_direct:{order.id}:{int(fill_time.timestamp() * 1000)}"
+                    try:
+                        _apply_fill_to_order(
+                            session,
+                            order,
+                            fill_qty=filled_value,
+                            fill_price=fill_price,
+                            fill_time=fill_time,
+                            exec_id=exec_id,
+                        )
+                        # Preserve event metadata on the order for UI/debugging.
+                        try:
+                            update_trade_order_status(
+                                session, order, {"status": str(order.status or "FILLED"), "params": event_params}
+                            )
+                        except ValueError:
+                            pass
+                    except ValueError:
+                        continue
+                    summary["processed"] += 1
+                    continue
+
+                summary["skipped_invalid_tag"] += 1
+                continue
+
+            if not tag.startswith("oi_"):
+                summary["skipped_invalid_tag"] += 1
+                continue
+
             intent_id = tag
             run_id_hint = _parse_intent_run_id(intent_id)
             duplicate_order = None
@@ -422,7 +519,6 @@ def apply_execution_events(events: list[dict], *, session=None) -> dict:
                 order.ib_order_id = int(order_id)
                 session.commit()
                 session.refresh(order)
-            status = str(event.get("status") or "").strip().upper()
             if status == "SUBMITTED":
                 current_status = str(order.status or "").strip().upper()
                 if current_status in {"NEW", "SUBMITTED"}:

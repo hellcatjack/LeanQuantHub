@@ -62,10 +62,66 @@ def test_orders_trigger_ingest(monkeypatch, tmp_path):
     events_path.write_text('{"tag": "oi_1", "status": "Submitted"}\n', encoding="utf-8")
 
     monkeypatch.setattr(trade_routes, "get_session", _get_session)
+    monkeypatch.setattr(trade_routes, "resolve_bridge_root", lambda: events_dir, raising=False)
     monkeypatch.setattr(trade_routes, "ingest_execution_events", _fake_ingest, raising=False)
-    monkeypatch.setattr(trade_routes, "settings", type("S", (), {"data_root": str(tmp_path)}), raising=False)
 
     trade_routes.list_trade_orders(limit=20, offset=0)
     assert calls["called"] is True
     assert calls["path"] == str(events_path)
     session.close()
+
+
+def test_orders_ingest_direct_execution_events(monkeypatch, tmp_path):
+    session = _make_session()
+    try:
+        result = create_trade_order(
+            session,
+            {
+                "client_order_id": "oi_0_0_123",
+                "symbol": "AAPL",
+                "side": "BUY",
+                "quantity": 1,
+                "order_type": "LMT",
+                "limit_price": 100.0,
+                "params": {"source": "manual"},
+            },
+        )
+        session.commit()
+        order = result.order
+
+        @contextmanager
+        def _get_session():
+            try:
+                yield session
+            finally:
+                pass
+
+        bridge_root = tmp_path / "lean_bridge"
+        direct_dir = bridge_root / f"direct_{order.id}"
+        direct_dir.mkdir(parents=True, exist_ok=True)
+        (direct_dir / "execution_events.jsonl").write_text(
+            "\n".join(
+                [
+                    f'{{"order_id":1,"symbol":"AAPL","status":"Submitted","filled":0,"fill_price":0,"direction":"Buy","time":"2026-02-07T00:00:00Z","tag":"direct:{order.id}"}}',
+                    f'{{"order_id":1,"symbol":"AAPL","status":"Canceled","filled":0,"fill_price":0,"direction":"Buy","time":"2026-02-07T00:01:00Z","tag":"direct:{order.id}"}}',
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(trade_routes, "get_session", _get_session)
+        monkeypatch.setattr(trade_routes, "resolve_bridge_root", lambda: bridge_root, raising=False)
+
+        out = trade_routes.list_trade_orders(limit=20, offset=0)
+        assert out
+        assert out[0].id == order.id
+        assert out[0].status == "CANCELED"
+
+        refreshed = session.get(type(order), order.id)
+        assert refreshed is not None
+        assert refreshed.status == "CANCELED"
+        assert refreshed.params
+        assert refreshed.params.get("event_tag") == f"direct:{order.id}"
+    finally:
+        session.close()
