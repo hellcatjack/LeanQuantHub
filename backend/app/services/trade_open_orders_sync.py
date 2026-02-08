@@ -9,6 +9,7 @@ from app.services.trade_orders import update_trade_order_status
 
 _ACTIVE_ORDER_STATUSES = {"SUBMITTED", "PARTIAL"}
 _TERMINAL_ORDER_STATUSES = {"FILLED", "CANCELED", "CANCELLED", "REJECTED"}
+_NEW_ORDER_MISSING_CANCEL_GRACE_SECONDS = 60
 
 
 def _normalize_tag(value: object) -> str:
@@ -94,7 +95,10 @@ def sync_trade_orders_from_open_orders(
         for run in session.query(TradeRun).filter(TradeRun.id.in_(sorted(run_ids))).all():
             run_modes[int(run.id)] = str(run.mode or "").strip().lower()
 
-    event_time = _now_iso(now)
+    current_dt = now or datetime.now(timezone.utc)
+    if current_dt.tzinfo is None:
+        current_dt = current_dt.replace(tzinfo=timezone.utc)
+    event_time = _now_iso(current_dt)
     for order in orders:
         summary["checked"] += 1
 
@@ -123,6 +127,7 @@ def sync_trade_orders_from_open_orders(
             summary["skipped_no_tag"] += 1
             continue
 
+        current_status = str(order.status or "").strip().upper()
         if tag in open_tags:
             current_status = str(order.status or "").strip().upper()
             if include_new and current_status == "NEW":
@@ -147,6 +152,22 @@ def sync_trade_orders_from_open_orders(
                     summary["updated"] += 1
                     summary["updated_new_to_submitted"] += 1
             continue
+
+        if include_new and current_status == "NEW":
+            created_at = getattr(order, "created_at", None)
+            if created_at:
+                created_dt = created_at
+                if getattr(created_dt, "tzinfo", None) is None:
+                    created_dt = created_dt.replace(tzinfo=timezone.utc)
+                try:
+                    age_seconds = (current_dt - created_dt).total_seconds()
+                except Exception:
+                    age_seconds = None
+                if age_seconds is not None and age_seconds < _NEW_ORDER_MISSING_CANCEL_GRACE_SECONDS:
+                    # Avoid prematurely cancelling newly-created orders when the open-orders snapshot
+                    # hasn't caught up with IB/TWS yet (common right after submission).
+                    summary["skipped"] += 1
+                    continue
 
         try:
             update_trade_order_status(
