@@ -7,6 +7,9 @@ export default defineConfig({
   testDir: "./tests",
   timeout: 120_000,
   expect: { timeout: 60_000 },
+  // These e2e tests hit a shared backend + IB/TWS state, so high parallelism causes flakiness
+  // (runs/orders interfere with each other). Default to 1 worker; override via E2E_WORKERS.
+  workers: Math.max(1, Number.parseInt(process.env.E2E_WORKERS || "1", 10) || 1),
   use: {
     baseURL,
     headless: true,

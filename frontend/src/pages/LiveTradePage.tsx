@@ -1611,30 +1611,39 @@ export default function LiveTradePage() {
   ) => {
     setTradeError("");
     setGuardError("");
+    let latestRun: TradeRun | null = null;
     try {
-      const [runsRes, ordersRes] = await Promise.all([
-        api.get<TradeRun[]>("/api/trade/runs", { params: { limit: 5, offset: 0 } }),
-        api.get<TradeOrder[]>("/api/trade/orders", {
-          params: { limit: pageSize, offset: (page - 1) * pageSize },
-        }),
-      ]);
+      const runsRes = await apiLong.get<TradeRun[]>("/api/trade/runs", {
+        params: { limit: 5, offset: 0 },
+      });
       const runs = runsRes.data || [];
       setTradeRuns(runs);
+      latestRun = runs[0] || null;
+    } catch {
+      // Keep existing state so transient backend issues don't wipe the UI.
+      setTradeError(t("trade.tradeError"));
+    }
+
+    try {
+      const ordersRes = await apiLong.get<TradeOrder[]>("/api/trade/orders", {
+        params: { limit: pageSize, offset: (page - 1) * pageSize },
+      });
       setTradeOrders(ordersRes.data || []);
       const totalHeader = Number(ordersRes.headers?.["x-total-count"]);
       setOrdersTotal(Number.isFinite(totalHeader) ? totalHeader : 0);
-      const latestRun = runs[0];
+    } catch {
+      setTradeError(t("trade.tradeError"));
+      // Keep previous orders on failure.
+    }
+
+    try {
       if (latestRun?.project_id) {
         await loadTradeGuard(latestRun.project_id, latestRun.mode || "paper");
       } else {
         setGuardState(null);
       }
-    } catch (error) {
-      setTradeError(t("trade.tradeError"));
-      setTradeRuns([]);
-      setTradeOrders([]);
-      setOrdersTotal(0);
-      setGuardState(null);
+    } catch {
+      // loadTradeGuard already sets guardError; avoid throwing from here.
     } finally {
       setTradeActivityUpdatedAt(new Date().toISOString());
     }
@@ -2457,7 +2466,10 @@ export default function LiveTradePage() {
     return t("trade.snapshotNotReady", { status: normalized });
   }, [snapshot?.id, snapshot?.status, snapshotLoading, t]);
 
-  const canExecute = useMemo(() => Boolean(selectedProjectId), [selectedProjectId]);
+  const canExecute = useMemo(
+    () => Boolean(selectedProjectId && snapshot?.id && snapshotReady),
+    [selectedProjectId, snapshot?.id, snapshotReady]
+  );
 
   const statusLabel = useMemo(() => {
     if (!isConfigured) {

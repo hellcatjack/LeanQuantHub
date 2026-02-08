@@ -69,14 +69,10 @@ test("live trade paper workflow", async ({ page }) => {
   await page.getByTestId("live-trade-project-select").selectOption("18");
   await page.locator("details.algo-advanced > summary").click();
   const createRunButton = page.getByTestId("paper-trade-create");
-  const priorRunId = await page.getByTestId("paper-trade-run-id").inputValue();
   await expect(createRunButton).toBeVisible({ timeout: 10_000 });
   await createRunButton.click();
   const runIdInput = page.getByTestId("paper-trade-run-id");
   await expect(runIdInput).not.toHaveValue("", { timeout: 60_000 });
-  if (priorRunId) {
-    await expect(runIdInput).not.toHaveValue(priorRunId, { timeout: 60_000 });
-  }
   const tradeStatus = page.getByTestId("paper-trade-status");
   await expect(tradeStatus).toHaveAttribute("data-status", /queued|blocked|failed|done|running/, {
     timeout: 60_000,

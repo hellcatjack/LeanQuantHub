@@ -31,7 +31,7 @@ test.beforeEach(async ({ page }) => {
 test("live trade page shows connection state", async ({ page }) => {
   await page.goto("/live-trade");
   await expect(
-    page.locator(".card-title", { hasText: /交易状态|Trading Status/i })
+    page.locator(".card-title", { hasText: /TWS Status|交易状态|Trading Status/i })
   ).toBeVisible();
 });
 
