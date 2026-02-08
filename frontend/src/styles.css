@@ -159,6 +159,19 @@ a {
   gap: 16px;
 }
 
+.live-trade-execution-row {
+  display: grid;
+  grid-template-columns: minmax(280px, 320px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+@media (max-width: 1100px) {
+  .live-trade-execution-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .live-trade-main-row {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));

@@ -4204,7 +4204,7 @@ export default function LiveTradePage() {
       </div>
     ),
     guard: (
-      <div className="card span-2">
+      <div className="card">
         <div className="card-title">{t("trade.guardTitle")}</div>
         <div className="card-meta">{t("trade.guardMeta")}</div>
         {renderRefreshSchedule("monitor", "guard")}
@@ -4271,7 +4271,7 @@ export default function LiveTradePage() {
       </div>
     ),
     execution: (
-      <div className="card span-2">
+      <div className="card">
         <div className="card-title">{t("trade.executionTitle")}</div>
         <div className="card-meta">{t("trade.executionMeta")}</div>
         {renderRefreshSchedule("execution", "execution")}
@@ -4963,9 +4963,20 @@ export default function LiveTradePage() {
             ))}
           </div>
           <div className="grid-2">
-            {sections.main.map((key) => (
-              <Fragment key={key}>{sectionCards[key]}</Fragment>
-            ))}
+            {sections.main.map((key) => {
+              if (key === "guard") {
+                return (
+                  <div key="guard-execution" className="span-2 live-trade-execution-row">
+                    {sectionCards.guard}
+                    {sectionCards.execution}
+                  </div>
+                );
+              }
+              if (key === "execution") {
+                return null;
+              }
+              return <Fragment key={key}>{sectionCards[key]}</Fragment>;
+            })}
           </div>
           <details className="algo-advanced" style={{ marginTop: "16px" }}>
             <summary>{t("trade.advancedSectionTitle")}</summary>
