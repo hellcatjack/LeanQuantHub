@@ -155,6 +155,18 @@ def _resolve_order_id(event_path: Path, payload: dict, session=None) -> int | No
     direct_tag_id = _extract_order_id_from_tag(tag)
     if direct_tag_id is not None:
         return direct_tag_id
+    # Lean execution for trade runs uses order-intent ids (e.g. `oi_{run_id}_...`) as tags.
+    # Those ids are persisted as TradeOrder.client_order_id, so resolve them directly.
+    tag_text = str(tag or "").strip()
+    if tag_text.startswith("oi_") and session is not None:
+        matched = (
+            session.query(TradeOrder.id)
+            .filter(TradeOrder.client_order_id == tag_text)
+            .order_by(TradeOrder.id.desc())
+            .first()
+        )
+        if matched:
+            return int(matched[0])
     snapshot_id, tag_symbol = _parse_snapshot_tag(str(tag or "").strip())
     if snapshot_id is None:
         return None

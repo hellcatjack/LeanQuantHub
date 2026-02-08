@@ -195,6 +195,52 @@ def test_receipts_ingest_snapshot_tag_updates_order(monkeypatch, tmp_path: Path)
     session.close()
 
 
+def test_receipts_ingest_run_intent_tag_updates_order(monkeypatch, tmp_path: Path) -> None:
+    session = _make_session()
+    monkeypatch.setattr(settings, "data_root", str(tmp_path))
+
+    run = TradeRun(project_id=1, decision_snapshot_id=46, status="running", mode="paper")
+    session.add(run)
+    session.commit()
+    session.refresh(run)
+
+    intent_id = f"oi_{run.id}_1"
+    result = create_trade_order(
+        session,
+        {
+            "client_order_id": intent_id,
+            "symbol": "AAA",
+            "side": "BUY",
+            "quantity": 2,
+            "order_type": "MKT",
+            "params": {"decision_snapshot_id": 46},
+        },
+        run_id=run.id,
+    )
+    session.commit()
+    order = result.order
+
+    bridge_dir = tmp_path / "lean_bridge"
+    bridge_dir.mkdir(parents=True, exist_ok=True)
+    events_path = bridge_dir / "execution_events.jsonl"
+    _write_events(
+        events_path,
+        [
+            f'{{"order_id":1,"symbol":"AAA","status":"Filled","filled":2,"fill_price":10.5,"direction":"Buy","time":"2026-01-30T20:34:01Z","tag":"{intent_id}"}}',
+        ],
+    )
+
+    page = list_trade_receipts(session, limit=50, offset=0, mode="all")
+
+    refreshed = session.get(TradeOrder, order.id)
+    assert refreshed is not None
+    assert refreshed.status == "FILLED"
+    assert float(refreshed.filled_quantity or 0.0) == 2.0
+    assert "lean_event_missing_order" not in (page.warnings or [])
+
+    session.close()
+
+
 def test_receipts_ingest_marks_filled_when_event_filled(monkeypatch, tmp_path: Path) -> None:
     session = _make_session()
     monkeypatch.setattr(settings, "data_root", str(tmp_path))
