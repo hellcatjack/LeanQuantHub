@@ -13,6 +13,8 @@ export default defineConfig({
   use: {
     baseURL,
     headless: true,
+    // Keep screenshots/layout assertions stable and match the target "headless desktop" resolution.
+    viewport: { width: 2560, height: 1440 },
   },
   webServer: useLocalServer
     ? {
