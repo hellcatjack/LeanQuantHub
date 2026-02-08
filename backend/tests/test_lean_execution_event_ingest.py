@@ -38,3 +38,20 @@ def test_ingest_events_jsonl_calls_apply(monkeypatch, tmp_path):
     lean_execution.ingest_execution_events(str(events_path))
     assert calls["payload"] is not None
     assert len(calls["payload"]) == 2
+
+
+def test_ingest_events_jsonl_single_object_calls_apply(monkeypatch, tmp_path):
+    # A single-line jsonl file is valid JSON (dict) and must still be treated as one event.
+    events_path = tmp_path / "events.jsonl"
+    events_path.write_text('{"tag": "direct:1", "status": "Submitted"}\n')
+    calls = {"payload": None}
+
+    def _fake_apply(events):
+        calls["payload"] = events
+
+    monkeypatch.setattr(lean_execution, "apply_execution_events", _fake_apply, raising=False)
+
+    lean_execution.ingest_execution_events(str(events_path))
+    assert calls["payload"] is not None
+    assert len(calls["payload"]) == 1
+    assert calls["payload"][0]["tag"] == "direct:1"

@@ -192,7 +192,13 @@ def ingest_execution_events(path: str, *, session=None) -> dict:
     content = Path(path).read_text(encoding="utf-8")
     try:
         parsed = json.loads(content)
-        events = parsed if isinstance(parsed, list) else []
+        # A single-line jsonl file is valid JSON (dict). Treat it as one event.
+        if isinstance(parsed, list):
+            events = parsed
+        elif isinstance(parsed, dict):
+            events = [parsed]
+        else:
+            events = []
     except json.JSONDecodeError:
         events = []
         for line in content.splitlines():
