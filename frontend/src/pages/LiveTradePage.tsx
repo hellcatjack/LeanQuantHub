@@ -4561,7 +4561,7 @@ export default function LiveTradePage() {
         <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
         </div>
         <div className="table-scroll" style={{ marginTop: "12px" }}>
-          <table className="table" data-testid="trade-symbol-summary-table">
+          <table className="table table-compact" data-testid="trade-symbol-summary-table">
             <thead>
               <tr>
                 <th>{t("trade.symbolTable.symbol")}</th>

@@ -1617,6 +1617,13 @@ a {
   overflow-wrap: anywhere;
 }
 
+.table.table-compact th,
+.table.table-compact td {
+  padding: 8px 12px;
+  font-size: 13px;
+  line-height: 1.25;
+}
+
 .backtest-table th,
 .backtest-table td {
   padding: 10px 12px;
