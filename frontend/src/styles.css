@@ -167,7 +167,8 @@ a {
 
 @media (min-width: 1200px) {
   .live-trade-main-row {
-    grid-template-columns: 318px 318px minmax(360px, 1fr);
+    /* Give the TWS status card a bit more room so status labels don't wrap as easily. */
+    grid-template-columns: 418px 318px minmax(360px, 1fr);
   }
 }
 
