@@ -555,12 +555,12 @@ export default function LiveTradePage() {
   const [tradeRuns, setTradeRuns] = useState<TradeRun[]>([]);
   const [tradeOrders, setTradeOrders] = useState<TradeOrder[]>([]);
   const [ordersPage, setOrdersPage] = useState(1);
-  const [ordersPageSize, setOrdersPageSize] = useState(50);
+  const [ordersPageSize, setOrdersPageSize] = useState(20);
   const [ordersTotal, setOrdersTotal] = useState(0);
   const [tradeActivityUpdatedAt, setTradeActivityUpdatedAt] = useState<string | null>(null);
   const [tradeReceipts, setTradeReceipts] = useState<TradeReceipt[]>([]);
   const [receiptsPage, setReceiptsPage] = useState(1);
-  const [receiptsPageSize, setReceiptsPageSize] = useState(50);
+  const [receiptsPageSize, setReceiptsPageSize] = useState(20);
   const [receiptsTotal, setReceiptsTotal] = useState(0);
   const [receiptsUpdatedAt, setReceiptsUpdatedAt] = useState<string | null>(null);
   const [receiptsWarnings, setReceiptsWarnings] = useState<string[]>([]);
@@ -3497,7 +3497,7 @@ export default function LiveTradePage() {
               total={ordersTotal}
               onPageChange={handleOrdersPageChange}
               onPageSizeChange={handleOrdersPageSizeChange}
-              pageSizeOptions={[50, 100, 200]}
+              pageSizeOptions={[20, 50, 100]}
             />
           </>
         ) : detailTab === "fills" ? (
@@ -3605,7 +3605,7 @@ export default function LiveTradePage() {
               total={receiptsTotal}
               onPageChange={handleReceiptsPageChange}
               onPageSizeChange={handleReceiptsPageSizeChange}
-              pageSizeOptions={[50, 100, 200]}
+              pageSizeOptions={[20, 50, 100]}
             />
           </>
         )}
@@ -4966,9 +4966,9 @@ export default function LiveTradePage() {
             {sections.main.map((key) => {
               if (key === "guard") {
                 return (
-                  <div key="guard-execution" className="span-2 live-trade-execution-row">
-                    {sectionCards.guard}
+                  <div key="execution-guard" className="span-2 live-trade-execution-row">
                     {sectionCards.execution}
+                    {sectionCards.guard}
                   </div>
                 );
               }
