@@ -60,11 +60,10 @@ test("live trade paper workflow", async ({ page }) => {
   await page.goto("/projects");
   await page.getByTestId("project-item-18").click();
   await page.getByTestId("project-tab-algorithm").click();
-  await page.getByTestId("decision-snapshot-run").click();
-  await expect(page.getByTestId("decision-snapshot-message")).toBeVisible({ timeout: 60_000 });
-  await expect(page.getByTestId("decision-snapshot-today")).not.toHaveText("-", {
-    timeout: 60_000,
-  });
+  // Ensure a latest successful decision snapshot exists before starting live-trade runs.
+  const snapshotToday = page.getByTestId("decision-snapshot-today");
+  await expect(snapshotToday).toBeVisible({ timeout: 60_000 });
+  await expect(snapshotToday).not.toHaveText("-", { timeout: 60_000 });
 
   await page.goto("/live-trade");
   await page.getByTestId("live-trade-project-select").selectOption("18");
