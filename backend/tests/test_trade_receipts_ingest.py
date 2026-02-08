@@ -241,6 +241,65 @@ def test_receipts_ingest_run_intent_tag_updates_order(monkeypatch, tmp_path: Pat
     session.close()
 
 
+def test_receipts_ingest_creates_order_for_missing_intent_tag(monkeypatch, tmp_path: Path) -> None:
+    session = _make_session()
+    monkeypatch.setattr(settings, "data_root", str(tmp_path))
+
+    run = TradeRun(project_id=1, decision_snapshot_id=46, status="running", mode="paper")
+    session.add(run)
+    session.commit()
+    session.refresh(run)
+
+    intent_id = f"oi_{run.id}_1"
+    assert session.query(TradeOrder).count() == 0
+
+    bridge_dir = tmp_path / "lean_bridge"
+    bridge_dir.mkdir(parents=True, exist_ok=True)
+    events_path = bridge_dir / "execution_events.jsonl"
+    _write_events(
+        events_path,
+        [
+            f'{{"order_id":1,"symbol":"AAA","status":"Submitted","filled":0,"fill_price":0,"direction":"Buy","time":"2026-01-30T20:34:01Z","tag":"{intent_id}"}}',
+        ],
+    )
+
+    page = list_trade_receipts(session, limit=50, offset=0, mode="all")
+    assert "lean_event_missing_order" not in (page.warnings or [])
+
+    created = session.query(TradeOrder).filter(TradeOrder.client_order_id == intent_id).one_or_none()
+    assert created is not None
+    assert created.run_id == run.id
+    assert created.symbol == "AAA"
+    assert created.side == "BUY"
+    assert created.status in {"NEW", "SUBMITTED"}
+
+    session.close()
+
+
+def test_receipts_ingest_ignores_orphan_intent_tag(monkeypatch, tmp_path: Path) -> None:
+    session = _make_session()
+    monkeypatch.setattr(settings, "data_root", str(tmp_path))
+
+    assert session.query(TradeRun).count() == 0
+    assert session.query(TradeOrder).count() == 0
+
+    bridge_dir = tmp_path / "lean_bridge"
+    bridge_dir.mkdir(parents=True, exist_ok=True)
+    events_path = bridge_dir / "execution_events.jsonl"
+    _write_events(
+        events_path,
+        [
+            '{"order_id":1,"symbol":"AAA","status":"Submitted","filled":0,"fill_price":0,"direction":"Buy","time":"2026-01-30T20:34:01Z","tag":"oi_999_1"}',
+        ],
+    )
+
+    page = list_trade_receipts(session, limit=50, offset=0, mode="all")
+    assert "lean_event_missing_order" not in (page.warnings or [])
+    assert session.query(TradeOrder).count() == 0
+
+    session.close()
+
+
 def test_receipts_ingest_marks_filled_when_event_filled(monkeypatch, tmp_path: Path) -> None:
     session = _make_session()
     monkeypatch.setattr(settings, "data_root", str(tmp_path))
@@ -343,10 +402,6 @@ def test_receipts_ingest_no_warning_when_tag_missing(monkeypatch, tmp_path: Path
         },
     )
     session.commit()
-    order = result.order
-    # Best-effort mapping for legacy logs relies on IB order id.
-    order.ib_order_id = 123
-    session.commit()
 
     bridge_dir = tmp_path / "lean_bridge"
     bridge_dir.mkdir(parents=True, exist_ok=True)
@@ -360,9 +415,5 @@ def test_receipts_ingest_no_warning_when_tag_missing(monkeypatch, tmp_path: Path
 
     page = list_trade_receipts(session, limit=50, offset=0, mode="all")
     assert "lean_event_missing_order" not in (page.warnings or [])
-
-    refreshed = session.get(TradeOrder, order.id)
-    assert refreshed is not None
-    assert refreshed.status in {"NEW", "SUBMITTED"}
 
     session.close()

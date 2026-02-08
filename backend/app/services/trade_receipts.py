@@ -9,6 +9,7 @@ from typing import Iterable
 from app.core.config import settings
 from app.models import TradeFill, TradeOrder, TradeRun
 from app.services.ib_orders import apply_fill_to_order
+from app.services.trade_orders import create_trade_order
 from app.services.trade_orders import update_trade_order_status
 from app.services.lean_bridge_paths import resolve_bridge_root
 from app.services.lean_bridge_reader import read_positions
@@ -156,22 +157,6 @@ def _resolve_order_id(event_path: Path, payload: dict, session=None) -> int | No
     if direct_tag_id is not None:
         return direct_tag_id
     tag_text = str(tag or "").strip()
-    if not tag_text and session is not None:
-        # Legacy/older logs may omit `tag` but include IB order id. Try best-effort mapping.
-        lean_order_id = payload.get("order_id")
-        try:
-            lean_order_id_value = int(lean_order_id)
-        except (TypeError, ValueError):
-            lean_order_id_value = None
-        if lean_order_id_value is not None:
-            matched = (
-                session.query(TradeOrder.id)
-                .filter(TradeOrder.ib_order_id == lean_order_id_value)
-                .order_by(TradeOrder.id.desc())
-                .first()
-            )
-            if matched:
-                return int(matched[0])
     # Lean execution for trade runs uses order-intent ids (e.g. `oi_{run_id}_...`) as tags.
     # Those ids are persisted as TradeOrder.client_order_id, so resolve them directly.
     if tag_text.startswith("oi_") and session is not None:
@@ -195,6 +180,59 @@ def _resolve_order_id(event_path: Path, payload: dict, session=None) -> int | No
         side=side if side else None,
         tag=tag,
     )
+
+
+def _parse_intent_run_id(intent_id: str) -> int | None:
+    parts = str(intent_id or "").strip().split("_")
+    if len(parts) < 3 or parts[0] != "oi":
+        return None
+    try:
+        return int(parts[1])
+    except (TypeError, ValueError):
+        return None
+
+
+def _ensure_order_for_intent_tag(session, *, intent_id: str, payload: dict) -> int | None:
+    run_id = _parse_intent_run_id(intent_id)
+    if run_id is None:
+        return None
+    run = session.get(TradeRun, run_id)
+    if run is None:
+        return None
+
+    symbol = str(payload.get("symbol") or "").strip().upper()
+    if not symbol:
+        return None
+    direction = _normalize_status(payload.get("direction"))
+    side = (
+        "BUY"
+        if direction in {"BUY", "LONG"}
+        else "SELL"
+        if direction in {"SELL", "SHORT"}
+        else ""
+    )
+    if not side:
+        return None
+    try:
+        filled_value = float(payload.get("filled") or 0.0)
+    except (TypeError, ValueError):
+        filled_value = 0.0
+    quantity = abs(filled_value) if filled_value else 0.0
+
+    order_payload = {
+        "client_order_id": intent_id,
+        "symbol": symbol,
+        "side": side,
+        "quantity": quantity,
+        "order_type": "MKT",
+        "params": {"source": "lean_bridge", "client_order_id_auto": True},
+    }
+    if quantity <= 0:
+        order_payload["params"]["intent_only"] = True
+
+    result = create_trade_order(session, order_payload, run_id=run.id)
+    session.commit()
+    return int(result.order.id)
 
 
 def _lean_kind(status: str, filled: float | None) -> str:
@@ -279,7 +317,23 @@ def _ingest_lean_events(session, warnings: list[str]) -> None:
                 # Only warn when the event carries a non-empty tag we failed to resolve.
                 # Some legacy logs (and certain edge cases) omit tags entirely; those cannot be
                 # reliably linked back to a local TradeOrder and should not spam the UI.
-                if str(payload.get("tag") or "").strip():
+                tag_value = str(payload.get("tag") or "").strip()
+                if not tag_value:
+                    continue
+                if tag_value.startswith("oi_"):
+                    # Older runs might have lean execution events before TradeOrder rows existed.
+                    # If we can infer the run, create a placeholder order so receipts stay consistent.
+                    created_id = _ensure_order_for_intent_tag(
+                        session,
+                        intent_id=tag_value,
+                        payload=payload,
+                    )
+                    if created_id is not None:
+                        order_id = created_id
+                    else:
+                        # Ignore orphan intent tags from deleted runs to keep UI warnings actionable.
+                        continue
+                else:
                     _append_warning(warnings, "lean_event_missing_order")
                 continue
 
