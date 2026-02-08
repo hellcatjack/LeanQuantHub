@@ -4204,7 +4204,7 @@ export default function LiveTradePage() {
       </div>
     ),
     guard: (
-      <div className="card">
+      <div className="card span-2">
         <div className="card-title">{t("trade.guardTitle")}</div>
         <div className="card-meta">{t("trade.guardMeta")}</div>
         {renderRefreshSchedule("monitor", "guard")}
@@ -4271,7 +4271,7 @@ export default function LiveTradePage() {
       </div>
     ),
     execution: (
-      <div className="card">
+      <div className="card span-2">
         <div className="card-title">{t("trade.executionTitle")}</div>
         <div className="card-meta">{t("trade.executionMeta")}</div>
         {renderRefreshSchedule("execution", "execution")}
