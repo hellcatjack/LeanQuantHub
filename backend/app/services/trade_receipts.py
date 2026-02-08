@@ -155,9 +155,25 @@ def _resolve_order_id(event_path: Path, payload: dict, session=None) -> int | No
     direct_tag_id = _extract_order_id_from_tag(tag)
     if direct_tag_id is not None:
         return direct_tag_id
+    tag_text = str(tag or "").strip()
+    if not tag_text and session is not None:
+        # Legacy/older logs may omit `tag` but include IB order id. Try best-effort mapping.
+        lean_order_id = payload.get("order_id")
+        try:
+            lean_order_id_value = int(lean_order_id)
+        except (TypeError, ValueError):
+            lean_order_id_value = None
+        if lean_order_id_value is not None:
+            matched = (
+                session.query(TradeOrder.id)
+                .filter(TradeOrder.ib_order_id == lean_order_id_value)
+                .order_by(TradeOrder.id.desc())
+                .first()
+            )
+            if matched:
+                return int(matched[0])
     # Lean execution for trade runs uses order-intent ids (e.g. `oi_{run_id}_...`) as tags.
     # Those ids are persisted as TradeOrder.client_order_id, so resolve them directly.
-    tag_text = str(tag or "").strip()
     if tag_text.startswith("oi_") and session is not None:
         matched = (
             session.query(TradeOrder.id)
@@ -260,7 +276,11 @@ def _ingest_lean_events(session, warnings: list[str]) -> None:
 
             order_id = _resolve_order_id(event_path, payload, session=session)
             if order_id is None:
-                _append_warning(warnings, "lean_event_missing_order")
+                # Only warn when the event carries a non-empty tag we failed to resolve.
+                # Some legacy logs (and certain edge cases) omit tags entirely; those cannot be
+                # reliably linked back to a local TradeOrder and should not spam the UI.
+                if str(payload.get("tag") or "").strip():
+                    _append_warning(warnings, "lean_event_missing_order")
                 continue
 
             order = session.get(TradeOrder, order_id)

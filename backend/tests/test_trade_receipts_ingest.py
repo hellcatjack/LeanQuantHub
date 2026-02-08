@@ -325,3 +325,44 @@ def test_receipts_ingest_updates_status_when_fill_exists(monkeypatch, tmp_path: 
     assert refreshed.status == "FILLED"
 
     session.close()
+
+
+def test_receipts_ingest_no_warning_when_tag_missing(monkeypatch, tmp_path: Path) -> None:
+    session = _make_session()
+    monkeypatch.setattr(settings, "data_root", str(tmp_path))
+
+    result = create_trade_order(
+        session,
+        {
+            "client_order_id": "manual-missing-tag",
+            "symbol": "AAPL",
+            "side": "BUY",
+            "quantity": 1,
+            "order_type": "MKT",
+            "params": {"client_order_id_auto": True},
+        },
+    )
+    session.commit()
+    order = result.order
+    # Best-effort mapping for legacy logs relies on IB order id.
+    order.ib_order_id = 123
+    session.commit()
+
+    bridge_dir = tmp_path / "lean_bridge"
+    bridge_dir.mkdir(parents=True, exist_ok=True)
+    events_path = bridge_dir / "execution_events.jsonl"
+    _write_events(
+        events_path,
+        [
+            '{"order_id":123,"symbol":"AAPL","status":"Submitted","filled":0,"fill_price":0,"direction":"Buy","time":"2026-01-30T20:34:01Z"}',
+        ],
+    )
+
+    page = list_trade_receipts(session, limit=50, offset=0, mode="all")
+    assert "lean_event_missing_order" not in (page.warnings or [])
+
+    refreshed = session.get(TradeOrder, order.id)
+    assert refreshed is not None
+    assert refreshed.status in {"NEW", "SUBMITTED"}
+
+    session.close()
