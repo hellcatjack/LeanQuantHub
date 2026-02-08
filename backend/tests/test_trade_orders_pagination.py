@@ -53,3 +53,47 @@ def test_orders_total_count_header():
     assert len(result) == 1
 
     session.close()
+
+
+def test_orders_sorted_by_id_desc():
+    session = _make_session()
+
+    @contextmanager
+    def _get_session():
+        try:
+            yield session
+        finally:
+            pass
+
+    trade_routes.get_session = _get_session  # type: ignore[attr-defined]
+
+    create_trade_order(
+        session,
+        {
+            "client_order_id": "manual-1",
+            "symbol": "SPY",
+            "side": "BUY",
+            "quantity": 1,
+            "order_type": "MKT",
+            "params": {"client_order_id_auto": True},
+        },
+    )
+    create_trade_order(
+        session,
+        {
+            "client_order_id": "manual-2",
+            "symbol": "AAPL",
+            "side": "BUY",
+            "quantity": 1,
+            "order_type": "MKT",
+            "params": {"client_order_id_auto": True},
+        },
+    )
+    session.commit()
+
+    response = Response()
+    result = trade_routes.list_trade_orders(limit=20, offset=0, run_id=None, response=response)
+    ids = [item.id for item in result]
+    assert ids == sorted(ids, reverse=True)
+
+    session.close()

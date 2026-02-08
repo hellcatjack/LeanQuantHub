@@ -624,7 +624,8 @@ def list_trade_orders(
         positions_payload = read_positions(resolve_bridge_root())
         baseline = ensure_positions_baseline(resolve_bridge_root(), positions_payload)
         realized = compute_realized_pnl(session, baseline)
-        query = session.query(TradeOrder).order_by(TradeOrder.updated_at.desc(), TradeOrder.id.desc())
+        # Live-trade monitor expects newest order ids first for easier correlation with TWS.
+        query = session.query(TradeOrder).order_by(TradeOrder.id.desc())
         if run_id is not None:
             query = query.filter(TradeOrder.run_id == run_id)
         total = query.order_by(None).count()

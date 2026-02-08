@@ -57,7 +57,8 @@ def build_trade_run_detail(session, run_id: int, *, limit: int = 200, offset: in
         session.query(TradeFill)
         .join(TradeOrder, TradeFill.order_id == TradeOrder.id)
         .filter(TradeOrder.run_id == run_id)
-        .order_by(TradeFill.created_at.desc())
+        # Live-trade monitor expects fills grouped by newest order ids first.
+        .order_by(TradeFill.order_id.desc(), TradeFill.created_at.desc(), TradeFill.id.desc())
         .offset(offset)
         .limit(limit)
         .all()

@@ -530,9 +530,13 @@ def list_trade_receipts(
     elif mode == "fills":
         items = [item for item in items if item.kind == "fill"]
 
+    # Live-trade monitor expects newest order ids first (DESC) so receipts/fills correlate with the
+    # orders table. Within the same order id, keep newest events first.
     items.sort(
-        key=lambda item: _ensure_aware(item.time)
-        or datetime.min.replace(tzinfo=timezone.utc),
+        key=lambda item: (
+            item.order_id if item.order_id is not None else -1,
+            _ensure_aware(item.time) or datetime.min.replace(tzinfo=timezone.utc),
+        ),
         reverse=True,
     )
     total = len(items)

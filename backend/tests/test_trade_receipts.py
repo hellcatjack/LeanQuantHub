@@ -88,3 +88,43 @@ def test_trade_receipts_warn_missing_lean_logs(monkeypatch, tmp_path: Path) -> N
     assert page.warnings == ["lean_logs_missing"]
 
     session.close()
+
+
+def test_trade_receipts_sorted_by_order_id_desc(monkeypatch, tmp_path: Path) -> None:
+    session = _make_session()
+    monkeypatch.setattr(settings, "data_root", str(tmp_path))
+    # Avoid warnings from missing lean_bridge root (sorting should still work, but keep the test clean).
+    (tmp_path / "lean_bridge").mkdir(parents=True, exist_ok=True)
+
+    create_trade_order(
+        session,
+        {
+            "client_order_id": "manual-1",
+            "symbol": "SPY",
+            "side": "BUY",
+            "quantity": 1,
+            "order_type": "MKT",
+            "params": {"client_order_id_auto": True},
+        },
+    )
+    create_trade_order(
+        session,
+        {
+            "client_order_id": "manual-2",
+            "symbol": "AAPL",
+            "side": "BUY",
+            "quantity": 1,
+            "order_type": "MKT",
+            "params": {"client_order_id_auto": True},
+        },
+    )
+    session.commit()
+
+    page = list_trade_receipts(session, limit=50, offset=0, mode="orders")
+
+    assert [item.order_id for item in page.items] == sorted(
+        [item.order_id for item in page.items], reverse=True
+    )
+    assert page.warnings == []
+
+    session.close()

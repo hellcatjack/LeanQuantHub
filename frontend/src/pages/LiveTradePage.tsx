@@ -2643,6 +2643,49 @@ export default function LiveTradePage() {
     return tradeActivityUpdatedAt;
   }, [detailTab, receiptsUpdatedAt, tradeActivityUpdatedAt]);
 
+  // Keep live-trade monitor tables deterministic and easy to scan: newest order ids first.
+  const sortedTradeOrders = useMemo(() => {
+    if (!tradeOrders.length) {
+      return [];
+    }
+    return [...tradeOrders].sort((a, b) => (b.id || 0) - (a.id || 0));
+  }, [tradeOrders]);
+
+  const sortedTradeFills = useMemo(() => {
+    const fills = runDetail?.fills || [];
+    if (!fills.length) {
+      return [];
+    }
+    return [...fills].sort((a, b) => {
+      const orderDiff = (b.order_id || 0) - (a.order_id || 0);
+      if (orderDiff !== 0) {
+        return orderDiff;
+      }
+      return (b.id || 0) - (a.id || 0);
+    });
+  }, [runDetail?.fills]);
+
+  const sortedTradeReceipts = useMemo(() => {
+    if (!tradeReceipts.length) {
+      return [];
+    }
+    const parseTime = (value?: string | null) => {
+      if (!value) {
+        return Number.NEGATIVE_INFINITY;
+      }
+      const parsed = Date.parse(value);
+      return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
+    };
+    return [...tradeReceipts].sort((a, b) => {
+      const orderA = a.order_id ?? -1;
+      const orderB = b.order_id ?? -1;
+      if (orderB !== orderA) {
+        return orderB - orderA;
+      }
+      return parseTime(b.time) - parseTime(a.time);
+    });
+  }, [tradeReceipts]);
+
   const buildPositionKey = (row: IBAccountPosition) =>
     `${row.symbol}::${row.account || ""}::${row.currency || ""}`;
 
@@ -3416,8 +3459,8 @@ export default function LiveTradePage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {tradeOrders.length ? (
-                    tradeOrders.map((order) => (
+                  {sortedTradeOrders.length ? (
+                    sortedTradeOrders.map((order) => (
                       <tr key={order.id}>
                         <td>#{order.id}</td>
                         <td>{order.client_order_id || t("common.none")}</td>
@@ -3474,9 +3517,9 @@ export default function LiveTradePage() {
                   <th>{t("trade.fillTable.time")}</th>
                 </tr>
               </thead>
-              <tbody>
-                {runDetail?.fills?.length ? (
-                  runDetail.fills.map((fill) => (
+                  <tbody>
+                {sortedTradeFills.length ? (
+                  sortedTradeFills.map((fill) => (
                     <tr key={fill.id}>
                       <td>#{fill.order_id}</td>
                       <td>{fill.symbol || t("common.none")}</td>
@@ -3527,9 +3570,9 @@ export default function LiveTradePage() {
                     <th>{t("trade.receiptTable.source")}</th>
                   </tr>
                 </thead>
-                <tbody>
-                  {tradeReceipts.length ? (
-                    tradeReceipts.map((receipt, index) => (
+                  <tbody>
+                  {sortedTradeReceipts.length ? (
+                    sortedTradeReceipts.map((receipt, index) => (
                       <tr key={`${receipt.source}-${receipt.order_id || "na"}-${index}`}>
                         <td>{receipt.time ? formatDateTime(receipt.time) : t("common.none")}</td>
                         <td>{formatReceiptKind(receipt.kind)}</td>
