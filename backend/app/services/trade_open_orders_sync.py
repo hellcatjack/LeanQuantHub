@@ -4,12 +4,14 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.models import TradeOrder, TradeRun
-from app.services.trade_orders import update_trade_order_status
+from app.services.trade_orders import force_update_trade_order_status, update_trade_order_status
 
 
 _ACTIVE_ORDER_STATUSES = {"SUBMITTED", "PARTIAL"}
 _TERMINAL_ORDER_STATUSES = {"FILLED", "CANCELED", "CANCELLED", "REJECTED"}
+_RECOVERABLE_TERMINAL_STATUSES = {"CANCELED", "CANCELLED"}
 _NEW_ORDER_MISSING_CANCEL_GRACE_SECONDS = 60
+_CANCELED_OPEN_ORDER_STATUSES = {"CANCELED", "CANCELLED"}
 
 
 def _normalize_tag(value: object) -> str:
@@ -26,6 +28,23 @@ def _extract_open_tags(payload: dict[str, Any]) -> set[str]:
         if tag:
             tags.add(tag)
     return tags
+
+
+def _extract_open_items_by_tag(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    mapped: dict[str, dict[str, Any]] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        tag = _normalize_tag(item.get("tag"))
+        if not tag:
+            continue
+        mapped[tag] = item
+    return mapped
+
+
+def _normalize_open_order_status(value: object) -> str:
+    return str(value or "").strip().upper()
 
 
 def _now_iso(now: datetime | None) -> str:
@@ -70,8 +89,9 @@ def sync_trade_orders_from_open_orders(
         summary["skipped_stale"] = 1
         return summary
 
-    open_tags = _extract_open_tags(open_orders_payload)
     open_items = open_orders_payload.get("items") if isinstance(open_orders_payload.get("items"), list) else []
+    open_by_tag = _extract_open_items_by_tag(open_orders_payload)
+    open_tags = set(open_by_tag.keys())
     if not open_tags and open_items:
         # If IB returns open orders but none of them have tags, we can't safely reconcile by tag.
         # This can happen when older orders were placed without OrderRef propagation. Treat the
@@ -82,6 +102,9 @@ def sync_trade_orders_from_open_orders(
     statuses = set(_ACTIVE_ORDER_STATUSES)
     if include_new:
         statuses.add("NEW")
+    # Recovery: if we previously marked orders as canceled due to a stale/empty open-orders snapshot,
+    # but IB still reports them as open now, we need to reconcile back to SUBMITTED.
+    statuses.update(_RECOVERABLE_TERMINAL_STATUSES)
     query = session.query(TradeOrder).filter(TradeOrder.status.in_(sorted(statuses)))
     if run_id is not None:
         query = query.filter(TradeOrder.run_id == int(run_id))
@@ -112,10 +135,6 @@ def sync_trade_orders_from_open_orders(
             summary["skipped_mode_mismatch"] += 1
             continue
 
-        if str(order.status or "").strip().upper() in _TERMINAL_ORDER_STATUSES:
-            summary["skipped"] += 1
-            continue
-
         tag = None
         if isinstance(order.params, dict):
             tag = _normalize_tag(order.params.get("event_tag"))
@@ -128,8 +147,35 @@ def sync_trade_orders_from_open_orders(
             continue
 
         current_status = str(order.status or "").strip().upper()
+
         if tag in open_tags:
-            current_status = str(order.status or "").strip().upper()
+            open_item = open_by_tag.get(tag) or {}
+            open_status = _normalize_open_order_status(open_item.get("status"))
+            if open_status in _CANCELED_OPEN_ORDER_STATUSES:
+                # Some IB responses can still include canceled orders. Treat them as terminal.
+                if current_status not in _TERMINAL_ORDER_STATUSES:
+                    try:
+                        update_trade_order_status(
+                            session,
+                            order,
+                            {
+                                "status": "CANCELED",
+                                "params": {
+                                    "event_source": "lean_open_orders",
+                                    "event_tag": tag,
+                                    "event_time": event_time,
+                                    "event_status": "CANCELED",
+                                    "sync_reason": "open_order_reports_canceled",
+                                },
+                            },
+                        )
+                    except ValueError:
+                        summary["skipped"] += 1
+                    else:
+                        summary["updated"] += 1
+                        summary["updated_missing_to_canceled"] += 1
+                continue
+
             if include_new and current_status == "NEW":
                 try:
                     update_trade_order_status(
@@ -151,6 +197,36 @@ def sync_trade_orders_from_open_orders(
                 else:
                     summary["updated"] += 1
                     summary["updated_new_to_submitted"] += 1
+                continue
+
+            if current_status in _RECOVERABLE_TERMINAL_STATUSES:
+                try:
+                    force_update_trade_order_status(
+                        session,
+                        order,
+                        {
+                            "status": "SUBMITTED",
+                            "params": {
+                                "event_source": "lean_open_orders",
+                                "event_tag": tag,
+                                "event_time": event_time,
+                                "event_status": "SUBMITTED",
+                                "sync_reason": "present_in_open_orders_recovered",
+                            },
+                        },
+                    )
+                except ValueError:
+                    summary["skipped"] += 1
+                else:
+                    summary["updated"] += 1
+                continue
+
+            # Present and not NEW recovery: keep current state.
+            continue
+
+        # Tag absent from the open-orders snapshot.
+        if current_status in _TERMINAL_ORDER_STATUSES:
+            summary["skipped"] += 1
             continue
 
         if include_new and current_status == "NEW":

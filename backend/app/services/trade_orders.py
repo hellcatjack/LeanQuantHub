@@ -227,3 +227,40 @@ def update_trade_order_status(session, order: TradeOrder, payload: dict[str, Any
             reason = f"{order.id}:{order.symbol}"
             update_trade_run_progress(session, run, stage, reason=reason, commit=True)
     return order
+
+
+def force_update_trade_order_status(session, order: TradeOrder, payload: dict[str, Any]) -> TradeOrder:
+    """Update order status without transition validation.
+
+    This is intended for internal reconciliation when we have high-confidence external
+    signals (e.g. Lean bridge open-orders snapshot) that the local state machine
+    drifted. Use sparingly.
+    """
+
+    target_status = _normalize_status(payload.get("status"))
+    if not target_status:
+        raise ValueError("status_required")
+    if target_status not in ALLOWED_TRANSITIONS:
+        raise ValueError("status_invalid")
+
+    order.status = target_status
+    if payload.get("filled_quantity") is not None:
+        order.filled_quantity = float(payload["filled_quantity"])
+    if payload.get("avg_fill_price") is not None:
+        order.avg_fill_price = float(payload["avg_fill_price"])
+    if payload.get("params"):
+        merged = dict(order.params or {})
+        merged.update(payload.get("params") or {})
+        order.params = merged
+    order.updated_at = datetime.utcnow()
+    session.commit()
+    session.refresh(order)
+
+    if order.run_id:
+        run = session.get(TradeRun, order.run_id)
+        if run:
+            stage = f"order_{target_status.lower()}"
+            reason = f"{order.id}:{order.symbol}"
+            update_trade_run_progress(session, run, stage, reason=reason, commit=True)
+
+    return order

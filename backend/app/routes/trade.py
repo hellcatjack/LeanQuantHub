@@ -199,6 +199,28 @@ def get_trade_run_detail(
     offset: int = Query(0, ge=0),
 ):
     with get_session() as session:
+        run_row = session.get(TradeRun, run_id)
+        if not run_row:
+            raise HTTPException(status_code=404, detail="run not found")
+        # Keep run detail consistent with TWS: ingest run-scoped execution events and reconcile
+        # against the latest open-orders snapshot so manual cancels show up without requiring a
+        # separate /api/trade/orders poll.
+        if isinstance(run_row.params, dict):
+            lean_exec = run_row.params.get("lean_execution")
+            if isinstance(lean_exec, dict):
+                exec_output_dir = lean_exec.get("output_dir") or None
+                if exec_output_dir:
+                    run_events = Path(str(exec_output_dir)) / "execution_events.jsonl"
+                    if run_events.exists():
+                        ingest_execution_events(str(run_events), session=session)
+        open_orders_payload = read_open_orders(resolve_bridge_root())
+        sync_trade_orders_from_open_orders(
+            session,
+            open_orders_payload,
+            mode=str(run_row.mode or "").strip().lower() or None,
+            run_id=run_id,
+            include_new=True,
+        )
         try:
             run, orders, fills, last_update_at = build_trade_run_detail(
                 session, run_id, limit=limit, offset=offset
@@ -218,6 +240,25 @@ def get_trade_run_detail(
 @router.get("/runs/{run_id}/symbols", response_model=TradeSymbolSummaryPageOut)
 def get_trade_run_symbols(run_id: int):
     with get_session() as session:
+        run_row = session.get(TradeRun, run_id)
+        if not run_row:
+            raise HTTPException(status_code=404, detail="run not found")
+        if isinstance(run_row.params, dict):
+            lean_exec = run_row.params.get("lean_execution")
+            if isinstance(lean_exec, dict):
+                exec_output_dir = lean_exec.get("output_dir") or None
+                if exec_output_dir:
+                    run_events = Path(str(exec_output_dir)) / "execution_events.jsonl"
+                    if run_events.exists():
+                        ingest_execution_events(str(run_events), session=session)
+        open_orders_payload = read_open_orders(resolve_bridge_root())
+        sync_trade_orders_from_open_orders(
+            session,
+            open_orders_payload,
+            mode=str(run_row.mode or "").strip().lower() or None,
+            run_id=run_id,
+            include_new=True,
+        )
         try:
             items = build_symbol_summary(session, run_id)
         except ValueError as exc:
@@ -666,6 +707,15 @@ def get_trade_run_orders(
                 ingest_execution_events(str(events_path), session=session)
             else:
                 ingest_execution_events(str(events_path))
+        if run is not None:
+            open_orders_payload = read_open_orders(resolve_bridge_root())
+            sync_trade_orders_from_open_orders(
+                session,
+                open_orders_payload,
+                mode=str(run.mode or "").strip().lower() or None,
+                run_id=run_id,
+                include_new=True,
+            )
         if run is not None and trade_executor.refresh_trade_run_status(session, run):
             session.commit()
         positions_payload = read_positions(resolve_bridge_root())
