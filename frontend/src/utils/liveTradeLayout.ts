@@ -22,14 +22,15 @@ export const getLiveTradeSections = () => ({
   mainRow: ["connection", "account", "positions"] as LiveTradeSectionKey[],
   main: [
     "monitor",
+    // Keep the core trading workflow visible by default (below the monitor widget).
+    "guard",
+    "execution",
+    "symbolSummary",
   ] as LiveTradeSectionKey[],
   advanced: [
     "config",
     "marketHealth",
     "contracts",
     "history",
-    "guard",
-    "execution",
-    "symbolSummary",
   ] as LiveTradeSectionKey[],
 });
