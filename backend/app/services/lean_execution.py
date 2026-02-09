@@ -410,7 +410,7 @@ def apply_execution_events(events: list[dict], *, session=None) -> dict:
                             )
                         except ValueError:
                             continue
-                    elif current_status in {"CANCELED", "CANCELLED"}:
+                    elif current_status in {"CANCELED", "CANCELLED", "SKIPPED"}:
                         params = order.params or {}
                         if isinstance(params, dict) and params.get("sync_reason") == "missing_from_open_orders":
                             recovered_params = dict(event_params)
@@ -569,7 +569,7 @@ def apply_execution_events(events: list[dict], *, session=None) -> dict:
                         )
                     except ValueError:
                         continue
-                elif current_status in {"CANCELED", "CANCELLED"}:
+                elif current_status in {"CANCELED", "CANCELLED", "SKIPPED"}:
                     params = order.params or {}
                     if isinstance(params, dict) and params.get("sync_reason") == "missing_from_open_orders":
                         recovered_params = dict(event_params)

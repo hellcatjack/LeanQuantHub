@@ -345,9 +345,10 @@ def _finalize_run_status(session, run, *, filled: int, rejected: int, cancelled:
     session.commit()
 
 
-_TERMINAL_ORDER_STATUSES = {"FILLED", "CANCELED", "CANCELLED", "REJECTED", "INVALID"}
+_TERMINAL_ORDER_STATUSES = {"FILLED", "CANCELED", "CANCELLED", "REJECTED", "INVALID", "SKIPPED"}
 _CANCELLED_ORDER_STATUSES = {"CANCELED", "CANCELLED"}
 _REJECTED_ORDER_STATUSES = {"REJECTED", "INVALID"}
+_SKIPPED_ORDER_STATUSES = {"SKIPPED"}
 _STALLED_WINDOW_MINUTES = 15
 
 
@@ -358,7 +359,7 @@ def _normalize_order_status(value: str | None) -> str:
 def determine_run_status(order_statuses: list[str]) -> tuple[str | None, dict[str, int]]:
     normalized = [_normalize_order_status(status) for status in order_statuses if status is not None]
     total = len(normalized)
-    summary = {"total": total, "filled": 0, "cancelled": 0, "rejected": 0}
+    summary = {"total": total, "filled": 0, "cancelled": 0, "rejected": 0, "skipped": 0}
     if not normalized:
         return None, summary
     if any(status not in _TERMINAL_ORDER_STATUSES for status in normalized):
@@ -369,6 +370,8 @@ def determine_run_status(order_statuses: list[str]) -> tuple[str | None, dict[st
                 summary["cancelled"] += 1
             elif status in _REJECTED_ORDER_STATUSES:
                 summary["rejected"] += 1
+            elif status in _SKIPPED_ORDER_STATUSES:
+                summary["skipped"] += 1
         return None, summary
     for status in normalized:
         if status == "FILLED":
@@ -377,9 +380,11 @@ def determine_run_status(order_statuses: list[str]) -> tuple[str | None, dict[st
             summary["cancelled"] += 1
         elif status in _REJECTED_ORDER_STATUSES:
             summary["rejected"] += 1
-    if summary["filled"] == 0 and (summary["rejected"] + summary["cancelled"]) > 0:
+        elif status in _SKIPPED_ORDER_STATUSES:
+            summary["skipped"] += 1
+    if summary["filled"] == 0 and (summary["rejected"] + summary["cancelled"] + summary["skipped"]) > 0:
         return "failed", summary
-    if summary["rejected"] > 0 or summary["cancelled"] > 0:
+    if summary["rejected"] > 0 or summary["cancelled"] > 0 or summary["skipped"] > 0:
         return "partial", summary
     return "done", summary
 

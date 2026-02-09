@@ -218,6 +218,47 @@ def test_sync_trade_orders_from_open_orders_skips_when_snapshot_stale():
         session.close()
 
 
+def test_sync_trade_orders_from_open_orders_skips_when_client_scoped_and_no_overlap():
+    from app.services.trade_open_orders_sync import sync_trade_orders_from_open_orders
+
+    session = _make_session()
+    try:
+        now = datetime.now(timezone.utc)
+        run = TradeRun(project_id=1, decision_snapshot_id=1, status="running", mode="paper", params={})
+        session.add(run)
+        session.commit()
+
+        order = TradeOrder(
+            run_id=run.id,
+            client_order_id="oi_1_1",
+            symbol="AAPL",
+            side="BUY",
+            quantity=1,
+            order_type="LMT",
+            limit_price=100.0,
+            status="SUBMITTED",
+            params={"event_tag": "oi_1_1"},
+        )
+        session.add(order)
+        session.commit()
+
+        open_orders = {
+            "items": [{"tag": "oi_999_1", "symbol": "MSFT"}],
+            "refreshed_at": now.isoformat().replace("+00:00", "Z"),
+            "source": "lean_bridge",
+            "source_detail": "ib_open_orders",
+            "stale": False,
+        }
+        summary = sync_trade_orders_from_open_orders(session, open_orders, mode="paper", run_id=run.id)
+
+        refreshed = session.get(TradeOrder, order.id)
+        assert refreshed.status == "SUBMITTED"
+        assert summary["updated"] == 0
+        assert summary["skipped_no_overlap"] == 1
+    finally:
+        session.close()
+
+
 def test_sync_trade_orders_from_open_orders_can_cancel_new_when_enabled():
     from app.services.trade_open_orders_sync import sync_trade_orders_from_open_orders
 
@@ -254,7 +295,7 @@ def test_sync_trade_orders_from_open_orders_can_cancel_new_when_enabled():
         )
 
         refreshed = session.get(TradeOrder, order.id)
-        assert refreshed.status == "CANCELED"
+        assert refreshed.status == "SKIPPED"
         assert summary["updated"] == 1
     finally:
         session.close()

@@ -30,3 +30,9 @@ def test_determine_run_status_pending_when_non_terminal():
     status, summary = determine_run_status(["NEW", "FILLED"])
     assert status is None
     assert summary["total"] == 2
+
+
+def test_determine_run_status_partial_when_skipped_present():
+    status, summary = determine_run_status(["FILLED", "SKIPPED"])
+    assert status == "partial"
+    assert summary["skipped"] == 1

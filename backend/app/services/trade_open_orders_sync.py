@@ -8,8 +8,10 @@ from app.services.trade_orders import force_update_trade_order_status, update_tr
 
 
 _ACTIVE_ORDER_STATUSES = {"SUBMITTED", "PARTIAL"}
-_TERMINAL_ORDER_STATUSES = {"FILLED", "CANCELED", "CANCELLED", "REJECTED"}
-_RECOVERABLE_TERMINAL_STATUSES = {"CANCELED", "CANCELLED"}
+_TERMINAL_ORDER_STATUSES = {"FILLED", "CANCELED", "CANCELLED", "REJECTED", "SKIPPED"}
+# Orders marked from low-confidence reconciliation may be recovered later when we observe
+# concrete broker/Lean signals (open-orders presence or execution events).
+_RECOVERABLE_TERMINAL_STATUSES = {"CANCELED", "CANCELLED", "SKIPPED"}
 _NEW_ORDER_MISSING_CANCEL_GRACE_SECONDS = 60
 _CANCELED_OPEN_ORDER_STATUSES = {"CANCELED", "CANCELLED"}
 
@@ -80,9 +82,11 @@ def sync_trade_orders_from_open_orders(
         "updated": 0,
         "updated_new_to_submitted": 0,
         "updated_missing_to_canceled": 0,
+        "updated_missing_to_skipped": 0,
         "skipped": 0,
         "skipped_no_tag": 0,
         "skipped_empty_snapshot": 0,
+        "skipped_no_overlap": 0,
         "skipped_mode_mismatch": 0,
         "skipped_stale": 0,
     }
@@ -118,6 +122,26 @@ def sync_trade_orders_from_open_orders(
     elif manual_only:
         query = query.filter(TradeOrder.run_id.is_(None))
     orders = query.order_by(TradeOrder.id.asc()).all()
+
+    # If the snapshot is client-scoped (IB "open orders" rather than "all open orders") and it
+    # contains zero tags from this run, we can't safely infer broker-side cancels for the run.
+    # This prevents false mass-cancels when the bridge is connected under a different client-id.
+    source_detail = str(open_orders_payload.get("source_detail") or "").strip().lower()
+    if run_id is not None and open_tags and source_detail.startswith("ib_open_orders"):
+        run_known_tags: set[str] = set()
+        for order in orders:
+            tag = None
+            if isinstance(order.params, dict):
+                tag = _normalize_tag(order.params.get("event_tag"))
+            if not tag:
+                client_order_id = str(order.client_order_id or "").strip()
+                if client_order_id.startswith("oi_") or client_order_id.startswith("direct:"):
+                    tag = client_order_id
+            if tag:
+                run_known_tags.add(tag)
+        if run_known_tags and run_known_tags.isdisjoint(open_tags):
+            summary["skipped_no_overlap"] = 1
+            return summary
 
     run_ids = {order.run_id for order in orders if order.run_id}
     run_modes: dict[int, str] = {}
@@ -252,17 +276,26 @@ def sync_trade_orders_from_open_orders(
                     summary["skipped"] += 1
                     continue
 
+        target_status = "CANCELED"
+        target_event_status = "CANCELED"
+        if include_new and current_status == "NEW":
+            # When a draft intent stays NEW and never appears in open orders, it usually means
+            # it was never submitted to the brokerage (e.g. filtered by execution constraints).
+            # Represent it as SKIPPED, not broker-side CANCELED.
+            target_status = "SKIPPED"
+            target_event_status = "SKIPPED"
+
         try:
             update_trade_order_status(
                 session,
                 order,
                 {
-                    "status": "CANCELED",
+                    "status": target_status,
                     "params": {
                         "event_source": "lean_open_orders",
                         "event_tag": tag,
                         "event_time": event_time,
-                        "event_status": "CANCELED",
+                        "event_status": target_event_status,
                         "sync_reason": "missing_from_open_orders",
                     },
                 },
@@ -272,6 +305,9 @@ def sync_trade_orders_from_open_orders(
             continue
 
         summary["updated"] += 1
-        summary["updated_missing_to_canceled"] += 1
+        if target_status == "SKIPPED":
+            summary["updated_missing_to_skipped"] += 1
+        else:
+            summary["updated_missing_to_canceled"] += 1
 
     return summary

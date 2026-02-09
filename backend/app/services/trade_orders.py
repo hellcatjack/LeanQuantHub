@@ -12,11 +12,15 @@ from app.services.trade_order_types import is_limit_like, validate_order_type
 
 
 ALLOWED_TRANSITIONS: dict[str, set[str]] = {
-    "NEW": {"SUBMITTED", "CANCELED", "REJECTED"},
+    # "SKIPPED" is a terminal state for intents that were never submitted to IB/TWS
+    # (e.g. filtered out by execution constraints). We keep it distinct from "CANCELED"
+    # which implies a broker-side cancel.
+    "NEW": {"SUBMITTED", "CANCELED", "REJECTED", "SKIPPED"},
     "SUBMITTED": {"PARTIAL", "FILLED", "CANCELED", "REJECTED"},
     "PARTIAL": {"PARTIAL", "FILLED", "CANCELED"},
     "FILLED": set(),
     "CANCELED": set(),
+    "SKIPPED": set(),
     "REJECTED": set(),
 }
 
