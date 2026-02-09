@@ -943,6 +943,24 @@ def step_pit_weekly(ctx: StepContext, params: dict[str, Any]) -> StepResult:
 def step_pit_fundamentals(ctx: StepContext, params: dict[str, Any]) -> StepResult:
     settings_row = _get_or_create_settings(ctx.session)
     cmd_params = dict(params or {})
+    # Avoid spamming PitFundamentalJob rows when another job holds the lock.
+    # PreTrade will retry this step, so we only proceed once the lock is available.
+    lock_root_raw = str(cmd_params.get("data_root") or settings.data_root or os.getenv("DATA_ROOT") or "").strip()
+    lock_root = Path(lock_root_raw).expanduser().resolve() if lock_root_raw else None
+    pit_lock = JobLock("pit_fundamental", lock_root, auto_heartbeat=False)
+    if not pit_lock.acquire():
+        try:
+            lock_meta = pit_lock._read_metadata()
+        except Exception:
+            lock_meta = {}
+        ctx.update(
+            artifacts={
+                "pit_fundamental_lock_busy": True,
+                "pit_fundamental_lock_meta": lock_meta,
+            }
+        )
+        raise RuntimeError("pit_fundamentals_blocked")
+    pit_lock.release()
     project_symbols: list[str] | None = None
     project_benchmarks: list[str] | None = None
     if settings_row.update_project_only:
