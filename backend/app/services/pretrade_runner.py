@@ -1600,6 +1600,7 @@ def run_pretrade_run(run_id: int, resume_step_id: int | None = None) -> None:
             if run.status == "cancel_requested":
                 step.status = "canceled"
                 step.message = "run_canceled"
+                step.next_retry_at = None
                 step.ended_at = datetime.utcnow()
                 session.commit()
                 break
@@ -1614,6 +1615,7 @@ def run_pretrade_run(run_id: int, resume_step_id: int | None = None) -> None:
             if not handler:
                 step.status = "skipped"
                 step.message = "unknown_step"
+                step.next_retry_at = None
                 step.ended_at = datetime.utcnow()
                 session.commit()
                 continue
@@ -1622,11 +1624,17 @@ def run_pretrade_run(run_id: int, resume_step_id: int | None = None) -> None:
                 if run.status == "cancel_requested":
                     step.status = "canceled"
                     step.message = "run_canceled"
+                    step.next_retry_at = None
                     step.ended_at = datetime.utcnow()
                     session.commit()
                     break
                 step.status = "running"
                 step.started_at = step.started_at or datetime.utcnow()
+                # Clear any previous retry metadata so the UI doesn't show stale
+                # "blocked" / next-retry timestamps while the step is actively running.
+                step.message = None
+                step.next_retry_at = None
+                step.ended_at = None
                 step.updated_at = datetime.utcnow()
                 session.commit()
                 ctx = StepContext(session=session, run=run, step=step)
@@ -1637,6 +1645,7 @@ def run_pretrade_run(run_id: int, resume_step_id: int | None = None) -> None:
                     step.message = exc.reason
                     step.progress = 1.0
                     step.artifacts = exc.artifacts or step.artifacts
+                    step.next_retry_at = None
                     step.ended_at = datetime.utcnow()
                     session.commit()
                     break
@@ -1683,6 +1692,7 @@ def run_pretrade_run(run_id: int, resume_step_id: int | None = None) -> None:
                     step.status = "success"
                     step.progress = 1.0
                     step.message = "success"
+                    step.next_retry_at = None
                     if result.artifacts:
                         step.artifacts = {
                             **(step.artifacts or {}),
