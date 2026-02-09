@@ -44,7 +44,7 @@ def test_sync_trade_orders_from_open_orders_marks_missing_as_canceled():
         session.commit()
 
         open_orders = {
-            "items": [],
+            "items": [{"tag": "oi_1_2", "symbol": "MSFT"}],
             "refreshed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "source": "lean_bridge",
             "stale": False,
@@ -54,6 +54,45 @@ def test_sync_trade_orders_from_open_orders_marks_missing_as_canceled():
         refreshed = session.get(TradeOrder, order.id)
         assert refreshed.status == "CANCELED"
         assert summary["updated"] == 1
+    finally:
+        session.close()
+
+
+def test_sync_trade_orders_from_open_orders_skips_when_snapshot_empty():
+    from app.services.trade_open_orders_sync import sync_trade_orders_from_open_orders
+
+    session = _make_session()
+    try:
+        run = TradeRun(project_id=1, decision_snapshot_id=1, status="running", mode="paper", params={})
+        session.add(run)
+        session.commit()
+
+        order = TradeOrder(
+            run_id=run.id,
+            client_order_id="1:AAPL:BUY:1",
+            symbol="AAPL",
+            side="BUY",
+            quantity=1,
+            order_type="LMT",
+            limit_price=100.0,
+            status="SUBMITTED",
+            params={"event_tag": "oi_1_1"},
+        )
+        session.add(order)
+        session.commit()
+
+        open_orders = {
+            "items": [],
+            "refreshed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "source": "lean_bridge",
+            "stale": False,
+        }
+        summary = sync_trade_orders_from_open_orders(session, open_orders, mode="paper")
+
+        refreshed = session.get(TradeOrder, order.id)
+        assert refreshed.status == "SUBMITTED"
+        assert summary["updated"] == 0
+        assert summary["skipped_empty_snapshot"] == 1
     finally:
         session.close()
 
@@ -132,7 +171,7 @@ def test_sync_trade_orders_from_open_orders_respects_mode_filter():
         session.commit()
 
         open_orders = {
-            "items": [],
+            "items": [{"tag": "oi_2_1", "symbol": "MSFT"}],
             "refreshed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "source": "lean_bridge",
             "stale": False,
@@ -205,7 +244,7 @@ def test_sync_trade_orders_from_open_orders_can_cancel_new_when_enabled():
         session.commit()
 
         open_orders = {
-            "items": [],
+            "items": [{"tag": "oi_1_2", "symbol": "MSFT"}],
             "refreshed_at": now.isoformat().replace("+00:00", "Z"),
             "source": "lean_bridge",
             "stale": False,
@@ -287,7 +326,7 @@ def test_sync_trade_orders_from_open_orders_does_not_cancel_recent_new_orders():
         session.commit()
 
         open_orders = {
-            "items": [],
+            "items": [{"tag": "oi_1_2", "symbol": "MSFT"}],
             "refreshed_at": now.isoformat().replace("+00:00", "Z"),
             "source": "lean_bridge",
             "stale": False,

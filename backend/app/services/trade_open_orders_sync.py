@@ -82,6 +82,7 @@ def sync_trade_orders_from_open_orders(
         "updated_missing_to_canceled": 0,
         "skipped": 0,
         "skipped_no_tag": 0,
+        "skipped_empty_snapshot": 0,
         "skipped_mode_mismatch": 0,
         "skipped_stale": 0,
     }
@@ -90,6 +91,12 @@ def sync_trade_orders_from_open_orders(
         return summary
 
     open_items = open_orders_payload.get("items") if isinstance(open_orders_payload.get("items"), list) else []
+    if not open_items:
+        # An empty open-orders snapshot is ambiguous: it can mean there are truly no open orders,
+        # but it can also happen when IB/TWS returns partial results (client-id scoping, transient
+        # brokerage gaps). Avoid inferring mass cancels from an empty list.
+        summary["skipped_empty_snapshot"] = 1
+        return summary
     open_by_tag = _extract_open_items_by_tag(open_orders_payload)
     open_tags = set(open_by_tag.keys())
     if not open_tags and open_items:

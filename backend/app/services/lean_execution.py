@@ -10,7 +10,11 @@ from app.core.config import settings
 from app.db import SessionLocal
 from app.models import TradeFill, TradeOrder, TradeRun
 from app.services.ib_settings import derive_client_id
-from app.services.trade_orders import create_trade_order, update_trade_order_status
+from app.services.trade_orders import (
+    create_trade_order,
+    force_update_trade_order_status,
+    update_trade_order_status,
+)
 
 subprocess_run = subprocess.run
 
@@ -270,11 +274,16 @@ def _apply_fill_to_order(
     target_status = "PARTIAL" if total_new < float(order.quantity) else "FILLED"
     if current_status == "NEW":
         update_trade_order_status(session, order, {"status": "SUBMITTED"})
-    update_trade_order_status(
-        session,
-        order,
-        {"status": target_status, "filled_quantity": total_new, "avg_fill_price": avg_new},
-    )
+    update_payload = {"status": target_status, "filled_quantity": total_new, "avg_fill_price": avg_new}
+    try:
+        update_trade_order_status(session, order, update_payload)
+    except ValueError as exc:
+        # Fills can race with cancel events (or low-confidence open-orders inference). If we have a
+        # concrete fill quantity/price, prefer the fill signal and reconcile the state machine.
+        if str(exc).startswith("invalid_transition:"):
+            force_update_trade_order_status(session, order, update_payload)
+        else:
+            raise
     fill = TradeFill(
         order_id=order.id,
         exec_id=exec_id,
@@ -401,6 +410,17 @@ def apply_execution_events(events: list[dict], *, session=None) -> dict:
                             )
                         except ValueError:
                             continue
+                    elif current_status in {"CANCELED", "CANCELLED"}:
+                        params = order.params or {}
+                        if isinstance(params, dict) and params.get("sync_reason") == "missing_from_open_orders":
+                            recovered_params = dict(event_params)
+                            recovered_params["sync_reason"] = "execution_event_submitted_recovered"
+                            try:
+                                force_update_trade_order_status(
+                                    session, order, {"status": "SUBMITTED", "params": recovered_params}
+                                )
+                            except ValueError:
+                                continue
                     summary["processed"] += 1
                     continue
 
@@ -549,6 +569,17 @@ def apply_execution_events(events: list[dict], *, session=None) -> dict:
                         )
                     except ValueError:
                         continue
+                elif current_status in {"CANCELED", "CANCELLED"}:
+                    params = order.params or {}
+                    if isinstance(params, dict) and params.get("sync_reason") == "missing_from_open_orders":
+                        recovered_params = dict(event_params)
+                        recovered_params["sync_reason"] = "execution_event_submitted_recovered"
+                        try:
+                            force_update_trade_order_status(
+                                session, order, {"status": "SUBMITTED", "params": recovered_params}
+                            )
+                        except ValueError:
+                            continue
                 summary["processed"] += 1
                 continue
 
