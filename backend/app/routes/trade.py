@@ -312,7 +312,10 @@ def create_trade_run(payload: TradeRunCreate):
         )
         if existing:
             status = str(existing.status or "").strip().lower()
-            if status not in {"failed", "blocked"}:
+            # Idempotency guard: avoid creating duplicate *active* runs for the same
+            # snapshot+mode within the same day (usually from repeated button clicks).
+            # Completed runs (done/partial/failed/blocked) should allow new runs.
+            if status in {"queued", "running", "stalled"}:
                 out = TradeRunOut.model_validate(existing, from_attributes=True)
                 out.orders_created = 0
                 return out
