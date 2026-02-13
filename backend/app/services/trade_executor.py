@@ -505,6 +505,29 @@ def _as_bool(value: Any, *, default: bool = False) -> bool:
     return default
 
 
+def _extract_broker_order_id(result: dict[str, Any] | None) -> int | None:
+    if not isinstance(result, dict):
+        return None
+    values = result.get("brokerage_ids")
+    if isinstance(values, list):
+        for value in values:
+            try:
+                parsed = int(str(value).strip())
+            except (TypeError, ValueError):
+                continue
+            if parsed > 0:
+                return parsed
+    for key in ("order_id", "lean_order_id"):
+        raw = result.get(key)
+        try:
+            parsed = int(str(raw).strip())
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0:
+            return parsed
+    return None
+
+
 def _is_open_orders_payload_fresh(
     payload: dict | None,
     *,
@@ -744,6 +767,9 @@ def _reconcile_submit_command_results(session, run: TradeRun, *, bridge_root: Pa
             "event_source": "lean_command",
             "sync_reason": f"submit_command_{status or 'unknown'}",
         }
+        broker_order_id = _extract_broker_order_id(result)
+        if broker_order_id is not None and order.ib_order_id is None:
+            order.ib_order_id = int(broker_order_id)
 
         if status == "submitted":
             current = str(order.status or "").strip().upper()
@@ -1481,14 +1507,19 @@ def reconcile_direct_orders_with_positions(
         session.query(TradeOrder)
         .filter(
             TradeOrder.run_id.is_(None),
-            TradeOrder.status.in_(["NEW", "SUBMITTED", "PARTIAL", "CANCEL_REQUESTED"]),
+            TradeOrder.status.in_(["NEW", "SUBMITTED", "PARTIAL", "CANCEL_REQUESTED", "CANCELED", "CANCELLED", "SKIPPED"]),
         )
         .order_by(TradeOrder.id.asc())
         .all()
     )
     for order in orders:
         status = _normalize_order_status(order.status)
-        if status in _TERMINAL_ORDER_STATUSES:
+        params = dict(order.params or {})
+        low_conf_missing = (
+            status in {"CANCELED", "CANCELLED", "SKIPPED"}
+            and str(params.get("sync_reason") or "").strip() == "missing_from_open_orders"
+        )
+        if status in _TERMINAL_ORDER_STATUSES and not low_conf_missing:
             continue
 
         order_age_seconds: float | None = None
@@ -1505,8 +1536,8 @@ def reconcile_direct_orders_with_positions(
 
         summary["checked"] += 1
         tag = None
-        if isinstance(order.params, dict):
-            tag = str(order.params.get("event_tag") or "").strip()
+        if isinstance(params, dict):
+            tag = str(params.get("event_tag") or "").strip()
         if not tag:
             tag = str(order.client_order_id or "").strip()
         if open_tags and tag and tag in open_tags:
@@ -1531,7 +1562,6 @@ def reconcile_direct_orders_with_positions(
             summary["skipped"] += 1
             continue
         if delta <= 0:
-            params = dict(order.params or {})
             submit_meta = params.get("submit_command")
             submit_status = str(submit_meta.get("status") or "").strip().lower() if isinstance(submit_meta, dict) else ""
             submit_source = str(submit_meta.get("source") or "").strip().lower() if isinstance(submit_meta, dict) else ""
@@ -1616,23 +1646,27 @@ def reconcile_direct_orders_with_positions(
         avg_new = (avg_prev * prev_filled + float(fill_price) * incremental) / total_new
         target_status = "PARTIAL" if total_new + 1e-6 < float(order.quantity) else "FILLED"
         event_time = datetime.utcnow().isoformat() + "Z"
-        update_trade_order_status(
+        update_params = {
+            "reconcile_source": "positions_direct",
+            "baseline_quantity": float(baseline_qty),
+            "baseline_refreshed_at": baseline_refreshed,
+            "current_position_quantity": pos_qty,
+            "event_source": "positions",
+            "event_status": target_status,
+            "event_time": event_time,
+            "sync_reason": "positions_reconcile",
+        }
+        if low_conf_missing:
+            update_params["reconcile_recovered_from"] = status
+        updater = force_update_trade_order_status if low_conf_missing else update_trade_order_status
+        updater(
             session,
             order,
             {
                 "status": target_status,
                 "filled_quantity": total_new,
                 "avg_fill_price": avg_new,
-                "params": {
-                    "reconcile_source": "positions_direct",
-                    "baseline_quantity": float(baseline_qty),
-                    "baseline_refreshed_at": baseline_refreshed,
-                    "current_position_quantity": pos_qty,
-                    "event_source": "positions",
-                    "event_status": target_status,
-                    "event_time": event_time,
-                    "sync_reason": "positions_reconcile",
-                },
+                "params": update_params,
             },
         )
         fill = TradeFill(

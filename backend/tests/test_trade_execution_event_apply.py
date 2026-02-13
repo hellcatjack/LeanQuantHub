@@ -1,6 +1,6 @@
 from pathlib import Path
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -169,6 +169,56 @@ def test_apply_execution_events_oi_fill_without_exec_id_keeps_submitted(monkeypa
             params = dict(refreshed.params or {})
             assert params.get("sync_reason") == "execution_fill_unconfirmed_no_exec_id"
             assert verify_session.query(TradeFill).count() == 0
+        finally:
+            verify_session.close()
+    finally:
+        session.close()
+
+
+def test_apply_execution_events_manual_tag_fill_updates_direct_order(monkeypatch):
+    engine = _make_engine()
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    session = Session()
+    try:
+        payload = {
+            "client_order_id": "manual_3_1770992553631_0111-5m",
+            "symbol": "AMSC",
+            "side": "SELL",
+            "quantity": 9,
+            "order_type": "LMT",
+            "limit_price": 31.5,
+            "params": {"source": "manual", "mode": "paper"},
+        }
+        created = create_trade_order(session, payload).order
+        session.commit()
+        session.refresh(created)
+
+        monkeypatch.setattr(lean_execution, "SessionLocal", Session, raising=False)
+
+        events = [
+            {
+                "tag": str(created.client_order_id),
+                "status": "Filled",
+                "order_id": 5711,
+                "filled": -9,
+                "fill_price": 32.05,
+                "exec_id": "exec-manual-5711",
+                "time": "2026-02-13T14:22:36Z",
+            }
+        ]
+        lean_execution.apply_execution_events(events)
+
+        verify_session = Session()
+        try:
+            refreshed = verify_session.get(TradeOrder, created.id)
+            assert refreshed.status == "FILLED"
+            assert float(refreshed.filled_quantity or 0.0) == 9.0
+            assert refreshed.ib_order_id == 5711
+            params = dict(refreshed.params or {})
+            assert params.get("sync_reason") == "execution_fill"
+            fills = verify_session.query(TradeFill).filter(TradeFill.order_id == refreshed.id).all()
+            assert len(fills) == 1
+            assert fills[0].exec_id == "exec-manual-5711"
         finally:
             verify_session.close()
     finally:
@@ -469,6 +519,106 @@ def test_apply_execution_events_canceled_event_overwrites_low_conf_sync_reason(m
             assert params.get("event_source") == "lean"
             assert params.get("event_status") == "CANCELED"
             assert params.get("sync_reason") == "execution_event_canceled"
+        finally:
+            verify_session.close()
+    finally:
+        session.close()
+
+
+def test_apply_execution_events_submitted_recovery_ignores_stale_event_time(monkeypatch):
+    engine = _make_engine()
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    session = Session()
+    try:
+        payload = {
+            "client_order_id": "oi_0_0_submitted_recovery_stale",
+            "symbol": "AAPL",
+            "side": "BUY",
+            "quantity": 1,
+            "order_type": "MKT",
+        }
+        result = create_trade_order(session, payload)
+        order = result.order
+        order.status = "CANCELED"
+        order.params = {
+            "event_tag": "oi_0_0_submitted_recovery_stale",
+            "event_source": "lean_open_orders",
+            "event_status": "CANCELED",
+            "sync_reason": "missing_from_open_orders",
+        }
+        order.updated_at = datetime.now(timezone.utc)
+        session.commit()
+
+        monkeypatch.setattr(lean_execution, "SessionLocal", Session, raising=False)
+
+        stale_time = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat().replace("+00:00", "Z")
+        events = [
+            {
+                "tag": "oi_0_0_submitted_recovery_stale",
+                "status": "Submitted",
+                "order_id": 6001,
+                "time": stale_time,
+            },
+        ]
+        lean_execution.apply_execution_events(events)
+
+        verify_session = Session()
+        try:
+            refreshed = verify_session.query(TradeOrder).filter_by(id=order.id).one()
+            params = dict(refreshed.params or {})
+            assert refreshed.status == "CANCELED"
+            assert params.get("sync_reason") == "missing_from_open_orders"
+            assert refreshed.ib_order_id == 6001
+        finally:
+            verify_session.close()
+    finally:
+        session.close()
+
+
+def test_apply_execution_events_submitted_recovery_accepts_fresh_event_time(monkeypatch):
+    engine = _make_engine()
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    session = Session()
+    try:
+        payload = {
+            "client_order_id": "oi_0_0_submitted_recovery_fresh",
+            "symbol": "AAPL",
+            "side": "BUY",
+            "quantity": 1,
+            "order_type": "MKT",
+        }
+        result = create_trade_order(session, payload)
+        order = result.order
+        order.status = "CANCELED"
+        order.params = {
+            "event_tag": "oi_0_0_submitted_recovery_fresh",
+            "event_source": "lean_open_orders",
+            "event_status": "CANCELED",
+            "sync_reason": "missing_from_open_orders",
+        }
+        order.updated_at = datetime.now(timezone.utc) - timedelta(minutes=2)
+        session.commit()
+
+        monkeypatch.setattr(lean_execution, "SessionLocal", Session, raising=False)
+
+        fresh_time = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        events = [
+            {
+                "tag": "oi_0_0_submitted_recovery_fresh",
+                "status": "Submitted",
+                "order_id": 6002,
+                "time": fresh_time,
+            },
+        ]
+        lean_execution.apply_execution_events(events)
+
+        verify_session = Session()
+        try:
+            refreshed = verify_session.query(TradeOrder).filter_by(id=order.id).one()
+            params = dict(refreshed.params or {})
+            assert refreshed.status == "SUBMITTED"
+            assert params.get("sync_reason") == "execution_event_submitted_recovered"
+            assert refreshed.ib_order_id == 6002
         finally:
             verify_session.close()
     finally:

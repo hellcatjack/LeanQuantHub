@@ -19,7 +19,10 @@ import {
   REFRESH_INTERVALS,
   MANUAL_REFRESH_KEYS,
   buildSymbolListKey,
+  hasActiveTradeOrderStatus,
+  hasActiveTradeRunStatus,
   isAutoRefreshKey,
+  resolveRefreshIntervals,
   type AutoRefreshKey,
   type RefreshKey,
 } from "../utils/liveTradeRefreshScheduler";
@@ -357,6 +360,15 @@ interface TradeSettings {
 }
 
 type TradeSessionValue = "rth" | "pre" | "post" | "night";
+type PositionLike = { position?: number | null };
+
+export const isPositionActionable = (row: PositionLike): boolean => {
+  const qty = Number(row?.position ?? 0);
+  return Number.isFinite(qty) && Math.abs(qty) > 1e-9;
+};
+
+export const filterActionablePositions = <T extends PositionLike>(rows: T[]): T[] =>
+  rows.filter((row) => isPositionActionable(row));
 
 export const resolveSessionByEasternTime = (date: Date = new Date()): TradeSessionValue => {
   try {
@@ -671,6 +683,30 @@ export default function LiveTradePage() {
     null
   );
   const defaultSession = resolveSessionByEasternTime();
+  const hotExecutionRefresh = useMemo(() => {
+    const hasActiveOrders = tradeOrders.some((order) => hasActiveTradeOrderStatus(order?.status));
+    const hasActiveRuns = tradeRuns.some((run) => hasActiveTradeRunStatus(run?.status));
+    const hasPendingCancel = Object.values(orderCancelLoading).some(Boolean);
+    return (
+      hasActiveOrders ||
+      hasActiveRuns ||
+      hasPendingCancel ||
+      executeLoading ||
+      runActionLoading ||
+      positionActionLoading
+    );
+  }, [
+    executeLoading,
+    orderCancelLoading,
+    positionActionLoading,
+    runActionLoading,
+    tradeOrders,
+    tradeRuns,
+  ]);
+  const refreshIntervals = useMemo(
+    () => resolveRefreshIntervals({ hotExecution: hotExecutionRefresh }),
+    [hotExecutionRefresh]
+  );
   const [refreshMeta, setRefreshMeta] = useState<
     Record<RefreshKey, { intervalMs: number | null; lastAt: string | null; nextAt: string | null }>
   >(() => {
@@ -769,7 +805,7 @@ export default function LiveTradePage() {
     (key: RefreshKey) => {
       setRefreshMeta((prev) => {
         const intervalMs =
-          prev[key]?.intervalMs ?? (isAutoRefreshKey(key) ? REFRESH_INTERVALS[key] : null);
+          prev[key]?.intervalMs ?? (isAutoRefreshKey(key) ? refreshIntervals[key] : null);
         const lastAt = new Date().toISOString();
         const nextAt =
           isAutoRefreshKey(key) && autoRefreshEnabled && intervalMs
@@ -785,13 +821,13 @@ export default function LiveTradePage() {
         };
       });
     },
-    [autoRefreshEnabled]
+    [autoRefreshEnabled, refreshIntervals]
   );
 
   const markRefreshDeferred = useCallback((key: RefreshKey, deferUntilMs: number) => {
     setRefreshMeta((prev) => {
       const intervalMs =
-        prev[key]?.intervalMs ?? (isAutoRefreshKey(key) ? REFRESH_INTERVALS[key] : null);
+        prev[key]?.intervalMs ?? (isAutoRefreshKey(key) ? refreshIntervals[key] : null);
       const existingNextAt = prev[key]?.nextAt ? new Date(prev[key].nextAt as string).getTime() : 0;
       const targetMs = Math.max(existingNextAt, Math.max(Date.now(), Number(deferUntilMs) || 0));
       return {
@@ -803,7 +839,7 @@ export default function LiveTradePage() {
         },
       };
     });
-  }, []);
+  }, [refreshIntervals]);
 
   const createTradeRun = async () => {
     setCreateRunError("");
@@ -1126,7 +1162,7 @@ export default function LiveTradePage() {
       return;
     }
     const next: Record<string, boolean> = {};
-    accountPositions.forEach((row) => {
+    actionableAccountPositions.forEach((row) => {
       next[buildPositionKey(row)] = true;
     });
     setPositionSelections(next);
@@ -1265,8 +1301,8 @@ export default function LiveTradePage() {
 
   const handleClosePosition = async (row: IBAccountPosition, index: number) => {
     const key = buildPositionKey(row);
-    const qtyValue = Math.abs(row.position ?? 0);
-    if (!qtyValue) {
+    const qtyValue = Math.abs(Number(row.position ?? 0));
+    if (!isPositionActionable(row) || !Number.isFinite(qtyValue)) {
       setPositionActionError(t("trade.positionActionErrorNoSelection"));
       return;
     }
@@ -1322,7 +1358,7 @@ export default function LiveTradePage() {
   };
 
   const handleClosePositions = async (rows: IBAccountPosition[], skipConfirm = false) => {
-    const positions = rows.filter((row) => Math.abs(row.position ?? 0) > 0);
+    const positions = filterActionablePositions(rows);
     if (!positions.length) {
       setPositionActionError(t("trade.positionActionErrorNoSelection"));
       return;
@@ -1372,17 +1408,17 @@ export default function LiveTradePage() {
   };
 
   const handleLiquidateAll = async () => {
-    if (!accountPositions.length) {
+    if (!actionableAccountPositions.length) {
       setPositionActionError(t("trade.positionActionErrorNoSelection"));
       return;
     }
     const confirmed = window.confirm(
-      t("trade.positionLiquidateAllConfirm", { count: accountPositions.length })
+      t("trade.positionLiquidateAllConfirm", { count: actionableAccountPositions.length })
     );
     if (!confirmed) {
       return;
     }
-    await handleClosePositions(accountPositions, true);
+    await handleClosePositions(actionableAccountPositions, true);
   };
 
   const loadIbState = async (silent = false) => {
@@ -2212,8 +2248,8 @@ export default function LiveTradePage() {
     setRefreshMeta((prev) => {
       const now = Date.now();
       const nextMeta: typeof prev = { ...prev };
-      (Object.keys(REFRESH_INTERVALS) as AutoRefreshKey[]).forEach((key) => {
-        const intervalMs = REFRESH_INTERVALS[key];
+      (Object.keys(refreshIntervals) as AutoRefreshKey[]).forEach((key) => {
+        const intervalMs = refreshIntervals[key];
         if (!intervalMs || intervalMs <= 0) {
           return;
         }
@@ -2226,7 +2262,7 @@ export default function LiveTradePage() {
       return nextMeta;
     });
     return undefined;
-  }, [autoRefreshEnabled]);
+  }, [autoRefreshEnabled, refreshIntervals]);
 
   useEffect(() => {
     Object.values(refreshTimersRef.current).forEach((timer) => {
@@ -2236,8 +2272,8 @@ export default function LiveTradePage() {
     if (!autoRefreshEnabled) {
       return undefined;
     }
-    (Object.keys(REFRESH_INTERVALS) as AutoRefreshKey[]).forEach((key) => {
-      const intervalMs = REFRESH_INTERVALS[key];
+    (Object.keys(refreshIntervals) as AutoRefreshKey[]).forEach((key) => {
+      const intervalMs = refreshIntervals[key];
       if (!intervalMs || intervalMs <= 0) {
         return;
       }
@@ -2252,14 +2288,14 @@ export default function LiveTradePage() {
       });
       refreshTimersRef.current = {};
     };
-  }, [autoRefreshEnabled, triggerRefresh]);
+  }, [autoRefreshEnabled, refreshIntervals, triggerRefresh]);
 
   useEffect(() => {
     setPositionSelections((prev) => {
       const next: Record<string, boolean> = {};
       accountPositions.forEach((row) => {
         const key = buildPositionKey(row);
-        if (prev[key]) {
+        if (prev[key] && isPositionActionable(row)) {
           next[key] = true;
         }
       });
@@ -2846,13 +2882,20 @@ export default function LiveTradePage() {
   const buildPositionKey = (row: IBAccountPosition) =>
     `${row.symbol}::${row.account || ""}::${row.currency || ""}`;
 
+  const actionableAccountPositions = useMemo(
+    () => filterActionablePositions(accountPositions),
+    [accountPositions]
+  );
+
   const selectedPositions = useMemo(
-    () => accountPositions.filter((row) => positionSelections[buildPositionKey(row)]),
-    [accountPositions, positionSelections]
+    () =>
+      actionableAccountPositions.filter((row) => positionSelections[buildPositionKey(row)]),
+    [actionableAccountPositions, positionSelections]
   );
 
   const allPositionsSelected =
-    accountPositions.length > 0 && selectedPositions.length === accountPositions.length;
+    actionableAccountPositions.length > 0 &&
+    selectedPositions.length === actionableAccountPositions.length;
 
   const accountSummaryOrder = [
     "NetLiquidation",
@@ -3399,7 +3442,7 @@ export default function LiveTradePage() {
           <button
             className="danger-button"
             data-testid="positions-liquidate-all"
-            disabled={positionActionLoading || accountPositions.length === 0}
+            disabled={positionActionLoading || actionableAccountPositions.length === 0}
             onClick={handleLiquidateAll}
           >
             {t("trade.positionActionLiquidateAll")}
@@ -3414,6 +3457,7 @@ export default function LiveTradePage() {
                     type="checkbox"
                     aria-label={t("trade.positionActionSelectAll")}
                     checked={allPositionsSelected}
+                    disabled={actionableAccountPositions.length === 0}
                     onChange={toggleSelectAllPositions}
                   />
                 </th>
@@ -3433,8 +3477,15 @@ export default function LiveTradePage() {
               {accountPositions.length ? (
                 accountPositions.map((row, index) => {
                   const key = buildPositionKey(row);
+                  const positionActionable = isPositionActionable(row);
+                  const absolutePosition = Math.abs(Number(row.position ?? 0));
                   const qtyValue =
-                    positionQuantities[key] ?? String(Math.abs(row.position ?? 0) || 1);
+                    positionQuantities[key] ??
+                    String(
+                      Number.isFinite(absolutePosition) && absolutePosition > 0
+                        ? absolutePosition
+                        : 0
+                    );
                   const sessionValue = normalizeTradeSession(positionSessions[key] ?? defaultSession);
                   const rawOrderType = normalizeOrderType(
                     positionOrderTypes[key] ?? resolveDefaultOrderTypeBySession(sessionValue)
@@ -3453,6 +3504,7 @@ export default function LiveTradePage() {
                             symbol: row.symbol,
                           })}
                           checked={!!positionSelections[key]}
+                          disabled={!positionActionable}
                           onChange={(event) => updatePositionSelection(key, event.target.checked)}
                         />
                       </td>
@@ -3539,7 +3591,7 @@ export default function LiveTradePage() {
                           <button
                             className="button-compact positions-action-button"
                             onClick={() => handleClosePosition(row, index)}
-                            disabled={positionActionLoading}
+                            disabled={positionActionLoading || !positionActionable}
                           >
                             {t("trade.positionActionClose")}
                           </button>

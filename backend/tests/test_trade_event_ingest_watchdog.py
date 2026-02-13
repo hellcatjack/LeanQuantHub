@@ -335,7 +335,12 @@ def test_reconcile_active_direct_orders_syncs_submitted_manual_orders(tmp_path):
                 "side": "SELL",
                 "quantity": 1,
                 "order_type": "MKT",
-                "params": {"mode": "paper", "source": "manual", "event_tag": "direct:1"},
+                "params": {
+                    "mode": "paper",
+                    "source": "manual",
+                    "event_tag": "direct:1",
+                    "open_orders_seen_once": True,
+                },
             },
         )
         session.commit()

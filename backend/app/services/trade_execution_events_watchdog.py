@@ -7,8 +7,11 @@ from app.services.lean_bridge_paths import resolve_bridge_root
 from app.services.lean_bridge_reader import read_open_orders, read_positions
 from app.services.lean_execution import ingest_execution_events
 from app.services.trade_cancel import reconcile_cancel_requested_orders
+from app.services.ib_execution_backfill import reconcile_direct_orders_with_ib_executions
+from app.services.ib_execution_backfill import reconcile_orders_with_ib_completed_status
 from app.services.trade_open_orders_sync import sync_trade_orders_from_open_orders
 from app.services.trade_executor import (
+    reconcile_direct_orders_with_positions,
     reconcile_run_with_positions,
     recompute_trade_run_completion_summary,
 )
@@ -143,6 +146,8 @@ def reconcile_active_direct_orders(
     root = Path(bridge_root) if bridge_root is not None else resolve_bridge_root()
     mode_value = str(mode or "").strip().lower() or "paper"
     open_orders_payload = read_open_orders(root)
+    open_tags = _extract_open_tags(open_orders_payload)
+    positions_payload = read_positions(root)
     sync_summary = sync_trade_orders_from_open_orders(
         session,
         open_orders_payload,
@@ -150,10 +155,34 @@ def reconcile_active_direct_orders(
         manual_only=True,
         include_new=True,
     )
+    ib_backfill_summary = reconcile_direct_orders_with_ib_executions(
+        session,
+        limit=300,
+        min_query_interval_seconds=15,
+        lookback_hours=8,
+        open_tags=open_tags,
+        infer_canceled_missing=bool(isinstance(open_orders_payload, dict) and open_orders_payload.get("stale") is not True),
+        missing_cancel_min_age_seconds=120,
+    )
+    ib_completed_summary = reconcile_orders_with_ib_completed_status(
+        session,
+        limit=1200,
+        min_query_interval_seconds=8,
+        lookback_hours=8,
+    )
+    positions_summary = reconcile_direct_orders_with_positions(
+        session,
+        positions_payload,
+        open_tags=open_tags,
+        min_age_seconds=20,
+    )
     cancel_summary = reconcile_cancel_requested_orders(session, run_id=None, limit=max(1, int(cancel_limit)))
     return {
         "mode": mode_value,
         "sync": sync_summary,
+        "ib_backfill": ib_backfill_summary,
+        "ib_completed": ib_completed_summary,
+        "positions": positions_summary,
         "cancel": cancel_summary,
     }
 

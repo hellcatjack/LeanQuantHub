@@ -11,7 +11,7 @@ from app.services.audit_log import record_audit
 from app.services.ib_settings import get_or_create_ib_settings, resolve_ib_api_mode
 from app.services.lean_bridge_commands import write_submit_order_command
 from app.services.lean_bridge_paths import resolve_bridge_root
-from app.services.lean_bridge_reader import read_bridge_status, read_quotes
+from app.services.lean_bridge_reader import read_bridge_status, read_quotes, read_positions
 from app.services.trade_direct_intent import build_direct_intent_items
 from app.services.trade_price_seed import resolve_price_seed
 from app.services.trade_orders import (
@@ -226,6 +226,29 @@ def _as_bool(value: Any, *, default: bool = False) -> bool:
     return default
 
 
+def _extract_broker_order_id(result: dict[str, Any] | None) -> int | None:
+    if not isinstance(result, dict):
+        return None
+    values = result.get("brokerage_ids")
+    if isinstance(values, list):
+        for value in values:
+            try:
+                parsed = int(str(value).strip())
+            except (TypeError, ValueError):
+                continue
+            if parsed > 0:
+                return parsed
+    for key in ("order_id", "lean_order_id"):
+        raw = result.get(key)
+        try:
+            parsed = int(str(raw).strip())
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0:
+            return parsed
+    return None
+
+
 def _infer_outside_rth(params: dict[str, Any] | None) -> tuple[bool, str]:
     if not isinstance(params, dict):
         return False, ""
@@ -240,6 +263,47 @@ def _infer_outside_rth(params: dict[str, Any] | None) -> tuple[bool, str]:
     if session in _SESSION_EXTENDED:
         return True, session
     return False, session
+
+
+def _capture_positions_baseline_for_symbol(bridge_root: Path, symbol: str | None) -> dict[str, Any] | None:
+    symbol_value = _normalize_symbol(symbol)
+    if not symbol_value:
+        return None
+    try:
+        payload = read_positions(bridge_root)
+    except Exception:
+        return None
+    if not isinstance(payload, dict) or payload.get("stale") is True:
+        return None
+    items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if _normalize_symbol(item.get("symbol")) != symbol_value:
+            continue
+        quantity_raw = item.get("quantity")
+        if quantity_raw is None:
+            quantity_raw = item.get("position")
+        try:
+            quantity_value = float(quantity_raw or 0.0)
+        except (TypeError, ValueError):
+            quantity_value = 0.0
+        avg_cost_raw = item.get("avg_cost")
+        try:
+            avg_cost_value = float(avg_cost_raw) if avg_cost_raw is not None else None
+        except (TypeError, ValueError):
+            avg_cost_value = None
+        baseline_item: dict[str, Any] = {"symbol": symbol_value, "quantity": quantity_value}
+        if avg_cost_value is not None:
+            baseline_item["avg_cost"] = avg_cost_value
+        return {
+            "refreshed_at": payload.get("refreshed_at") or payload.get("updated_at"),
+            "items": [baseline_item],
+        }
+    return {
+        "refreshed_at": payload.get("refreshed_at") or payload.get("updated_at"),
+        "items": [{"symbol": symbol_value, "quantity": 0.0}],
+    }
 
 
 def _pick_quote_limit_price(item: dict[str, Any], *, side: str, prefer_mid: bool = False) -> float | None:
@@ -439,6 +503,10 @@ def _submit_direct_execution_via_leader(
     params["event_source"] = "lean_command"
     params["broker_order_tag"] = broker_order_tag
     params["event_tag"] = broker_order_tag
+    if not isinstance(params.get("positions_baseline"), dict):
+        baseline_payload = _capture_positions_baseline_for_symbol(bridge_root, order.symbol)
+        if isinstance(baseline_payload, dict):
+            params["positions_baseline"] = baseline_payload
     order.params = params
     _update_retry_meta(order, pending=False, reason="submitted")
     session.commit()
@@ -508,6 +576,9 @@ def reconcile_direct_submit_command_results(
         payload_params["submit_command"] = merged_submit
         payload_params["event_source"] = "lean_command"
         payload_params["sync_reason"] = f"submit_command_{status or 'unknown'}"
+        broker_order_id = _extract_broker_order_id(result)
+        if broker_order_id is not None and order.ib_order_id is None:
+            order.ib_order_id = int(broker_order_id)
 
         if status == "submitted":
             current = str(order.status or "").strip().upper()

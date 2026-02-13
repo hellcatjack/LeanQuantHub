@@ -10,6 +10,7 @@ from app.services.trade_orders import force_update_trade_order_status, update_tr
 _ACTIVE_ORDER_STATUSES = {"SUBMITTED", "PARTIAL", "CANCEL_REQUESTED"}
 _ACTIVE_ORDER_MISSING_GRACE_STATUSES = {"SUBMITTED", "PARTIAL"}
 _TERMINAL_ORDER_STATUSES = {"FILLED", "CANCELED", "CANCELLED", "REJECTED", "SKIPPED"}
+_TERMINAL_RUN_STATUSES = {"DONE", "PARTIAL", "FAILED", "CANCELED", "CANCELLED"}
 # Orders marked from low-confidence reconciliation may be recovered later when we observe
 # concrete broker/Lean signals (open-orders presence or execution events).
 _RECOVERABLE_TERMINAL_STATUSES = {"CANCELED", "CANCELLED", "SKIPPED"}
@@ -42,6 +43,7 @@ _CANCELED_OPEN_ORDER_STATUSES = {"CANCELED", "CANCELLED"}
 _OPEN_ORDERS_MISSING_SINCE_KEY = "open_orders_missing_since"
 _OPEN_ORDERS_MISSING_LAST_SEEN_KEY = "open_orders_missing_last_seen"
 _OPEN_ORDERS_MISSING_UNCONFIRMED_KEY = "open_orders_missing_unconfirmed"
+_OPEN_ORDERS_SEEN_ONCE_KEY = "open_orders_seen_once"
 
 
 def _normalize_tag(value: object) -> str:
@@ -97,6 +99,21 @@ def _is_submit_command_pending(params: dict[str, Any] | None) -> bool:
     if not isinstance(submit_meta, dict):
         return False
     return _as_bool(submit_meta.get("pending"), default=False)
+
+
+def _is_leader_submit_command_submitted(params: dict[str, Any] | None) -> bool:
+    if not isinstance(params, dict):
+        return False
+    submit_meta = params.get("submit_command")
+    if not isinstance(submit_meta, dict):
+        return False
+    source = str(submit_meta.get("source") or "").strip().lower()
+    if source != "leader_command":
+        return False
+    if _as_bool(submit_meta.get("pending"), default=False):
+        return True
+    status = str(submit_meta.get("status") or "").strip().lower()
+    return status in {"submitted", "pending"}
 
 
 def _is_short_lived_fallback_submission_pending(
@@ -161,6 +178,12 @@ def _is_short_lived_fallback_related(params: dict[str, Any] | None) -> bool:
     return superseded_by == "short_lived_fallback" or reason == "leader_submit_pending_timeout" or reason.endswith(
         "pending_timeout"
     )
+
+
+def _is_run_leader_submitted(order: TradeOrder, params: dict[str, Any] | None) -> bool:
+    if getattr(order, "run_id", None) is None:
+        return False
+    return _is_leader_submit_command_submitted(params)
 
 
 def _is_client_scoped_master_snapshot(open_orders_payload: dict[str, Any]) -> bool:
@@ -305,6 +328,9 @@ def sync_trade_orders_from_open_orders(
         "skipped_partial_coverage": 0,
         "skipped_missing_grace": 0,
         "skipped_missing_unconfirmed": 0,
+        "skipped_direct_missing_unseen": 0,
+        "skipped_direct_missing_leader_submitted": 0,
+        "skipped_run_missing_leader_submitted": 0,
         "skipped_submit_pending": 0,
         "skipped_stale": 0,
     }
@@ -374,9 +400,12 @@ def sync_trade_orders_from_open_orders(
 
     run_ids = {order.run_id for order in orders if order.run_id}
     run_modes: dict[int, str] = {}
+    run_statuses: dict[int, str] = {}
     if run_ids:
         for run in session.query(TradeRun).filter(TradeRun.id.in_(sorted(run_ids))).all():
-            run_modes[int(run.id)] = str(run.mode or "").strip().lower()
+            run_id_value = int(run.id)
+            run_modes[run_id_value] = str(run.mode or "").strip().lower()
+            run_statuses[run_id_value] = str(run.status or "").strip().upper()
 
     current_dt = now or datetime.now(timezone.utc)
     if current_dt.tzinfo is None:
@@ -408,19 +437,29 @@ def sync_trade_orders_from_open_orders(
                 break
 
         current_status = str(order.status or "").strip().upper()
+        order_params = dict(order.params or {}) if isinstance(order.params, dict) else {}
+        run_leader_submitted = _is_run_leader_submitted(order, order_params)
 
         if matched_tag is not None:
             tag = matched_tag
+            direct_seen_updates: dict[str, Any] = {}
+            if _is_direct_or_manual_order(order):
+                order_params = dict(order.params or {})
+                if not _as_bool(order_params.get(_OPEN_ORDERS_SEEN_ONCE_KEY), default=False):
+                    direct_seen_updates[_OPEN_ORDERS_SEEN_ONCE_KEY] = True
             if current_status in _ACTIVE_ORDER_MISSING_GRACE_STATUSES:
                 _persist_order_params(
                     session,
                     order,
+                    updates=direct_seen_updates,
                     remove_keys={
                         _OPEN_ORDERS_MISSING_SINCE_KEY,
                         _OPEN_ORDERS_MISSING_LAST_SEEN_KEY,
                         _OPEN_ORDERS_MISSING_UNCONFIRMED_KEY,
                     },
                 )
+            elif direct_seen_updates:
+                _persist_order_params(session, order, updates=direct_seen_updates)
             open_item = open_by_tag.get(tag) or {}
             open_status = _normalize_open_order_status(open_item.get("status"))
             if open_status in _CANCELED_OPEN_ORDER_STATUSES:
@@ -507,6 +546,36 @@ def sync_trade_orders_from_open_orders(
             continue
 
         # Tag absent from the open-orders snapshot.
+        if (
+            current_status in _RECOVERABLE_TERMINAL_STATUSES
+            and _is_low_conf_missing_terminal(order.params)
+            and run_leader_submitted
+        ):
+            try:
+                force_update_trade_order_status(
+                    session,
+                    order,
+                    {
+                        "status": "SUBMITTED",
+                        "params": {
+                            "event_source": "lean_open_orders",
+                            "event_tag": tag,
+                            "event_time": event_time,
+                            "event_status": "SUBMITTED",
+                            "sync_reason": "missing_from_open_orders_recovered_unconfirmed",
+                            _OPEN_ORDERS_MISSING_SINCE_KEY: order_params.get(_OPEN_ORDERS_MISSING_SINCE_KEY)
+                            or event_time,
+                            _OPEN_ORDERS_MISSING_LAST_SEEN_KEY: order_params.get(_OPEN_ORDERS_MISSING_LAST_SEEN_KEY)
+                            or event_time,
+                            _OPEN_ORDERS_MISSING_UNCONFIRMED_KEY: True,
+                        },
+                    },
+                )
+            except ValueError:
+                summary["skipped"] += 1
+            else:
+                summary["updated"] += 1
+            continue
         if current_status in _TERMINAL_ORDER_STATUSES:
             summary["skipped"] += 1
             continue
@@ -546,7 +615,10 @@ def sync_trade_orders_from_open_orders(
             missing_since = _parse_iso_datetime(params.get(_OPEN_ORDERS_MISSING_SINCE_KEY))
             grace_seconds = _ACTIVE_ORDER_MISSING_CANCEL_GRACE_SECONDS
             finalize_seconds = _ACTIVE_ORDER_MISSING_UNCONFIRMED_FINALIZE_SECONDS
+            allow_low_conf_missing_terminal = True
             if order.run_id is not None:
+                run_status = run_statuses.get(int(order.run_id), "")
+                run_terminal = run_status in _TERMINAL_RUN_STATUSES
                 grace_seconds = max(
                     _ACTIVE_ORDER_MISSING_CANCEL_GRACE_SECONDS,
                     _RUN_ACTIVE_ORDER_MISSING_CANCEL_GRACE_SECONDS,
@@ -563,8 +635,35 @@ def sync_trade_orders_from_open_orders(
                     )
                     if finalize_seconds < grace_seconds:
                         finalize_seconds = grace_seconds
+                if _is_run_leader_submitted(order, params):
+                    if run_terminal:
+                        # Terminal runs no longer have an active execution pipeline; if a leader-
+                        # submitted order stays missing long enough, force convergence to avoid
+                        # indefinitely lingering SUBMITTED rows.
+                        grace_seconds = min(grace_seconds, _RUN_INACTIVE_ORDER_MISSING_CANCEL_GRACE_SECONDS)
+                        finalize_seconds = min(
+                            finalize_seconds,
+                            _RUN_INACTIVE_ORDER_MISSING_UNCONFIRMED_FINALIZE_SECONDS,
+                        )
+                        if finalize_seconds < grace_seconds:
+                            finalize_seconds = grace_seconds
+                    else:
+                        # Leader-submitted running orders are executed by the long-lived bridge
+                        # leader. Missing from open-orders is ambiguous (filled or canceled), so
+                        # avoid low-confidence terminalization while the run is still active.
+                        allow_low_conf_missing_terminal = False
+                        summary["skipped_run_missing_leader_submitted"] += 1
             else:
-                if _is_direct_or_manual_order(order):
+                direct_or_manual = _is_direct_or_manual_order(order)
+                seen_in_open_orders = _as_bool(params.get(_OPEN_ORDERS_SEEN_ONCE_KEY), default=False)
+                leader_submitted = _is_leader_submit_command_submitted(params)
+                if direct_or_manual and leader_submitted:
+                    # For leader-submitted direct/manual orders, missing-from-open-orders is
+                    # ambiguous (could be FILLED or CANCELED). Prefer waiting for higher-confidence
+                    # signals (execution events / positions reconcile) instead of terminalizing.
+                    allow_low_conf_missing_terminal = False
+                    summary["skipped_direct_missing_leader_submitted"] += 1
+                elif direct_or_manual and seen_in_open_orders:
                     grace_seconds = min(
                         grace_seconds,
                         _DIRECT_ACTIVE_ORDER_MISSING_CANCEL_GRACE_SECONDS,
@@ -575,6 +674,10 @@ def sync_trade_orders_from_open_orders(
                     )
                     if finalize_seconds < grace_seconds:
                         finalize_seconds = grace_seconds
+                elif direct_or_manual:
+                    # Orders never observed in open-orders can be immediately filled and disappear
+                    # before snapshot capture. Keep conservative thresholds to avoid false cancels.
+                    summary["skipped_direct_missing_unseen"] += 1
             if missing_since is None:
                 order_updated_at = getattr(order, "updated_at", None)
                 order_age: float | None = None
@@ -590,7 +693,7 @@ def sync_trade_orders_from_open_orders(
                         order_age = (current_dt - updated_dt).total_seconds()
                     except Exception:
                         order_age = None
-                if order_age is not None and order_age >= finalize_seconds:
+                if allow_low_conf_missing_terminal and order_age is not None and order_age >= finalize_seconds:
                     try:
                         update_trade_order_status(
                             session,
@@ -634,7 +737,7 @@ def sync_trade_orders_from_open_orders(
                 summary["skipped_missing_grace"] += 1
                 continue
 
-            if missing_age >= finalize_seconds:
+            if allow_low_conf_missing_terminal and missing_age >= finalize_seconds:
                 try:
                     update_trade_order_status(
                         session,

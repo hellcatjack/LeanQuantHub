@@ -216,3 +216,81 @@ def test_reconcile_direct_orders_with_positions_terminalizes_superseded_submitte
         assert params.get("sync_reason") == "leader_submit_no_fill_timeout"
     finally:
         session.close()
+
+
+def test_reconcile_direct_orders_with_positions_recovers_low_conf_missing_terminal(tmp_path, monkeypatch):
+    from app.services.trade_executor import reconcile_direct_orders_with_positions
+
+    monkeypatch.setattr(settings, "data_root", str(tmp_path))
+    bridge_root = tmp_path / "lean_bridge"
+
+    session = _make_session()
+    try:
+        order = TradeOrder(
+            run_id=None,
+            client_order_id="manual_3_1770992553631_0111-5m",
+            symbol="AMSC",
+            side="SELL",
+            quantity=9.0,
+            order_type="LMT",
+            limit_price=31.5,
+            status="CANCELED",
+            filled_quantity=0.0,
+            avg_fill_price=None,
+            params={
+                "mode": "paper",
+                "source": "manual",
+                "event_tag": "manual_3_1770992553631_0111-5m",
+                "sync_reason": "missing_from_open_orders",
+            },
+            created_at=datetime.utcnow() - timedelta(minutes=10),
+        )
+        session.add(order)
+        session.commit()
+        session.refresh(order)
+
+        # Baseline captured at submit time: 9 shares, now positions are zero => SELL filled by 9.
+        order.params = {
+            **dict(order.params or {}),
+            "positions_baseline": {
+                "refreshed_at": "2026-02-13T14:22:33Z",
+                "items": [{"symbol": "AMSC", "quantity": 9.0, "avg_cost": 32.05}],
+            },
+        }
+        session.commit()
+
+        # Keep compatibility with fallback path on disk too.
+        direct_dir = bridge_root / f"direct_{order.id}"
+        direct_dir.mkdir(parents=True, exist_ok=True)
+        (direct_dir / "positions.json").write_text(
+            json.dumps(
+                {
+                    "items": [{"symbol": "AMSC", "quantity": 9.0, "avg_cost": 32.05}],
+                    "refreshed_at": "2026-02-13T14:22:33Z",
+                    "stale": False,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        positions_payload = {
+            "items": [{"symbol": "AMSC", "quantity": 0.0, "avg_cost": 32.05}],
+            "refreshed_at": "2026-02-13T14:23:20Z",
+            "stale": False,
+        }
+
+        out = reconcile_direct_orders_with_positions(session, positions_payload, now=datetime.utcnow())
+        assert out["reconciled"] == 1
+
+        session.refresh(order)
+        assert order.status == "FILLED"
+        assert float(order.filled_quantity or 0.0) == 9.0
+        params = dict(order.params or {})
+        assert params.get("sync_reason") == "positions_reconcile"
+        assert params.get("reconcile_recovered_from") in {"CANCELED", "CANCELLED", "SKIPPED"}
+
+        fills = session.query(TradeFill).filter(TradeFill.order_id == order.id).all()
+        assert len(fills) == 1
+        assert fills[0].fill_quantity == 9.0
+    finally:
+        session.close()

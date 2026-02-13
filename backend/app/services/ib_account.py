@@ -4,7 +4,7 @@ import copy
 from pathlib import Path
 import json
 from datetime import datetime, timedelta, timezone
-from threading import Event, Lock
+from threading import Event, Lock, Thread
 from time import monotonic
 from typing import Any
 
@@ -26,9 +26,9 @@ CORE_TAGS = (
 )
 
 CACHE_ROOT: Path | None = None
-_VALID_HOLDINGS_SOURCE_DETAILS = {"ib_holdings", "ib_holdings_empty"}
+_VALID_HOLDINGS_SOURCE_DETAILS = {"ib_holdings", "ib_holdings_empty", "ib_holdings_ibapi_fallback"}
 _DIRECT_FILL_STATUSES = ("FILLED", "PARTIAL")
-_OVERLAY_RECENT_DIRECT_FILL_MAX_AGE_SECONDS = 300
+_OVERLAY_RECENT_DIRECT_FILL_MAX_AGE_SECONDS = 7200
 _INFER_RECENT_DIRECT_FILL_MAX_AGE_SECONDS = 1800
 _OVERLAY_TERMINAL_FILL_GRACE_SECONDS = 60
 _OVERLAY_ACTIVE_ORDER_STATUSES = {
@@ -53,6 +53,14 @@ _ACCOUNT_POSITIONS_RESPONSE_INFLIGHT_STALE_SECONDS = max(
     float(getattr(settings, "ib_account_positions_response_inflight_stale_seconds", 2.0) or 2.0),
     0.1,
 )
+_IBAPI_VERIFY_TIMEOUT_SECONDS = max(
+    float(getattr(settings, "ib_account_positions_ibapi_verify_timeout_seconds", 1.5) or 1.5),
+    0.3,
+)
+_IBAPI_VERIFY_MIN_INTERVAL_SECONDS = max(
+    float(getattr(settings, "ib_account_positions_ibapi_verify_interval_seconds", 3.0) or 3.0),
+    0.0,
+)
 _SYMBOL_LATEST_GUARD_STATUSES = (
     "NEW",
     "SUBMITTED",
@@ -68,6 +76,8 @@ _SYMBOL_LATEST_GUARD_STATUSES = (
 _account_positions_response_cache_lock = Lock()
 _account_positions_response_cache: dict[tuple[str], tuple[float, dict[str, object]]] = {}
 _account_positions_response_inflight: dict[tuple[str], tuple[Event, float]] = {}
+_ibapi_positions_verify_cache_lock = Lock()
+_ibapi_positions_verify_cache: dict[str, tuple[float, dict[str, object] | None]] = {}
 
 
 def _account_positions_cache_key(*, mode: str) -> tuple[str]:
@@ -162,6 +172,8 @@ def _clear_account_positions_response_cache() -> None:
     with _account_positions_response_cache_lock:
         _account_positions_response_cache.clear()
         _account_positions_response_inflight.clear()
+    with _ibapi_positions_verify_cache_lock:
+        _ibapi_positions_verify_cache.clear()
 
 
 def _build_account_positions_fast_fallback(*, mode: str) -> dict[str, object]:
@@ -188,6 +200,179 @@ def _build_account_positions_fast_fallback(*, mode: str) -> dict[str, object]:
         "source_detail": source_detail,
         "mode": mode,
     }
+
+
+def _fetch_positions_via_ibapi(
+    *,
+    host: str,
+    port: int,
+    client_id: int,
+    timeout_seconds: float = 6.0,
+) -> list[dict[str, object]] | None:
+    # Lazy import so environments without ibapi can still import this module.
+    from ibapi.client import EClient
+    from ibapi.wrapper import EWrapper
+
+    class _App(EWrapper, EClient):
+        def __init__(self):
+            EClient.__init__(self, self)
+            self.ready = Event()
+            self.done = Event()
+            self.items: list[dict[str, object]] = []
+
+        def nextValidId(self, _order_id: int):
+            self.ready.set()
+
+        def position(self, account, contract, pos, avgCost):
+            symbol = str(getattr(contract, "symbol", "") or "").strip().upper()
+            if not symbol:
+                return
+            try:
+                qty = float(pos or 0.0)
+            except (TypeError, ValueError):
+                qty = 0.0
+            try:
+                avg_cost = float(avgCost or 0.0)
+            except (TypeError, ValueError):
+                avg_cost = 0.0
+            self.items.append(
+                {
+                    "account": str(account or "").strip() or None,
+                    "symbol": symbol,
+                    "position": qty,
+                    "quantity": qty,
+                    "avg_cost": avg_cost if avg_cost > 0 else None,
+                    "currency": str(getattr(contract, "currency", "") or "").strip() or None,
+                }
+            )
+
+        def positionEnd(self):
+            self.done.set()
+
+    app = _App()
+    thread: Thread | None = None
+    try:
+        app.connect(host, int(port), int(client_id))
+        thread = Thread(target=app.run, daemon=True)
+        thread.start()
+        if not app.ready.wait(timeout_seconds):
+            return None
+        app.reqPositions()
+        if not app.done.wait(timeout_seconds):
+            return None
+        return sorted(app.items, key=lambda x: str(x.get("symbol") or ""))
+    except Exception:
+        return None
+    finally:
+        try:
+            app.disconnect()
+        except Exception:
+            pass
+        if thread is not None:
+            thread.join(timeout=0.2)
+
+
+def _load_positions_via_ibapi_fallback(
+    session,
+    *,
+    mode: str,
+    refreshed_at: object,
+    timeout_seconds: float = 6.0,
+) -> dict[str, object] | None:
+    if session is None:
+        return None
+    try:
+        settings_row = get_or_create_ib_settings(session)
+    except Exception:
+        return None
+    host = str(getattr(settings_row, "host", "") or "").strip()
+    try:
+        port = int(getattr(settings_row, "port", 0) or 0)
+    except (TypeError, ValueError):
+        port = 0
+    if not host or port <= 0:
+        return None
+
+    # Use high transient client id to avoid conflicts with leader/run clients.
+    client_id = 1_800_000_000 + int(monotonic() * 1000) % 100_000
+    items = _fetch_positions_via_ibapi(
+        host=host,
+        port=port,
+        client_id=client_id,
+        timeout_seconds=max(0.3, float(timeout_seconds)),
+    )
+    if items is None:
+        return None
+    return {
+        "items": items,
+        "refreshed_at": refreshed_at or datetime.utcnow().isoformat() + "Z",
+        "stale": False,
+        "source_detail": "ib_holdings_ibapi_fallback",
+    }
+
+
+def _positions_items_to_map(items: list[dict[str, object]]) -> dict[str, float]:
+    positions: dict[str, float] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        symbol = str(item.get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        qty = _parse_position_quantity(item.get("position"))
+        if qty is None:
+            qty = _parse_position_quantity(item.get("quantity"))
+        if qty is None:
+            continue
+        positions[symbol] = float(qty)
+    return positions
+
+
+def _positions_items_match(
+    left_items: list[dict[str, object]],
+    right_items: list[dict[str, object]],
+    *,
+    tolerance: float = 1e-6,
+) -> bool:
+    left_map = _positions_items_to_map(left_items)
+    right_map = _positions_items_to_map(right_items)
+    if left_map.keys() != right_map.keys():
+        return False
+    for symbol, left_qty in left_map.items():
+        right_qty = float(right_map.get(symbol, 0.0))
+        if abs(float(left_qty) - right_qty) > tolerance:
+            return False
+    return True
+
+
+def _load_positions_via_ibapi_verified(
+    session,
+    *,
+    mode: str,
+    refreshed_at: object,
+    force: bool = False,
+) -> dict[str, object] | None:
+    if session is None:
+        return None
+    mode_key = str(mode or "").strip().lower() or "paper"
+    now_mono = monotonic()
+    if not force and _IBAPI_VERIFY_MIN_INTERVAL_SECONDS > 0:
+        with _ibapi_positions_verify_cache_lock:
+            cached_entry = _ibapi_positions_verify_cache.get(mode_key)
+            if cached_entry is not None:
+                cached_at, cached_payload = cached_entry
+                if (now_mono - float(cached_at)) < _IBAPI_VERIFY_MIN_INTERVAL_SECONDS:
+                    return copy.deepcopy(cached_payload) if isinstance(cached_payload, dict) else None
+
+    payload = _load_positions_via_ibapi_fallback(
+        session,
+        mode=mode,
+        refreshed_at=refreshed_at,
+        timeout_seconds=_IBAPI_VERIFY_TIMEOUT_SECONDS,
+    )
+    with _ibapi_positions_verify_cache_lock:
+        _ibapi_positions_verify_cache[mode_key] = (now_mono, copy.deepcopy(payload) if isinstance(payload, dict) else None)
+    return payload
 
 
 def _resolve_bridge_root() -> Path:
@@ -827,6 +1012,18 @@ def _reconcile_non_stale_ib_holdings_with_recent_fills(
             if not inconsistent:
                 return payload
 
+    ibapi_payload = _load_positions_via_ibapi_fallback(
+        session,
+        mode=mode,
+        refreshed_at=refreshed_at,
+    )
+    if isinstance(ibapi_payload, dict):
+        ibapi_items = ibapi_payload.get("items") if isinstance(ibapi_payload.get("items"), list) else []
+        # Prefer IB API fallback when we can retrieve non-empty holdings, or when bridge
+        # snapshot is empty but we explicitly confirmed live reachability.
+        if ibapi_items or not raw_items:
+            return ibapi_payload
+
     inferred_items = _infer_positions_from_recent_direct_fills(
         session,
         mode=mode,
@@ -890,6 +1087,34 @@ def get_account_positions(session, *, mode: str, force_refresh: bool = False) ->
     source_detail = payload.get("source_detail") if isinstance(payload, dict) else None
     refreshed_at = payload.get("updated_at") or payload.get("refreshed_at")
     stale = bool(payload.get("stale", True))
+
+    # Guardrail: bridge positions snapshots can look fresh while drifting from TWS.
+    # Periodically verify against a direct reqPositions snapshot and prefer TWS when mismatched.
+    if (
+        session is not None
+        and hasattr(session, "query")
+        and source_detail in _VALID_HOLDINGS_SOURCE_DETAILS
+        and not stale
+    ):
+        ibapi_verified = _load_positions_via_ibapi_verified(
+            session,
+            mode=mode,
+            refreshed_at=refreshed_at,
+            force=force_refresh,
+        )
+        if isinstance(ibapi_verified, dict):
+            bridge_items = payload.get("items") if isinstance(payload.get("items"), list) else []
+            ibapi_items = (
+                ibapi_verified.get("items")
+                if isinstance(ibapi_verified.get("items"), list)
+                else []
+            )
+            if force_refresh or not _positions_items_match(bridge_items, ibapi_items):
+                payload = ibapi_verified
+                source_detail = payload.get("source_detail")
+                refreshed_at = payload.get("updated_at") or payload.get("refreshed_at")
+                stale = bool(payload.get("stale", True))
+
     if source_detail not in _VALID_HOLDINGS_SOURCE_DETAILS or stale:
         if session is None:
             return {
@@ -905,6 +1130,15 @@ def get_account_positions(session, *, mode: str, force_refresh: bool = False) ->
         stale = bool(payload.get("stale", True))
         if source_detail not in _VALID_HOLDINGS_SOURCE_DETAILS or stale:
             if source_detail in _VALID_HOLDINGS_SOURCE_DETAILS and stale:
+                # Bridge holdings can be stale while still carrying outdated positions.
+                # Prefer IB API fallback first so UI reflects current account state.
+                ibapi_payload = _load_positions_via_ibapi_fallback(
+                    session,
+                    mode=mode,
+                    refreshed_at=refreshed_at,
+                )
+                if isinstance(ibapi_payload, dict):
+                    return ibapi_payload
                 stale_items = payload.get("items") if isinstance(payload.get("items"), list) else []
                 if stale_items:
                     payload = {

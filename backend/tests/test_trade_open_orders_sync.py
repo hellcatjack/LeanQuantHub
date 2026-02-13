@@ -288,6 +288,187 @@ def test_sync_trade_orders_from_open_orders_run_scoped_missing_submitted_finaliz
         session.close()
 
 
+def test_sync_trade_orders_from_open_orders_run_scoped_leader_submitted_missing_stays_submitted_when_executor_inactive():
+    from app.services.trade_open_orders_sync import sync_trade_orders_from_open_orders
+
+    session = _make_session()
+    try:
+        now = datetime.now(timezone.utc)
+        run = TradeRun(project_id=1, decision_snapshot_id=1, status="running", mode="paper", params={})
+        session.add(run)
+        session.commit()
+
+        order = TradeOrder(
+            run_id=run.id,
+            client_order_id="oi_1_1",
+            symbol="AAPL",
+            side="BUY",
+            quantity=1,
+            order_type="LMT",
+            limit_price=100.0,
+            status="SUBMITTED",
+            params={
+                "event_tag": "oi_1_1",
+                "open_orders_missing_since": (now - timedelta(seconds=180)).isoformat().replace("+00:00", "Z"),
+                "submit_command": {
+                    "source": "leader_command",
+                    "status": "submitted",
+                    "pending": False,
+                },
+            },
+        )
+        session.add(order)
+        session.commit()
+
+        open_orders = {
+            "items": [{"tag": "oi_1_2", "symbol": "MSFT"}],
+            "refreshed_at": now.isoformat().replace("+00:00", "Z"),
+            "source": "lean_bridge",
+            "stale": False,
+        }
+        summary = sync_trade_orders_from_open_orders(
+            session,
+            open_orders,
+            mode="paper",
+            run_id=run.id,
+            now=now,
+            run_executor_active=False,
+        )
+
+        refreshed = session.get(TradeOrder, order.id)
+        assert refreshed.status == "SUBMITTED"
+        params = dict(refreshed.params or {})
+        assert params.get("open_orders_missing_unconfirmed") is True
+        assert summary["updated"] == 0
+        assert summary["skipped_missing_unconfirmed"] == 1
+    finally:
+        session.close()
+
+
+def test_sync_trade_orders_from_open_orders_run_scoped_leader_submitted_missing_converges_when_run_terminal():
+    from app.services.trade_open_orders_sync import sync_trade_orders_from_open_orders
+
+    session = _make_session()
+    try:
+        now = datetime.now(timezone.utc)
+        run = TradeRun(
+            project_id=1,
+            decision_snapshot_id=1,
+            status="failed",
+            mode="paper",
+            params={},
+            ended_at=now - timedelta(minutes=5),
+        )
+        session.add(run)
+        session.commit()
+
+        order = TradeOrder(
+            run_id=run.id,
+            client_order_id="oi_1_1",
+            symbol="AAPL",
+            side="BUY",
+            quantity=1,
+            order_type="LMT",
+            limit_price=100.0,
+            status="SUBMITTED",
+            params={
+                "event_tag": "oi_1_1",
+                "open_orders_missing_since": (now - timedelta(seconds=180)).isoformat().replace("+00:00", "Z"),
+                "submit_command": {
+                    "source": "leader_command",
+                    "status": "submitted",
+                    "pending": False,
+                },
+            },
+        )
+        session.add(order)
+        session.commit()
+
+        open_orders = {
+            "items": [{"tag": "oi_1_2", "symbol": "MSFT"}],
+            "refreshed_at": now.isoformat().replace("+00:00", "Z"),
+            "source": "lean_bridge",
+            "stale": False,
+        }
+        summary = sync_trade_orders_from_open_orders(
+            session,
+            open_orders,
+            mode="paper",
+            run_id=run.id,
+            now=now,
+            run_executor_active=False,
+        )
+
+        refreshed = session.get(TradeOrder, order.id)
+        assert refreshed.status == "CANCELED"
+        params = dict(refreshed.params or {})
+        assert params.get("sync_reason") == "missing_from_open_orders"
+        assert params.get("open_orders_missing_unconfirmed") is True
+        assert summary["updated"] == 1
+        assert summary["updated_missing_to_canceled"] == 1
+    finally:
+        session.close()
+
+
+def test_sync_trade_orders_from_open_orders_recovers_low_conf_run_canceled_to_submitted_when_leader_submitted():
+    from app.services.trade_open_orders_sync import sync_trade_orders_from_open_orders
+
+    session = _make_session()
+    try:
+        now = datetime.now(timezone.utc)
+        run = TradeRun(project_id=1, decision_snapshot_id=1, status="running", mode="paper", params={})
+        session.add(run)
+        session.commit()
+
+        order = TradeOrder(
+            run_id=run.id,
+            client_order_id="oi_1_1",
+            symbol="AAPL",
+            side="BUY",
+            quantity=1,
+            order_type="LMT",
+            limit_price=100.0,
+            status="CANCELED",
+            params={
+                "event_tag": "oi_1_1",
+                "sync_reason": "missing_from_open_orders",
+                "event_source": "lean_open_orders",
+                "open_orders_missing_since": (now - timedelta(seconds=180)).isoformat().replace("+00:00", "Z"),
+                "submit_command": {
+                    "source": "leader_command",
+                    "status": "submitted",
+                    "pending": False,
+                },
+            },
+        )
+        session.add(order)
+        session.commit()
+
+        open_orders = {
+            "items": [{"tag": "oi_1_2", "symbol": "MSFT"}],
+            "refreshed_at": now.isoformat().replace("+00:00", "Z"),
+            "source": "lean_bridge",
+            "stale": False,
+        }
+        summary = sync_trade_orders_from_open_orders(
+            session,
+            open_orders,
+            mode="paper",
+            run_id=run.id,
+            now=now,
+            run_executor_active=False,
+        )
+
+        refreshed = session.get(TradeOrder, order.id)
+        assert refreshed.status == "SUBMITTED"
+        params = dict(refreshed.params or {})
+        assert params.get("sync_reason") == "missing_from_open_orders_recovered_unconfirmed"
+        assert params.get("open_orders_missing_unconfirmed") is True
+        assert summary["updated"] == 1
+    finally:
+        session.close()
+
+
 def test_sync_trade_orders_from_open_orders_keeps_missing_submitted_within_active_grace():
     from app.services.trade_open_orders_sync import sync_trade_orders_from_open_orders
 
@@ -968,7 +1149,12 @@ def test_sync_trade_orders_from_open_orders_manual_missing_submitted_finalizes_f
             order_type="MKT",
             limit_price=None,
             status="SUBMITTED",
-            params={"event_tag": "direct:999", "mode": "paper", "source": "manual"},
+            params={
+                "event_tag": "direct:999",
+                "mode": "paper",
+                "source": "manual",
+                "open_orders_seen_once": True,
+            },
         )
         session.add(order)
         session.commit()
@@ -1013,6 +1199,7 @@ def test_sync_trade_orders_from_open_orders_manual_missing_submitted_cancels_aft
                 "event_tag": "direct:1000",
                 "mode": "paper",
                 "source": "manual",
+                "open_orders_seen_once": True,
                 "open_orders_missing_since": (now - timedelta(seconds=50)).isoformat().replace("+00:00", "Z"),
             },
         )
@@ -1035,6 +1222,101 @@ def test_sync_trade_orders_from_open_orders_manual_missing_submitted_cancels_aft
         assert params.get("sync_reason") == "missing_from_open_orders"
         assert summary["updated"] == 1
         assert summary["updated_missing_unconfirmed_to_canceled"] == 1
+    finally:
+        session.close()
+
+
+def test_sync_trade_orders_from_open_orders_manual_missing_submitted_without_open_seen_uses_conservative_window():
+    from app.services.trade_open_orders_sync import sync_trade_orders_from_open_orders
+
+    session = _make_session()
+    try:
+        now = datetime.now(timezone.utc)
+        order = TradeOrder(
+            run_id=None,
+            client_order_id="oi_1001_manual",
+            symbol="AAPL",
+            side="SELL",
+            quantity=1,
+            order_type="MKT",
+            limit_price=None,
+            status="SUBMITTED",
+            params={
+                "event_tag": "direct:1001",
+                "mode": "paper",
+                "source": "manual",
+                "open_orders_missing_since": (now - timedelta(seconds=50)).isoformat().replace("+00:00", "Z"),
+            },
+        )
+        session.add(order)
+        session.commit()
+
+        open_orders = {
+            "items": [],
+            "refreshed_at": now.isoformat().replace("+00:00", "Z"),
+            "source": "lean_bridge",
+            "source_detail": "ib_open_orders_empty",
+            "bridge_client_id": 0,
+            "stale": False,
+        }
+        summary = sync_trade_orders_from_open_orders(session, open_orders, mode="paper", run_id=None, now=now)
+
+        refreshed = session.get(TradeOrder, order.id)
+        assert refreshed.status == "SUBMITTED"
+        assert summary["updated"] == 0
+        assert summary["skipped_missing_grace"] == 1
+        assert summary["skipped_direct_missing_unseen"] >= 1
+    finally:
+        session.close()
+
+
+def test_sync_trade_orders_from_open_orders_manual_missing_leader_submitted_does_not_terminalize():
+    from app.services.trade_open_orders_sync import sync_trade_orders_from_open_orders
+
+    session = _make_session()
+    try:
+        now = datetime.now(timezone.utc)
+        order = TradeOrder(
+            run_id=None,
+            client_order_id="manual_3_1770992553631_0111-5m",
+            symbol="AMSC",
+            side="SELL",
+            quantity=9,
+            order_type="LMT",
+            limit_price=31.5,
+            status="SUBMITTED",
+            params={
+                "event_tag": "manual_3_1770992553631_0111-5m",
+                "broker_order_tag": "manual_3_1770992553631_0111-5m",
+                "mode": "paper",
+                "source": "manual",
+                "open_orders_seen_once": True,
+                "open_orders_missing_since": (now - timedelta(seconds=50)).isoformat().replace("+00:00", "Z"),
+                "submit_command": {
+                    "source": "leader_command",
+                    "status": "submitted",
+                    "pending": False,
+                },
+            },
+        )
+        session.add(order)
+        session.commit()
+
+        open_orders = {
+            "items": [],
+            "refreshed_at": now.isoformat().replace("+00:00", "Z"),
+            "source": "lean_bridge",
+            "source_detail": "ib_open_orders_empty",
+            "bridge_client_id": 0,
+            "stale": False,
+        }
+        summary = sync_trade_orders_from_open_orders(session, open_orders, mode="paper", run_id=None, now=now)
+
+        refreshed = session.get(TradeOrder, order.id)
+        assert refreshed.status == "SUBMITTED"
+        assert summary["updated"] == 0
+        assert summary["skipped_missing_grace"] == 1
+        assert summary["skipped_direct_missing_leader_submitted"] >= 1
     finally:
         session.close()
 

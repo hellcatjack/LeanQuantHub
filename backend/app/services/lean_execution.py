@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import subprocess
 import os
 from pathlib import Path
@@ -37,6 +37,11 @@ _JSONL_INITIAL_REPLAY_MAX_BYTES = max(
     int(getattr(settings, "lean_jsonl_initial_replay_max_bytes", 8 * 1024 * 1024) or 8 * 1024 * 1024),
     256 * 1024,
 )
+_SUBMITTED_RECOVERY_EVENT_MAX_AGE_SECONDS = max(
+    int(getattr(settings, "lean_submitted_recovery_event_max_age_seconds", 900) or 900),
+    30,
+)
+_SUBMITTED_RECOVERY_EVENT_CLOCK_SKEW_SECONDS = 5
 
 
 def _bridge_output_dir() -> str:
@@ -405,6 +410,65 @@ def _parse_event_time(value: str | None) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _parse_event_time_optional(value: str | None) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    normalized = text.replace("Z", "+00:00")
+    if "." in normalized:
+        head, tail = normalized.split(".", 1)
+        tz = ""
+        tz_index = None
+        for sep in ("+", "-"):
+            idx = tail.find(sep)
+            if idx > 0:
+                tz_index = idx
+                break
+        if tz_index is not None:
+            frac = tail[:tz_index]
+            tz = tail[tz_index:]
+        else:
+            frac = tail
+        if len(frac) > 6:
+            frac = frac[:6]
+        normalized = f"{head}.{frac}{tz}"
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _to_utc(value: datetime | None) -> datetime | None:
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _can_recover_low_conf_submitted_event(order: TradeOrder, event_time: str | None) -> bool:
+    parsed_event_time = _parse_event_time_optional(event_time)
+    if parsed_event_time is None:
+        return False
+    now = datetime.now(timezone.utc)
+    try:
+        age_seconds = (now - parsed_event_time).total_seconds()
+    except Exception:
+        return False
+    if age_seconds < -_SUBMITTED_RECOVERY_EVENT_CLOCK_SKEW_SECONDS:
+        return False
+    if age_seconds > _SUBMITTED_RECOVERY_EVENT_MAX_AGE_SECONDS:
+        return False
+    updated_at = _to_utc(getattr(order, "updated_at", None))
+    if updated_at is not None:
+        if parsed_event_time + timedelta(seconds=_SUBMITTED_RECOVERY_EVENT_CLOCK_SKEW_SECONDS) < updated_at:
+            return False
+    return True
+
+
 def _apply_fill_to_order(
     session,
     order: TradeOrder,
@@ -707,6 +771,167 @@ def _apply_rejected_event_to_order(
     return True
 
 
+def _resolve_direct_or_manual_order_by_tag(session, tag: str) -> TradeOrder | None:
+    normalized = str(tag or "").strip()
+    if not normalized:
+        return None
+
+    order = (
+        session.query(TradeOrder)
+        .filter(TradeOrder.client_order_id == normalized)
+        .order_by(TradeOrder.id.desc())
+        .first()
+    )
+    if order is not None:
+        return order
+
+    # Fallback for historical inconsistent rows where event/client tags diverged.
+    candidates = (
+        session.query(TradeOrder)
+        .filter(TradeOrder.run_id.is_(None))
+        .order_by(TradeOrder.id.desc())
+        .limit(4000)
+        .all()
+    )
+    for candidate in candidates:
+        params = candidate.params if isinstance(candidate.params, dict) else {}
+        event_tag = str(params.get("event_tag") or "").strip()
+        broker_tag = str(params.get("broker_order_tag") or "").strip()
+        if normalized and (normalized == event_tag or normalized == broker_tag):
+            return candidate
+    return None
+
+
+def _apply_event_to_existing_order(
+    session,
+    *,
+    order: TradeOrder,
+    event: dict,
+    event_params: dict[str, object],
+    status: str,
+    filled_abs_value: float,
+) -> bool:
+    lean_order_id = event.get("order_id")
+    if lean_order_id is not None and order.ib_order_id is None:
+        try:
+            order.ib_order_id = int(lean_order_id)
+        except (TypeError, ValueError):
+            pass
+
+    if status in {"SUBMITTED", "NEW"}:
+        current_status = str(order.status or "").strip().upper()
+        if current_status in {"NEW", "SUBMITTED"}:
+            try:
+                update_trade_order_status(
+                    session,
+                    order,
+                    {"status": "SUBMITTED", "params": event_params},
+                    commit=False,
+                )
+            except ValueError:
+                return False
+        elif current_status in {"CANCELED", "CANCELLED", "SKIPPED"}:
+            params = order.params or {}
+            if (
+                isinstance(params, dict)
+                and params.get("sync_reason") == "missing_from_open_orders"
+                and _can_recover_low_conf_submitted_event(order, str(event.get("time") or "").strip())
+            ):
+                recovered_params = dict(event_params)
+                recovered_params["sync_reason"] = "execution_event_submitted_recovered"
+                try:
+                    force_update_trade_order_status(
+                        session,
+                        order,
+                        {"status": "SUBMITTED", "params": recovered_params},
+                        commit=False,
+                    )
+                except ValueError:
+                    return False
+        return True
+
+    if status in {"CANCELPENDING", "PENDINGCANCEL", "CANCEL_REQUESTED"}:
+        current_status = str(order.status or "").strip().upper()
+        if current_status not in {"CANCEL_REQUESTED", "CANCELED", "CANCELLED", "REJECTED", "FILLED"}:
+            try:
+                update_trade_order_status(
+                    session,
+                    order,
+                    {
+                        "status": "CANCEL_REQUESTED",
+                        "params": {
+                            **event_params,
+                            "event_status": "CANCEL_REQUESTED",
+                            "sync_reason": "execution_cancel_pending",
+                        },
+                    },
+                    commit=False,
+                )
+            except ValueError:
+                return False
+        return True
+
+    if status in {"CANCELED", "CANCELLED"}:
+        current_status = str(order.status or "").strip().upper()
+        if current_status not in {"REJECTED", "FILLED"}:
+            canceled_params = dict(event_params)
+            canceled_params["sync_reason"] = "execution_event_canceled"
+            try:
+                update_trade_order_status(
+                    session,
+                    order,
+                    {"status": "CANCELED", "params": canceled_params},
+                    commit=False,
+                )
+            except ValueError:
+                return False
+        return True
+
+    if status in {"REJECTED", "INVALID"}:
+        current_status = str(order.status or "").strip().upper()
+        reason = event.get("reason") or event.get("message")
+        return _apply_rejected_event_to_order(
+            session,
+            order,
+            current_status=current_status,
+            event_params=event_params,
+            reason=reason,
+        )
+
+    if status in {"FILLED", "PARTIALLYFILLED", "PARTIAL"} or filled_abs_value > 0:
+        fill_qty = filled_abs_value
+        if fill_qty <= 0:
+            return False
+        fill_price = float(event.get("fill_price") or 0.0)
+        fill_time = _parse_event_time(event.get("time"))
+        exec_id = event.get("exec_id") or f"lean_direct:{order.id}:{int(fill_time.timestamp() * 1000)}"
+        try:
+            _apply_fill_to_order(
+                session,
+                order,
+                fill_qty=fill_qty,
+                fill_price=fill_price,
+                fill_time=fill_time,
+                exec_id=exec_id,
+            )
+            filled_params = dict(event_params)
+            filled_params["sync_reason"] = "execution_fill"
+            try:
+                update_trade_order_status(
+                    session,
+                    order,
+                    {"status": str(order.status or "FILLED"), "params": filled_params},
+                    commit=False,
+                )
+            except ValueError:
+                pass
+        except ValueError:
+            return False
+        return True
+
+    return False
+
+
 def apply_execution_events(events: list[dict], *, session=None) -> dict:
     own_session = False
     summary = {"processed": 0, "skipped_invalid_tag": 0, "skipped_not_found": 0}
@@ -748,134 +973,34 @@ def apply_execution_events(events: list[dict], *, session=None) -> dict:
                 if order is None:
                     summary["skipped_not_found"] += 1
                     continue
-
-                lean_order_id = event.get("order_id")
-                if lean_order_id is not None and order.ib_order_id is None:
-                    try:
-                        order.ib_order_id = int(lean_order_id)
-                    except (TypeError, ValueError):
-                        pass
-
-                if status in {"SUBMITTED", "NEW"}:
-                    current_status = str(order.status or "").strip().upper()
-                    if current_status in {"NEW", "SUBMITTED"}:
-                        try:
-                            update_trade_order_status(
-                                session,
-                                order,
-                                {"status": "SUBMITTED", "params": event_params},
-                                commit=False,
-                            )
-                        except ValueError:
-                            continue
-                    elif current_status in {"CANCELED", "CANCELLED", "SKIPPED"}:
-                        params = order.params or {}
-                        if isinstance(params, dict) and params.get("sync_reason") == "missing_from_open_orders":
-                            recovered_params = dict(event_params)
-                            recovered_params["sync_reason"] = "execution_event_submitted_recovered"
-                            try:
-                                force_update_trade_order_status(
-                                    session,
-                                    order,
-                                    {"status": "SUBMITTED", "params": recovered_params},
-                                    commit=False,
-                                )
-                            except ValueError:
-                                continue
+                if _apply_event_to_existing_order(
+                    session,
+                    order=order,
+                    event=event,
+                    event_params=event_params,
+                    status=status,
+                    filled_abs_value=filled_abs_value,
+                ):
                     summary["processed"] += 1
                     continue
-
-                if status in {"CANCELPENDING", "PENDINGCANCEL", "CANCEL_REQUESTED"}:
-                    current_status = str(order.status or "").strip().upper()
-                    if current_status not in {"CANCEL_REQUESTED", "CANCELED", "CANCELLED", "REJECTED", "FILLED"}:
-                        try:
-                            update_trade_order_status(
-                                session,
-                                order,
-                                {
-                                    "status": "CANCEL_REQUESTED",
-                                    "params": {
-                                        **event_params,
-                                        "event_status": "CANCEL_REQUESTED",
-                                        "sync_reason": "execution_cancel_pending",
-                                    },
-                                },
-                                commit=False,
-                            )
-                        except ValueError:
-                            continue
-                    summary["processed"] += 1
-                    continue
-
-                if status in {"CANCELED", "CANCELLED"}:
-                    current_status = str(order.status or "").strip().upper()
-                    if current_status not in {"REJECTED", "FILLED"}:
-                        canceled_params = dict(event_params)
-                        canceled_params["sync_reason"] = "execution_event_canceled"
-                        try:
-                            update_trade_order_status(
-                                session,
-                                order,
-                                {"status": "CANCELED", "params": canceled_params},
-                                commit=False,
-                            )
-                        except ValueError:
-                            continue
-                    summary["processed"] += 1
-                    continue
-
-                if status in {"REJECTED", "INVALID"}:
-                    current_status = str(order.status or "").strip().upper()
-                    reason = event.get("reason") or event.get("message")
-                    if not _apply_rejected_event_to_order(
-                        session,
-                        order,
-                        current_status=current_status,
-                        event_params=event_params,
-                        reason=reason,
-                    ):
-                        continue
-                    summary["processed"] += 1
-                    continue
-
-                if status in {"FILLED", "PARTIALLYFILLED", "PARTIAL"} or filled_abs_value > 0:
-                    fill_qty = filled_abs_value
-                    if fill_qty <= 0:
-                        summary["skipped_not_found"] += 1
-                        continue
-                    fill_price = float(event.get("fill_price") or 0.0)
-                    fill_time = _parse_event_time(event.get("time"))
-                    exec_id = event.get("exec_id") or f"lean_direct:{order.id}:{int(fill_time.timestamp() * 1000)}"
-                    try:
-                        _apply_fill_to_order(
-                            session,
-                            order,
-                            fill_qty=fill_qty,
-                            fill_price=fill_price,
-                            fill_time=fill_time,
-                            exec_id=exec_id,
-                        )
-                        # Preserve event metadata on the order for UI/debugging.
-                        filled_params = dict(event_params)
-                        filled_params["sync_reason"] = "execution_fill"
-                        try:
-                            update_trade_order_status(
-                                session,
-                                order,
-                                {"status": str(order.status or "FILLED"), "params": filled_params},
-                                commit=False,
-                            )
-                        except ValueError:
-                            pass
-                    except ValueError:
-                        continue
-                    summary["processed"] += 1
-                    continue
-
                 summary["skipped_invalid_tag"] += 1
                 continue
 
             if not tag.startswith("oi_"):
+                order = _resolve_direct_or_manual_order_by_tag(session, tag)
+                if order is None:
+                    summary["skipped_not_found"] += 1
+                    continue
+                if _apply_event_to_existing_order(
+                    session,
+                    order=order,
+                    event=event,
+                    event_params=event_params,
+                    status=status,
+                    filled_abs_value=filled_abs_value,
+                ):
+                    summary["processed"] += 1
+                    continue
                 summary["skipped_invalid_tag"] += 1
                 continue
 
@@ -977,7 +1102,11 @@ def apply_execution_events(events: list[dict], *, session=None) -> dict:
                         continue
                 elif current_status in {"CANCELED", "CANCELLED", "SKIPPED"}:
                     params = order.params or {}
-                    if isinstance(params, dict) and params.get("sync_reason") == "missing_from_open_orders":
+                    if (
+                        isinstance(params, dict)
+                        and params.get("sync_reason") == "missing_from_open_orders"
+                        and _can_recover_low_conf_submitted_event(order, str(event.get("time") or "").strip())
+                    ):
                         recovered_params = dict(event_params)
                         recovered_params["sync_reason"] = "execution_event_submitted_recovered"
                         try:

@@ -3,6 +3,8 @@ import ReactDOMServer from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { I18nProvider, useI18n } from "../i18n";
 import LiveTradePage, {
+  filterActionablePositions,
+  isPositionActionable,
   TradeIntentMismatchCard,
   resolveSessionByEasternTime,
 } from "./LiveTradePage";
@@ -24,6 +26,25 @@ describe("LiveTradePage", () => {
     expect(resolveSessionByEasternTime(new Date("2026-01-15T22:00:00Z"))).toBe("post");
     expect(resolveSessionByEasternTime(new Date("2026-01-15T02:00:00Z"))).toBe("night");
     expect(resolveSessionByEasternTime(new Date("2026-01-17T16:00:00Z"))).toBe("night");
+  });
+
+  it("marks zero positions as non-actionable for liquidation", () => {
+    expect(isPositionActionable({ position: 0 })).toBe(false);
+    expect(isPositionActionable({ position: 1e-12 })).toBe(false);
+    expect(isPositionActionable({ position: 10 })).toBe(true);
+    expect(isPositionActionable({ position: -3 })).toBe(true);
+  });
+
+  it("filters liquidation targets to non-zero positions only", () => {
+    const rows = [
+      { symbol: "A", position: 0 },
+      { symbol: "B", position: 5 },
+      { symbol: "C", position: -2 },
+      { symbol: "D", position: 0 },
+    ];
+    const actionable = filterActionablePositions(rows);
+    expect(actionable).toHaveLength(2);
+    expect(actionable.map((item) => item.symbol)).toEqual(["B", "C"]);
   });
 
   it("renders market snapshot card", () => {
