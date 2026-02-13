@@ -5,6 +5,7 @@ import os
 import signal
 import subprocess
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
@@ -65,11 +66,23 @@ def _build_launch_env() -> dict[str, str]:
 _LEADER_LOCK_KEY = "lean_bridge_leader"
 _LEADER_THREAD: threading.Thread | None = None
 _LEADER_STOP = threading.Event()
-_LEADER_CHECK_SECONDS = 5
+_LEADER_CHECK_SECONDS = max(1, int(getattr(settings, "lean_bridge_leader_check_seconds", 2) or 2))
+_LEADER_HEAVY_TASK_INTERVAL_SECONDS = max(
+    1,
+    int(getattr(settings, "lean_bridge_watchdog_heavy_task_interval_seconds", 15) or 15),
+)
 
 
 def _bridge_root() -> Path:
     return resolve_bridge_root()
+
+
+def _interval_due(*, last_run_mono: float, now_mono: float, interval_seconds: float) -> bool:
+    if interval_seconds <= 0:
+        return True
+    if last_run_mono <= 0:
+        return True
+    return (now_mono - last_run_mono) >= interval_seconds
 
 
 def _state_path() -> Path:
@@ -189,6 +202,14 @@ def _load_template_config(mode: str) -> dict:
 
 
 def _resolve_leader_client_id(settings_row, *, mode: str) -> int:
+    # Prefer explicit override from backend settings. Default is 0 (IB master client)
+    # so the leader can cancel/open-orders across other API clientIds.
+    try:
+        override = int(getattr(settings, "lean_bridge_leader_client_id", 0))
+    except Exception:
+        override = None
+    if override is not None and override >= 0:
+        return override
     if settings_row and getattr(settings_row, "client_id", None):
         try:
             return int(settings_row.client_id)
@@ -214,13 +235,34 @@ def _build_leader_config(session, *, mode: str, watchlist_path: Path) -> tuple[d
     payload["ib-host"] = settings_row.host
     payload["ib-port"] = int(settings_row.port)
     payload["ib-client-id"] = client_id
+    payload.setdefault(
+        "ib-response-timeout",
+        str(getattr(settings, "lean_ib_response_timeout_seconds", 20)),
+    )
     payload["ib-trading-mode"] = mode
     payload["lean-bridge-output-dir"] = str(_bridge_root())
     payload["lean-bridge-watchlist-path"] = str(watchlist_path)
     payload.setdefault("lean-bridge-heartbeat-seconds", "2")
-    payload.setdefault("lean-bridge-watchlist-refresh-seconds", "5")
-    payload.setdefault("lean-bridge-snapshot-seconds", "2")
-    payload.setdefault("lean-bridge-open-orders-seconds", "10")
+    payload["lean-bridge-watchlist-refresh-seconds"] = str(
+        max(1, int(getattr(settings, "lean_bridge_watchlist_refresh_seconds", 5) or 5))
+    )
+    payload["lean-bridge-snapshot-seconds"] = str(
+        max(1, int(getattr(settings, "lean_bridge_snapshot_seconds", 2) or 2))
+    )
+    payload["lean-bridge-open-orders-seconds"] = str(
+        max(1, int(getattr(settings, "lean_bridge_open_orders_seconds", 2) or 2))
+    )
+    # Leader-only execution backfill: poll IB executions and append to execution_events.jsonl
+    # so short-lived direct executors can still be reconciled after they exit.
+    payload["lean-bridge-executions-seconds"] = str(
+        max(1, int(getattr(settings, "lean_bridge_executions_seconds", 2) or 2))
+    )
+    # Enable bridge command processing (e.g. manual cancel) only on the leader instance.
+    payload["lean-bridge-commands-enabled"] = True
+    payload["lean-bridge-commands-seconds"] = str(
+        max(1, int(getattr(settings, "lean_bridge_commands_seconds", 1) or 1))
+    )
+    payload.setdefault("lean-bridge-commands-dir", str(_bridge_root() / "commands"))
     return payload, client_id
 
 
@@ -327,13 +369,42 @@ def start_leader_watchdog(session_factory) -> None:
 
     def _runner() -> None:
         from app.services.ib_settings import get_or_create_ib_settings
+        from app.services.ib_client_id_pool import reap_stale_leases
+        from app.services.trade_direct_order import (
+            reconcile_direct_submit_command_results,
+            retry_pending_direct_orders,
+        )
+        from app.services.trade_execution_events_watchdog import (
+            ingest_active_trade_order_events,
+            reconcile_active_direct_orders,
+            reconcile_low_confidence_terminal_runs,
+        )
 
+        last_heavy_task_run_mono = 0.0
         while not _LEADER_STOP.wait(_LEADER_CHECK_SECONDS):
             try:
+                loop_now_mono = time.monotonic()
+                run_heavy_tasks = _interval_due(
+                    last_run_mono=last_heavy_task_run_mono,
+                    now_mono=loop_now_mono,
+                    interval_seconds=float(_LEADER_HEAVY_TASK_INTERVAL_SECONDS),
+                )
                 with session_factory() as session:
                     settings_row = get_or_create_ib_settings(session)
                     mode = str(settings_row.mode or "paper").strip().lower() or "paper"
                     ensure_lean_bridge_leader(session, mode=mode)
+                    reconcile_direct_submit_command_results(session, bridge_root=resolve_bridge_root(), limit=600)
+                    retry_pending_direct_orders(session, mode=mode, limit=200)
+                    reconcile_active_direct_orders(session, bridge_root=resolve_bridge_root(), mode=mode)
+                    ingest_active_trade_order_events(session, limit=1500)
+                    if run_heavy_tasks:
+                        # Reap leases and low-confidence reconciliation are expensive scans.
+                        # Run them less frequently so status-updating hot path can stay fast.
+                        reap_stale_leases(session, mode="paper")
+                        reap_stale_leases(session, mode="live")
+                        reconcile_low_confidence_terminal_runs(session, limit_runs=30, order_scan_limit=1500)
+                if run_heavy_tasks:
+                    last_heavy_task_run_mono = loop_now_mono
             except Exception:
                 continue
 

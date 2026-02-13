@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildOrderTag } from "./orderTag";
+import { buildManualOrderTag, buildOrderTag } from "./orderTag";
 
 describe("buildOrderTag", () => {
   it("generates unique tag with trade_run_id and index", () => {
@@ -8,5 +8,13 @@ describe("buildOrderTag", () => {
     expect(tag1).toContain("oi_25_0_");
     expect(tag2).toContain("oi_25_1_");
     expect(tag1).not.toBe(tag2);
+  });
+});
+
+describe("buildManualOrderTag", () => {
+  it("generates manual tag without run id", () => {
+    const tag = buildManualOrderTag(3, 1700000000000, 77);
+    expect(tag).toBe("manual_3_1700000000000_0077");
+    expect(tag.startsWith("oi_")).toBe(false);
   });
 });

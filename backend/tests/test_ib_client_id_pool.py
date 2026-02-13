@@ -11,7 +11,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from app.core.config import settings
-from app.models import Base
+from app.models import Base, TradeOrder
 from app.services import ib_client_id_pool
 
 
@@ -107,3 +107,42 @@ def test_reap_stale_leases_accepts_zulu_heartbeat(monkeypatch, tmp_path):
     session.refresh(lease)
     assert lease.last_heartbeat is not None
     assert lease.last_heartbeat.tzinfo is None
+
+
+def test_reap_stale_leases_does_not_release_active_trade_order(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "ib_client_id_pool_base", 900)
+    monkeypatch.setattr(settings, "ib_client_id_pool_size", 1)
+    monkeypatch.setattr(settings, "ib_client_id_lease_ttl_seconds", 1)
+    monkeypatch.setattr(settings, "lean_bridge_heartbeat_timeout_seconds", 1)
+
+    session = _make_session()
+    order = TradeOrder(
+        run_id=None,
+        client_order_id="manual-active",
+        symbol="AAPL",
+        side="BUY",
+        quantity=1.0,
+        order_type="LMT",
+        limit_price=100.0,
+        status="SUBMITTED",
+        params={"mode": "paper"},
+    )
+    session.add(order)
+    session.commit()
+    session.refresh(order)
+
+    lease = ib_client_id_pool.lease_client_id(
+        session,
+        order_id=order.id,
+        mode="paper",
+        output_dir=str(tmp_path),
+    )
+    lease.acquired_at = datetime.utcnow() - timedelta(seconds=10)
+    lease.pid = 999999  # dead pid triggers stale reap in old behavior
+    session.commit()
+
+    released = ib_client_id_pool.reap_stale_leases(session, mode="paper", now=datetime.utcnow())
+    assert released == 0
+    session.refresh(lease)
+    assert lease.status == "leased"
+    assert lease.order_id == order.id

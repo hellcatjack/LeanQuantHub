@@ -25,6 +25,24 @@ def test_write_order_intent_uses_run_id_prefix(tmp_path: Path) -> None:
     assert payload[0]["order_intent_id"].startswith("oi_7_")
 
 
+def test_write_order_intent_writes_prime_price_map(tmp_path: Path) -> None:
+    items = [
+        {"symbol": "AAPL", "weight": 0.1, "snapshot_date": "2026-01-16", "rebalance_date": "2026-01-16"},
+    ]
+    path = write_order_intent(
+        None,
+        snapshot_id=46,
+        items=items,
+        output_dir=tmp_path,
+        run_id=7,
+        order_type="ADAPTIVE_LMT",
+        prime_price_map={"AAPL": 189.25},
+    )
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    assert payload[0]["prime_price"] == 189.25
+    assert payload[0].get("limit_price") is None
+
+
 def test_ensure_order_intent_ids_rewrites_missing(tmp_path: Path) -> None:
     path = tmp_path / "intent.json"
     payload = [

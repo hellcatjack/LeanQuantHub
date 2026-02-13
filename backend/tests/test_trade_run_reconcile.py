@@ -82,6 +82,64 @@ def test_reconcile_run_with_positions_marks_filled():
         session.close()
 
 
+def test_reconcile_run_with_positions_recovers_low_confidence_canceled():
+    engine = _make_engine()
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    session = Session()
+    try:
+        run = TradeRun(
+            project_id=1,
+            status="running",
+            mode="paper",
+            params={
+                "positions_baseline": {
+                    "refreshed_at": "2026-02-07T00:00:00Z",
+                    "items": [{"symbol": "AMD", "quantity": 0.0}],
+                }
+            },
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        payload = {
+            "client_order_id": "oi_1_0_5",
+            "symbol": "AMD",
+            "side": "BUY",
+            "quantity": 1,
+            "order_type": "MKT",
+        }
+        order = create_trade_order(session, payload, run_id=run.id).order
+        session.commit()
+
+        update_trade_order_status(session, order, {"status": "SUBMITTED"})
+        update_trade_order_status(
+            session,
+            order,
+            {
+                "status": "CANCELED",
+                "params": {"event_source": "lean_open_orders", "sync_reason": "missing_from_open_orders"},
+            },
+        )
+
+        positions_payload = {"items": [{"symbol": "AMD", "quantity": 1.0, "avg_cost": 150.0}], "stale": False}
+        trade_executor.reconcile_run_with_positions(session, run, positions_payload)
+        trade_executor.reconcile_run_with_positions(session, run, positions_payload)
+
+        session.refresh(order)
+        assert order.status == "FILLED"
+        assert float(order.filled_quantity or 0.0) == 1.0
+        assert float(order.avg_fill_price or 0.0) == 150.0
+        params = order.params or {}
+        assert params.get("event_source") == "positions"
+        assert params.get("event_status") == "FILLED"
+        assert params.get("sync_reason") == "positions_reconcile"
+        fills = session.query(TradeFill).filter(TradeFill.order_id == order.id).all()
+        assert len(fills) == 1
+    finally:
+        session.close()
+
+
 def test_force_close_run_cancels_open_orders():
     engine = _make_engine()
     Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
@@ -142,6 +200,54 @@ def test_force_close_run_cancels_open_orders():
         assert filled_order.status == "FILLED"
         summary = (run.params or {}).get("completion_summary")
         assert summary == {"total": 3, "filled": 1, "cancelled": 2, "rejected": 0}
+    finally:
+        session.close()
+
+
+def test_recompute_trade_run_completion_summary_updates_terminal_run_summary():
+    engine = _make_engine()
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    session = Session()
+    try:
+        run = TradeRun(
+            project_id=1,
+            status="failed",
+            mode="paper",
+            message="stalled",
+            params={"completion_summary": {"total": 2, "filled": 0, "cancelled": 2, "rejected": 0, "skipped": 0}},
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        payload = {
+            "client_order_id": "oi_1_0_x",
+            "symbol": "AAPL",
+            "side": "BUY",
+            "quantity": 1,
+            "order_type": "MKT",
+        }
+        filled = create_trade_order(session, {**payload, "client_order_id": "oi_1_0_filled"}, run_id=run.id).order
+        cancelled = create_trade_order(session, {**payload, "client_order_id": "oi_1_0_cancelled", "symbol": "MSFT"}, run_id=run.id).order
+        session.commit()
+
+        update_trade_order_status(session, filled, {"status": "SUBMITTED"})
+        update_trade_order_status(session, filled, {"status": "FILLED", "filled_quantity": 1, "avg_fill_price": 100})
+        update_trade_order_status(session, cancelled, {"status": "SUBMITTED"})
+        update_trade_order_status(session, cancelled, {"status": "CANCELED"})
+
+        updated = trade_executor.recompute_trade_run_completion_summary(session, run)
+        assert updated is True
+
+        session.refresh(run)
+        assert run.status == "partial"
+        assert (run.params or {}).get("completion_summary") == {
+            "total": 2,
+            "filled": 1,
+            "cancelled": 1,
+            "rejected": 0,
+            "skipped": 0,
+        }
     finally:
         session.close()
 

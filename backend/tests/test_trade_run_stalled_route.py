@@ -162,6 +162,64 @@ def test_refresh_trade_run_marks_already_held_from_positions(monkeypatch):
         session.close()
 
 
+def test_refresh_trade_run_marks_stalled_when_submit_command_pending_timeout(monkeypatch):
+    session = _make_session()
+    try:
+        project = _seed_project(session)
+        now = datetime.utcnow()
+        run = TradeRun(
+            project_id=project.id,
+            decision_snapshot_id=1,
+            mode="paper",
+            status="running",
+            last_progress_at=now - timedelta(minutes=1),
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        order = TradeOrder(
+            run_id=run.id,
+            client_order_id="oi_1200_1",
+            symbol="AAPL",
+            side="BUY",
+            quantity=1,
+            order_type="ADAPTIVE_LMT",
+            status="NEW",
+            params={
+                "event_tag": "oi_1200_1",
+                "submit_command": {
+                    "pending": True,
+                    "command_id": "submit_order_1200_1",
+                    "requested_at": (now - timedelta(seconds=120)).isoformat() + "Z",
+                },
+            },
+        )
+        session.add(order)
+        session.commit()
+
+        monkeypatch.setattr(
+            trade_executor,
+            "read_open_orders",
+            lambda *_a, **_k: {"items": [], "stale": True},
+        )
+        monkeypatch.setattr(
+            trade_executor,
+            "read_positions",
+            lambda *_a, **_k: {"items": [], "stale": True},
+        )
+        monkeypatch.setattr(trade_executor, "_lean_no_orders_submitted", lambda *_a, **_k: False)
+        monkeypatch.setattr(trade_executor, "is_market_open", lambda *_a, **_k: True)
+
+        updated = trade_executor.refresh_trade_run_status(session, run)
+        assert updated is True
+        assert run.status == "stalled"
+        assert run.stalled_reason == "submit_command_pending_timeout"
+        assert run.stalled_at is not None
+    finally:
+        session.close()
+
+
 def test_resume_and_terminate_trade_run(monkeypatch):
     session = _make_session()
     try:

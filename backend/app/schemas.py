@@ -1574,6 +1574,12 @@ class TradeSettingsOut(BaseModel):
             "max_auto_retries": 1,
             "max_price_deviation_pct": 1.5,
             "allow_replace_outside_rth": False,
+            # Live execution: handle long-unfilled broker orders (QuantConnect-style order management).
+            # These are consumed by LeanBridgeExecutionAlgorithm via execution-params-path.
+            "unfilled_timeout_seconds": 600,
+            "unfilled_reprice_interval_seconds": 0,
+            "unfilled_max_reprices": 0,
+            "unfilled_max_price_deviation_pct": 1.5,
         }
         if not isinstance(value, dict):
             return dict(defaults)
@@ -2009,6 +2015,9 @@ class TradeSymbolSummaryOut(BaseModel):
     symbol: str
     target_weight: float | None = None
     target_value: float | None = None
+    current_qty: float | None = None
+    current_value: float | None = None
+    current_weight: float | None = None
     filled_qty: float
     avg_fill_price: float | None = None
     filled_value: float

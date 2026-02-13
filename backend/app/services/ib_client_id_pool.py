@@ -10,11 +10,14 @@ from uuid import uuid4
 from sqlalchemy import and_
 
 from app.core.config import settings
-from app.models import IBClientIdPool, LeanExecutorPool
+from app.models import IBClientIdPool, LeanExecutorPool, TradeOrder
 
 
 class ClientIdPoolExhausted(RuntimeError):
     pass
+
+
+_TERMINAL_TRADE_ORDER_STATUSES = {"FILLED", "CANCELED", "CANCELLED", "REJECTED", "INVALID", "SKIPPED"}
 
 
 def _pool_base(mode: str) -> int:
@@ -160,7 +163,22 @@ def reap_stale_leases(session, *, mode: str, now: datetime | None = None) -> int
             heartbeat_stale = now - heartbeat > heartbeat_timeout
         too_old = lease.pid is None and now - acquired > ttl
 
-        if pid_dead or heartbeat_stale or too_old:
+        should_release = pid_dead or heartbeat_stale or too_old
+
+        # If the lease is tied to an order that is still active, keep the client id reserved even
+        # if the original Lean process died. This avoids reusing the same ib-client-id while the
+        # order remains open in TWS, which would break manual cancels and status reconciliation.
+        if should_release and lease.order_id is not None:
+            order_status = (
+                session.query(TradeOrder.status)
+                .filter(TradeOrder.id == int(lease.order_id))
+                .scalar()
+            )
+            if order_status and str(order_status).strip().upper() not in _TERMINAL_TRADE_ORDER_STATUSES:
+                # Keep lease as-is (best-effort). We still record heartbeats above.
+                continue
+
+        if should_release:
             if lease.pid is not None:
                 _kill_pid(lease.pid)
             lease.status = "free"

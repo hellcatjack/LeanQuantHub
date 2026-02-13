@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
 
 from sqlalchemy import func
@@ -15,9 +16,10 @@ ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     # "SKIPPED" is a terminal state for intents that were never submitted to IB/TWS
     # (e.g. filtered out by execution constraints). We keep it distinct from "CANCELED"
     # which implies a broker-side cancel.
-    "NEW": {"SUBMITTED", "CANCELED", "REJECTED", "SKIPPED"},
-    "SUBMITTED": {"PARTIAL", "FILLED", "CANCELED", "REJECTED"},
-    "PARTIAL": {"PARTIAL", "FILLED", "CANCELED"},
+    "NEW": {"SUBMITTED", "CANCEL_REQUESTED", "CANCELED", "REJECTED", "SKIPPED"},
+    "SUBMITTED": {"PARTIAL", "FILLED", "CANCEL_REQUESTED", "CANCELED", "REJECTED"},
+    "PARTIAL": {"PARTIAL", "FILLED", "CANCEL_REQUESTED", "CANCELED"},
+    "CANCEL_REQUESTED": {"SUBMITTED", "PARTIAL", "FILLED", "CANCELED", "REJECTED"},
     "FILLED": set(),
     "CANCELED": set(),
     "SKIPPED": set(),
@@ -25,6 +27,10 @@ ALLOWED_TRANSITIONS: dict[str, set[str]] = {
 }
 
 CLIENT_ORDER_ID_MAX_LEN = 64
+_SUBMIT_PENDING_CLEAR_STATUSES = {"SUBMITTED", "PARTIAL", "FILLED", "CANCELED", "CANCELLED", "REJECTED", "SKIPPED"}
+_IB_STK_LMT_TICK_NORMAL = Decimal("0.01")
+_IB_STK_LMT_TICK_SUB_DOLLAR = Decimal("0.0001")
+_IB_SUB_DOLLAR_THRESHOLD = Decimal("1")
 
 
 @dataclass
@@ -43,6 +49,52 @@ def _normalize_side(value: str) -> str:
 
 def _normalize_order_type(value: str) -> str:
     return validate_order_type(value)
+
+
+def _as_bool(value: Any, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+def _normalize_ib_stk_limit_price(value: Any) -> float:
+    try:
+        price = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        raise ValueError("limit_price_invalid") from None
+    if price <= 0:
+        raise ValueError("limit_price_invalid")
+    tick = _IB_STK_LMT_TICK_SUB_DOLLAR if price < _IB_SUB_DOLLAR_THRESHOLD else _IB_STK_LMT_TICK_NORMAL
+    normalized = price.quantize(tick, rounding=ROUND_HALF_UP)
+    if normalized <= 0:
+        raise ValueError("limit_price_invalid")
+    return float(normalized)
+
+
+def _clear_submit_command_pending_if_resolved(order: TradeOrder, *, target_status: str) -> None:
+    if str(target_status or "").strip().upper() not in _SUBMIT_PENDING_CLEAR_STATUSES:
+        return
+    params = dict(order.params or {})
+    submit_meta = params.get("submit_command")
+    if not isinstance(submit_meta, dict):
+        return
+    if not _as_bool(submit_meta.get("pending"), default=False):
+        return
+    resolved_at = datetime.utcnow().isoformat() + "Z"
+    merged_submit = dict(submit_meta)
+    merged_submit["pending"] = False
+    merged_submit.setdefault("status", str(target_status or "").strip().lower())
+    merged_submit.setdefault("processed_at", resolved_at)
+    merged_submit.setdefault("resolved_from_status", str(target_status or "").strip().upper())
+    params["submit_command"] = merged_submit
+    order.params = params
 
 
 def _base36(value: int) -> str:
@@ -143,12 +195,7 @@ def _validate_order_payload(payload: dict[str, Any]) -> None:
     if is_limit_like(order_type):
         if payload.get("limit_price") is None:
             raise ValueError("limit_price_required")
-        try:
-            limit_price = float(payload.get("limit_price"))
-        except (TypeError, ValueError):
-            raise ValueError("limit_price_invalid") from None
-        if limit_price <= 0:
-            raise ValueError("limit_price_invalid")
+        _normalize_ib_stk_limit_price(payload.get("limit_price"))
 
 
 def create_trade_order(session, payload: dict[str, Any], run_id: int | None = None) -> OrderCreateResult:
@@ -162,6 +209,11 @@ def create_trade_order(session, payload: dict[str, Any], run_id: int | None = No
     side = _normalize_side(working_payload["side"])
     order_type = _normalize_order_type(working_payload.get("order_type") or "MKT")
     limit_price = working_payload.get("limit_price")
+    if order_type == "ADAPTIVE_LMT":
+        # IB Adaptive orders should not carry an explicit limit price; TWS computes it.
+        limit_price = None
+    elif is_limit_like(order_type) and limit_price is not None:
+        limit_price = _normalize_ib_stk_limit_price(limit_price)
     quantity = float(working_payload["quantity"])
     for pending in session.new:
         if isinstance(pending, TradeOrder) and pending.client_order_id == client_order_id:
@@ -206,7 +258,13 @@ def create_trade_order(session, payload: dict[str, Any], run_id: int | None = No
     return OrderCreateResult(order=order, created=True)
 
 
-def update_trade_order_status(session, order: TradeOrder, payload: dict[str, Any]) -> TradeOrder:
+def update_trade_order_status(
+    session,
+    order: TradeOrder,
+    payload: dict[str, Any],
+    *,
+    commit: bool = True,
+) -> TradeOrder:
     target_status = _normalize_status(payload.get("status"))
     if not target_status:
         raise ValueError("status_required")
@@ -221,19 +279,32 @@ def update_trade_order_status(session, order: TradeOrder, payload: dict[str, Any
         merged = dict(order.params or {})
         merged.update(payload.get("params") or {})
         order.params = merged
+    _clear_submit_command_pending_if_resolved(order, target_status=target_status)
+    rejected_reason = payload.get("rejected_reason")
+    if rejected_reason is None and isinstance(payload.get("params"), dict):
+        rejected_reason = payload["params"].get("reason")
+    if target_status == "REJECTED":
+        order.rejected_reason = str(rejected_reason) if rejected_reason else order.rejected_reason
     order.updated_at = datetime.utcnow()
-    session.commit()
-    session.refresh(order)
+    if commit:
+        session.commit()
+        session.refresh(order)
     if order.run_id:
         run = session.get(TradeRun, order.run_id)
         if run:
             stage = f"order_{target_status.lower()}"
             reason = f"{order.id}:{order.symbol}"
-            update_trade_run_progress(session, run, stage, reason=reason, commit=True)
+            update_trade_run_progress(session, run, stage, reason=reason, commit=commit)
     return order
 
 
-def force_update_trade_order_status(session, order: TradeOrder, payload: dict[str, Any]) -> TradeOrder:
+def force_update_trade_order_status(
+    session,
+    order: TradeOrder,
+    payload: dict[str, Any],
+    *,
+    commit: bool = True,
+) -> TradeOrder:
     """Update order status without transition validation.
 
     This is intended for internal reconciliation when we have high-confidence external
@@ -256,15 +327,22 @@ def force_update_trade_order_status(session, order: TradeOrder, payload: dict[st
         merged = dict(order.params or {})
         merged.update(payload.get("params") or {})
         order.params = merged
+    _clear_submit_command_pending_if_resolved(order, target_status=target_status)
+    rejected_reason = payload.get("rejected_reason")
+    if rejected_reason is None and isinstance(payload.get("params"), dict):
+        rejected_reason = payload["params"].get("reason")
+    if target_status == "REJECTED":
+        order.rejected_reason = str(rejected_reason) if rejected_reason else order.rejected_reason
     order.updated_at = datetime.utcnow()
-    session.commit()
-    session.refresh(order)
+    if commit:
+        session.commit()
+        session.refresh(order)
 
     if order.run_id:
         run = session.get(TradeRun, order.run_id)
         if run:
             stage = f"order_{target_status.lower()}"
             reason = f"{order.id}:{order.symbol}"
-            update_trade_run_progress(session, run, stage, reason=reason, commit=True)
+            update_trade_run_progress(session, run, stage, reason=reason, commit=commit)
 
     return order

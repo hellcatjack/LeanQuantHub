@@ -45,7 +45,7 @@ def test_trade_settings_defaults_roundtrip(monkeypatch):
     session.close()
 
 
-def test_trade_settings_execution_data_source_locked(monkeypatch):
+def test_trade_settings_execution_data_source_allows_lean(monkeypatch):
     session = _make_session()
 
     @contextmanager
@@ -59,10 +59,10 @@ def test_trade_settings_execution_data_source_locked(monkeypatch):
 
     updated = TradeSettingsUpdate(
         risk_defaults={"max_order_notional": 2000},
-        execution_data_source="alpha",
+        execution_data_source="lean",
     )
     resp = trade_routes.update_trade_settings(updated)
     dumped = resp.model_dump()
-    assert dumped.get("execution_data_source") == "ib"
+    assert dumped.get("execution_data_source") == "lean"
 
     session.close()

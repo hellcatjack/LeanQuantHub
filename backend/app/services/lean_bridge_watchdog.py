@@ -119,7 +119,8 @@ def _should_rate_limit(root: Path) -> bool:
 def refresh_bridge(session, *, mode: str, reason: str, force: bool = False) -> dict[str, object]:
     root = resolve_bridge_root()
     status = read_bridge_status(root)
-    if not force and not _is_stale(status, _DEFAULT_STALE_SECONDS):
+    stale_before_refresh = _is_stale(status, _DEFAULT_STALE_SECONDS)
+    if not force and not stale_before_refresh:
         write_refresh_state(root, result="skipped", reason="fresh", message=None)
         return build_bridge_status(root)
 
@@ -127,7 +128,8 @@ def refresh_bridge(session, *, mode: str, reason: str, force: bool = False) -> d
         write_refresh_state(root, result="skipped", reason="rate_limited", message=None)
         return build_bridge_status(root)
 
-    ensure_lean_bridge_leader(session, mode=mode, force=force)
+    # force refresh should not restart a healthy leader; only stale bridge requires force restart.
+    ensure_lean_bridge_leader(session, mode=mode, force=bool(force and stale_before_refresh))
     status = read_bridge_status(root)
     if _is_stale(status, _DEFAULT_STALE_SECONDS):
         write_refresh_state(root, result="failed", reason=reason, message="stale_after_refresh")

@@ -46,7 +46,7 @@ from app.services.ib_market import (
     fetch_market_snapshots,
     refresh_contract_cache,
 )
-from app.services.ib_account import get_account_summary, get_account_positions
+from app.services.ib_account import get_account_summary, get_account_positions_cached
 from app.services.project_symbols import collect_active_project_symbols
 from app.services.lean_bridge_paths import resolve_bridge_root
 from app.services.lean_bridge_reader import read_bridge_status, read_quotes
@@ -143,9 +143,9 @@ def get_ib_account_summary(mode: str = "paper", full: bool = False):
 
 
 @router.get("/account/positions", response_model=IBAccountPositionsOut)
-def get_ib_account_positions(mode: str = "paper"):
+def get_ib_account_positions(mode: str = "paper", force_refresh: bool = False):
     with get_session() as session:
-        payload = get_account_positions(session, mode=mode, force_refresh=False)
+        payload = get_account_positions_cached(session, mode=mode, force_refresh=force_refresh)
         return IBAccountPositionsOut(**payload)
 
 

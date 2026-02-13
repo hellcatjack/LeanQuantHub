@@ -8,6 +8,7 @@ from app.core.config import settings
 from app.models import TradeOrder
 from app.services.lean_bridge_paths import resolve_bridge_root
 from app.services.lean_execution import build_execution_config, launch_execution_async
+from app.services.trade_price_seed import resolve_price_seed
 
 ARTIFACT_ROOT = Path(settings.artifact_root) if settings.artifact_root else Path("/app/stocklean/artifacts")
 
@@ -40,18 +41,25 @@ def write_manual_order_intent(order: TradeOrder, *, output_dir: Path) -> str:
     if order_type == "LIMIT":
         order_type = "LMT"
     limit_price = order.limit_price
-    payload = [
-        {
-            "order_intent_id": order.client_order_id,
-            "symbol": order.symbol,
-            "quantity": quantity,
-            "weight": 0,
-            "order_type": order_type,
-            "limit_price": limit_price,
-            "outside_rth": bool(allow_outside),
-            "session": session or None,
-        }
-    ]
+    prime_price = resolve_price_seed(order.symbol)
+    item = {
+        "order_intent_id": order.client_order_id,
+        "symbol": order.symbol,
+        "quantity": quantity,
+        "weight": 0,
+        "order_type": order_type,
+        "limit_price": limit_price,
+        "outside_rth": bool(allow_outside),
+        "session": session or None,
+    }
+    if prime_price is not None:
+        try:
+            prime_value = float(prime_price)
+        except (TypeError, ValueError):
+            prime_value = None
+        if prime_value is not None and prime_value > 0:
+            item["prime_price"] = prime_value
+    payload = [item]
     path = output_dir / f"order_intent_manual_{order.id}.json"
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return str(path)

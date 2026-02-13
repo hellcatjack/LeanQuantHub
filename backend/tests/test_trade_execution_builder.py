@@ -69,6 +69,12 @@ def test_execute_builds_orders_from_snapshot(tmp_path, monkeypatch):
         },
         raising=False,
     )
+    monkeypatch.setattr(
+        trade_executor,
+        "read_positions",
+        lambda _root: {"items": [], "stale": False},
+        raising=False,
+    )
     session = Session()
     try:
         project = Project(name="p", description="")

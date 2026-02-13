@@ -52,5 +52,4 @@ def validate_order_type(value: object) -> str:
 
 def is_limit_like(order_type: object) -> bool:
     normalized = normalize_order_type(order_type)
-    return normalized in {"LMT", "ADAPTIVE_LMT", "PEG_MID"}
-
+    return normalized in {"LMT", "PEG_MID"}

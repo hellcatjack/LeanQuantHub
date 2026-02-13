@@ -81,6 +81,16 @@ def _is_stale(heartbeat: datetime | None, *, stale_seconds: int | None = None) -
     return now - heartbeat > timedelta(seconds=timeout)
 
 
+def _read_bridge_process_client_id(root: Path) -> int | None:
+    payload = _read_json(root / "bridge_process.json")
+    if not isinstance(payload, dict):
+        return None
+    try:
+        return int(payload.get("client_id"))
+    except (TypeError, ValueError):
+        return None
+
+
 def read_bridge_status(root: Path) -> dict:
     path = root / "lean_bridge_status.json"
     data = _read_json(path)
@@ -113,7 +123,16 @@ def read_positions(root: Path) -> dict:
     if not isinstance(data, dict):
         return {"items": [], "stale": True}
     data.setdefault("items", [])
-    data.setdefault("stale", False)
+    refreshed_at = parse_bridge_timestamp(data, ["refreshed_at", "updated_at"])
+    stale = bool(data.get("stale") is True)
+    if refreshed_at is None:
+        stale = True
+    else:
+        stale = stale or _is_stale(refreshed_at, stale_seconds=30)
+    source_detail = str(data.get("source_detail") or "").strip().lower()
+    if source_detail in {"brokerage_unavailable", "ib_holdings_error"}:
+        stale = True
+    data["stale"] = stale
     return data
 
 
@@ -143,5 +162,9 @@ def read_open_orders(root: Path) -> dict:
     source_detail = str(data.get("source_detail") or "").strip().lower()
     if source_detail in {"brokerage_unavailable", "ib_open_orders_error"}:
         stale = True
+    if "bridge_client_id" not in data:
+        bridge_client_id = _read_bridge_process_client_id(root)
+        if bridge_client_id is not None:
+            data["bridge_client_id"] = bridge_client_id
     data["stale"] = stale
     return data

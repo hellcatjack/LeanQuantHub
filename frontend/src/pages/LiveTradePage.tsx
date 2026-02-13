@@ -10,14 +10,15 @@ import {
 import TopBar from "../components/TopBar";
 import IdChip from "../components/IdChip";
 import PaginationBar from "../components/PaginationBar";
-import { api, apiLong } from "../api";
+import { api, apiLong, getBackendBackoffUntilMs } from "../api";
 import { useI18n } from "../i18n";
 import { resolveAccountSummaryLabel } from "../utils/accountSummary";
-import { buildOrderTag } from "../utils/orderTag";
+import { buildManualOrderTag } from "../utils/orderTag";
 import { getLiveTradeSections, type LiveTradeSectionKey } from "../utils/liveTradeLayout";
 import {
   REFRESH_INTERVALS,
   MANUAL_REFRESH_KEYS,
+  buildSymbolListKey,
   isAutoRefreshKey,
   type AutoRefreshKey,
   type RefreshKey,
@@ -309,6 +310,9 @@ interface TradeSymbolSummary {
   symbol: string;
   target_weight?: number | null;
   target_value?: number | null;
+  current_qty?: number | null;
+  current_value?: number | null;
+  current_weight?: number | null;
   filled_qty: number;
   avg_fill_price?: number | null;
   filled_value: number;
@@ -351,6 +355,52 @@ interface TradeSettings {
   created_at: string;
   updated_at: string;
 }
+
+type TradeSessionValue = "rth" | "pre" | "post" | "night";
+
+export const resolveSessionByEasternTime = (date: Date = new Date()): TradeSessionValue => {
+  try {
+    const formatter = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      weekday: "short",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+    const parts = formatter.formatToParts(date);
+    let weekday = "";
+    let hour = 0;
+    let minute = 0;
+    parts.forEach((part) => {
+      if (part.type === "weekday") {
+        weekday = part.value;
+      } else if (part.type === "hour") {
+        hour = Number(part.value) || 0;
+      } else if (part.type === "minute") {
+        minute = Number(part.value) || 0;
+      }
+    });
+    if (weekday === "Sat" || weekday === "Sun") {
+      return "night";
+    }
+    const totalMinutes = hour * 60 + minute;
+    if (totalMinutes >= 9 * 60 + 30 && totalMinutes < 16 * 60) {
+      return "rth";
+    }
+    if (totalMinutes >= 4 * 60 && totalMinutes < 9 * 60 + 30) {
+      return "pre";
+    }
+    if (totalMinutes >= 16 * 60 && totalMinutes < 20 * 60) {
+      return "post";
+    }
+    return "night";
+  } catch {
+    return "rth";
+  }
+};
+
+const resolveDefaultOrderTypeBySession = (session: string) =>
+  String(session || "").trim().toLowerCase() === "rth" ? "ADAPTIVE_LMT" : "LMT";
 
 const maskAccount = (value?: string | null) => {
   if (!value) {
@@ -554,6 +604,9 @@ export default function LiveTradePage() {
   const [marketSnapshotError, setMarketSnapshotError] = useState("");
   const [tradeRuns, setTradeRuns] = useState<TradeRun[]>([]);
   const [tradeOrders, setTradeOrders] = useState<TradeOrder[]>([]);
+  const [orderCancelLoading, setOrderCancelLoading] = useState<Record<number, boolean>>({});
+  const [orderCancelError, setOrderCancelError] = useState("");
+  const [orderCancelResult, setOrderCancelResult] = useState("");
   const [ordersPage, setOrdersPage] = useState(1);
   const [ordersPageSize, setOrdersPageSize] = useState(20);
   const [ordersTotal, setOrdersTotal] = useState(0);
@@ -617,6 +670,7 @@ export default function LiveTradePage() {
   const [pipelineSelectedEvent, setPipelineSelectedEvent] = useState<PipelineEvent | null>(
     null
   );
+  const defaultSession = resolveSessionByEasternTime();
   const [refreshMeta, setRefreshMeta] = useState<
     Record<RefreshKey, { intervalMs: number | null; lastAt: string | null; nextAt: string | null }>
   >(() => {
@@ -661,6 +715,15 @@ export default function LiveTradePage() {
   };
 
   const refreshTimersRef = useRef<Record<AutoRefreshKey, number>>({});
+  const refreshInFlightRef = useRef<Set<RefreshKey>>(new Set());
+  const streamSymbolKey = useMemo(
+    () => buildSymbolListKey(ibStreamStatus?.subscribed_symbols),
+    [ibStreamStatus?.subscribed_symbols]
+  );
+  const primaryStreamSymbol = useMemo(() => {
+    const [first] = streamSymbolKey.split("|");
+    return first || undefined;
+  }, [streamSymbolKey]);
 
   const formatIntervalLabel = useCallback(
     (intervalMs: number | null) => {
@@ -724,6 +787,23 @@ export default function LiveTradePage() {
     },
     [autoRefreshEnabled]
   );
+
+  const markRefreshDeferred = useCallback((key: RefreshKey, deferUntilMs: number) => {
+    setRefreshMeta((prev) => {
+      const intervalMs =
+        prev[key]?.intervalMs ?? (isAutoRefreshKey(key) ? REFRESH_INTERVALS[key] : null);
+      const existingNextAt = prev[key]?.nextAt ? new Date(prev[key].nextAt as string).getTime() : 0;
+      const targetMs = Math.max(existingNextAt, Math.max(Date.now(), Number(deferUntilMs) || 0));
+      return {
+        ...prev,
+        [key]: {
+          intervalMs,
+          lastAt: prev[key]?.lastAt ?? null,
+          nextAt: targetMs > 0 ? new Date(targetMs).toISOString() : null,
+        },
+      };
+    });
+  }, []);
 
   const createTradeRun = async () => {
     setCreateRunError("");
@@ -872,12 +952,15 @@ export default function LiveTradePage() {
     }
   };
 
-  const loadAccountPositions = async () => {
+  const loadAccountPositions = async (forceRefresh = false) => {
     setAccountPositionsLoading(true);
     setAccountPositionsError("");
     try {
       const res = await api.get<IBAccountPositionsOut>("/api/brokerage/account/positions", {
-        params: { mode: ibSettings?.mode || ibSettingsForm.mode || "paper" },
+        params: {
+          mode: ibSettings?.mode || ibSettingsForm.mode || "paper",
+          force_refresh: forceRefresh,
+        },
       });
       setAccountPositions(res.data.items || []);
       setAccountPositionsUpdatedAt(res.data.refreshed_at || null);
@@ -962,7 +1045,10 @@ export default function LiveTradePage() {
     return normalized || t("common.none");
   };
 
-  const isLimitLikeOrderType = (value: string) => normalizeOrderType(value) !== "MKT";
+  const isLimitLikeOrderType = (value: string) => {
+    const normalized = normalizeOrderType(value);
+    return normalized === "LMT" || normalized === "PEG_MID";
+  };
 
   const updatePositionSession = (row: IBAccountPosition, key: string, session: string) => {
     const normalized = normalizeTradeSession(session);
@@ -1107,7 +1193,7 @@ export default function LiveTradePage() {
         setPositionActionWarning(Array.from(warnings).join(" "));
       }
       setPositionActionResult(t("trade.positionActionResult", { count: orders.length }));
-      await loadTradeActivity();
+      await Promise.all([loadTradeActivity(), loadAccountPositions(true)]);
     } catch (err: any) {
       const detail = err?.response?.data?.detail || t("trade.tradeError");
       setPositionActionError(String(detail));
@@ -1127,9 +1213,11 @@ export default function LiveTradePage() {
       setPositionActionError(t("trade.positionActionErrorInvalidQty"));
       return;
     }
-    const session = normalizeTradeSession(positionSessions[key] ?? "rth");
+    const session = normalizeTradeSession(positionSessions[key] ?? defaultSession);
     const isExtended = session !== "rth";
-    const rawOrderType = normalizeOrderType(positionOrderTypes[key] ?? "MKT");
+    const rawOrderType = normalizeOrderType(
+      positionOrderTypes[key] ?? resolveDefaultOrderTypeBySession(session)
+    );
     const orderType = isExtended ? "LMT" : rawOrderType;
     const needsLimit = isLimitLikeOrderType(orderType);
     const limitPrice = needsLimit ? resolvePositionLimitPrice(row, key) : null;
@@ -1156,7 +1244,7 @@ export default function LiveTradePage() {
       return;
     }
     const payload = {
-      client_order_id: buildOrderTag(selectedRunId ?? latestTradeRun?.id ?? 0, index),
+      client_order_id: buildManualOrderTag(index),
       symbol: row.symbol,
       side,
       quantity,
@@ -1183,9 +1271,11 @@ export default function LiveTradePage() {
       return;
     }
     const side: "BUY" | "SELL" = (row.position ?? 0) >= 0 ? "SELL" : "BUY";
-    const session = normalizeTradeSession(positionSessions[key] ?? "rth");
+    const session = normalizeTradeSession(positionSessions[key] ?? defaultSession);
     const isExtended = session !== "rth";
-    const rawOrderType = normalizeOrderType(positionOrderTypes[key] ?? "MKT");
+    const rawOrderType = normalizeOrderType(
+      positionOrderTypes[key] ?? resolveDefaultOrderTypeBySession(session)
+    );
     const orderType = isExtended ? "LMT" : rawOrderType;
     const needsLimit = isLimitLikeOrderType(orderType);
     const limitPrice = needsLimit ? resolvePositionLimitPrice(row, key) : null;
@@ -1212,7 +1302,7 @@ export default function LiveTradePage() {
       return;
     }
     const payload = {
-      client_order_id: buildOrderTag(selectedRunId ?? latestTradeRun?.id ?? 0, index),
+      client_order_id: buildManualOrderTag(index),
       symbol: row.symbol,
       side,
       quantity: qtyValue,
@@ -1245,13 +1335,14 @@ export default function LiveTradePage() {
         return;
       }
     }
-    const baseRunId = selectedRunId ?? latestTradeRun?.id ?? 0;
     const orders: Array<Record<string, any>> = [];
     for (const [idx, row] of positions.entries()) {
       const key = buildPositionKey(row);
-      const session = normalizeTradeSession(positionSessions[key] ?? "rth");
+      const session = normalizeTradeSession(positionSessions[key] ?? defaultSession);
       const isExtended = session !== "rth";
-      const rawOrderType = normalizeOrderType(positionOrderTypes[key] ?? "MKT");
+      const rawOrderType = normalizeOrderType(
+        positionOrderTypes[key] ?? resolveDefaultOrderTypeBySession(session)
+      );
       const orderType = isExtended ? "LMT" : rawOrderType;
       const needsLimit = isLimitLikeOrderType(orderType);
       const limitPrice = needsLimit ? resolvePositionLimitPrice(row, key) : null;
@@ -1260,7 +1351,7 @@ export default function LiveTradePage() {
         return;
       }
       orders.push({
-        client_order_id: buildOrderTag(baseRunId, idx),
+        client_order_id: buildManualOrderTag(idx),
         symbol: row.symbol,
         side: row.position >= 0 ? "SELL" : "BUY",
         quantity: Math.abs(row.position ?? 0),
@@ -1612,26 +1703,27 @@ export default function LiveTradePage() {
     setTradeError("");
     setGuardError("");
     let latestRun: TradeRun | null = null;
-    try {
-      const runsRes = await apiLong.get<TradeRun[]>("/api/trade/runs", {
-        params: { limit: 5, offset: 0 },
-      });
-      const runs = runsRes.data || [];
+    const [runsResult, ordersResult] = await Promise.allSettled([
+      apiLong.get<TradeRun[]>("/api/trade/runs", { params: { limit: 5, offset: 0 } }),
+      apiLong.get<TradeOrder[]>("/api/trade/orders", {
+        params: { limit: pageSize, offset: (page - 1) * pageSize },
+      }),
+    ]);
+
+    if (runsResult.status === "fulfilled") {
+      const runs = runsResult.value.data || [];
       setTradeRuns(runs);
       latestRun = runs[0] || null;
-    } catch {
+    } else {
       // Keep existing state so transient backend issues don't wipe the UI.
       setTradeError(t("trade.tradeError"));
     }
 
-    try {
-      const ordersRes = await apiLong.get<TradeOrder[]>("/api/trade/orders", {
-        params: { limit: pageSize, offset: (page - 1) * pageSize },
-      });
-      setTradeOrders(ordersRes.data || []);
-      const totalHeader = Number(ordersRes.headers?.["x-total-count"]);
+    if (ordersResult.status === "fulfilled") {
+      setTradeOrders(ordersResult.value.data || []);
+      const totalHeader = Number(ordersResult.value.headers?.["x-total-count"]);
       setOrdersTotal(Number.isFinite(totalHeader) ? totalHeader : 0);
-    } catch {
+    } else {
       setTradeError(t("trade.tradeError"));
       // Keep previous orders on failure.
     }
@@ -1647,6 +1739,56 @@ export default function LiveTradePage() {
     } finally {
       setTradeActivityUpdatedAt(new Date().toISOString());
     }
+  };
+
+  const cancelTradeOrder = async (order: TradeOrder) => {
+      const orderId = Number(order?.id || 0);
+      if (!Number.isFinite(orderId) || orderId <= 0) {
+        return;
+      }
+      const normalizedStatus = String(order?.status || "").toUpperCase();
+      if (!normalizedStatus || ["FILLED", "CANCELED", "CANCELLED", "REJECTED", "SKIPPED"].includes(normalizedStatus)) {
+        return;
+      }
+
+      const symbol = order?.symbol || t("common.none");
+      const side = formatSide(order?.side);
+      const qty = formatNumber(order?.quantity ?? null, 4);
+      const type = formatOrderTypeLabel(order?.order_type);
+      const limit =
+        order?.limit_price != null ? ` @ ${formatNumber(order.limit_price, 4)}` : "";
+      const confirmText = t("trade.orderCancelConfirm", {
+        id: orderId,
+        symbol,
+        side,
+        qty,
+        type: `${type}${limit}`,
+      });
+      if (!window.confirm(confirmText)) {
+        return;
+      }
+
+      setOrderCancelError("");
+      setOrderCancelResult("");
+      setOrderCancelLoading((prev) => ({ ...prev, [orderId]: true }));
+      try {
+        const res = await api.post<TradeOrder>(`/api/trade/orders/${orderId}/cancel`);
+        const updated = res.data;
+        setTradeOrders((prev) =>
+          prev.map((row) => (row.id === orderId ? { ...row, ...updated } : row))
+        );
+        setOrderCancelResult(t("trade.orderCancelSuccess", { id: orderId }));
+      } catch (err: any) {
+        const detail = err?.response?.data?.detail || t("trade.orderCancelError");
+        setOrderCancelError(String(detail));
+      } finally {
+        setOrderCancelLoading((prev) => {
+          const next = { ...prev };
+          delete next[orderId];
+          return next;
+        });
+        loadTradeActivity(ordersPage, ordersPageSize);
+      }
   };
 
   const loadTradeReceipts = async (
@@ -1979,7 +2121,7 @@ export default function LiveTradePage() {
         ]);
       },
       snapshot: async () => {
-        await loadMarketSnapshot(ibStreamStatus?.subscribed_symbols?.[0]);
+        await loadMarketSnapshot(primaryStreamSymbol);
       },
       execution: async () => {
         await loadTradeSettings();
@@ -1995,9 +2137,9 @@ export default function LiveTradePage() {
       },
     }),
     [
-      ibStreamStatus?.subscribed_symbols,
       ordersPage,
       ordersPageSize,
+      primaryStreamSymbol,
       receiptsPage,
       receiptsPageSize,
       selectedProjectId,
@@ -2006,18 +2148,31 @@ export default function LiveTradePage() {
   );
 
   const triggerRefresh = useCallback(
-    async (key: RefreshKey) => {
+    async (key: RefreshKey, options?: { source?: "auto" | "manual" }) => {
       const handler = refreshHandlers[key];
       if (!handler) {
         return;
       }
+      const source = options?.source || "manual";
+      if (source === "auto") {
+        const deferUntil = getBackendBackoffUntilMs();
+        if (deferUntil > Date.now()) {
+          markRefreshDeferred(key, deferUntil);
+          return;
+        }
+      }
+      if (refreshInFlightRef.current.has(key)) {
+        return;
+      }
+      refreshInFlightRef.current.add(key);
       try {
         await handler();
       } finally {
+        refreshInFlightRef.current.delete(key);
         markRefreshed(key);
       }
     },
-    [markRefreshed, refreshHandlers]
+    [markRefreshed, markRefreshDeferred, refreshHandlers]
   );
 
   const refreshAll = async (forceBridge: boolean = false) => {
@@ -2087,7 +2242,7 @@ export default function LiveTradePage() {
         return;
       }
       const timer = window.setInterval(() => {
-        triggerRefresh(key);
+        triggerRefresh(key, { source: "auto" });
       }, intervalMs);
       refreshTimersRef.current[key] = timer;
     });
@@ -2324,18 +2479,14 @@ export default function LiveTradePage() {
     }
   }, [ibSettings?.market_data_type]);
 
-  const streamSymbolKey = useMemo(() => {
-    return (ibStreamStatus?.subscribed_symbols || []).join(",");
-  }, [ibStreamStatus?.subscribed_symbols]);
-
   useEffect(() => {
-    if (streamSymbolKey) {
-      loadMarketSnapshot(ibStreamStatus?.subscribed_symbols?.[0]);
+    if (streamSymbolKey && primaryStreamSymbol) {
+      loadMarketSnapshot(primaryStreamSymbol);
     } else {
       setMarketSnapshot(null);
       setMarketSnapshotSymbol("");
     }
-  }, [streamSymbolKey]);
+  }, [primaryStreamSymbol, streamSymbolKey]);
 
   const isConfigured = useMemo(() => {
     if (!ibSettings) {
@@ -2502,9 +2653,15 @@ export default function LiveTradePage() {
     if (!value) {
       return t("common.none");
     }
-    const key = `common.status.${String(value)}`;
+    const raw = String(value);
+    const key = `common.status.${raw}`;
     const translated = t(key);
-    return translated === key ? String(value) : translated;
+    if (translated !== key) {
+      return translated;
+    }
+    const lowerKey = `common.status.${raw.toLowerCase()}`;
+    const lowerTranslated = t(lowerKey);
+    return lowerTranslated === lowerKey ? raw : lowerTranslated;
   };
 
   const formatRunMode = (value?: string | null) => {
@@ -3278,8 +3435,10 @@ export default function LiveTradePage() {
                   const key = buildPositionKey(row);
                   const qtyValue =
                     positionQuantities[key] ?? String(Math.abs(row.position ?? 0) || 1);
-                  const sessionValue = normalizeTradeSession(positionSessions[key] ?? "rth");
-                  const rawOrderType = normalizeOrderType(positionOrderTypes[key] ?? "MKT");
+                  const sessionValue = normalizeTradeSession(positionSessions[key] ?? defaultSession);
+                  const rawOrderType = normalizeOrderType(
+                    positionOrderTypes[key] ?? resolveDefaultOrderTypeBySession(sessionValue)
+                  );
                   const orderTypeValue = sessionValue === "rth" ? rawOrderType : "LMT";
                   const fallbackLimit = Number(row.market_price ?? null);
                   const limitValue =
@@ -3409,6 +3568,16 @@ export default function LiveTradePage() {
         <div className="card-meta">{t("trade.monitorMeta")}</div>
         {renderRefreshSchedule("monitor", "monitor")}
         {tradeError && <div className="form-hint">{tradeError}</div>}
+        {orderCancelError && (
+          <div className="form-hint danger" style={{ marginTop: "12px" }}>
+            {orderCancelError}
+          </div>
+        )}
+        {orderCancelResult && (
+          <div className="form-success" style={{ marginTop: "12px" }}>
+            {orderCancelResult}
+          </div>
+        )}
         <div className="meta-list" style={{ marginTop: "12px" }}>
           <div className="meta-row">
             <span>{t("trade.sectionUpdatedAt")}</span>
@@ -3456,6 +3625,7 @@ export default function LiveTradePage() {
                     <th>{t("trade.orderTable.realizedPnl")}</th>
                     <th>{t("trade.orderTable.status")}</th>
                     <th>{t("trade.orderTable.createdAt")}</th>
+                    <th>{t("trade.orderTable.actions")}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -3479,11 +3649,36 @@ export default function LiveTradePage() {
                         <td>{formatNumber(order.realized_pnl ?? null)}</td>
                         <td>{formatStatus(order.status)}</td>
                         <td>{formatDateTime(order.created_at)}</td>
+                        <td>
+                          {(() => {
+                            const status = String(order.status || "").toUpperCase();
+                            const cancelable = ["NEW", "SUBMITTED", "PARTIAL", "CANCEL_REQUESTED"].includes(status);
+                            const pending = status === "CANCEL_REQUESTED";
+                            const isLoading = !!orderCancelLoading[order.id];
+                            if (!cancelable) {
+                              return <span style={{ opacity: 0.6 }}>{t("common.none")}</span>;
+                            }
+                            return (
+                              <button
+                                className="danger-button"
+                                disabled={isLoading || pending}
+                                onClick={() => cancelTradeOrder(order)}
+                                data-testid={`trade-order-cancel-${order.id}`}
+                              >
+                                {isLoading
+                                  ? t("common.actions.loading")
+                                  : pending
+                                    ? t("trade.orderCancelPending")
+                                    : t("trade.orderCancel")}
+                              </button>
+                            );
+                          })()}
+                        </td>
                       </tr>
                     ))
                   ) : (
                     <tr>
-                      <td colSpan={9} className="empty-state">
+                      <td colSpan={10} className="empty-state">
                         {t("trade.orderEmpty")}
                       </td>
                     </tr>
@@ -4566,14 +4761,12 @@ export default function LiveTradePage() {
               <tr>
                 <th>{t("trade.symbolTable.symbol")}</th>
                 <th>{t("trade.symbolTable.targetWeight")}</th>
-                <th>{t("trade.symbolTable.targetValue")}</th>
-                <th>{t("trade.symbolTable.filledQty")}</th>
-                <th>{t("trade.symbolTable.avgPrice")}</th>
-                <th>{t("trade.symbolTable.filledValue")}</th>
-                <th>{t("trade.symbolTable.pendingQty")}</th>
-                <th>{t("trade.symbolTable.deltaValue")}</th>
+                <th>{t("trade.symbolTable.currentWeight")}</th>
                 <th>{t("trade.symbolTable.deltaWeight")}</th>
-                <th>{t("trade.symbolTable.fillRatio")}</th>
+                <th>{t("trade.symbolTable.targetValue")}</th>
+                <th>{t("trade.symbolTable.currentValue")}</th>
+                <th>{t("trade.symbolTable.deltaValue")}</th>
+                <th>{t("trade.symbolTable.currentQty")}</th>
                 <th>{t("trade.symbolTable.status")}</th>
               </tr>
             </thead>
@@ -4583,20 +4776,18 @@ export default function LiveTradePage() {
                   <tr key={row.symbol}>
                     <td>{row.symbol}</td>
                     <td>{formatPercent(row.target_weight ?? null)}</td>
-                    <td>{formatNumber(row.target_value ?? null)}</td>
-                    <td>{formatNumber(row.filled_qty ?? 0, 2)}</td>
-                    <td>{formatNumber(row.avg_fill_price ?? null)}</td>
-                    <td>{formatNumber(row.filled_value ?? 0)}</td>
-                    <td>{formatNumber(row.pending_qty ?? 0, 2)}</td>
-                    <td>{formatNumber(row.delta_value ?? null)}</td>
+                    <td>{formatPercent(row.current_weight ?? null)}</td>
                     <td>{formatPercent(row.delta_weight ?? null)}</td>
-                    <td>{formatPercent(row.fill_ratio ?? null)}</td>
+                    <td>{formatNumber(row.target_value ?? null)}</td>
+                    <td>{formatNumber(row.current_value ?? null)}</td>
+                    <td>{formatNumber(row.delta_value ?? null)}</td>
+                    <td>{formatNumber(row.current_qty ?? null, 2)}</td>
                     <td>{row.last_status ? formatStatus(row.last_status) : t("common.none")}</td>
                   </tr>
                 ))
               ) : (
                 <tr>
-                  <td colSpan={11} className="empty-state">
+                  <td colSpan={9} className="empty-state">
                     {detailLoading ? t("common.actions.loading") : t("trade.symbolSummaryEmpty")}
                   </td>
                 </tr>

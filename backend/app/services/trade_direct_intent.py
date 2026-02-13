@@ -9,6 +9,7 @@ def build_direct_intent_items(
     quantity: float,
     order_type: str = "MKT",
     limit_price: float | None = None,
+    prime_price: float | None = None,
     allow_outside_rth: bool = False,
     session: str | None = None,
 ) -> list[dict]:
@@ -27,6 +28,13 @@ def build_direct_intent_items(
         "order_type": normalized_type,
         "limit_price": limit_price,
     }
+    if prime_price is not None:
+        try:
+            prime_value = float(prime_price)
+        except (TypeError, ValueError):
+            prime_value = None
+        if prime_value is not None and prime_value > 0:
+            payload["prime_price"] = prime_value
     if allow_outside_rth:
         payload["outside_rth"] = True
     if session:

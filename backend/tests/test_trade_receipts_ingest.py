@@ -417,3 +417,61 @@ def test_receipts_ingest_no_warning_when_tag_missing(monkeypatch, tmp_path: Path
     assert "lean_event_missing_order" not in (page.warnings or [])
 
     session.close()
+
+
+def test_receipts_ingest_negative_fill_does_not_crash(monkeypatch, tmp_path: Path) -> None:
+    session = _make_session()
+    monkeypatch.setattr(settings, "data_root", str(tmp_path))
+
+    result = create_trade_order(
+        session,
+        {
+            "client_order_id": "manual-neg-fill",
+            "symbol": "AAPL",
+            "side": "SELL",
+            "quantity": 2,
+            "order_type": "MKT",
+            "params": {"client_order_id_auto": True},
+        },
+    )
+    session.commit()
+    order = result.order
+
+    # Simulate an already-ingested fill with positive quantity, then replay a
+    # lean direct event carrying negative signed quantity for the same execution.
+    session.add(
+        TradeFill(
+            order_id=order.id,
+            fill_quantity=2,
+            fill_price=100.0,
+            fill_time=datetime(2026, 1, 30, 20, 34, 1, tzinfo=timezone.utc),
+            params={"event_time": "2026-01-30T20:34:01Z"},
+        )
+    )
+    order.status = "SUBMITTED"
+    order.filled_quantity = 2
+    order.avg_fill_price = 100.0
+    session.commit()
+
+    bridge_dir = tmp_path / "lean_bridge" / f"direct_{order.id}"
+    bridge_dir.mkdir(parents=True, exist_ok=True)
+    events_path = bridge_dir / "execution_events.jsonl"
+    _write_events(
+        events_path,
+        [
+            f'{{"order_id":1,"symbol":"AAPL","status":"Filled","filled":-2,"fill_price":100.0,"direction":"Sell","time":"2026-01-30T20:34:02Z","tag":"direct:{order.id}"}}',
+        ],
+    )
+
+    page = list_trade_receipts(session, limit=50, offset=0, mode="all")
+
+    refreshed = session.get(TradeOrder, order.id)
+    assert refreshed is not None
+    assert refreshed.status == "FILLED"
+    assert float(refreshed.filled_quantity or 0.0) == 2.0
+    assert page.items
+
+    fills = session.query(TradeFill).filter(TradeFill.order_id == order.id).all()
+    assert len(fills) == 1
+
+    session.close()

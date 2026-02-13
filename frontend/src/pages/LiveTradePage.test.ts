@@ -2,7 +2,10 @@ import React from "react";
 import ReactDOMServer from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { I18nProvider, useI18n } from "../i18n";
-import LiveTradePage, { TradeIntentMismatchCard } from "./LiveTradePage";
+import LiveTradePage, {
+  TradeIntentMismatchCard,
+  resolveSessionByEasternTime,
+} from "./LiveTradePage";
 
 const PipelineLabel = () => {
   const { t } = useI18n();
@@ -15,6 +18,14 @@ const TradeStatusLabel = () => {
 };
 
 describe("LiveTradePage", () => {
+  it("infers eastern trading session from clock", () => {
+    expect(resolveSessionByEasternTime(new Date("2026-01-15T15:00:00Z"))).toBe("rth");
+    expect(resolveSessionByEasternTime(new Date("2026-01-15T11:00:00Z"))).toBe("pre");
+    expect(resolveSessionByEasternTime(new Date("2026-01-15T22:00:00Z"))).toBe("post");
+    expect(resolveSessionByEasternTime(new Date("2026-01-15T02:00:00Z"))).toBe("night");
+    expect(resolveSessionByEasternTime(new Date("2026-01-17T16:00:00Z"))).toBe("night");
+  });
+
   it("renders market snapshot card", () => {
     const html = ReactDOMServer.renderToString(React.createElement(LiveTradePage));
     expect(html).toContain("trade.snapshotTitle");

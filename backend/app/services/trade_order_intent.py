@@ -13,33 +13,50 @@ def write_order_intent(
     run_id: int | None = None,
     order_type: str | None = None,
     limit_price_map: dict[str, float] | None = None,
+    prime_price_map: dict[str, float] | None = None,
     outside_rth: bool | None = None,
     execution_session: str | None = None,
 ) -> str:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    path = output_dir / f"order_intent_snapshot_{snapshot_id}.json"
+    # Snapshot-scoped intents are fine for offline/backtest flows, but trade execution must be
+    # run-scoped to avoid overwriting in-flight runs that share the same decision snapshot.
+    path = (
+        output_dir / f"order_intent_run_{run_id}.json"
+        if run_id
+        else output_dir / f"order_intent_snapshot_{snapshot_id}.json"
+    )
     payload = []
     intent_prefix = f"oi_{run_id}" if run_id else f"snapshot:{snapshot_id}"
     for idx, item in enumerate(items, start=1):
         symbol = (item.get("symbol") or "").strip().upper()
-        if run_id:
+        existing_id = str(item.get("order_intent_id") or "").strip()
+        if existing_id:
+            intent_id = existing_id
+        elif run_id:
             intent_id = f"{intent_prefix}_{idx}"
         else:
             intent_id = f"{intent_prefix}:{idx}:{symbol or 'NA'}"
         record = {
             "order_intent_id": intent_id,
             "symbol": symbol or item.get("symbol"),
+            "quantity": item.get("quantity"),
             "weight": item.get("weight"),
             "snapshot_date": item.get("snapshot_date"),
             "rebalance_date": item.get("rebalance_date"),
         }
         if order_type:
             record["order_type"] = order_type
+        if item.get("limit_price") is not None:
+            record["limit_price"] = item.get("limit_price")
         if limit_price_map is not None and symbol:
             picked = limit_price_map.get(symbol)
             if picked is not None:
                 record["limit_price"] = picked
+        if prime_price_map is not None and symbol:
+            prime = prime_price_map.get(symbol)
+            if prime is not None:
+                record["prime_price"] = prime
         if outside_rth is not None:
             record["outside_rth"] = bool(outside_rth)
         if execution_session:

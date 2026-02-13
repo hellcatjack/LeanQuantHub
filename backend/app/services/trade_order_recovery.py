@@ -24,6 +24,11 @@ def _resolve_auto_recovery_config(session) -> dict[str, Any]:
         "max_auto_retries": 1,
         "max_price_deviation_pct": 1.5,
         "allow_replace_outside_rth": False,
+        # Live execution: long-unfilled handling, used by LeanBridgeExecutionAlgorithm (execution-params-path).
+        "unfilled_timeout_seconds": 600,
+        "unfilled_reprice_interval_seconds": 0,
+        "unfilled_max_reprices": 0,
+        "unfilled_max_price_deviation_pct": 1.5,
     }
     row = session.query(TradeSettings).order_by(TradeSettings.id.desc()).first()
     if row and isinstance(row.auto_recovery, dict):

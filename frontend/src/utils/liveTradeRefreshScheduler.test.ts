@@ -1,9 +1,17 @@
 import { describe, expect, it } from "vitest";
 
-import { REFRESH_INTERVALS } from "./liveTradeRefreshScheduler";
+import { buildSymbolListKey } from "./liveTradeRefreshScheduler";
 
-describe("liveTradeRefreshScheduler", () => {
-  it("includes bridge in auto refresh intervals", () => {
-    expect(Object.keys(REFRESH_INTERVALS)).toContain("bridge");
+describe("buildSymbolListKey", () => {
+  it("builds stable key for same symbol contents", () => {
+    const a = ["ALB", "gsat", "  TYL "];
+    const b = ["alb", "GSAT", "TYL"];
+    expect(buildSymbolListKey(a)).toBe(buildSymbolListKey(b));
+  });
+
+  it("ignores empty values", () => {
+    expect(buildSymbolListKey(["ALB", "", " ", null as unknown as string, "GSAT"])).toBe(
+      "ALB|GSAT"
+    );
   });
 });

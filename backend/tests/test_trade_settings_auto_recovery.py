@@ -28,5 +28,6 @@ def test_trade_settings_includes_auto_recovery_defaults():
         out = TradeSettingsOut.model_validate(row, from_attributes=True)
         assert out.auto_recovery is not None
         assert out.auto_recovery.get("new_timeout_seconds") == 45
+        assert out.auto_recovery.get("unfilled_timeout_seconds") == 600
     finally:
         session.close()

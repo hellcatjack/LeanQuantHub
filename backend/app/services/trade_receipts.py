@@ -263,12 +263,14 @@ def _fill_exists(
     fill_price: float,
     event_time_iso: str,
 ) -> bool:
+    incoming_qty = abs(float(fill_qty or 0.0))
+    incoming_price = float(fill_price or 0.0)
     fills = session.query(TradeFill).filter(TradeFill.order_id == order_id).all()
     for fill in fills:
         params = fill.params or {}
         if event_time_iso and params.get("event_time") == event_time_iso:
             return True
-        if float(fill.fill_quantity) == float(fill_qty) and float(fill.fill_price) == float(fill_price):
+        if abs(float(fill.fill_quantity or 0.0)) == incoming_qty and float(fill.fill_price or 0.0) == incoming_price:
             if event_time_iso:
                 if _to_iso(fill.fill_time or fill.created_at) == event_time_iso:
                     return True
@@ -344,9 +346,15 @@ def _ingest_lean_events(session, warnings: list[str]) -> None:
 
             status = _normalize_status(payload.get("status"))
             filled = payload.get("filled")
-            fill_qty = float(filled or 0.0)
+            try:
+                fill_qty = abs(float(filled or 0.0))
+            except (TypeError, ValueError):
+                fill_qty = 0.0
             fill_price = payload.get("fill_price")
-            fill_price_value = float(fill_price) if fill_price is not None else 0.0
+            try:
+                fill_price_value = float(fill_price) if fill_price is not None else 0.0
+            except (TypeError, ValueError):
+                fill_price_value = 0.0
             event_time = _parse_time(payload.get("time")) or datetime.utcnow().replace(tzinfo=timezone.utc)
             event_time_iso = _to_iso(event_time)
             event_tag = payload.get("tag")
@@ -412,14 +420,44 @@ def _ingest_lean_events(session, warnings: list[str]) -> None:
                 continue
 
             if status in {"FILLED", "PARTIALLYFILLED", "PARTIAL"} or fill_qty > 0:
-                fill_key = f"{order_id}:{fill_qty}:{fill_price_value}:{event_time_iso}"
+                current_filled = abs(float(order.filled_quantity or 0.0))
+                fill_delta = fill_qty
+                # Lean bridge direct events report cumulative filled quantity. Convert to
+                # incremental delta against the currently persisted order quantity.
+                if current_filled > 0 and fill_qty > current_filled:
+                    fill_delta = fill_qty - current_filled
+                elif current_filled > 0 and fill_qty <= current_filled:
+                    fill_delta = 0.0
+
+                if fill_delta <= 0:
+                    if status == "FILLED" and str(order.status or "").strip().upper() != "FILLED":
+                        filled_total = max(current_filled, float(fill_qty or 0.0))
+                        try:
+                            update_trade_order_status(
+                                session,
+                                order,
+                                {
+                                    "status": "FILLED",
+                                    "filled_quantity": filled_total,
+                                    "params": {
+                                        "event_time": event_time_iso,
+                                        "event_status": status,
+                                        "event_source": "lean",
+                                        "event_tag": event_tag,
+                                    },
+                                },
+                            )
+                        except ValueError:
+                            _append_warning(warnings, "lean_event_status_transition")
+                    continue
+                fill_key = f"{order_id}:{fill_delta}:{fill_price_value}:{event_time_iso}"
                 if fill_key in seen_fill_keys:
                     continue
                 seen_fill_keys.add(fill_key)
                 if _fill_exists(
                     session,
                     order_id=order_id,
-                    fill_qty=fill_qty,
+                    fill_qty=fill_delta,
                     fill_price=fill_price_value,
                     event_time_iso=event_time_iso,
                 ):
@@ -439,7 +477,7 @@ def _ingest_lean_events(session, warnings: list[str]) -> None:
                 fill = apply_fill_to_order(
                     session,
                     order,
-                    fill_qty=fill_qty,
+                    fill_qty=fill_delta,
                     fill_price=fill_price_value,
                     fill_time=_ensure_aware(event_time) or datetime.utcnow().replace(tzinfo=timezone.utc),
                 )
@@ -482,10 +520,13 @@ def list_trade_receipts(
     limit: int = 50,
     offset: int = 0,
     mode: str = "all",
+    ingest_lean_events: bool = True,
+    include_lean_events: bool = True,
 ) -> TradeReceiptPage:
     warnings: list[str] = []
 
-    _ingest_lean_events(session, warnings)
+    if ingest_lean_events:
+        _ingest_lean_events(session, warnings)
 
     positions_payload = read_positions(resolve_bridge_root())
     baseline = ensure_positions_baseline(resolve_bridge_root(), positions_payload)
@@ -552,64 +593,65 @@ def list_trade_receipts(
             )
         )
 
-    bridge_root = resolve_bridge_root()
-    if not bridge_root.exists():
-        _append_warning(warnings, "lean_logs_missing")
-    else:
-        for event_path in _iter_event_files(bridge_root):
-            try:
-                raw_lines = event_path.read_text(encoding="utf-8").splitlines()
-            except OSError:
-                _append_warning(warnings, "lean_logs_read_error")
-                continue
-            for line in raw_lines:
-                text = line.strip()
-                if not text:
-                    continue
+    if include_lean_events:
+        bridge_root = resolve_bridge_root()
+        if not bridge_root.exists():
+            _append_warning(warnings, "lean_logs_missing")
+        else:
+            for event_path in _iter_event_files(bridge_root):
                 try:
-                    payload = json.loads(text)
-                except json.JSONDecodeError:
-                    _append_warning(warnings, "lean_logs_parse_error")
+                    raw_lines = event_path.read_text(encoding="utf-8").splitlines()
+                except OSError:
+                    _append_warning(warnings, "lean_logs_read_error")
                     continue
-                status = _normalize_status(payload.get("status"))
-                filled = payload.get("filled")
-                kind = _lean_kind(status, filled)
-                event_time = _parse_time(payload.get("time"))
-                order_id = _resolve_order_id(event_path, payload, session=session)
-                if kind == "fill" and order_id is not None:
-                    key = (
-                        order_id,
-                        float(filled or 0.0),
-                        float(payload.get("fill_price") or 0.0),
-                        _to_iso(event_time),
-                    )
-                    if key in db_fill_keys:
+                for line in raw_lines:
+                    text = line.strip()
+                    if not text:
                         continue
-                direction = _normalize_status(payload.get("direction"))
-                order = order_map.get(order_id) if order_id is not None else None
-                realized_value = None
-                if order_id is not None and kind == "order":
-                    realized_value = realized.order_totals.get(order_id, 0.0)
-                items.append(
-                    TradeReceipt(
-                        time=_ensure_aware(event_time),
-                        kind=kind,
-                        order_id=order_id,
-                        client_order_id=order.client_order_id if order else None,
-                        symbol=payload.get("symbol") or (order.symbol if order else None),
-                        side=direction or (order.side if order else None),
-                        quantity=order.quantity if order else None,
-                        filled_quantity=float(filled) if filled is not None else None,
-                        fill_price=float(payload.get("fill_price") or 0.0)
-                        if payload.get("fill_price") is not None
-                        else None,
-                        exec_id=None,
-                        status=status or None,
-                        commission=None,
-                        realized_pnl=realized_value,
-                        source="lean",
+                    try:
+                        payload = json.loads(text)
+                    except json.JSONDecodeError:
+                        _append_warning(warnings, "lean_logs_parse_error")
+                        continue
+                    status = _normalize_status(payload.get("status"))
+                    filled = payload.get("filled")
+                    kind = _lean_kind(status, filled)
+                    event_time = _parse_time(payload.get("time"))
+                    order_id = _resolve_order_id(event_path, payload, session=session)
+                    if kind == "fill" and order_id is not None:
+                        key = (
+                            order_id,
+                            float(filled or 0.0),
+                            float(payload.get("fill_price") or 0.0),
+                            _to_iso(event_time),
+                        )
+                        if key in db_fill_keys:
+                            continue
+                    direction = _normalize_status(payload.get("direction"))
+                    order = order_map.get(order_id) if order_id is not None else None
+                    realized_value = None
+                    if order_id is not None and kind == "order":
+                        realized_value = realized.order_totals.get(order_id, 0.0)
+                    items.append(
+                        TradeReceipt(
+                            time=_ensure_aware(event_time),
+                            kind=kind,
+                            order_id=order_id,
+                            client_order_id=order.client_order_id if order else None,
+                            symbol=payload.get("symbol") or (order.symbol if order else None),
+                            side=direction or (order.side if order else None),
+                            quantity=order.quantity if order else None,
+                            filled_quantity=float(filled) if filled is not None else None,
+                            fill_price=float(payload.get("fill_price") or 0.0)
+                            if payload.get("fill_price") is not None
+                            else None,
+                            exec_id=None,
+                            status=status or None,
+                            commission=None,
+                            realized_pnl=realized_value,
+                            source="lean",
+                        )
                     )
-                )
 
     if mode == "orders":
         items = [item for item in items if item.kind == "order"]

@@ -1,5 +1,6 @@
 from pathlib import Path
 import sys
+import json
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -20,9 +21,10 @@ def _make_session():
     return Session()
 
 
-def test_write_manual_order_intent_builds_quantity(tmp_path):
+def test_write_manual_order_intent_builds_quantity(tmp_path, monkeypatch):
     session = _make_session()
     try:
+        monkeypatch.setattr(manual_trade_execution, "resolve_price_seed", lambda *_args, **_kwargs: 190.5, raising=False)
         payload = {
             "client_order_id": "oi_0_0_123",
             "symbol": "AAPL",
@@ -34,10 +36,10 @@ def test_write_manual_order_intent_builds_quantity(tmp_path):
         session.commit()
 
         path = write_manual_order_intent(order, output_dir=tmp_path)
-        text = Path(path).read_text(encoding="utf-8")
-        assert "order_intent_id" in text
-        assert "oi_0_0_123" in text
-        assert "\"quantity\": -1" in text
+        payload_items = json.loads(Path(path).read_text(encoding="utf-8"))
+        assert payload_items[0]["order_intent_id"] == "oi_0_0_123"
+        assert float(payload_items[0]["quantity"]) == -1.0
+        assert float(payload_items[0]["prime_price"]) == 190.5
     finally:
         session.close()
 

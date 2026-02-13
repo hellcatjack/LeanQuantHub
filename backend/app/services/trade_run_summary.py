@@ -6,9 +6,10 @@ from pathlib import Path
 import csv
 from typing import Any
 
+from app.core.config import settings
 from app.models import DecisionSnapshot, TradeFill, TradeOrder, TradeRun
 from app.services.lean_bridge_paths import resolve_bridge_root
-from app.services.lean_bridge_reader import read_positions
+from app.services.lean_bridge_reader import read_positions, read_quotes
 from app.services.realized_pnl import compute_realized_pnl
 from app.services.realized_pnl_baseline import ensure_positions_baseline
 
@@ -34,6 +35,98 @@ def _read_snapshot_weights(items_path: str | None) -> dict[str, float]:
     except OSError:
         return {}
     return weights
+
+
+def _pick_price(snapshot: dict[str, Any] | None) -> float | None:
+    if not snapshot:
+        return None
+    for key in ("last", "close", "bid", "ask"):
+        value = snapshot.get(key)
+        if value is None:
+            continue
+        try:
+            value_f = float(value)
+        except (TypeError, ValueError):
+            continue
+        if value_f > 0:
+            return value_f
+    return None
+
+
+def _resolve_data_root() -> Path:
+    if settings.data_root:
+        return Path(settings.data_root)
+    return Path("/data/share/stock/data")
+
+
+def _normalize_symbol_for_filename(symbol: str) -> str:
+    return "".join(ch if ch.isalnum() else "_" for ch in symbol.upper()).strip("_")
+
+
+def _find_latest_price_file(root: Path, symbol: str) -> Path | None:
+    if not root.exists():
+        return None
+    normalized = _normalize_symbol_for_filename(symbol)
+    if not normalized:
+        return None
+    matches = sorted(root.glob(f"*_{normalized}_Daily.csv"))
+    if not matches:
+        return None
+    return matches[-1]
+
+
+def _read_latest_close(path: Path) -> float | None:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            last_row: dict[str, Any] | None = None
+            for row in reader:
+                last_row = row
+        if not last_row:
+            return None
+        close_value = last_row.get("close")
+        if close_value is None or close_value == "":
+            return None
+        value = float(close_value)
+        return value if value > 0 else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _load_fallback_prices(symbols: list[str]) -> dict[str, float]:
+    root = _resolve_data_root() / "curated_adjusted"
+    prices: dict[str, float] = {}
+    for symbol in symbols:
+        path = _find_latest_price_file(root, symbol)
+        if not path:
+            continue
+        value = _read_latest_close(path)
+        if value is None:
+            continue
+        prices[symbol] = value
+    return prices
+
+
+def _build_price_map(symbols: list[str]) -> dict[str, float]:
+    symbol_set = {str(symbol or "").strip().upper() for symbol in symbols if symbol}
+    if not symbol_set:
+        return {}
+    quotes = read_quotes(resolve_bridge_root())
+    items = quotes.get("items") if isinstance(quotes.get("items"), list) else []
+    prices: dict[str, float] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        symbol = str(item.get("symbol") or "").strip().upper()
+        if not symbol or symbol not in symbol_set:
+            continue
+        picked = _pick_price(item)
+        if picked is not None:
+            prices[symbol] = picked
+    missing = sorted(symbol_set - set(prices.keys()))
+    if missing:
+        prices.update(_load_fallback_prices(missing))
+    return prices
 
 
 def _max_datetime(values: list[datetime | None]) -> datetime | None:
@@ -150,6 +243,50 @@ def build_symbol_summary(session, run_id: int) -> list[dict[str, Any]]:
     except (TypeError, ValueError):
         portfolio_value = 0.0
 
+    positions_payload = read_positions(resolve_bridge_root())
+    positions_items = (
+        positions_payload.get("items") if isinstance(positions_payload.get("items"), list) else []
+    )
+    current_qty: dict[str, float] = {}
+    current_market_value: dict[str, float] = {}
+    for item in positions_items:
+        if not isinstance(item, dict):
+            continue
+        symbol = str(item.get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        qty_value = item.get("quantity")
+        if qty_value is None:
+            qty_value = item.get("position")
+        if qty_value is None:
+            continue
+        try:
+            qty = float(qty_value)
+        except (TypeError, ValueError):
+            continue
+        if abs(qty) <= 1e-12:
+            continue
+        current_qty[symbol] = qty
+        mv_value = item.get("market_value")
+        if mv_value is not None:
+            try:
+                mv = float(mv_value)
+            except (TypeError, ValueError):
+                mv = None
+            # Lean bridge may emit market_value=0 even when holdings exist (missing market data).
+            # Treat zero/near-zero as unknown and fall back to latest quotes.
+            if mv is not None and abs(mv) > 1e-12:
+                current_market_value[symbol] = mv
+        if symbol not in current_market_value:
+            market_price_value = item.get("market_price")
+            if market_price_value is not None:
+                try:
+                    market_price = float(market_price_value)
+                except (TypeError, ValueError):
+                    market_price = None
+                if market_price is not None and market_price != 0:
+                    current_market_value[symbol] = float(qty) * market_price
+
     totals_qty: dict[str, float] = defaultdict(float)
     filled_qty: dict[str, float] = defaultdict(float)
     filled_value: dict[str, float] = defaultdict(float)
@@ -181,7 +318,8 @@ def build_symbol_summary(session, run_id: int) -> list[dict[str, Any]]:
         filled_qty[symbol] += qty
         filled_value[symbol] += sign * qty * price
 
-    symbols = sorted(set(list(weights.keys()) + list(totals_qty.keys())))
+    symbols = sorted(set(list(weights.keys()) + list(totals_qty.keys()) + list(current_qty.keys())))
+    price_map = _build_price_map(symbols)
     summary: list[dict[str, Any]] = []
     for symbol in symbols:
         total_qty = totals_qty.get(symbol, 0.0)
@@ -189,15 +327,24 @@ def build_symbol_summary(session, run_id: int) -> list[dict[str, Any]]:
         value_filled = filled_value.get(symbol, 0.0)
         avg_price = value_filled / filled if filled > 0 else None
         weight = weights.get(symbol)
-        target_value = None
-        if weight is not None and portfolio_value > 0:
-            target_value = portfolio_value * float(weight)
+        if weight is None:
+            weight = 0.0
+        target_value = portfolio_value * float(weight) if portfolio_value > 0 else None
+
+        qty_now = current_qty.get(symbol, 0.0)
+        current_value = current_market_value.get(symbol)
+        if (current_value is None or abs(float(current_value)) <= 1e-12) and abs(float(qty_now)) > 1e-12:
+            px = price_map.get(symbol)
+            current_value = float(qty_now) * float(px) if px is not None and px > 0 else None
+        current_weight = None
+        if current_value is not None and portfolio_value > 0:
+            current_weight = current_value / portfolio_value
         delta_value = None
         delta_weight = None
-        if target_value is not None:
-            delta_value = target_value - value_filled
-            if portfolio_value > 0:
-                delta_weight = delta_value / portfolio_value
+        if target_value is not None and current_value is not None:
+            delta_value = target_value - current_value
+            if current_weight is not None:
+                delta_weight = float(weight) - float(current_weight)
         fill_ratio = None
         if total_qty > 0:
             fill_ratio = filled / total_qty
@@ -206,6 +353,9 @@ def build_symbol_summary(session, run_id: int) -> list[dict[str, Any]]:
                 "symbol": symbol,
                 "target_weight": weight,
                 "target_value": target_value,
+                "current_qty": qty_now,
+                "current_value": current_value,
+                "current_weight": current_weight,
                 "filled_qty": filled,
                 "avg_fill_price": avg_price,
                 "filled_value": value_filled,

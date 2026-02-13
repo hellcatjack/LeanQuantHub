@@ -25,3 +25,14 @@ def test_build_direct_intent_buy_positive():
             "limit_price": None,
         }
     ]
+
+
+def test_build_direct_intent_includes_prime_price():
+    items = build_direct_intent_items(
+        order_id=12,
+        symbol="MSFT",
+        side="BUY",
+        quantity=1,
+        prime_price=416.12,
+    )
+    assert items[0]["prime_price"] == 416.12

@@ -45,6 +45,12 @@ def test_lean_mode_sizes_intent_orders_before_risk_gate(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         trade_executor,
+        "read_positions",
+        lambda _root: {"items": [], "stale": False},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        trade_executor,
         "fetch_account_summary",
         lambda *_a, **_k: {"NetLiquidation": 10000, "cash_available": 10000},
         raising=False,
@@ -92,4 +98,3 @@ def test_lean_mode_sizes_intent_orders_before_risk_gate(tmp_path, monkeypatch):
         assert float(orders[0].quantity) == 40.0
     finally:
         session.close()
-

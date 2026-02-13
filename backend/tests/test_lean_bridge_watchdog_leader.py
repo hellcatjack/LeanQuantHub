@@ -29,3 +29,48 @@ def test_ensure_lean_bridge_live_uses_leader(monkeypatch, tmp_path):
 
     assert called["value"] is True
     assert out.get("status") == "ok"
+
+
+def test_refresh_bridge_force_does_not_force_restart_when_fresh(monkeypatch, tmp_path):
+    calls: list[bool] = []
+
+    def _ensure(session, *, mode: str, force: bool = False):
+        calls.append(bool(force))
+        return {"status": "ok", "last_heartbeat": datetime.now(timezone.utc).isoformat()}
+
+    monkeypatch.setattr(lean_bridge_watchdog, "ensure_lean_bridge_leader", _ensure)
+    monkeypatch.setattr(lean_bridge_watchdog, "resolve_bridge_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        lean_bridge_watchdog,
+        "read_bridge_status",
+        lambda _root: {
+            "status": "ok",
+            "stale": False,
+            "last_heartbeat": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+
+    out = lean_bridge_watchdog.refresh_bridge(None, mode="paper", reason="force_check", force=True)
+
+    assert calls == [False]
+    assert out.get("last_refresh_result") == "success"
+
+
+def test_refresh_bridge_force_triggers_restart_when_stale(monkeypatch, tmp_path):
+    calls: list[bool] = []
+
+    def _ensure(session, *, mode: str, force: bool = False):
+        calls.append(bool(force))
+        return {"status": "degraded", "stale": True, "last_heartbeat": None}
+
+    monkeypatch.setattr(lean_bridge_watchdog, "ensure_lean_bridge_leader", _ensure)
+    monkeypatch.setattr(lean_bridge_watchdog, "resolve_bridge_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        lean_bridge_watchdog,
+        "read_bridge_status",
+        lambda _root: {"status": "degraded", "stale": True, "last_heartbeat": None},
+    )
+
+    lean_bridge_watchdog.refresh_bridge(None, mode="paper", reason="force_check", force=True)
+
+    assert calls == [True]

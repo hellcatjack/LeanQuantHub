@@ -21,6 +21,10 @@ def apply_fill_to_order(
 ) -> TradeFill:
     if fill_time is None:
         fill_time = datetime.utcnow()
+    fill_qty_value = abs(float(fill_qty or 0.0))
+    if fill_qty_value <= 0:
+        raise ValueError("fill_qty_invalid")
+    fill_price_value = float(fill_price or 0.0)
     if exec_id:
         existing = (
             session.query(TradeFill)
@@ -31,10 +35,14 @@ def apply_fill_to_order(
             return existing
     current_status = str(order.status or "").strip().upper()
     total_prev = float(order.filled_quantity or 0.0)
-    total_new = total_prev + float(fill_qty)
+    total_new = total_prev + fill_qty_value
     avg_prev = float(order.avg_fill_price or 0.0)
-    avg_new = (avg_prev * total_prev + float(fill_price) * float(fill_qty)) / total_new
-    target_status = "PARTIAL" if total_new < float(order.quantity) else "FILLED"
+    if total_new <= 0:
+        total_prev = 0.0
+        total_new = fill_qty_value
+        avg_prev = 0.0
+    avg_new = (avg_prev * total_prev + fill_price_value * fill_qty_value) / total_new
+    target_status = "PARTIAL" if total_new < float(abs(order.quantity or 0.0)) else "FILLED"
     if current_status == "NEW":
         update_trade_order_status(session, order, {"status": "SUBMITTED"})
     update_trade_order_status(
@@ -47,8 +55,8 @@ def apply_fill_to_order(
     fill = TradeFill(
         order_id=order.id,
         exec_id=exec_id,
-        fill_quantity=float(fill_qty),
-        fill_price=float(fill_price),
+        fill_quantity=fill_qty_value,
+        fill_price=fill_price_value,
         commission=commission,
         fill_time=fill_time,
         currency=currency,
