@@ -1020,10 +1020,11 @@ export default function ProjectsPage() {
         params: { project_id: projectId },
       });
       setDecisionLatest(res.data);
-      setDecisionMessage("");
+      setDecisionMessage((res.data?.message || "").trim());
     } catch (err: any) {
       if (err?.response?.status === 404) {
         setDecisionLatest(null);
+        setDecisionMessage("");
         return;
       }
       setDecisionLatest(null);
@@ -1163,7 +1164,8 @@ export default function ProjectsPage() {
         { timeout: 120000 }
       );
       setDecisionPreview(res.data);
-      setDecisionMessage(t("projects.decision.previewReady"));
+      const snapshotMessage = (res.data?.message || "").trim();
+      setDecisionMessage(snapshotMessage || t("projects.decision.previewReady"));
     } catch (err) {
       setDecisionMessage(t("projects.decision.previewError"));
     } finally {
@@ -1188,7 +1190,13 @@ export default function ProjectsPage() {
         decisionPollRef.current = pollToken;
         const detail = await pollDecisionSnapshot(snapshotId, pollToken);
         if (detail?.status === "failed") {
-          setDecisionMessage(t("projects.decision.runError"));
+          const failedMessage = (detail?.message || "").trim();
+          setDecisionMessage(failedMessage || t("projects.decision.runError"));
+        } else if (detail?.status === "success") {
+          const successMessage = (detail?.message || "").trim();
+          if (successMessage) {
+            setDecisionMessage(successMessage);
+          }
         }
       } else {
         await loadDecisionLatest(selectedProjectId);

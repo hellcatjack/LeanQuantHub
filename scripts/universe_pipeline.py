@@ -10,6 +10,7 @@ import time
 import urllib.parse
 import urllib.request
 from bisect import bisect_right
+from collections import deque
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Iterable
@@ -165,6 +166,94 @@ def _parse_symbol_list(value: object) -> list[str]:
     if isinstance(value, str):
         return _split_symbols(value)
     return []
+
+
+def _coerce_bool(value: object, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off"}:
+            return False
+    return default
+
+
+def _parse_float_list(value: object) -> list[float]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        values: list[float] = []
+        for item in value:
+            try:
+                values.append(float(item))
+            except (TypeError, ValueError):
+                continue
+        return values
+    if isinstance(value, str):
+        parts = [segment.strip() for segment in value.split(",")]
+        values = []
+        for part in parts:
+            if not part:
+                continue
+            try:
+                values.append(float(part))
+            except (TypeError, ValueError):
+                continue
+        return values
+    try:
+        return [float(value)]
+    except (TypeError, ValueError):
+        return []
+
+
+def normalize_drawdown_tier_exposures(
+    tiers_raw: object,
+    exposures_raw: object,
+) -> list[tuple[float, float]]:
+    tiers = [value for value in _parse_float_list(tiers_raw) if value > 0]
+    exposures = [min(max(value, 0.0), 1.0) for value in _parse_float_list(exposures_raw)]
+    if not tiers or not exposures:
+        return []
+    if len(exposures) < len(tiers):
+        exposures += [exposures[-1]] * (len(tiers) - len(exposures))
+    elif len(exposures) > len(tiers):
+        exposures = exposures[: len(tiers)]
+    pairs = list(zip(tiers, exposures))
+    pairs.sort(key=lambda item: item[0])
+    return pairs
+
+
+def resolve_drawdown_exposure_cap(
+    *,
+    current_drawdown: float,
+    max_exposure: float,
+    dynamic_exposure: bool,
+    drawdown_tiers: list[tuple[float, float]],
+    drawdown_exposure_floor: float,
+) -> tuple[float, float | None, float | None]:
+    base_cap = min(max(float(max_exposure), 0.0), 1.0)
+    if not dynamic_exposure or not drawdown_tiers:
+        return base_cap, None, None
+    matched_threshold = None
+    matched_exposure = None
+    for threshold, exposure in drawdown_tiers:
+        if current_drawdown >= threshold:
+            matched_threshold = threshold
+            matched_exposure = exposure
+        else:
+            break
+    cap = base_cap
+    if matched_exposure is not None:
+        cap = min(cap, matched_exposure)
+        if drawdown_exposure_floor > 0 and cap < drawdown_exposure_floor:
+            cap = min(drawdown_exposure_floor, base_cap)
+    return max(cap, 0.0), matched_threshold, matched_exposure
 
 
 def _flatten_columns(columns) -> list[str]:
@@ -1412,6 +1501,31 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
         max_exposure = 0.0
     if max_exposure > 1:
         max_exposure = 1.0
+    dynamic_exposure = _coerce_bool(
+        risk_cfg.get("dynamic_exposure", weights_cfg.get("dynamic_exposure", False)),
+        default=False,
+    )
+    drawdown_exposure_floor = _coerce_float(
+        risk_cfg.get(
+            "drawdown_exposure_floor",
+            weights_cfg.get("drawdown_exposure_floor", 0.0),
+        ),
+        0.0,
+    )
+    drawdown_exposure_floor = min(max(drawdown_exposure_floor, 0.0), 1.0)
+    drawdown_tiers = normalize_drawdown_tier_exposures(
+        risk_cfg.get("drawdown_tiers", weights_cfg.get("drawdown_tiers")),
+        risk_cfg.get("drawdown_exposures", weights_cfg.get("drawdown_exposures")),
+    )
+    idle_mode_raw = str(
+        risk_cfg.get("idle_allocation") or weights_cfg.get("idle_allocation") or "none"
+    ).strip().lower()
+    if idle_mode_raw in {"defensive", "bond", "safe"}:
+        idle_allocation_mode = "defensive"
+    elif idle_mode_raw in {"benchmark", "index", "spy"}:
+        idle_allocation_mode = "benchmark"
+    else:
+        idle_allocation_mode = "none"
 
     universe = read_csv(universe_path)
     symbol_map_path = str(weights_cfg.get("symbol_map_path") or "").strip()
@@ -1749,6 +1863,17 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
         cold_start: bool,
         prev_weight_sum: float,
         effective_turnover_limit: float | None,
+        effective_exposure_cap: float,
+        exposure_cap_source: str,
+        drawdown_all: float,
+        drawdown_52w: float,
+        drawdown_current: float,
+        drawdown_tier_threshold: float | None,
+        drawdown_tier_exposure: float | None,
+        idle_allocation_mode_used: str,
+        idle_symbol_used: str,
+        idle_weight: float | None,
+        risk_off_selection: str,
     ) -> None:
         snapshot_rows.append(
             {
@@ -1766,6 +1891,21 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
                 "weights_sum": f"{weights_sum:.8f}" if weights_sum is not None else "",
                 "turnover_scale": f"{turnover_scale:.6f}" if turnover_scale is not None else "",
                 "max_exposure": f"{max_exposure:.6f}",
+                "effective_exposure_cap": f"{effective_exposure_cap:.6f}",
+                "exposure_cap_source": exposure_cap_source,
+                "drawdown_all": f"{drawdown_all:.6f}",
+                "drawdown_52w": f"{drawdown_52w:.6f}",
+                "drawdown_current": f"{drawdown_current:.6f}",
+                "drawdown_tier_threshold": (
+                    f"{drawdown_tier_threshold:.6f}" if drawdown_tier_threshold is not None else ""
+                ),
+                "drawdown_tier_exposure": (
+                    f"{drawdown_tier_exposure:.6f}" if drawdown_tier_exposure is not None else ""
+                ),
+                "idle_allocation_mode": idle_allocation_mode_used,
+                "idle_symbol": idle_symbol_used,
+                "idle_weight": f"{idle_weight:.8f}" if idle_weight is not None else "",
+                "risk_off_selection": risk_off_selection,
                 "cold_start": "1" if cold_start else "0",
                 "prev_weight_sum": f"{prev_weight_sum:.8f}",
                 "effective_turnover_limit": (
@@ -2099,6 +2239,42 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
     cold_start_count = 0
     effective_turnover_limit_sum = 0.0
     effective_turnover_limit_count = 0
+    effective_exposure_cap_sum = 0.0
+    effective_exposure_cap_count = 0
+    drawdown_tier_hit_count = 0
+    drawdown_equity = 1.0
+    drawdown_peak_all = 1.0
+    drawdown_window = deque([1.0], maxlen=252)
+    current_drawdown_all = 0.0
+    current_drawdown_52w = 0.0
+    drawdown_start_idx: int | None = None
+    drawdown_weight_row = pd.Series(0.0, index=prices.columns)
+
+    def _advance_drawdown_state(end_idx: int) -> None:
+        nonlocal drawdown_equity
+        nonlocal drawdown_peak_all
+        nonlocal current_drawdown_all
+        nonlocal current_drawdown_52w
+        nonlocal drawdown_start_idx
+        if drawdown_start_idx is None:
+            drawdown_start_idx = end_idx
+            return
+        if end_idx <= drawdown_start_idx:
+            return
+        realized = (returns.iloc[drawdown_start_idx:end_idx] * drawdown_weight_row).sum(axis=1).fillna(0.0)
+        for value in realized.tolist():
+            drawdown_equity *= max(0.0, 1.0 + float(value))
+            if drawdown_equity <= 0:
+                drawdown_equity = 1e-9
+            if drawdown_equity > drawdown_peak_all:
+                drawdown_peak_all = drawdown_equity
+            if drawdown_peak_all > 0:
+                current_drawdown_all = max(0.0, 1.0 - drawdown_equity / drawdown_peak_all)
+            drawdown_window.append(drawdown_equity)
+            peak_52w = max(drawdown_window) if drawdown_window else drawdown_equity
+            if peak_52w > 0:
+                current_drawdown_52w = max(0.0, 1.0 - drawdown_equity / peak_52w)
+        drawdown_start_idx = end_idx
 
     for idx, rebalance in enumerate(rebalance_dates):
         snapshot_date = pit_snapshot_map.get(rebalance, rebalance)
@@ -2251,6 +2427,7 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
         selected_scores: dict[str, float] = {}
         risk_off = False
         risk_off_symbol_used = ""
+        risk_off_selection = ""
         if market_filter and benchmark_sma is not None and benchmark_series is not None:
             try:
                 bench_price = float(benchmark_series.iloc[snapshot_pos])
@@ -2268,15 +2445,19 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
             if risk_off_mode == "benchmark" and benchmark_symbol in prices.columns:
                 weights_for_symbols = {benchmark_symbol: 1.0}
                 risk_off_symbol_used = benchmark_symbol
+                risk_off_selection = "benchmark"
             elif risk_off_mode in {"defensive", "bond", "safe"}:
                 picked = _pick_risk_off_symbol(snapshot_pos)
                 if picked:
                     weights_for_symbols = {picked: 1.0}
                     risk_off_symbol_used = picked
+                    risk_off_selection = "defensive_pick"
                 else:
                     weights_for_symbols = {}
+                    risk_off_selection = "defensive_missing"
             else:
                 weights_for_symbols = {}
+                risk_off_selection = "cash"
 
         if not risk_off and signal_mode == "ml_scores":
             if not has_scores:
@@ -2394,16 +2575,31 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
                 for symbol in symbols:
                     weights_for_symbols[symbol] = share
 
+        start_exec_ts = rebalance_exec_ts or pd.Timestamp(rebalance)
+        if start_exec_ts not in prices.index:
+            continue
+        start_idx = prices.index.get_loc(start_exec_ts)
+        _advance_drawdown_state(start_idx)
+        drawdown_current = max(current_drawdown_all, current_drawdown_52w)
+        effective_exposure_cap, drawdown_tier_threshold, drawdown_tier_exposure = resolve_drawdown_exposure_cap(
+            current_drawdown=drawdown_current,
+            max_exposure=max_exposure,
+            dynamic_exposure=dynamic_exposure,
+            drawdown_tiers=drawdown_tiers,
+            drawdown_exposure_floor=drawdown_exposure_floor,
+        )
+        exposure_cap_source = "drawdown_tier" if drawdown_tier_threshold is not None else "max_exposure"
+        if drawdown_tier_threshold is not None:
+            drawdown_tier_hit_count += 1
+        effective_exposure_cap_sum += effective_exposure_cap
+        effective_exposure_cap_count += 1
+
         if not weights_for_symbols and risk_off:
             prev_weight_sum = float(prev_weights_row.abs().sum())
             effective_turnover_limit, cold_start = resolve_turnover_limit(
                 turnover_limit, cold_start_turnover, prev_weight_sum
             )
             weight_series = pd.Series(0.0, index=prices.columns)
-            start_exec_ts = rebalance_exec_ts or pd.Timestamp(rebalance)
-            if start_exec_ts not in prices.index:
-                continue
-            start_idx = prices.index.get_loc(start_exec_ts)
             if idx + 1 < len(rebalance_dates):
                 next_ts = pd.Timestamp(rebalance_dates[idx + 1])
                 next_exec_ts = next_ts
@@ -2433,12 +2629,25 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
                 cold_start=cold_start,
                 prev_weight_sum=prev_weight_sum,
                 effective_turnover_limit=effective_turnover_limit,
+                effective_exposure_cap=effective_exposure_cap,
+                exposure_cap_source=exposure_cap_source,
+                drawdown_all=current_drawdown_all,
+                drawdown_52w=current_drawdown_52w,
+                drawdown_current=drawdown_current,
+                drawdown_tier_threshold=drawdown_tier_threshold,
+                drawdown_tier_exposure=drawdown_tier_exposure,
+                idle_allocation_mode_used=idle_allocation_mode,
+                idle_symbol_used="",
+                idle_weight=None,
+                risk_off_selection=risk_off_selection,
             )
             if cold_start:
                 cold_start_count += 1
             if effective_turnover_limit is not None:
                 effective_turnover_limit_sum += effective_turnover_limit
                 effective_turnover_limit_count += 1
+            drawdown_weight_row = weight_series
+            drawdown_start_idx = start_idx
             continue
         if not weights_for_symbols:
             continue
@@ -2460,10 +2669,29 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
         weights_for_symbols = {
             symbol: weight / total_weight for symbol, weight in weights_for_symbols.items()
         }
-        if max_exposure < 1.0:
+        if effective_exposure_cap < 1.0:
             weights_for_symbols = {
-                symbol: weight * max_exposure for symbol, weight in weights_for_symbols.items()
+                symbol: weight * effective_exposure_cap for symbol, weight in weights_for_symbols.items()
             }
+        idle_symbol_used = ""
+        idle_weight = None
+        if not risk_off and idle_allocation_mode != "none":
+            idle_candidate = ""
+            if idle_allocation_mode == "benchmark":
+                if benchmark_symbol in prices.columns:
+                    idle_candidate = benchmark_symbol
+            elif idle_allocation_mode == "defensive":
+                picked_idle = _pick_risk_off_symbol(snapshot_pos)
+                if picked_idle:
+                    idle_candidate = picked_idle
+            if idle_candidate and idle_candidate in prices.columns:
+                remaining = max(0.0, 1.0 - sum(weights_for_symbols.values()))
+                if remaining > 1e-9:
+                    weights_for_symbols[idle_candidate] = (
+                        float(weights_for_symbols.get(idle_candidate, 0.0)) + remaining
+                    )
+                    idle_symbol_used = idle_candidate
+                    idle_weight = remaining
 
         weight_row = {symbol: 0.0 for symbol in prices.columns}
         for symbol, weight in weights_for_symbols.items():
@@ -2504,7 +2732,8 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
                 turnover_limited += 1
                 turnover_scale_sum += scale
             turnover_scale = scale
-            cash_weight_sum += max(0.0, 1.0 - float(weight_series.sum()))
+        cash_weight = max(0.0, 1.0 - float(weight_series.sum()))
+        cash_weight_sum += cash_weight
         for symbol, weight in weight_series.items():
             if weight <= 0:
                 continue
@@ -2525,10 +2754,6 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
                     "score": score_value,
                 }
             )
-        start_exec_ts = rebalance_exec_ts or pd.Timestamp(rebalance)
-        if start_exec_ts not in prices.index:
-            continue
-        start_idx = prices.index.get_loc(start_exec_ts)
         if idx + 1 < len(rebalance_dates):
             next_ts = pd.Timestamp(rebalance_dates[idx + 1])
             next_exec_ts = next_ts
@@ -2551,18 +2776,31 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
             risk_off=risk_off,
             risk_off_reason="market_filter" if risk_off else "",
             risk_off_symbol_used=risk_off_symbol_used,
-            cash_weight=max(0.0, 1.0 - float(weight_series.sum())),
+            cash_weight=cash_weight,
             weights_sum=float(weight_series.sum()),
             turnover_scale=turnover_scale,
             cold_start=cold_start,
             prev_weight_sum=prev_weight_sum,
             effective_turnover_limit=effective_turnover_limit,
+            effective_exposure_cap=effective_exposure_cap,
+            exposure_cap_source=exposure_cap_source,
+            drawdown_all=current_drawdown_all,
+            drawdown_52w=current_drawdown_52w,
+            drawdown_current=drawdown_current,
+            drawdown_tier_threshold=drawdown_tier_threshold,
+            drawdown_tier_exposure=drawdown_tier_exposure,
+            idle_allocation_mode_used=idle_allocation_mode,
+            idle_symbol_used=idle_symbol_used,
+            idle_weight=idle_weight,
+            risk_off_selection=risk_off_selection,
         )
         if cold_start:
             cold_start_count += 1
         if effective_turnover_limit is not None:
             effective_turnover_limit_sum += effective_turnover_limit
             effective_turnover_limit_count += 1
+        drawdown_weight_row = weight_series
+        drawdown_start_idx = start_idx
 
     portfolio_returns = (weights * returns).sum(axis=1)
     turnover_by_date: dict[str, float] = {}
@@ -2687,7 +2925,18 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
         "risk_off_pick": risk_off_pick,
         "risk_off_lookback_days": risk_off_lookback_days,
         "max_exposure": max_exposure,
+        "dynamic_exposure": dynamic_exposure,
+        "drawdown_tiers": [threshold for threshold, _ in drawdown_tiers],
+        "drawdown_exposures": [exposure for _, exposure in drawdown_tiers],
+        "drawdown_exposure_floor": drawdown_exposure_floor,
+        "idle_allocation_mode": idle_allocation_mode,
         "risk_off_count": risk_off_count,
+        "drawdown_tier_hit_count": drawdown_tier_hit_count,
+        "effective_exposure_cap_avg": (
+            effective_exposure_cap_sum / effective_exposure_cap_count
+            if effective_exposure_cap_count
+            else max_exposure
+        ),
         "fee_bps": fee_bps,
         "slippage_bps": slippage_bps,
         "impact_bps": impact_bps,
@@ -2782,6 +3031,17 @@ def run_backtest(data_root: Path, universe_path: Path, config_path: Path) -> Pat
                 "weights_sum",
                 "turnover_scale",
                 "max_exposure",
+                "effective_exposure_cap",
+                "exposure_cap_source",
+                "drawdown_all",
+                "drawdown_52w",
+                "drawdown_current",
+                "drawdown_tier_threshold",
+                "drawdown_tier_exposure",
+                "idle_allocation_mode",
+                "idle_symbol",
+                "idle_weight",
+                "risk_off_selection",
                 "cold_start",
                 "prev_weight_sum",
                 "effective_turnover_limit",

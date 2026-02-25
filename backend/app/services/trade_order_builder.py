@@ -119,6 +119,8 @@ def build_rebalance_orders(
     cash_buffer_ratio: float = 0.0,
     lot_size: int = 1,
     min_qty: int = 1,
+    deadband_min_notional: float = 0.0,
+    deadband_min_weight: float = 0.0,
     order_type: str = "MKT",
     epsilon: float = 1e-9,
 ) -> list[dict[str, Any]]:
@@ -134,6 +136,13 @@ def build_rebalance_orders(
       Signed quantities are handled at the order-intent layer.
     - We apply execution constraints (lot size + min qty) to the *target* sizing, not the delta,
       to avoid overselling/overbuying from rounding the delta.
+    - Delta is then quantized to whole lots (towards zero) before generating an order. This
+      matches Lean/QuantConnect behavior that ignores sub-lot residuals in execution, and
+      prevents crossing through the target with a forced one-lot sell/buy.
+    - Optional deadband thresholds can suppress tiny lot-valid deltas:
+      - `deadband_min_notional`: minimum order notional in account currency
+      - `deadband_min_weight`: minimum order notional / portfolio_value
+      Defaults are zero (disabled) to preserve existing behavior.
     """
     normalized_order_type = validate_order_type(order_type or "MKT")
     try:
@@ -142,6 +151,18 @@ def build_rebalance_orders(
         pv_value = 0.0
     if pv_value <= 0:
         return []
+
+    try:
+        deadband_notional = float(deadband_min_notional or 0.0)
+    except (TypeError, ValueError):
+        deadband_notional = 0.0
+    deadband_notional = max(0.0, deadband_notional)
+
+    try:
+        deadband_weight = float(deadband_min_weight or 0.0)
+    except (TypeError, ValueError):
+        deadband_weight = 0.0
+    deadband_weight = max(0.0, deadband_weight)
 
     try:
         buffer_value = float(cash_buffer_ratio or 0.0)
@@ -189,13 +210,43 @@ def build_rebalance_orders(
                 sized = min_qty_value
             target_qty = float(sized) if target_weight >= 0 else float(-sized)
 
-        delta_qty = target_qty - current_qty
-        if abs(delta_qty) <= epsilon:
+        raw_delta_qty = target_qty - current_qty
+        if abs(raw_delta_qty) <= epsilon:
             continue
+
+        # Keep the order delta monotonic towards target:
+        # - never exceed the requested delta
+        # - ignore sub-lot residuals
+        # This mirrors Lean's lot-size handling for target deltas.
+        tradable_lots = int(math.floor((abs(raw_delta_qty) + epsilon) / float(lot)))
+        if tradable_lots <= 0:
+            continue
+        delta_qty = float(tradable_lots * lot)
+        if raw_delta_qty < 0:
+            delta_qty = -delta_qty
+
         side = "BUY" if delta_qty > 0 else "SELL"
         quantity = abs(delta_qty)
         if quantity <= epsilon:
             continue
+
+        order_notional = None
+        order_weight = None
+        if deadband_notional > epsilon or deadband_weight > epsilon:
+            price = price_map.get(symbol)
+            if price is not None:
+                try:
+                    price_value = float(price)
+                except (TypeError, ValueError):
+                    price_value = 0.0
+                if price_value > 0:
+                    order_notional = quantity * price_value
+                    order_weight = order_notional / pv_value if pv_value > 0 else 0.0
+                    if deadband_notional > epsilon and order_notional + epsilon < deadband_notional:
+                        continue
+                    if deadband_weight > epsilon and order_weight + epsilon < deadband_weight:
+                        continue
+
         orders.append(
             {
                 "symbol": symbol,
@@ -208,6 +259,9 @@ def build_rebalance_orders(
                 "target_qty": target_qty,
                 "current_qty": current_qty,
                 "delta_qty": delta_qty,
+                "raw_delta_qty": raw_delta_qty,
+                "order_notional": order_notional,
+                "order_weight": order_weight,
             }
         )
 

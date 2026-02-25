@@ -1,0 +1,11 @@
+[Unit]
+Description=Run StockLean IB Gateway Watchdog
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+AccuracySec=10s
+Unit=stocklean-ibgateway-watchdog.service
+
+[Install]
+WantedBy=timers.target

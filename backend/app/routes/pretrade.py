@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import math
+import time
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 
@@ -74,6 +75,15 @@ def _pretrade_lock_active() -> bool:
     if lock._is_stale(meta):
         return False
     if not lock._owner_alive(meta):
+        return False
+    heartbeat_raw = meta.get("heartbeat_at") or meta.get("acquired_at") or "0"
+    try:
+        heartbeat_at = float(heartbeat_raw)
+    except ValueError:
+        return False
+    interval = max(1, lock._resolve_heartbeat_interval())
+    max_age_seconds = max(90, interval * 3)
+    if (time.time() - heartbeat_at) > max_age_seconds:
         return False
     return True
 

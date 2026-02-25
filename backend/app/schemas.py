@@ -1467,6 +1467,7 @@ class PreTradeTelegramTestOut(BaseModel):
 class IBSettingsUpdate(BaseModel):
     host: str | None = None
     port: int | None = None
+    workstation_type: str | None = None
     client_id: int | None = None
     account_id: str | None = None
     mode: str | None = None
@@ -1479,6 +1480,7 @@ class IBSettingsOut(BaseModel):
     id: int
     host: str
     port: int
+    workstation_type: str
     client_id: int
     account_id: str | None
     mode: str
@@ -1518,6 +1520,7 @@ class IBStreamSnapshotOut(BaseModel):
 class IBBridgeStatusOut(BaseModel):
     status: str | None = None
     stale: bool = False
+    stale_reasons: list[str] = Field(default_factory=list)
     last_heartbeat: str | None = None
     updated_at: str | None = None
     last_error: str | None = None
@@ -1532,7 +1535,7 @@ class IBBridgeRefreshOut(BaseModel):
 
 
 class IBAccountSummaryOut(BaseModel):
-    items: dict[str, float | str | None] = Field(default_factory=dict)
+    items: dict[str, Any] = Field(default_factory=dict)
     refreshed_at: datetime | None = None
     source: str | None = None
     stale: bool = False
@@ -1561,6 +1564,8 @@ class IBAccountPositionsOut(BaseModel):
 class TradeSettingsOut(BaseModel):
     id: int
     risk_defaults: dict | None = None
+    deadband_min_notional: float = 0.0
+    deadband_min_weight: float = 0.0
     execution_data_source: str | None = None
     auto_recovery: dict | None = None
     created_at: datetime
@@ -1593,6 +1598,8 @@ class TradeSettingsOut(BaseModel):
 
 class TradeSettingsUpdate(BaseModel):
     risk_defaults: dict | None = None
+    deadband_min_notional: float | None = Field(default=None, ge=0)
+    deadband_min_weight: float | None = Field(default=None, ge=0)
     execution_data_source: str | None = None
     auto_recovery: dict | None = None
 
@@ -1872,6 +1879,8 @@ class TradeRunCreate(BaseModel):
     mode: str = "paper"
     orders: list[TradeOrderCreate] = []
     live_confirm_token: str | None = None
+    deadband_min_notional: float | None = Field(default=None, ge=0)
+    deadband_min_weight: float | None = Field(default=None, ge=0)
     require_market_health: bool = True
     health_min_success_ratio: float = 1.0
     health_fallback_history: bool = True
@@ -1907,6 +1916,7 @@ class TradeRunExecuteRequest(BaseModel):
     dry_run: bool = False
     force: bool = False
     live_confirm_token: str | None = None
+    risk_off_drill: bool = False
 
 
 class TradeRunActionRequest(BaseModel):
@@ -2009,6 +2019,7 @@ class TradeRunDetailOut(BaseModel):
     orders: list[TradeOrderOut]
     fills: list[TradeFillDetailOut]
     last_update_at: datetime | None
+    risk_audit: dict | None = None
 
 
 class TradeSymbolSummaryOut(BaseModel):

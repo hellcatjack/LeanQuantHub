@@ -71,6 +71,11 @@ _LEADER_HEAVY_TASK_INTERVAL_SECONDS = max(
     1,
     int(getattr(settings, "lean_bridge_watchdog_heavy_task_interval_seconds", 15) or 15),
 )
+_TRADE_GUARD_WATCHDOG_ENABLED = bool(getattr(settings, "trade_guard_watchdog_enabled", True))
+_TRADE_GUARD_WATCHDOG_INTERVAL_SECONDS = max(
+    5,
+    int(getattr(settings, "trade_guard_watchdog_interval_seconds", 60) or 60),
+)
 
 
 def _bridge_root() -> Path:
@@ -83,6 +88,39 @@ def _interval_due(*, last_run_mono: float, now_mono: float, interval_seconds: fl
     if last_run_mono <= 0:
         return True
     return (now_mono - last_run_mono) >= interval_seconds
+
+
+def _run_trade_guard_watchdog(session, *, modes: Iterable[str] = ("paper", "live")) -> int:
+    from app.models import Project
+    from app.services.trade_guard import evaluate_intraday_guard, load_guard_ib_snapshot
+
+    scanned = 0
+    normalized_modes = [str(mode).strip().lower() for mode in modes if str(mode).strip()]
+    if not normalized_modes:
+        normalized_modes = ["paper", "live"]
+    project_ids = [int(row[0]) for row in session.query(Project.id).all()]
+    ib_snapshot_by_mode: dict[str, dict] = {}
+    for project_id in project_ids:
+        for mode in normalized_modes:
+            ib_snapshot = ib_snapshot_by_mode.get(mode)
+            if ib_snapshot is None:
+                try:
+                    loaded = load_guard_ib_snapshot(session, mode=mode)
+                except Exception:
+                    loaded = {}
+                ib_snapshot = loaded if isinstance(loaded, dict) else {}
+                ib_snapshot_by_mode[mode] = ib_snapshot
+            try:
+                evaluate_intraday_guard(
+                    session,
+                    project_id=project_id,
+                    mode=mode,
+                    ib_snapshot=ib_snapshot,
+                )
+                scanned += 1
+            except Exception:
+                continue
+    return scanned
 
 
 def _state_path() -> Path:
@@ -381,6 +419,7 @@ def start_leader_watchdog(session_factory) -> None:
         )
 
         last_heavy_task_run_mono = 0.0
+        last_trade_guard_run_mono = 0.0
         while not _LEADER_STOP.wait(_LEADER_CHECK_SECONDS):
             try:
                 loop_now_mono = time.monotonic()
@@ -388,6 +427,11 @@ def start_leader_watchdog(session_factory) -> None:
                     last_run_mono=last_heavy_task_run_mono,
                     now_mono=loop_now_mono,
                     interval_seconds=float(_LEADER_HEAVY_TASK_INTERVAL_SECONDS),
+                )
+                run_trade_guard_scan = _TRADE_GUARD_WATCHDOG_ENABLED and _interval_due(
+                    last_run_mono=last_trade_guard_run_mono,
+                    now_mono=loop_now_mono,
+                    interval_seconds=float(_TRADE_GUARD_WATCHDOG_INTERVAL_SECONDS),
                 )
                 with session_factory() as session:
                     settings_row = get_or_create_ib_settings(session)
@@ -397,6 +441,8 @@ def start_leader_watchdog(session_factory) -> None:
                     retry_pending_direct_orders(session, mode=mode, limit=200)
                     reconcile_active_direct_orders(session, bridge_root=resolve_bridge_root(), mode=mode)
                     ingest_active_trade_order_events(session, limit=1500)
+                    if run_trade_guard_scan:
+                        _run_trade_guard_watchdog(session, modes=("paper", "live"))
                     if run_heavy_tasks:
                         # Reap leases and low-confidence reconciliation are expensive scans.
                         # Run them less frequently so status-updating hot path can stay fast.
@@ -405,6 +451,8 @@ def start_leader_watchdog(session_factory) -> None:
                         reconcile_low_confidence_terminal_runs(session, limit_runs=30, order_scan_limit=1500)
                 if run_heavy_tasks:
                     last_heavy_task_run_mono = loop_now_mono
+                if run_trade_guard_scan:
+                    last_trade_guard_run_mono = loop_now_mono
             except Exception:
                 continue
 

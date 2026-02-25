@@ -16,7 +16,11 @@ const PipelineLabel = () => {
 
 const TradeStatusLabel = () => {
   const { t } = useI18n();
-  return React.createElement("span", null, t("trade.statusLabel"));
+  return React.createElement(
+    "span",
+    null,
+    t("trade.statusLabel", { system: t("data.ib.workstationTypeTws") })
+  );
 };
 
 describe("LiveTradePage", () => {
@@ -101,7 +105,7 @@ describe("LiveTradePage", () => {
     expect(html).toContain("Pipeline");
   });
 
-  it("renders TWS status label translation", () => {
+  it("renders status label translation with system name", () => {
     const html = ReactDOMServer.renderToString(
       React.createElement(
         I18nProvider,

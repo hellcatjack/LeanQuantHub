@@ -52,8 +52,20 @@ npm run build
 
 # 部署 systemd
 cp deploy/systemd/*.service ~/.config/systemd/user/
+cp deploy/systemd/*.timer ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user restart stocklean-backend stocklean-frontend
+```
+
+可选：在 `~/.config/stocklean/ibgateway.env` 覆盖 Gateway 参数（端口、版本、看门狗阈值等）。
+注意：若机器已使用系统级 `/etc/systemd/system/ibgateway.service`，不要再启用用户级 `stocklean-ibgateway.service`，两者只能保留一个。
+当前主机约定：使用用户级 `stocklean-ibgateway.service`（`system` 级 `ibgateway.service` 保持 `disabled/inactive`）。
+
+Gateway 管理命令（用户级）：
+```bash
+systemctl --user restart stocklean-ibgateway.service
+systemctl --user status stocklean-ibgateway.service
+systemctl --user status stocklean-ibgateway-watchdog.timer
 ```
 
 默认前端：http://<host>:8081  

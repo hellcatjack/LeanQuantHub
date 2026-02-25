@@ -51,6 +51,17 @@ def test_lean_mode_sizes_intent_orders_before_risk_gate(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         trade_executor,
+        "get_account_positions",
+        lambda _session, *, mode, force_refresh=False: {
+            "items": [],
+            "stale": False,
+            "source_detail": "ib_holdings_ibapi_fallback",
+            "refreshed_at": "2026-02-14T00:00:00Z",
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        trade_executor,
         "fetch_account_summary",
         lambda *_a, **_k: {"NetLiquidation": 10000, "cash_available": 10000},
         raising=False,

@@ -92,7 +92,8 @@ def test_apply_execution_events_rejects_invalid_tag(tmp_path):
 
         result = apply_execution_events(events, session=session)
 
-        assert result["skipped_invalid_tag"] == 1
+        assert result["skipped_invalid_tag"] == 0
+        assert result["skipped_not_found"] == 1
         order = session.query(TradeOrder).filter(TradeOrder.ib_order_id == 1).first()
         assert order is None
     finally:

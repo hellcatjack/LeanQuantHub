@@ -14,7 +14,7 @@ from app.models import PitFundamentalJob, PitWeeklyJob
 from app.services.audit_log import record_audit
 from app.services.alpha_rate import alpha_rate_config_path, write_alpha_rate_config
 from app.services.job_lock import JobLock
-from app.services import universe_exclude
+from app.services import trading_calendar, universe_exclude
 
 
 FUNDAMENTAL_CANCEL_EXIT_CODE = 130
@@ -40,6 +40,37 @@ def _resolve_output_dir(params: dict[str, Any]) -> str | None:
     return None
 
 
+def _resolve_latest_trading_day_end(params: dict[str, Any]) -> str | None:
+    data_root = _resolve_data_root(params)
+    if not data_root:
+        return None
+    adjusted_dir = data_root / "curated_adjusted"
+    if not adjusted_dir.exists():
+        return None
+    benchmark = str(params.get("benchmark") or "SPY").strip().upper() or "SPY"
+    vendor_raw = str(params.get("vendor_preference") or "Alpha").strip()
+    vendor_preference = [item.strip() for item in vendor_raw.split(",") if item.strip()]
+    vendor_preference = [item for item in vendor_preference if item.upper() == "ALPHA"] or ["Alpha"]
+    calendar_override = str(params.get("calendar_source") or "").strip().lower() or None
+    try:
+        days, _info = trading_calendar.load_trading_days(
+            data_root,
+            adjusted_dir,
+            benchmark,
+            vendor_preference,
+            source_override=calendar_override,
+        )
+    except Exception:
+        return None
+    if not days:
+        return None
+    utc_today = datetime.utcnow().date()
+    eligible = [day for day in days if day <= utc_today]
+    if not eligible:
+        return None
+    return eligible[-1].isoformat()
+
+
 def _build_command(params: dict[str, Any], output_dir: str | None) -> list[str]:
     script_path = _project_root() / "scripts" / "build_pit_weekly_snapshots.py"
     cmd = [sys.executable, str(script_path)]
@@ -57,6 +88,8 @@ def _build_command(params: dict[str, Any], output_dir: str | None) -> list[str]:
     if start:
         cmd.extend(["--start", start])
     end = str(params.get("end") or "").strip()
+    if not end:
+        end = _resolve_latest_trading_day_end(params) or ""
     if end:
         cmd.extend(["--end", end])
 
@@ -193,6 +226,8 @@ def _build_fundamental_command(params: dict[str, Any], output_dir: str | None) -
     if start:
         cmd.extend(["--start", start])
     end = str(params.get("end") or "").strip()
+    if not end:
+        end = _resolve_latest_trading_day_end(params) or ""
     if end:
         cmd.extend(["--end", end])
 
@@ -489,6 +524,13 @@ def run_pit_weekly_job(job_id: int) -> None:
             return
 
         params = dict(job.params or {})
+        if not str(params.get("end") or "").strip():
+            inferred_end = _resolve_latest_trading_day_end(params)
+            if inferred_end:
+                params["end"] = inferred_end
+                params["end_auto_inferred"] = True
+                job.params = params
+                session.commit()
         log_dir = Path(settings.artifact_root) / f"pit_weekly_job_{job_id}"
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / "run.log"
@@ -683,6 +725,13 @@ def run_pit_fundamental_job(job_id: int) -> None:
             return
 
         params = dict(job.params or {})
+        if not str(params.get("end") or "").strip():
+            inferred_end = _resolve_latest_trading_day_end(params)
+            if inferred_end:
+                params["end"] = inferred_end
+                params["end_auto_inferred"] = True
+                job.params = params
+                session.commit()
         build_pit_fundamentals = params.get("build_pit_fundamentals")
         if build_pit_fundamentals is None:
             build_pit_fundamentals = True

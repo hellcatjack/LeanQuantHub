@@ -7,11 +7,33 @@ import csv
 from typing import Any
 
 from app.core.config import settings
-from app.models import DecisionSnapshot, TradeFill, TradeOrder, TradeRun
+from app.models import DecisionSnapshot, TradeFill, TradeGuardState, TradeOrder, TradeRun
+from app.services.ib_account import fetch_account_summary, get_account_positions_cached
 from app.services.lean_bridge_paths import resolve_bridge_root
 from app.services.lean_bridge_reader import read_positions, read_quotes
 from app.services.realized_pnl import compute_realized_pnl
 from app.services.realized_pnl_baseline import ensure_positions_baseline
+
+_PRECISE_POSITIONS_SOURCE_DETAILS = {
+    "ib_holdings",
+    "ib_holdings_empty",
+    "ib_holdings_ibapi_fallback",
+}
+
+
+def _load_precise_positions_payload(session, *, mode: str) -> dict[str, Any]:
+    payload = get_account_positions_cached(
+        session,
+        mode=str(mode or "").strip().lower() or "paper",
+        force_refresh=False,
+    )
+    if not isinstance(payload, dict):
+        raise ValueError("current_positions_not_precise")
+    stale = bool(payload.get("stale", True))
+    source_detail = str(payload.get("source_detail") or "").strip()
+    if stale or source_detail not in _PRECISE_POSITIONS_SOURCE_DETAILS:
+        raise ValueError("current_positions_not_precise")
+    return payload
 
 
 def _read_snapshot_weights(items_path: str | None) -> dict[str, float]:
@@ -134,6 +156,65 @@ def _max_datetime(values: list[datetime | None]) -> datetime | None:
     return max(filtered) if filtered else None
 
 
+def _build_risk_audit_payload(session, run: TradeRun) -> dict[str, Any] | None:
+    params = run.params if isinstance(run.params, dict) else {}
+    guard_precheck = params.get("guard_precheck") if isinstance(params.get("guard_precheck"), dict) else None
+    guard_blocked = params.get("guard_blocked") if isinstance(params.get("guard_blocked"), dict) else None
+
+    primary = guard_blocked if isinstance(guard_blocked, dict) else guard_precheck
+    if not isinstance(primary, dict):
+        return None
+
+    metrics = primary.get("metrics") if isinstance(primary.get("metrics"), dict) else {}
+    thresholds = primary.get("thresholds") if isinstance(primary.get("thresholds"), dict) else {}
+    trigger_details = primary.get("trigger_details") if isinstance(primary.get("trigger_details"), list) else []
+    reason = primary.get("reason")
+
+    cashflow_adjustment = primary.get("cashflow_adjustment")
+    if cashflow_adjustment is None and isinstance(metrics, dict):
+        cashflow_adjustment = metrics.get("cashflow_adjustment")
+
+    pnl_total_by_currency = metrics.get("pnl_total_by_currency") if isinstance(metrics, dict) else None
+    if not isinstance(pnl_total_by_currency, dict):
+        pnl_total_by_currency = None
+
+    state_row = (
+        session.query(TradeGuardState)
+        .filter(
+            TradeGuardState.project_id == run.project_id,
+            TradeGuardState.mode == run.mode,
+        )
+        .order_by(TradeGuardState.trade_date.desc(), TradeGuardState.id.desc())
+        .first()
+    )
+    state_payload = None
+    if state_row is not None:
+        state_payload = {
+            "status": state_row.status,
+            "trade_date": state_row.trade_date.isoformat() if state_row.trade_date else None,
+            "valuation_source": state_row.valuation_source,
+            "updated_at": state_row.updated_at.isoformat() if state_row.updated_at else None,
+            "halt_reason": state_row.halt_reason if isinstance(state_row.halt_reason, dict) else state_row.halt_reason,
+        }
+
+    return {
+        "source": "guard_blocked" if guard_blocked is primary else "guard_precheck",
+        "status": primary.get("status"),
+        "equity_source": primary.get("equity_source") or metrics.get("equity_source"),
+        "cashflow_adjustment": cashflow_adjustment,
+        "pnl_total_by_currency": pnl_total_by_currency,
+        "dd_all": primary.get("dd_all") if primary.get("dd_all") is not None else metrics.get("dd_all"),
+        "dd_52w": primary.get("dd_52w") if primary.get("dd_52w") is not None else metrics.get("dd_52w"),
+        "dd_lock_state": (
+            primary.get("dd_lock_state") if primary.get("dd_lock_state") is not None else metrics.get("dd_lock_state")
+        ),
+        "reason": reason,
+        "trigger_details": trigger_details,
+        "thresholds": thresholds,
+        "guard_state": state_payload,
+    }
+
+
 def build_trade_run_detail(session, run_id: int, *, limit: int = 200, offset: int = 0):
     run = session.get(TradeRun, run_id)
     if not run:
@@ -211,7 +292,8 @@ def build_trade_run_detail(session, run_id: int, *, limit: int = 200, offset: in
         + [order.updated_at for order in orders]
         + [fill.updated_at for fill in fills]
     )
-    return run, order_payloads, fill_payloads, last_update_at
+    risk_audit = _build_risk_audit_payload(session, run)
+    return run, order_payloads, fill_payloads, last_update_at, risk_audit
 
 
 def build_symbol_summary(session, run_id: int) -> list[dict[str, Any]]:
@@ -242,13 +324,32 @@ def build_symbol_summary(session, run_id: int) -> list[dict[str, Any]]:
         portfolio_value = float(params.get("portfolio_value") or 0.0)
     except (TypeError, ValueError):
         portfolio_value = 0.0
+    # Keep weight math aligned with live account holdings view:
+    # prefer latest NetLiquidation over historical run.params portfolio value.
+    try:
+        account_summary = fetch_account_summary(session)
+    except Exception:
+        account_summary = {}
+    if isinstance(account_summary, dict):
+        net_liq = account_summary.get("NetLiquidation")
+        if net_liq is not None:
+            try:
+                net_liq_value = float(net_liq)
+            except (TypeError, ValueError):
+                net_liq_value = 0.0
+            if net_liq_value > 0:
+                portfolio_value = net_liq_value
 
-    positions_payload = read_positions(resolve_bridge_root())
+    positions_payload = _load_precise_positions_payload(
+        session,
+        mode=str(run.mode or "").strip().lower() or "paper",
+    )
     positions_items = (
         positions_payload.get("items") if isinstance(positions_payload.get("items"), list) else []
     )
     current_qty: dict[str, float] = {}
     current_market_value: dict[str, float] = {}
+    current_market_price: dict[str, float] = {}
     for item in positions_items:
         if not isinstance(item, dict):
             continue
@@ -285,6 +386,7 @@ def build_symbol_summary(session, run_id: int) -> list[dict[str, Any]]:
                 except (TypeError, ValueError):
                     market_price = None
                 if market_price is not None and market_price != 0:
+                    current_market_price[symbol] = market_price
                     current_market_value[symbol] = float(qty) * market_price
 
     totals_qty: dict[str, float] = defaultdict(float)
@@ -319,7 +421,6 @@ def build_symbol_summary(session, run_id: int) -> list[dict[str, Any]]:
         filled_value[symbol] += sign * qty * price
 
     symbols = sorted(set(list(weights.keys()) + list(totals_qty.keys()) + list(current_qty.keys())))
-    price_map = _build_price_map(symbols)
     summary: list[dict[str, Any]] = []
     for symbol in symbols:
         total_qty = totals_qty.get(symbol, 0.0)
@@ -333,12 +434,16 @@ def build_symbol_summary(session, run_id: int) -> list[dict[str, Any]]:
 
         qty_now = current_qty.get(symbol, 0.0)
         current_value = current_market_value.get(symbol)
-        if (current_value is None or abs(float(current_value)) <= 1e-12) and abs(float(qty_now)) > 1e-12:
-            px = price_map.get(symbol)
+        if current_value is None and abs(float(qty_now)) <= 1e-12:
+            current_value = 0.0
+        if current_value is None and abs(float(qty_now)) > 1e-12:
+            px = current_market_price.get(symbol)
             current_value = float(qty_now) * float(px) if px is not None and px > 0 else None
         current_weight = None
         if current_value is not None and portfolio_value > 0:
             current_weight = current_value / portfolio_value
+        elif abs(float(qty_now)) <= 1e-12 and portfolio_value > 0:
+            current_weight = 0.0
         delta_value = None
         delta_weight = None
         if target_value is not None and current_value is not None:

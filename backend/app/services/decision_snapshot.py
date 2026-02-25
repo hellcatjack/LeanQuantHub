@@ -3,9 +3,10 @@ from __future__ import annotations
 import csv
 import json
 import os
+import re
 import subprocess
 import sys
-from datetime import datetime
+from datetime import date, datetime
 import math
 from numbers import Number
 from pathlib import Path
@@ -22,6 +23,7 @@ from app.services.project_symbols import collect_project_theme_map
 
 
 DECISION_ACTIVE_STATUSES = {"queued", "running"}
+_SNAPSHOT_STALE_WARNING_RE = re.compile(r"^snapshot_stale:(?P<age>-?\d+)d>(?P<threshold>\d+)d$")
 
 
 def _project_root() -> Path:
@@ -131,14 +133,12 @@ def _resolve_pit_rebalance_end(snapshot_date: str | None) -> str | None:
     return sorted(set(rebalance_dates))[-1]
 
 
-def _resolve_latest_pit_snapshot() -> str | None:
+def _iter_pit_snapshot_dates() -> list[str]:
     pit_dir = _resolve_data_root() / "universe" / "pit_weekly"
     if not pit_dir.exists():
-        return None
-    # pit_weekly may contain future-dated snapshots (calendar pre-generated). Decision snapshot
-    # should never default to a date beyond today because price coverage cannot exist in the future.
+        return []
     utc_today = datetime.utcnow().date()
-    latest: str | None = None
+    snapshots: set[str] = set()
     for path in pit_dir.glob("pit_*.csv"):
         stem = path.stem
         parts = stem.split("_", 1)
@@ -153,10 +153,176 @@ def _resolve_latest_pit_snapshot() -> str | None:
             continue
         if parsed_date > utc_today:
             continue
-        parsed = parsed_date.isoformat()
-        if latest is None or parsed > latest:
-            latest = parsed
-    return latest
+        snapshots.add(parsed_date.isoformat())
+    return sorted(snapshots)
+
+
+def _resolve_latest_pit_snapshot() -> str | None:
+    snapshots = _iter_pit_snapshot_dates()
+    if not snapshots:
+        return None
+    return snapshots[-1]
+
+
+def _resolve_effective_pit_snapshot(snapshot_date: str | None) -> dict[str, Any]:
+    requested = _parse_date(snapshot_date) if snapshot_date else None
+    snapshots = _iter_pit_snapshot_dates()
+    latest = snapshots[-1] if snapshots else None
+    if not snapshots:
+        return {
+            "requested_snapshot_date": requested,
+            "effective_snapshot_date": None,
+            "latest_snapshot_date": None,
+            "fallback_used": requested is not None,
+            "fallback_reason": "pit_snapshot_unavailable",
+        }
+
+    if not requested:
+        return {
+            "requested_snapshot_date": None,
+            "effective_snapshot_date": latest,
+            "latest_snapshot_date": latest,
+            "fallback_used": False,
+            "fallback_reason": None,
+        }
+
+    if requested in snapshots:
+        return {
+            "requested_snapshot_date": requested,
+            "effective_snapshot_date": requested,
+            "latest_snapshot_date": latest,
+            "fallback_used": False,
+            "fallback_reason": None,
+        }
+
+    earlier = [value for value in snapshots if value <= requested]
+    if earlier:
+        return {
+            "requested_snapshot_date": requested,
+            "effective_snapshot_date": earlier[-1],
+            "latest_snapshot_date": latest,
+            "fallback_used": True,
+            "fallback_reason": "requested_snapshot_unavailable_use_previous",
+        }
+
+    return {
+        "requested_snapshot_date": requested,
+        "effective_snapshot_date": snapshots[0],
+        "latest_snapshot_date": latest,
+        "fallback_used": True,
+        "fallback_reason": "requested_snapshot_before_first_available",
+    }
+
+
+def _resolve_snapshot_stale_days() -> int:
+    raw = (os.getenv("DECISION_SNAPSHOT_STALE_DAYS") or "").strip()
+    try:
+        value = int(raw) if raw else 7
+    except (TypeError, ValueError):
+        value = 7
+    return max(1, value)
+
+
+def _snapshot_age_days(snapshot_date: str | None, *, today: date | None = None) -> int | None:
+    normalized = _parse_date(snapshot_date)
+    if not normalized:
+        return None
+    if today is None:
+        today = datetime.utcnow().date()
+    try:
+        snapshot_day = datetime.strptime(normalized, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+    return (today - snapshot_day).days
+
+
+def _coerce_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _collect_snapshot_warning_codes(summary: dict[str, Any] | None) -> list[str]:
+    if not isinstance(summary, dict):
+        return []
+    codes: list[str] = []
+    raw = summary.get("warnings")
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, str):
+                continue
+            code = item.strip()
+            if code and code not in codes:
+                codes.append(code)
+    if codes:
+        return codes
+
+    if summary.get("snapshot_fallback_used"):
+        fallback_reason = summary.get("snapshot_fallback_reason")
+        if isinstance(fallback_reason, str) and fallback_reason.strip():
+            code = fallback_reason.strip()
+            if code not in codes:
+                codes.append(code)
+
+    if summary.get("snapshot_stale_warning"):
+        age = _coerce_int(summary.get("snapshot_age_days"))
+        threshold = _coerce_int(summary.get("snapshot_stale_days_threshold"))
+        if age is not None and threshold is not None:
+            stale_code = f"snapshot_stale:{age}d>{threshold}d"
+        else:
+            stale_code = "snapshot_stale"
+        if stale_code not in codes:
+            codes.append(stale_code)
+    return codes
+
+
+def _format_snapshot_warning(code: str, summary: dict[str, Any]) -> str:
+    requested_raw = summary.get("requested_snapshot_date")
+    effective_raw = summary.get("effective_snapshot_date")
+    requested = _parse_date(requested_raw) if isinstance(requested_raw, str) else None
+    effective = _parse_date(effective_raw) if isinstance(effective_raw, str) else None
+    if code == "requested_snapshot_unavailable_use_previous":
+        if requested and effective and requested != effective:
+            return f"请求的PIT快照 {requested} 不可用，已自动回退到 {effective}。"
+        return "请求的PIT快照不可用，已自动回退到最近可用快照。"
+    if code == "requested_snapshot_before_first_available":
+        if requested and effective:
+            return f"请求日期 {requested} 早于最早可用PIT快照，已自动使用 {effective}。"
+        return "请求日期早于最早可用PIT快照，已自动使用最早快照。"
+    if code == "pit_snapshot_unavailable":
+        return "当前无可用PIT快照，请先完成PIT快照生成。"
+    if code.startswith("snapshot_stale"):
+        matched = _SNAPSHOT_STALE_WARNING_RE.match(code)
+        if matched:
+            age_days = _coerce_int(matched.group("age"))
+            threshold_days = _coerce_int(matched.group("threshold"))
+        else:
+            age_days = _coerce_int(summary.get("snapshot_age_days"))
+            threshold_days = _coerce_int(summary.get("snapshot_stale_days_threshold"))
+        if age_days is not None and threshold_days is not None:
+            return (
+                f"PIT快照时效告警：当前快照距今{age_days}天，"
+                f"超过阈值{threshold_days}天。"
+            )
+        return "PIT快照时效告警：当前快照已超过时效阈值。"
+    return code
+
+
+def build_snapshot_warning_message(summary: dict[str, Any] | None) -> str | None:
+    if not isinstance(summary, dict):
+        return None
+    warning_codes = _collect_snapshot_warning_codes(summary)
+    if not warning_codes:
+        return None
+    messages: list[str] = []
+    for code in warning_codes:
+        message = _format_snapshot_warning(code, summary)
+        if message and message not in messages:
+            messages.append(message)
+    if not messages:
+        return None
+    return "；".join(messages)
 
 
 def _coerce_bool(value: Any) -> bool | None:
@@ -260,6 +426,26 @@ def _apply_algorithm_params(weights_cfg: dict[str, Any], algo_params: dict[str, 
     if max_exposure not in (None, ""):
         risk_cfg["max_exposure"] = max_exposure
         weights_cfg["max_exposure"] = max_exposure
+    dynamic_exposure = _coerce_bool(algo_params.get("dynamic_exposure"))
+    if dynamic_exposure is not None:
+        risk_cfg["dynamic_exposure"] = dynamic_exposure
+        weights_cfg["dynamic_exposure"] = dynamic_exposure
+    drawdown_tiers = algo_params.get("drawdown_tiers")
+    if drawdown_tiers not in (None, ""):
+        risk_cfg["drawdown_tiers"] = drawdown_tiers
+        weights_cfg["drawdown_tiers"] = drawdown_tiers
+    drawdown_exposures = algo_params.get("drawdown_exposures")
+    if drawdown_exposures not in (None, ""):
+        risk_cfg["drawdown_exposures"] = drawdown_exposures
+        weights_cfg["drawdown_exposures"] = drawdown_exposures
+    drawdown_exposure_floor = algo_params.get("drawdown_exposure_floor")
+    if drawdown_exposure_floor not in (None, ""):
+        risk_cfg["drawdown_exposure_floor"] = drawdown_exposure_floor
+        weights_cfg["drawdown_exposure_floor"] = drawdown_exposure_floor
+    idle_allocation = algo_params.get("idle_allocation")
+    if isinstance(idle_allocation, str) and idle_allocation.strip():
+        risk_cfg["idle_allocation"] = idle_allocation.strip().lower()
+        weights_cfg["idle_allocation"] = idle_allocation.strip().lower()
     score_delay_days = algo_params.get("score_delay_days")
     if score_delay_days not in (None, ""):
         plugins["score_delay_days"] = score_delay_days
@@ -324,7 +510,7 @@ def _build_decision_configs(
     project_id: int,
     config: dict[str, Any],
     score_csv_path: str | None,
-    snapshot_date: str | None,
+    effective_snapshot_date: str | None,
     algo_params: dict[str, Any],
     output_dir: Path,
 ) -> tuple[Path, Path]:
@@ -343,11 +529,10 @@ def _build_decision_configs(
     # pipeline to emit weights without requiring rebalance-date prices to exist yet.
     weights_payload["allow_future_rebalance"] = True
     weights_payload["output_dir"] = str(output_dir)
-    effective_snapshot = snapshot_date or _resolve_latest_pit_snapshot()
-    if effective_snapshot:
-        weights_payload["backtest_start"] = effective_snapshot
-        pit_rebalance_end = _resolve_pit_rebalance_end(effective_snapshot)
-        weights_payload["backtest_end"] = pit_rebalance_end or effective_snapshot
+    if effective_snapshot_date:
+        weights_payload["backtest_start"] = effective_snapshot_date
+        pit_rebalance_end = _resolve_pit_rebalance_end(effective_snapshot_date)
+        weights_payload["backtest_end"] = pit_rebalance_end or effective_snapshot_date
 
     weights_payload = _apply_algorithm_params(weights_payload, algo_params)
 
@@ -403,6 +588,7 @@ def _build_decision_payload(
     pipeline_id: int | None,
     snapshot_date: str | None,
     algo_params: dict[str, Any],
+    algo_params_source: str,
     backtest_run_id: int | None,
     backtest_link_status: str | None,
     preview: bool,
@@ -427,6 +613,7 @@ def _build_decision_payload(
             "pipeline_id": pipeline_id,
             "snapshot_date": snapshot_date,
             "algorithm_parameters": algo_params,
+            "algorithm_parameters_source": algo_params_source,
             "backtest_run_id": backtest_run_id,
             "backtest_link_status": backtest_link_status,
         },
@@ -434,18 +621,52 @@ def _build_decision_payload(
 
 
 def _extract_algo_params(
-    pipeline: MLPipelineRun | None, override: dict[str, Any] | None
-) -> dict[str, Any]:
+    pipeline: MLPipelineRun | None,
+    override: dict[str, Any] | None,
+    backtest_run: BacktestRun | None,
+) -> tuple[dict[str, Any], str]:
     params: dict[str, Any] = {}
+    backtest_params: dict[str, Any] = {}
+    pipeline_params: dict[str, Any] = {}
+    override_params: dict[str, Any] = {}
+
+    if backtest_run and isinstance(backtest_run.params, dict):
+        algo = backtest_run.params.get("algorithm_parameters")
+        if isinstance(algo, dict):
+            backtest_params = dict(algo)
+        else:
+            backtest_cfg = backtest_run.params.get("backtest")
+            if isinstance(backtest_cfg, dict):
+                nested = backtest_cfg.get("algorithm_parameters")
+                if isinstance(nested, dict):
+                    backtest_params = dict(nested)
+
     if pipeline and isinstance(pipeline.params, dict):
         backtest = pipeline.params.get("backtest")
         if isinstance(backtest, dict):
             algo = backtest.get("algorithm_parameters")
             if isinstance(algo, dict):
-                params.update(algo)
+                pipeline_params = dict(algo)
     if isinstance(override, dict):
-        params.update(override)
-    return params
+        override_params = dict(override)
+
+    if backtest_params:
+        params.update(backtest_params)
+    if pipeline_params:
+        params.update(pipeline_params)
+    if override_params:
+        params.update(override_params)
+
+    if override_params:
+        source = "override"
+    elif pipeline_params:
+        source = "pipeline"
+    elif backtest_params:
+        source = "backtest_run"
+    else:
+        source = "empty"
+
+    return params, source
 
 
 def _resolve_score_csv(
@@ -594,9 +815,16 @@ def generate_decision_snapshot(
 
     train_job = session.get(MLTrainJob, train_job_id) if train_job_id else None
     pipeline = session.get(MLPipelineRun, pipeline_id) if pipeline_id else None
+    backtest_run = session.get(BacktestRun, backtest_run_id) if backtest_run_id else None
 
-    algo_params = _extract_algo_params(pipeline, algorithm_parameters)
+    algo_params, algo_params_source = _extract_algo_params(
+        pipeline,
+        algorithm_parameters,
+        backtest_run,
+    )
     score_csv_path = _resolve_score_csv(train_job, algo_params)
+    snapshot_resolution = _resolve_effective_pit_snapshot(snapshot_date)
+    effective_snapshot = snapshot_resolution.get("effective_snapshot_date")
 
     payload = _build_decision_payload(
         project_id,
@@ -604,6 +832,7 @@ def generate_decision_snapshot(
         pipeline_id,
         snapshot_date,
         algo_params,
+        algo_params_source,
         backtest_run_id,
         backtest_link_status,
         preview,
@@ -616,7 +845,7 @@ def generate_decision_snapshot(
         project_id,
         config,
         score_csv_path,
-        snapshot_date,
+        effective_snapshot,
         algo_params,
         output_dir,
     )
@@ -625,9 +854,8 @@ def generate_decision_snapshot(
     if not summary:
         raise RuntimeError("decision_snapshot_failed")
 
-    effective_snapshot = snapshot_date or _resolve_latest_pit_snapshot()
     snapshot_rows = _read_csv_rows(Path(summary.get("snapshot_summary_path") or ""))
-    snapshot_row = _select_snapshot_row(snapshot_rows, snapshot_date or effective_snapshot)
+    snapshot_row = _select_snapshot_row(snapshot_rows, effective_snapshot)
     if not snapshot_row:
         snapshot_row = {
             "snapshot_date": effective_snapshot or "",
@@ -644,6 +872,17 @@ def generate_decision_snapshot(
             "weights_sum": "",
             "turnover_scale": "",
             "max_exposure": "",
+            "effective_exposure_cap": "",
+            "exposure_cap_source": "",
+            "drawdown_all": "",
+            "drawdown_52w": "",
+            "drawdown_current": "",
+            "drawdown_tier_threshold": "",
+            "drawdown_tier_exposure": "",
+            "idle_allocation_mode": "",
+            "idle_symbol": "",
+            "idle_weight": "",
+            "risk_off_selection": "",
         }
     snapshot_row = _normalize_snapshot_row(snapshot_row, effective_snapshot) or snapshot_row
 
@@ -654,6 +893,22 @@ def generate_decision_snapshot(
     items = _build_items(weights_rows, theme_map, listing_meta, snapshot_row)
     filters = _build_filters(filters_rows, theme_map, listing_meta, snapshot_row)
     filter_counts = _summarize_filters(filters)
+    effective_summary_snapshot = _parse_date(snapshot_row.get("snapshot_date")) or effective_snapshot
+    snapshot_age_days = _snapshot_age_days(effective_summary_snapshot)
+    snapshot_stale_days = _resolve_snapshot_stale_days()
+    snapshot_is_stale = (
+        snapshot_age_days is not None
+        and snapshot_age_days > snapshot_stale_days
+    )
+    warnings: list[str] = []
+    fallback_used = bool(snapshot_resolution.get("fallback_used"))
+    fallback_reason = snapshot_resolution.get("fallback_reason")
+    if fallback_used and isinstance(fallback_reason, str) and fallback_reason:
+        warnings.append(fallback_reason)
+    if snapshot_is_stale and snapshot_age_days is not None:
+        warnings.append(
+            f"snapshot_stale:{snapshot_age_days}d>{snapshot_stale_days}d"
+        )
 
     decision_items_path = root / "decision_items.csv"
     decision_filters_path = root / "filter_reasons.csv"
@@ -720,6 +975,16 @@ def generate_decision_snapshot(
         "backtest_link_status": backtest_link_status or "missing",
         "score_csv_path": score_csv_path,
         "algorithm_parameters": algo_params,
+        "algorithm_parameters_source": algo_params_source,
+        "requested_snapshot_date": snapshot_resolution.get("requested_snapshot_date"),
+        "effective_snapshot_date": effective_summary_snapshot,
+        "snapshot_latest_available": snapshot_resolution.get("latest_snapshot_date"),
+        "snapshot_fallback_used": fallback_used,
+        "snapshot_fallback_reason": fallback_reason,
+        "snapshot_age_days": snapshot_age_days,
+        "snapshot_stale_days_threshold": snapshot_stale_days,
+        "snapshot_stale_warning": snapshot_is_stale,
+        "warnings": warnings,
         "snapshot_date": snapshot_row.get("snapshot_date"),
         "rebalance_date": snapshot_row.get("rebalance_date"),
         "as_of_time": f"{snapshot_row.get('snapshot_date') or ''} close",
@@ -736,6 +1001,17 @@ def generate_decision_snapshot(
         "weights_sum": snapshot_row.get("weights_sum"),
         "turnover_scale": snapshot_row.get("turnover_scale"),
         "max_exposure": snapshot_row.get("max_exposure"),
+        "effective_exposure_cap": snapshot_row.get("effective_exposure_cap"),
+        "exposure_cap_source": snapshot_row.get("exposure_cap_source"),
+        "drawdown_all": snapshot_row.get("drawdown_all"),
+        "drawdown_52w": snapshot_row.get("drawdown_52w"),
+        "drawdown_current": snapshot_row.get("drawdown_current"),
+        "drawdown_tier_threshold": snapshot_row.get("drawdown_tier_threshold"),
+        "drawdown_tier_exposure": snapshot_row.get("drawdown_tier_exposure"),
+        "idle_allocation_mode": snapshot_row.get("idle_allocation_mode"),
+        "idle_symbol": snapshot_row.get("idle_symbol"),
+        "idle_weight": snapshot_row.get("idle_weight"),
+        "risk_off_selection": snapshot_row.get("risk_off_selection"),
         "filter_counts": filter_counts,
         "theme_weights": theme_weights,
         "source_summary": summary,
@@ -800,12 +1076,16 @@ def run_decision_snapshot_task(snapshot_id: int) -> None:
         )
         summary = _sanitize_json(result.get("summary"))
         snapshot.status = "success"
+        result_params = _sanitize_json(result.get("params") or {})
+        existing_params = snapshot.params if isinstance(snapshot.params, dict) else {}
+        snapshot.params = _sanitize_json({**existing_params, **result_params})
         snapshot.summary = summary
         snapshot.artifact_dir = result.get("artifact_dir")
         snapshot.summary_path = result.get("summary_path")
         snapshot.items_path = result.get("items_path")
         snapshot.filters_path = result.get("filters_path")
         snapshot.log_path = result.get("log_path")
+        snapshot.message = build_snapshot_warning_message(summary)
         snapshot.snapshot_date = (result.get("summary") or {}).get("snapshot_date")
         snapshot.ended_at = datetime.utcnow()
         session.commit()

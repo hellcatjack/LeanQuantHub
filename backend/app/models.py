@@ -551,6 +551,7 @@ class IBSettings(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     host: Mapped[str] = mapped_column(String(128), default="127.0.0.1")
     port: Mapped[int] = mapped_column(Integer, default=7497)
+    workstation_type: Mapped[str] = mapped_column(String(16), default="tws")
     client_id: Mapped[int] = mapped_column(Integer, default=1)
     account_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     mode: Mapped[str] = mapped_column(String(16), default="paper")

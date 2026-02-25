@@ -508,3 +508,319 @@ def test_reconcile_orders_with_ib_completed_status_skips_when_fill_exists(monkey
         assert refreshed.status == "SUBMITTED"
     finally:
         session.close()
+
+
+def test_reconcile_direct_orders_with_ib_executions_prefers_reused_session(monkeypatch):
+    engine = _make_engine()
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    session = Session()
+    try:
+        order = create_trade_order(
+            session,
+            {
+                "client_order_id": "manual_9_1770999999999_x3",
+                "symbol": "AMSC",
+                "side": "SELL",
+                "quantity": 9,
+                "order_type": "LMT",
+                "limit_price": 31.9,
+                "params": {"source": "manual"},
+            },
+        ).order
+        session.commit()
+        update_trade_order_status(session, order, {"status": "SUBMITTED"})
+        order.ib_order_id = 5712
+        session.commit()
+
+        class _Settings:
+            host = "127.0.0.1"
+            port = 4002
+
+        class _SharedSession:
+            def __init__(self):
+                self.calls = 0
+
+            def fetch_executions(self, *, start_time_utc, timeout_seconds: float):
+                self.calls += 1
+                return [
+                    ib_execution_backfill._IBExecutionRow(
+                        order_id=5712,
+                        symbol="AMSC",
+                        side="SLD",
+                        shares=9.0,
+                        price=31.97,
+                        exec_id="exec-reuse-001",
+                        time_raw="20260213 09:23:15",
+                    )
+                ]
+
+        shared = _SharedSession()
+        monkeypatch.setattr(ib_execution_backfill, "get_or_create_ib_settings", lambda _session: _Settings())
+        monkeypatch.setattr(
+            ib_execution_backfill,
+            "get_ib_read_session",
+            lambda *, mode, host, port, client_id_hint=None: shared,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            ib_execution_backfill,
+            "_fetch_ib_executions",
+            lambda **_kwargs: (_ for _ in ()).throw(AssertionError("transient_fetch_executions_should_not_run")),
+            raising=False,
+        )
+
+        summary = ib_execution_backfill.reconcile_direct_orders_with_ib_executions(
+            session,
+            limit=50,
+            min_query_interval_seconds=0,
+            lookback_hours=12,
+        )
+        session.expire_all()
+        refreshed = session.get(type(order), order.id)
+
+        assert shared.calls == 1
+        assert summary["processed"] == 1
+        assert refreshed is not None
+        assert refreshed.status == "FILLED"
+    finally:
+        session.close()
+
+
+def test_reconcile_orders_with_ib_completed_status_prefers_reused_session(monkeypatch):
+    engine = _make_engine()
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    session = Session()
+    try:
+        run = TradeRun(project_id=1, mode="paper", status="running", params={"mode": "paper"})
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        order = create_trade_order(
+            session,
+            {
+                "client_order_id": "oi_1108_88",
+                "symbol": "GSAT",
+                "side": "BUY",
+                "quantity": 5,
+                "order_type": "MKT",
+                "params": {"mode": "paper"},
+            },
+            run_id=run.id,
+        ).order
+        session.commit()
+        update_trade_order_status(session, order, {"status": "SUBMITTED"})
+        order.ib_order_id = 7801
+        session.commit()
+
+        class _Settings:
+            host = "127.0.0.1"
+            port = 4002
+
+        class _SharedSession:
+            def __init__(self):
+                self.calls = 0
+
+            def fetch_completed_orders(self, *, timeout_seconds: float):
+                self.calls += 1
+                return [
+                    ib_execution_backfill._IBCompletedOrderRow(
+                        order_id=7801,
+                        perm_id=250000001,
+                        symbol="GSAT",
+                        side="BUY",
+                        status="CANCELED",
+                        completed_time_raw="20260213 10:16:27 America/New_York",
+                        order_ref="oi_1108_88",
+                        completed_status="Cancelled by Trader",
+                    )
+                ]
+
+        shared = _SharedSession()
+        monkeypatch.setattr(ib_execution_backfill, "get_or_create_ib_settings", lambda _session: _Settings())
+        monkeypatch.setattr(
+            ib_execution_backfill,
+            "get_ib_read_session",
+            lambda *, mode, host, port, client_id_hint=None: shared,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            ib_execution_backfill,
+            "_fetch_ib_completed_orders",
+            lambda **_kwargs: (_ for _ in ()).throw(
+                AssertionError("transient_fetch_completed_orders_should_not_run")
+            ),
+            raising=False,
+        )
+
+        summary = ib_execution_backfill.reconcile_orders_with_ib_completed_status(
+            session,
+            limit=200,
+            min_query_interval_seconds=0,
+            lookback_hours=12,
+        )
+        session.expire_all()
+        refreshed = session.get(type(order), order.id)
+
+        assert shared.calls == 1
+        assert summary["terminalized"] == 1
+        assert refreshed is not None
+        assert refreshed.status == "CANCELED"
+    finally:
+        session.close()
+
+
+def test_reconcile_direct_orders_skips_transient_probe_when_circuit_open(monkeypatch):
+    engine = _make_engine()
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    session = Session()
+    try:
+        order = create_trade_order(
+            session,
+            {
+                "client_order_id": "manual_11_1771000000000_x1",
+                "symbol": "AMSC",
+                "side": "SELL",
+                "quantity": 1,
+                "order_type": "MKT",
+                "params": {"source": "manual"},
+            },
+        ).order
+        session.commit()
+        update_trade_order_status(session, order, {"status": "SUBMITTED"})
+        order.ib_order_id = 5713
+        session.commit()
+
+        class _Settings:
+            host = "127.0.0.1"
+            port = 4002
+            mode = "paper"
+
+        monkeypatch.setattr(ib_execution_backfill, "get_or_create_ib_settings", lambda _session: _Settings())
+        monkeypatch.setattr(
+            ib_execution_backfill,
+            "get_ib_read_session",
+            lambda *, mode, host, port, client_id_hint=None: None,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            ib_execution_backfill,
+            "can_attempt_ib_transient_fallback",
+            lambda *, mode, host, port, purpose: False,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            ib_execution_backfill,
+            "_fetch_ib_executions",
+            lambda **_kwargs: (_ for _ in ()).throw(AssertionError("transient_execution_probe_should_be_blocked")),
+            raising=False,
+        )
+
+        summary = ib_execution_backfill.reconcile_direct_orders_with_ib_executions(
+            session,
+            limit=50,
+            min_query_interval_seconds=0,
+            lookback_hours=12,
+        )
+
+        assert summary["candidates"] == 1
+        assert summary["throttled"] == 1
+        assert summary["errors"] == 0
+    finally:
+        session.close()
+
+
+def test_reconcile_completed_orders_uses_stable_transient_client_id(monkeypatch):
+    engine = _make_engine()
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    session = Session()
+    try:
+        run = TradeRun(project_id=1, mode="paper", status="running", params={"mode": "paper"})
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        order = create_trade_order(
+            session,
+            {
+                "client_order_id": "oi_1109_99",
+                "symbol": "GSAT",
+                "side": "BUY",
+                "quantity": 3,
+                "order_type": "MKT",
+                "params": {"mode": "paper"},
+            },
+            run_id=run.id,
+        ).order
+        session.commit()
+        update_trade_order_status(session, order, {"status": "SUBMITTED"})
+        order.ib_order_id = 8102
+        session.commit()
+
+        class _Settings:
+            host = "127.0.0.1"
+            port = 4002
+            mode = "paper"
+
+        tracker = {"client_id": None, "recorded_success": None}
+
+        monkeypatch.setattr(ib_execution_backfill, "get_or_create_ib_settings", lambda _session: _Settings())
+        monkeypatch.setattr(
+            ib_execution_backfill,
+            "get_ib_read_session",
+            lambda *, mode, host, port, client_id_hint=None: None,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            ib_execution_backfill,
+            "can_attempt_ib_transient_fallback",
+            lambda *, mode, host, port, purpose: True,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            ib_execution_backfill,
+            "resolve_ib_transient_client_id",
+            lambda *, mode, purpose: 180001505,
+            raising=False,
+        )
+
+        def _fake_fetch(*, host: str, port: int, client_id: int, timeout_seconds: float = 6.0):
+            tracker["client_id"] = int(client_id)
+            return [
+                ib_execution_backfill._IBCompletedOrderRow(
+                    order_id=8102,
+                    perm_id=190000001,
+                    symbol="GSAT",
+                    side="BUY",
+                    status="CANCELED",
+                    completed_time_raw="20260213 10:16:27 America/New_York",
+                    order_ref="oi_1109_99",
+                    completed_status="Cancelled by Trader",
+                )
+            ]
+
+        monkeypatch.setattr(
+            ib_execution_backfill,
+            "_fetch_ib_completed_orders",
+            _fake_fetch,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            ib_execution_backfill,
+            "record_ib_transient_fallback_result",
+            lambda *, mode, host, port, purpose, success: tracker.__setitem__("recorded_success", bool(success)),
+            raising=False,
+        )
+
+        summary = ib_execution_backfill.reconcile_orders_with_ib_completed_status(
+            session,
+            limit=200,
+            min_query_interval_seconds=0,
+            lookback_hours=12,
+        )
+
+        assert summary["terminalized"] == 1
+        assert tracker["client_id"] == 180001505
+        assert tracker["recorded_success"] is True
+    finally:
+        session.close()

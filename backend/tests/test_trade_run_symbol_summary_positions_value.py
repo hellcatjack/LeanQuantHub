@@ -64,19 +64,23 @@ def test_build_symbol_summary_prefers_positions_market_value_and_includes_non_ta
 
         monkeypatch.setattr(
             trade_run_summary,
-            "read_positions",
-            lambda _root: {
+            "get_account_positions_cached",
+            lambda _session, *, mode, force_refresh=False: {
                 "items": [
                     {"symbol": "AAA", "quantity": 10.0, "market_value": 900.0},
                     {"symbol": "ZZZ", "quantity": 5.0, "market_value": 500.0},
                 ],
                 "stale": False,
-                "source_detail": "ib_holdings",
+                "source_detail": "ib_holdings_ibapi_fallback",
             },
             raising=False,
         )
-        # Force price map to empty so the summary must rely on positions-provided market values.
-        monkeypatch.setattr(trade_run_summary, "_build_price_map", lambda _symbols: {}, raising=False)
+        monkeypatch.setattr(
+            trade_run_summary,
+            "fetch_account_summary",
+            lambda _session: {"NetLiquidation": 5000.0},
+            raising=False,
+        )
 
         items = trade_run_summary.build_symbol_summary(session, run.id)
         by_symbol = {item["symbol"]: item for item in items}
@@ -120,20 +124,20 @@ def test_build_symbol_summary_falls_back_to_quotes_when_positions_market_value_z
 
         monkeypatch.setattr(
             trade_run_summary,
-            "read_positions",
-            lambda _root: {
+            "get_account_positions_cached",
+            lambda _session, *, mode, force_refresh=False: {
                 "items": [
-                    {"symbol": "AMD", "quantity": 2.0, "market_value": 0.0},
+                    {"symbol": "AMD", "quantity": 2.0, "market_value": 0.0, "market_price": 100.0},
                 ],
                 "stale": False,
-                "source_detail": "ib_holdings",
+                "source_detail": "ib_holdings_ibapi_fallback",
             },
             raising=False,
         )
         monkeypatch.setattr(
             trade_run_summary,
-            "_build_price_map",
-            lambda _symbols: {"AMD": 100.0},
+            "fetch_account_summary",
+            lambda _session: {"NetLiquidation": 5000.0},
             raising=False,
         )
 
@@ -147,5 +151,99 @@ def test_build_symbol_summary_falls_back_to_quotes_when_positions_market_value_z
         assert by_symbol["AMD"]["delta_value"] == -200.0
         assert abs(by_symbol["AMD"]["current_weight"] - (200.0 / 5000.0)) <= 1e-9
         assert abs(by_symbol["AMD"]["delta_weight"] - (0.0 - 200.0 / 5000.0)) <= 1e-9
+    finally:
+        session.close()
+
+
+def test_build_symbol_summary_rejects_non_precise_positions(tmp_path, monkeypatch):
+    Session = _make_session_factory()
+    session = Session()
+    try:
+        project = Project(name="p", description="")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        run = TradeRun(
+            project_id=project.id,
+            decision_snapshot_id=None,
+            status="queued",
+            mode="paper",
+            params={"portfolio_value": 5000.0},
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        monkeypatch.setattr(
+            trade_run_summary,
+            "get_account_positions_cached",
+            lambda _session, *, mode, force_refresh=False: {
+                "items": [{"symbol": "AMD", "quantity": 2.0}],
+                "stale": True,
+                "source_detail": "ib_holdings",
+            },
+            raising=False,
+        )
+        monkeypatch.setattr(
+            trade_run_summary,
+            "fetch_account_summary",
+            lambda _session: {"NetLiquidation": 5000.0},
+            raising=False,
+        )
+
+        try:
+            trade_run_summary.build_symbol_summary(session, run.id)
+            assert False, "expected ValueError"
+        except ValueError as exc:
+            assert str(exc) == "current_positions_not_precise"
+    finally:
+        session.close()
+
+
+def test_build_symbol_summary_prefers_latest_net_liquidation_over_run_portfolio_value(
+    tmp_path, monkeypatch
+):
+    Session = _make_session_factory()
+    session = Session()
+    try:
+        project = Project(name="p", description="")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        run = TradeRun(
+            project_id=project.id,
+            decision_snapshot_id=None,
+            status="queued",
+            mode="paper",
+            params={"portfolio_value": 10000.0},
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        monkeypatch.setattr(
+            trade_run_summary,
+            "get_account_positions_cached",
+            lambda _session, *, mode, force_refresh=False: {
+                "items": [{"symbol": "AMD", "quantity": 2.0, "market_value": 200.0}],
+                "stale": False,
+                "source_detail": "ib_holdings_ibapi_fallback",
+            },
+            raising=False,
+        )
+        monkeypatch.setattr(
+            trade_run_summary,
+            "fetch_account_summary",
+            lambda _session: {"NetLiquidation": 5000.0},
+            raising=False,
+        )
+
+        items = trade_run_summary.build_symbol_summary(session, run.id)
+        by_symbol = {item["symbol"]: item for item in items}
+        assert set(by_symbol.keys()) == {"AMD"}
+        # 200 / 5000 = 4%, not 200 / 10000 = 2%
+        assert abs(by_symbol["AMD"]["current_weight"] - 0.04) <= 1e-9
     finally:
         session.close()

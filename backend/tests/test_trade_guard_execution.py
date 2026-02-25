@@ -28,6 +28,7 @@ def test_execute_blocked_when_guard_halted(monkeypatch, tmp_path):
 
     Session = _make_session_factory()
     monkeypatch.setattr(trade_executor, "SessionLocal", Session)
+    monkeypatch.setattr(trade_executor, "_bridge_connection_ok", lambda *_: True, raising=False)
     session = Session()
     try:
         project = Project(name="guard-test", description="")
@@ -87,6 +88,54 @@ def test_execution_blocks_when_disconnected(monkeypatch, tmp_path):
         session.add(run)
         session.commit()
         session.refresh(run)
+
+        result = trade_executor.execute_trade_run(run.id, dry_run=True)
+        assert result.status == "blocked"
+        assert result.message == "bridge_unavailable"
+    finally:
+        session.close()
+
+
+def test_execution_prefers_bridge_block_over_guard_halt(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "data_root", str(tmp_path))
+    os.environ["IB_API_MODE"] = "mock"
+
+    Session = _make_session_factory()
+    monkeypatch.setattr(trade_executor, "SessionLocal", Session)
+    monkeypatch.setattr(trade_executor, "_bridge_connection_ok", lambda *_: False, raising=False)
+
+    def _guard_should_not_run(*_args, **_kwargs):
+        raise AssertionError("guard precheck should not run when bridge is unavailable")
+
+    monkeypatch.setattr(trade_executor, "evaluate_intraday_guard", _guard_should_not_run, raising=False)
+
+    session = Session()
+    try:
+        project = Project(name="bridge-first-test", description="")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        run = TradeRun(
+            project_id=project.id,
+            mode="paper",
+            status="queued",
+            decision_snapshot_id=1,
+            params={"portfolio_value": 10000},
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        guard = TradeGuardState(
+            project_id=project.id,
+            trade_date=datetime.utcnow().date(),
+            mode="paper",
+            status="halted",
+            halt_reason={"reason": "manual"},
+        )
+        session.add(guard)
+        session.commit()
 
         result = trade_executor.execute_trade_run(run.id, dry_run=True)
         assert result.status == "blocked"

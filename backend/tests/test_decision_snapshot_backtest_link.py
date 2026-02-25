@@ -9,7 +9,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from app.models import Base, BacktestRun, MLPipelineRun, Project
-from app.services.decision_snapshot import resolve_backtest_run_link
+from app.services.decision_snapshot import _extract_algo_params, resolve_backtest_run_link
 
 
 def _make_session():
@@ -97,3 +97,38 @@ def test_resolve_backtest_run_link_missing():
     assert resolved is None
     assert status == "missing"
     session.close()
+
+
+def test_extract_algo_params_falls_back_to_backtest_run():
+    backtest_run = BacktestRun(
+        project_id=1,
+        status="success",
+        params={"algorithm_parameters": {"risk_off_mode": "defensive", "max_drawdown": 0.12}},
+    )
+    params, source = _extract_algo_params(None, None, backtest_run)
+
+    assert source == "backtest_run"
+    assert params["risk_off_mode"] == "defensive"
+    assert params["max_drawdown"] == 0.12
+
+
+def test_extract_algo_params_merges_by_priority():
+    backtest_run = BacktestRun(
+        project_id=1,
+        status="success",
+        params={"algorithm_parameters": {"max_exposure": 0.45, "risk_off_mode": "cash"}},
+    )
+    pipeline = MLPipelineRun(
+        project_id=1,
+        name="pl",
+        status="success",
+        params={"backtest": {"algorithm_parameters": {"max_exposure": 0.30, "market_filter": True}}},
+    )
+    override = {"max_exposure": 0.20}
+
+    params, source = _extract_algo_params(pipeline, override, backtest_run)
+
+    assert source == "override"
+    assert params["risk_off_mode"] == "cash"
+    assert params["market_filter"] is True
+    assert params["max_exposure"] == 0.20

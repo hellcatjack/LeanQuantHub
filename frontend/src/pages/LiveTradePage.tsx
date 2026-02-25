@@ -44,6 +44,7 @@ interface IBSettings {
   id: number;
   host: string;
   port: number;
+  workstation_type: string;
   client_id: number;
   account_id?: string | null;
   mode: string;
@@ -297,6 +298,7 @@ interface TradeRunDetail {
   orders: TradeOrder[];
   fills: TradeFillDetail[];
   last_update_at?: string | null;
+  risk_audit?: Record<string, any> | null;
 }
 
 interface IntentOrderMismatch {
@@ -354,6 +356,8 @@ interface TradeGuardState {
 interface TradeSettings {
   id: number;
   risk_defaults?: Record<string, any> | null;
+  deadband_min_notional?: number | null;
+  deadband_min_weight?: number | null;
   execution_data_source?: string | null;
   created_at: string;
   updated_at: string;
@@ -439,6 +443,23 @@ const normalizeSymbolList = (raw: unknown) => {
     .filter((item) => item.length > 0);
 };
 
+const resolveWorkstationType = (value: unknown, portValue?: unknown): "tws" | "gateway" => {
+  const normalized = String(value ?? "")
+    .trim()
+    .toLowerCase();
+  if (normalized === "gateway") {
+    return "gateway";
+  }
+  if (normalized === "tws") {
+    return "tws";
+  }
+  const port = Number(portValue);
+  if (Number.isFinite(port) && (port === 4001 || port === 4002)) {
+    return "gateway";
+  }
+  return "tws";
+};
+
 export const TradeIntentMismatchCard = ({
   mismatch,
   message,
@@ -522,6 +543,7 @@ export default function LiveTradePage() {
   const [ibSettingsForm, setIbSettingsForm] = useState({
     host: "127.0.0.1",
     port: "7497",
+    workstation_type: "tws",
     client_id: "1",
     account_id: "",
     mode: "paper",
@@ -634,6 +656,17 @@ export default function LiveTradePage() {
   const [guardState, setGuardState] = useState<TradeGuardState | null>(null);
   const [tradeSettings, setTradeSettings] = useState<TradeSettings | null>(null);
   const [tradeSettingsError, setTradeSettingsError] = useState("");
+  const [tradeSettingsForm, setTradeSettingsForm] = useState({
+    deadband_min_notional: "0",
+    deadband_min_weight: "0",
+  });
+  const [tradeSettingsSaving, setTradeSettingsSaving] = useState(false);
+  const [tradeSettingsSaveError, setTradeSettingsSaveError] = useState("");
+  const [tradeSettingsSaveResult, setTradeSettingsSaveResult] = useState("");
+  const [createRunForm, setCreateRunForm] = useState({
+    deadband_min_notional: "",
+    deadband_min_weight: "",
+  });
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
   const [runDetail, setRunDetail] = useState<TradeRunDetail | null>(null);
   const [symbolSummary, setSymbolSummary] = useState<TradeSymbolSummary[]>([]);
@@ -750,6 +783,44 @@ export default function LiveTradePage() {
     setExecuteForm((prev) => ({ ...prev, [key]: value }));
   };
 
+  const updateTradeSettingsForm = (
+    key: keyof typeof tradeSettingsForm,
+    value: string
+  ) => {
+    setTradeSettingsForm((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const updateCreateRunForm = (
+    key: keyof typeof createRunForm,
+    value: string
+  ) => {
+    setCreateRunForm((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const parseOptionalNonNegativeNumber = (raw: string) => {
+    const text = String(raw ?? "").trim();
+    if (!text) {
+      return { valid: true, value: undefined as number | undefined };
+    }
+    const parsed = Number(text);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      return { valid: false, value: undefined as number | undefined };
+    }
+    return { valid: true, value: parsed };
+  };
+
+  const parseRequiredNonNegativeNumber = (raw: string) => {
+    const text = String(raw ?? "").trim();
+    if (!text) {
+      return { valid: true, value: 0 };
+    }
+    const parsed = Number(text);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      return { valid: false, value: 0 };
+    }
+    return { valid: true, value: parsed };
+  };
+
   const refreshTimersRef = useRef<Record<AutoRefreshKey, number>>({});
   const refreshInFlightRef = useRef<Set<RefreshKey>>(new Set());
   const streamSymbolKey = useMemo(
@@ -864,13 +935,30 @@ export default function LiveTradePage() {
     setCreateRunLoading(true);
     try {
       const mode = (ibSettings?.mode || ibSettingsForm.mode || "paper").toLowerCase();
-      const payload = {
+      const deadbandNotionalOverride = parseOptionalNonNegativeNumber(
+        createRunForm.deadband_min_notional
+      );
+      const deadbandWeightOverride = parseOptionalNonNegativeNumber(
+        createRunForm.deadband_min_weight
+      );
+      if (!deadbandNotionalOverride.valid || !deadbandWeightOverride.valid) {
+        setCreateRunError(t("trade.deadbandInvalid"));
+        setCreateRunLoading(false);
+        return;
+      }
+      const payload: Record<string, any> = {
         project_id: Number(selectedProjectId),
         decision_snapshot_id: snapshot?.id ?? undefined,
         mode,
         live_confirm_token:
           mode === "live" ? executeForm.live_confirm_token || undefined : undefined,
       };
+      if (deadbandNotionalOverride.value !== undefined) {
+        payload.deadband_min_notional = deadbandNotionalOverride.value;
+      }
+      if (deadbandWeightOverride.value !== undefined) {
+        payload.deadband_min_weight = deadbandWeightOverride.value;
+      }
       const res = await api.post<TradeRun>("/api/trade/runs", payload);
       if (res.data?.id) {
         setExecuteForm((prev) => ({ ...prev, run_id: String(res.data.id) }));
@@ -893,6 +981,10 @@ export default function LiveTradePage() {
       setIbSettingsForm({
         host: res.data.host || "127.0.0.1",
         port: String(res.data.port ?? 7497),
+        workstation_type: resolveWorkstationType(
+          res.data.workstation_type,
+          res.data.port
+        ),
         client_id: String(res.data.client_id ?? 1),
         account_id: "",
         mode: res.data.mode || "paper",
@@ -1468,6 +1560,7 @@ export default function LiveTradePage() {
       const payload = {
         host: ibSettingsForm.host,
         port: Number.parseInt(ibSettingsForm.port, 10) || 0,
+        workstation_type: ibSettingsForm.workstation_type,
         client_id: Number.parseInt(ibSettingsForm.client_id, 10) || 0,
         account_id: ibSettingsForm.account_id || undefined,
         mode: ibSettingsForm.mode,
@@ -1859,11 +1952,66 @@ export default function LiveTradePage() {
     try {
       const res = await api.get<TradeSettings>("/api/trade/settings");
       setTradeSettings(res.data);
+      const globalDeadbandNotional = Number(
+        res.data?.deadband_min_notional ??
+          res.data?.risk_defaults?.deadband_min_notional ??
+          0
+      );
+      const globalDeadbandWeight = Number(
+        res.data?.deadband_min_weight ??
+          res.data?.risk_defaults?.deadband_min_weight ??
+          0
+      );
+      setTradeSettingsForm({
+        deadband_min_notional:
+          Number.isFinite(globalDeadbandNotional) && globalDeadbandNotional >= 0
+            ? String(globalDeadbandNotional)
+            : "0",
+        deadband_min_weight:
+          Number.isFinite(globalDeadbandWeight) && globalDeadbandWeight >= 0
+            ? String(globalDeadbandWeight)
+            : "0",
+      });
       setTradeSettingsError("");
     } catch (err: any) {
       const detail = err?.response?.data?.detail || t("trade.tradeSettingsError");
       setTradeSettingsError(String(detail));
       setTradeSettings(null);
+    }
+  };
+
+  const saveTradeSettings = async () => {
+    const deadbandNotional = parseRequiredNonNegativeNumber(
+      tradeSettingsForm.deadband_min_notional
+    );
+    const deadbandWeight = parseRequiredNonNegativeNumber(
+      tradeSettingsForm.deadband_min_weight
+    );
+    if (!deadbandNotional.valid || !deadbandWeight.valid) {
+      setTradeSettingsSaveError(t("trade.deadbandInvalid"));
+      setTradeSettingsSaveResult("");
+      return;
+    }
+    setTradeSettingsSaving(true);
+    setTradeSettingsSaveError("");
+    setTradeSettingsSaveResult("");
+    try {
+      const res = await api.post<TradeSettings>("/api/trade/settings", {
+        deadband_min_notional: deadbandNotional.value,
+        deadband_min_weight: deadbandWeight.value,
+      });
+      setTradeSettings(res.data);
+      setTradeSettingsForm({
+        deadband_min_notional: String(deadbandNotional.value),
+        deadband_min_weight: String(deadbandWeight.value),
+      });
+      setTradeSettingsSaveResult(t("trade.tradeSettingsSaved"));
+      setTradeSettingsError("");
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("trade.tradeSettingsSaveError");
+      setTradeSettingsSaveError(String(detail));
+    } finally {
+      setTradeSettingsSaving(false);
     }
   };
 
@@ -2144,7 +2292,7 @@ export default function LiveTradePage() {
         }
       },
       account: async () => {
-        await Promise.all([loadAccountSummary(false), loadAccountSummary(true)]);
+        await loadAccountSummary(false);
       },
       positions: async () => {
         await loadAccountPositions();
@@ -2674,6 +2822,19 @@ export default function LiveTradePage() {
     return ibState.status;
   }, [ibState?.status, isConfigured, t]);
 
+  const workstationType = useMemo(
+    () => resolveWorkstationType(ibSettings?.workstation_type, ibSettings?.port),
+    [ibSettings?.port, ibSettings?.workstation_type]
+  );
+
+  const workstationSystemName = useMemo(
+    () =>
+      workstationType === "gateway"
+        ? t("data.ib.workstationTypeGateway")
+        : t("data.ib.workstationTypeTws"),
+    [t, workstationType]
+  );
+
   const modeLabel = useMemo(() => {
     const mode = ibSettings?.mode?.toLowerCase();
     if (mode === "live") {
@@ -2926,6 +3087,20 @@ export default function LiveTradePage() {
     return String(value);
   };
 
+  const formatJsonText = (value: unknown) => {
+    if (value === null || value === undefined) {
+      return t("common.none");
+    }
+    if (typeof value === "string") {
+      return value;
+    }
+    try {
+      return JSON.stringify(value, null, 2);
+    } catch {
+      return t("common.none");
+    }
+  };
+
   const formatNumber = (value?: number | null, digits = 2) => {
     if (value === null || value === undefined) {
       return t("common.none");
@@ -3005,6 +3180,50 @@ export default function LiveTradePage() {
     }
   }, [guardState, t]);
 
+  const runRiskAudit = useMemo(() => {
+    const raw = runDetail?.risk_audit;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      return null;
+    }
+    return raw as Record<string, any>;
+  }, [runDetail?.risk_audit]);
+
+  const runRiskAuditCurrencyPnl = useMemo(() => {
+    const raw = runRiskAudit?.pnl_total_by_currency;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      return [];
+    }
+    return Object.entries(raw)
+      .map(([currency, value]) => {
+        const parsed = Number(value);
+        return [currency, Number.isFinite(parsed) ? parsed : null] as const;
+      })
+      .sort((a, b) => a[0].localeCompare(b[0]));
+  }, [runRiskAudit]);
+
+  const runRiskAuditReason = useMemo(
+    () => formatJsonText(runRiskAudit?.reason),
+    [runRiskAudit?.reason, t]
+  );
+  const runRiskAuditThresholds = useMemo(
+    () => formatJsonText(runRiskAudit?.thresholds),
+    [runRiskAudit?.thresholds, t]
+  );
+  const runRiskAuditTriggers = useMemo(
+    () => formatJsonText(runRiskAudit?.trigger_details),
+    [runRiskAudit?.trigger_details, t]
+  );
+  const runRiskAuditGuardState = useMemo(
+    () => formatJsonText(runRiskAudit?.guard_state),
+    [runRiskAudit?.guard_state, t]
+  );
+  const runRiskAuditLockState = useMemo(() => {
+    if (!runRiskAudit || runRiskAudit.dd_lock_state === null || runRiskAudit.dd_lock_state === undefined) {
+      return t("common.none");
+    }
+    return runRiskAudit.dd_lock_state ? t("trade.riskAuditLockOn") : t("trade.riskAuditLockOff");
+  }, [runRiskAudit, t]);
+
   const streamStatusLabel = useMemo(() => {
     if (!ibStreamStatus?.status) {
       return t("common.none");
@@ -3055,8 +3274,12 @@ export default function LiveTradePage() {
   const sectionCards: Record<LiveTradeSectionKey, ReactNode> = {
     connection: (
       <div className="card">
-        <div className="card-title">{t("trade.statusTitle")}</div>
-        <div className="card-meta">{t("trade.statusMeta")}</div>
+        <div className="card-title">
+          {t("trade.statusTitle", { system: workstationSystemName })}
+        </div>
+        <div className="card-meta">
+          {t("trade.statusMeta", { system: workstationSystemName })}
+        </div>
         {renderRefreshSchedule("connection", "connection")}
         {ibSettings?.mode === "live" && (
           <div className="form-error" style={{ marginTop: "8px" }}>
@@ -3065,7 +3288,9 @@ export default function LiveTradePage() {
         )}
         <div className="overview-grid" style={{ marginTop: "12px" }}>
           <div className="overview-card">
-            <div className="overview-label">{t("trade.statusLabel")}</div>
+            <div className="overview-label">
+              {t("trade.statusLabel", { system: workstationSystemName })}
+            </div>
             <div className="overview-value">{statusLabel}</div>
             <div className="overview-sub">
               {t("trade.connectionUpdatedAt")} {formatDateTime(ibState?.updated_at)}
@@ -3344,7 +3569,15 @@ export default function LiveTradePage() {
           )}
         </div>
         {accountSummaryFullError && <div className="form-hint">{accountSummaryFullError}</div>}
-        <details style={{ marginTop: "12px" }}>
+        <details
+          style={{ marginTop: "12px" }}
+          onToggle={(event) => {
+            const expanded = (event.currentTarget as HTMLDetailsElement).open;
+            if (expanded && !accountSummaryFullLoading) {
+              void loadAccountSummary(true);
+            }
+          }}
+        >
           <summary>{t("trade.accountSummaryFullTitle")}</summary>
           <div className="table-scroll" style={{ marginTop: "8px" }}>
             <table className="table">
@@ -3870,6 +4103,10 @@ export default function LiveTradePage() {
             <div className="overview-sub">
               {t("trade.port")}: {ibSettings?.port ?? t("common.none")}
             </div>
+            <div className="overview-sub">
+              {t("data.ib.workstationType")}:{" "}
+              {workstationSystemName}
+            </div>
           </div>
           <div className="overview-card">
             <div className="overview-label">{t("trade.account")}</div>
@@ -3916,6 +4153,18 @@ export default function LiveTradePage() {
               onChange={(e) => updateIbSettingsForm("port", e.target.value)}
             />
             <div className="form-hint">{t("data.ib.portHint")}</div>
+          </div>
+          <div className="form-row">
+            <label className="form-label">{t("data.ib.workstationType")}</label>
+            <select
+              className="form-select"
+              value={ibSettingsForm.workstation_type}
+              onChange={(e) => updateIbSettingsForm("workstation_type", e.target.value)}
+            >
+              <option value="tws">{t("data.ib.workstationTypeTws")}</option>
+              <option value="gateway">{t("data.ib.workstationTypeGateway")}</option>
+            </select>
+            <div className="form-hint">{t("data.ib.workstationTypeHint")}</div>
           </div>
           <div className="form-row">
             <label className="form-label">{t("data.ib.clientId")}</label>
@@ -4566,6 +4815,43 @@ export default function LiveTradePage() {
         </div>
         {tradeSettingsError && <div className="form-hint">{tradeSettingsError}</div>}
         {tradeError && <div className="form-hint">{tradeError}</div>}
+        <div className="form-grid" style={{ marginTop: "12px" }}>
+          <div className="form-row">
+            <label className="form-label">{t("trade.deadbandGlobalNotional")}</label>
+            <input
+              className="form-input"
+              type="number"
+              min="0"
+              step="0.01"
+              value={tradeSettingsForm.deadband_min_notional}
+              onChange={(event) =>
+                updateTradeSettingsForm("deadband_min_notional", event.target.value)
+              }
+            />
+            <div className="form-hint">{t("trade.deadbandGlobalNotionalHint")}</div>
+          </div>
+          <div className="form-row">
+            <label className="form-label">{t("trade.deadbandGlobalWeight")}</label>
+            <input
+              className="form-input"
+              type="number"
+              min="0"
+              step="0.0001"
+              value={tradeSettingsForm.deadband_min_weight}
+              onChange={(event) =>
+                updateTradeSettingsForm("deadband_min_weight", event.target.value)
+              }
+            />
+            <div className="form-hint">{t("trade.deadbandGlobalWeightHint")}</div>
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: "10px", flexWrap: "wrap", marginTop: "12px" }}>
+          <button className="button-secondary" onClick={saveTradeSettings} disabled={tradeSettingsSaving}>
+            {tradeSettingsSaving ? t("common.actions.loading") : t("trade.tradeSettingsSave")}
+          </button>
+        </div>
+        {tradeSettingsSaveError && <div className="form-hint">{tradeSettingsSaveError}</div>}
+        {tradeSettingsSaveResult && <div className="form-hint">{tradeSettingsSaveResult}</div>}
         <div className="table-scroll" style={{ marginTop: "12px" }}>
           <table className="table" data-testid="trade-runs-table">
             <thead>
@@ -4605,6 +4891,38 @@ export default function LiveTradePage() {
               )}
             </tbody>
           </table>
+        </div>
+        <div className="form-grid" style={{ marginTop: "12px" }}>
+          <div className="form-row">
+            <label className="form-label">{t("trade.deadbandRunNotional")}</label>
+            <input
+              className="form-input"
+              type="number"
+              min="0"
+              step="0.01"
+              value={createRunForm.deadband_min_notional}
+              onChange={(event) =>
+                updateCreateRunForm("deadband_min_notional", event.target.value)
+              }
+              placeholder={t("trade.deadbandRunPlaceholder")}
+            />
+            <div className="form-hint">{t("trade.deadbandRunNotionalHint")}</div>
+          </div>
+          <div className="form-row">
+            <label className="form-label">{t("trade.deadbandRunWeight")}</label>
+            <input
+              className="form-input"
+              type="number"
+              min="0"
+              step="0.0001"
+              value={createRunForm.deadband_min_weight}
+              onChange={(event) =>
+                updateCreateRunForm("deadband_min_weight", event.target.value)
+              }
+              placeholder={t("trade.deadbandRunPlaceholder")}
+            />
+            <div className="form-hint">{t("trade.deadbandRunWeightHint")}</div>
+          </div>
         </div>
         <div style={{ display: "flex", gap: "10px", flexWrap: "wrap", marginTop: "12px" }}>
           <button
@@ -4792,22 +5110,93 @@ export default function LiveTradePage() {
       </div>
     ),
     symbolSummary: (
-      <div className="card span-2">
+      <div className="card span-2 symbol-summary-card">
         <div className="card-title">{t("trade.symbolSummaryTitle")}</div>
         <div className="card-meta">{t("trade.symbolSummaryMeta")}</div>
         {renderRefreshSchedule("execution", "symbol-summary")}
         {detailError && <div className="form-hint">{detailError}</div>}
-        <div className="meta-list" style={{ marginTop: "12px" }}>
+        <div className="meta-list symbol-summary-meta-list">
           <div className="meta-row">
             <span>{t("trade.symbolSummaryUpdatedAt")}</span>
             <strong>
               {symbolSummaryUpdatedAt ? formatDateTime(symbolSummaryUpdatedAt) : t("common.none")}
             </strong>
           </div>
+          <div className="meta-row">
+            <span>{t("trade.symbolSummaryCount")}</span>
+            <strong data-testid="trade-symbol-summary-count">{symbolSummary.length}</strong>
+          </div>
         </div>
-        <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
-        </div>
-        <div className="table-scroll" style={{ marginTop: "12px" }}>
+        {runRiskAudit ? (
+          <div className="symbol-summary-audit">
+            <div className="symbol-summary-audit-grid">
+              <div className="symbol-summary-audit-item">
+                <span>{t("common.labels.status")}</span>
+                <strong>
+                  {runRiskAudit.status
+                    ? formatStatus(String(runRiskAudit.status))
+                    : t("common.none")}
+                </strong>
+              </div>
+              <div className="symbol-summary-audit-item">
+                <span>{t("trade.riskAuditSource")}</span>
+                <strong>{runRiskAudit.source || t("common.none")}</strong>
+              </div>
+              <div className="symbol-summary-audit-item">
+                <span>{t("trade.riskAuditEquitySource")}</span>
+                <strong>{runRiskAudit.equity_source || t("common.none")}</strong>
+              </div>
+              <div className="symbol-summary-audit-item">
+                <span>{t("trade.riskAuditCashflow")}</span>
+                <strong>{formatNumber(runRiskAudit.cashflow_adjustment ?? null, 2)}</strong>
+              </div>
+              <div className="symbol-summary-audit-item">
+                <span>{t("trade.riskAuditDdAll")}</span>
+                <strong>{formatPercent(runRiskAudit.dd_all ?? null, 2)}</strong>
+              </div>
+              <div className="symbol-summary-audit-item">
+                <span>{t("trade.riskAuditDd52w")}</span>
+                <strong>{formatPercent(runRiskAudit.dd_52w ?? null, 2)}</strong>
+              </div>
+              <div className="symbol-summary-audit-item">
+                <span>{t("trade.riskAuditLockState")}</span>
+                <strong>{runRiskAuditLockState}</strong>
+              </div>
+              <div className="symbol-summary-audit-item">
+                <span>{t("trade.riskAuditCurrencyPnl")}</span>
+                <strong>
+                  {runRiskAuditCurrencyPnl.length
+                    ? runRiskAuditCurrencyPnl
+                        .map(([currency, value]) => `${currency}: ${formatNumber(value, 2)}`)
+                        .join(" · ")
+                    : t("common.none")}
+                </strong>
+              </div>
+            </div>
+            <div className="symbol-summary-audit-raw">
+              <details className="symbol-summary-detail">
+                <summary>{t("trade.riskAuditReason")}</summary>
+                <pre className="pipeline-drawer-json">{runRiskAuditReason}</pre>
+              </details>
+              <details className="symbol-summary-detail">
+                <summary>{t("trade.riskAuditThresholds")}</summary>
+                <pre className="pipeline-drawer-json">{runRiskAuditThresholds}</pre>
+              </details>
+              <details className="symbol-summary-detail">
+                <summary>{t("trade.riskAuditTriggers")}</summary>
+                <pre className="pipeline-drawer-json">{runRiskAuditTriggers}</pre>
+              </details>
+              <details className="symbol-summary-detail">
+                <summary>{t("trade.riskAuditGuardState")}</summary>
+                <pre className="pipeline-drawer-json">{runRiskAuditGuardState}</pre>
+              </details>
+            </div>
+          </div>
+        ) : null}
+        <div
+          className="table-scroll symbol-summary-table-scroll"
+          data-testid="trade-symbol-summary-scroll"
+        >
           <table className="table table-compact" data-testid="trade-symbol-summary-table">
             <thead>
               <tr>
@@ -4839,7 +5228,7 @@ export default function LiveTradePage() {
                 ))
               ) : (
                 <tr>
-                  <td colSpan={9} className="empty-state">
+                  <td colSpan={9} className="empty-state symbol-summary-table-empty">
                     {detailLoading ? t("common.actions.loading") : t("trade.symbolSummaryEmpty")}
                   </td>
                 </tr>

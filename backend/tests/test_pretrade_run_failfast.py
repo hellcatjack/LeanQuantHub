@@ -98,3 +98,62 @@ def test_pretrade_run_fails_fast_on_market_snapshot_unavailable(monkeypatch, tmp
         assert "行情快照" in (step_db.message or "")
     finally:
         session.close()
+
+
+def test_pretrade_run_marks_failed_on_unexpected_base_exception(monkeypatch):
+    session = _make_session()
+    session.close = lambda: None
+    try:
+        project = Project(name="pretrade-crash", description="")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        run = PreTradeRun(project_id=project.id, status="queued", params={})
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        settings = PreTradeSettings(max_retries=0, retry_base_delay_seconds=0, retry_max_delay_seconds=0)
+        session.add(settings)
+        session.commit()
+
+        step = PreTradeStep(
+            run_id=run.id,
+            step_key="decision_snapshot",
+            step_order=1,
+            status="queued",
+        )
+        session.add(step)
+        session.commit()
+        session.refresh(step)
+
+        class DummyLock:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def acquire(self):
+                return True
+
+            def release(self):
+                return None
+
+        def _raise_base_exception(_ctx, _params):
+            raise KeyboardInterrupt("boom")
+
+        monkeypatch.setattr(pretrade_runner, "SessionLocal", lambda: session)
+        monkeypatch.setattr(pretrade_runner, "JobLock", DummyLock)
+        monkeypatch.setattr(pretrade_runner, "_notify_telegram", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(pretrade_runner, "STEP_DEFS", [("decision_snapshot", _raise_base_exception)])
+
+        pretrade_runner.run_pretrade_run(run.id)
+
+        session.refresh(run)
+        step_db = session.get(PreTradeStep, step.id)
+        assert run.status == "failed"
+        assert (run.message or "").startswith("runner_crash:")
+        assert step_db is not None
+        assert step_db.status == "failed"
+        assert (step_db.message or "").startswith("runner_crash:")
+    finally:
+        session.close()

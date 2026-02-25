@@ -530,7 +530,7 @@ def test_ib_account_positions_prefers_ibapi_when_flat_symbol_differs(monkeypatch
     assert "ZERO" not in by_symbol
 
 
-def test_ib_account_positions_stale_snapshot_prefers_ibapi_fallback(monkeypatch):
+def test_ib_account_positions_stale_snapshot_returns_fast_without_ibapi_probe(monkeypatch):
     from pathlib import Path
     from app.services import ib_account as ib_account_module
 
@@ -566,30 +566,40 @@ def test_ib_account_positions_stale_snapshot_prefers_ibapi_fallback(monkeypatch)
         "compute_realized_pnl",
         lambda _session, _baseline: type("Realized", (), {"symbol_totals": {}})(),
     )
+    calls = {"ensure_force": [], "timeout_seconds": []}
+
+    def _fake_ensure(_session, *, mode, force=False):
+        calls["ensure_force"].append(bool(force))
+        return {"status": "ok", "mode": mode, "force": force}
+
     monkeypatch.setattr(
         ib_account_module,
         "ensure_lean_bridge_live",
-        lambda _session, *, mode, force=False: {"status": "ok", "mode": mode, "force": force},
+        _fake_ensure,
     )
     monkeypatch.setattr(
         ib_account_module,
         "_load_positions_via_ibapi_fallback",
-        lambda _session, *, mode, refreshed_at: {
+        lambda _session, *, mode, refreshed_at, timeout_seconds=6.0: (
+            calls["timeout_seconds"].append(float(timeout_seconds))
+            or {
             "items": [{"symbol": "NEW", "position": 3, "avg_cost": 11.0}],
             "refreshed_at": refreshed_at,
             "stale": False,
             "source_detail": "ib_holdings_ibapi_fallback",
-        },
+        }),
     )
 
     payload = ib_account_module.get_account_positions(
         session=_DummySession(), mode="paper", force_refresh=False
     )
 
-    assert read_calls["count"] >= 2
-    assert payload["stale"] is False
-    assert payload["source_detail"] == "ib_holdings_ibapi_fallback"
-    assert payload["items"] and payload["items"][0]["symbol"] == "NEW"
+    assert read_calls["count"] == 1
+    assert calls["ensure_force"] == []
+    assert calls["timeout_seconds"] == []
+    assert payload["stale"] is True
+    assert payload["source_detail"] == "ib_holdings"
+    assert payload["items"] and payload["items"][0]["symbol"] == "OLD"
 
 
 def test_ib_account_positions_cached_reuses_recent_payload(monkeypatch):
@@ -765,13 +775,18 @@ def test_ib_account_positions_keeps_stale_ib_holdings_snapshot(monkeypatch):
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should_not_infer")),
     )
 
-    calls = {"ensure": 0}
+    calls = {"ensure": 0, "ibapi": 0}
 
     def _fake_ensure(_session, *, mode: str, force: bool = False):
         calls["ensure"] += 1
         return {"status": "ok"}
 
+    def _fake_ibapi(*_args, **_kwargs):
+        calls["ibapi"] += 1
+        return None
+
     monkeypatch.setattr(ib_account_module, "ensure_lean_bridge_live", _fake_ensure)
+    monkeypatch.setattr(ib_account_module, "_load_positions_via_ibapi_fallback", _fake_ibapi)
 
     class _DummySession:
         pass
@@ -779,13 +794,16 @@ def test_ib_account_positions_keeps_stale_ib_holdings_snapshot(monkeypatch):
     payload = ib_account_module.get_account_positions(
         session=_DummySession(), mode="paper", force_refresh=False
     )
-    assert calls["ensure"] == 1
+    assert calls["ensure"] == 0
+    assert calls["ibapi"] == 0
     assert payload["items"][0]["symbol"] == "AAA"
     assert payload["items"][0]["position"] == 2
     assert payload["stale"] is True
 
 
-def test_ib_account_positions_overlays_non_stale_ib_holdings_when_inconsistent(monkeypatch):
+def test_ib_account_positions_keeps_non_stale_ib_holdings_when_inconsistent_if_ibapi_unavailable(
+    monkeypatch,
+):
     from pathlib import Path
     from app.services import ib_account as ib_account_module
 
@@ -829,15 +847,13 @@ def test_ib_account_positions_overlays_non_stale_ib_holdings_when_inconsistent(m
     )
     monkeypatch.setattr(
         ib_account_module,
+        "_load_positions_via_ibapi_fallback",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        ib_account_module,
         "_infer_positions_from_recent_direct_fills",
-        lambda *_args, **_kwargs: [
-            {
-                "symbol": "AAA",
-                "position": 1.0,
-                "quantity": 1.0,
-                "avg_cost": 11.0,
-            }
-        ],
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should_not_infer")),
     )
 
     calls = {"ensure": 0}
@@ -854,14 +870,16 @@ def test_ib_account_positions_overlays_non_stale_ib_holdings_when_inconsistent(m
     payload = ib_account_module.get_account_positions(
         session=_DummySession(), mode="paper", force_refresh=False
     )
-    assert calls["ensure"] == 1
+    assert calls["ensure"] == 0
     assert payload["items"][0]["symbol"] == "AAA"
-    assert payload["items"][0]["position"] == 1.0
-    assert payload["stale"] is True
-    assert payload["source_detail"] == "ib_holdings_overlay_recent_fills"
+    assert payload["items"][0]["position"] == 2
+    assert payload["stale"] is False
+    assert payload["source_detail"] == "ib_holdings"
 
 
-def test_ib_account_positions_overlay_can_remove_flattened_symbol(monkeypatch):
+def test_ib_account_positions_inconsistent_non_stale_snapshot_does_not_remove_symbol_via_overlay(
+    monkeypatch,
+):
     from pathlib import Path
     from app.services import ib_account as ib_account_module
 
@@ -905,15 +923,13 @@ def test_ib_account_positions_overlay_can_remove_flattened_symbol(monkeypatch):
     )
     monkeypatch.setattr(
         ib_account_module,
+        "_load_positions_via_ibapi_fallback",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        ib_account_module,
         "_infer_positions_from_recent_direct_fills",
-        lambda *_args, **_kwargs: [
-            {
-                "symbol": "AAA",
-                "position": 0.0,
-                "quantity": 0.0,
-                "avg_cost": 11.0,
-            }
-        ],
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should_not_infer")),
     )
 
     calls = {"ensure": 0}
@@ -930,10 +946,10 @@ def test_ib_account_positions_overlay_can_remove_flattened_symbol(monkeypatch):
     payload = ib_account_module.get_account_positions(
         session=_DummySession(), mode="paper", force_refresh=False
     )
-    assert calls["ensure"] == 1
-    assert payload["source_detail"] == "ib_holdings_overlay_recent_fills"
-    assert payload["stale"] is True
-    assert payload["items"] == []
+    assert calls["ensure"] == 0
+    assert payload["source_detail"] == "ib_holdings"
+    assert payload["stale"] is False
+    assert payload["items"] and payload["items"][0]["symbol"] == "AAA"
 
 
 def test_ib_account_positions_prefers_ibapi_fallback_when_inconsistent(monkeypatch):
@@ -975,12 +991,7 @@ def test_ib_account_positions_prefers_ibapi_fallback_when_inconsistent(monkeypat
     monkeypatch.setattr(ib_account_module, "_resolve_bridge_root", lambda: Path("/tmp"))
     monkeypatch.setattr(
         ib_account_module,
-        "_is_positions_snapshot_inconsistent_with_recent_fills",
-        lambda *_args, **_kwargs: True,
-    )
-    monkeypatch.setattr(
-        ib_account_module,
-        "_load_positions_via_ibapi_fallback",
+        "_load_positions_via_ibapi_verified",
         lambda *_args, **_kwargs: {
             "items": [{"symbol": "BBB", "position": 3.0, "quantity": 3.0}],
             "refreshed_at": "2026-02-13T14:58:09Z",
@@ -1003,18 +1014,81 @@ def test_ib_account_positions_prefers_ibapi_fallback_when_inconsistent(monkeypat
     monkeypatch.setattr(ib_account_module, "ensure_lean_bridge_live", _fake_ensure)
 
     class _DummySession:
-        pass
+        def query(self, *_args, **_kwargs):
+            return None
 
     payload = ib_account_module.get_account_positions(
         session=_DummySession(), mode="paper", force_refresh=False
     )
-    assert calls["ensure"] == 1
+    assert calls["ensure"] == 0
     assert payload["source_detail"] == "ib_holdings_ibapi_fallback"
     assert payload["stale"] is False
     assert payload["items"][0]["symbol"] == "BBB"
 
 
-def test_ib_account_positions_infers_from_recent_direct_fills_when_snapshot_stale(monkeypatch):
+def test_ib_account_positions_skips_redundant_verify_for_ibapi_fallback_snapshot(monkeypatch):
+    from pathlib import Path
+    from app.services import ib_account as ib_account_module
+
+    monkeypatch.setattr(
+        ib_account_module,
+        "read_positions",
+        lambda _root: {
+            "items": [{"symbol": "AAA", "quantity": 2}],
+            "stale": False,
+            "source_detail": "ib_holdings_ibapi_fallback",
+            "refreshed_at": "2026-02-13T14:58:00Z",
+        },
+    )
+    monkeypatch.setattr(
+        ib_account_module,
+        "read_quotes",
+        lambda _root: {"items": [], "stale": False},
+    )
+    monkeypatch.setattr(
+        ib_account_module,
+        "ensure_positions_baseline",
+        lambda _root, _payload: {},
+    )
+    monkeypatch.setattr(
+        ib_account_module,
+        "compute_realized_pnl",
+        lambda _session, _baseline: type("Realized", (), {"symbol_totals": {}})(),
+    )
+    monkeypatch.setattr(ib_account_module, "_resolve_bridge_root", lambda: Path("/tmp"))
+    monkeypatch.setattr(
+        ib_account_module,
+        "_reconcile_non_stale_ib_holdings_with_recent_fills",
+        lambda _session, *, mode, payload: payload,
+    )
+
+    calls = {"verify": 0}
+
+    def _fake_verify(_session, *, mode, refreshed_at, force=False):
+        calls["verify"] += 1
+        return {
+            "items": [{"symbol": "BBB", "position": 3.0, "quantity": 3.0}],
+            "refreshed_at": refreshed_at,
+            "stale": False,
+            "source_detail": "ib_holdings_ibapi_fallback",
+        }
+
+    monkeypatch.setattr(ib_account_module, "_load_positions_via_ibapi_verified", _fake_verify)
+
+    class _DummySession:
+        def query(self, *_args, **_kwargs):
+            return None
+
+    payload = ib_account_module.get_account_positions(
+        session=_DummySession(), mode="paper", force_refresh=False
+    )
+    assert calls["verify"] == 0
+    assert payload["source_detail"] == "ib_holdings_ibapi_fallback"
+    assert payload["stale"] is False
+    assert payload["items"][0]["symbol"] == "AAA"
+
+
+def test_ib_account_positions_stale_snapshot_does_not_infer_recent_direct_fills(monkeypatch):
     from pathlib import Path
     from app.services import ib_account as ib_account_module
 
@@ -1055,14 +1129,12 @@ def test_ib_account_positions_infers_from_recent_direct_fills_when_snapshot_stal
     monkeypatch.setattr(
         ib_account_module,
         "_infer_positions_from_recent_direct_fills",
-        lambda _session, *, mode: [
-            {
-                "symbol": "AAPL",
-                "position": 1.0,
-                "quantity": 1.0,
-                "avg_cost": 271.1,
-            }
-        ],
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should_not_infer")),
+    )
+    monkeypatch.setattr(
+        ib_account_module,
+        "_load_positions_via_ibapi_fallback",
+        lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(
         ib_account_module,
@@ -1078,11 +1150,62 @@ def test_ib_account_positions_infers_from_recent_direct_fills_when_snapshot_stal
         session=_DummySession(), mode="paper", force_refresh=False
     )
     assert payload["stale"] is True
-    assert payload["source_detail"] == "ib_holdings_inferred_recent_fills"
-    assert payload["items"][0]["symbol"] == "AAPL"
-    assert payload["items"][0]["position"] == 1.0
-    assert payload["items"][0]["market_price"] == 272.0
-    assert payload["items"][0]["market_value"] == 272.0
+    assert payload["source_detail"] == "ib_holdings_empty"
+    assert payload["items"] == []
+
+
+def test_ib_account_positions_cached_stalled_owner_uses_canonical_fetch_instead_of_fast_fallback(
+    monkeypatch,
+):
+    from app.services import ib_account as ib_account_module
+
+    wake = threading.Event()
+    wake.set()
+    monkeypatch.setattr(
+        ib_account_module,
+        "_ACCOUNT_POSITIONS_RESPONSE_CACHE_TTL_SECONDS",
+        0.2,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        ib_account_module,
+        "_get_account_positions_response_cache",
+        lambda _key: None,
+    )
+    monkeypatch.setattr(
+        ib_account_module,
+        "_acquire_account_positions_response_inflight",
+        lambda _key, *, allow_steal_stale=False: (False, wake),
+    )
+    monkeypatch.setattr(
+        ib_account_module,
+        "_build_account_positions_fast_fallback",
+        lambda *, mode: {
+            "items": [{"symbol": "FAST", "position": 9.0}],
+            "refreshed_at": "2026-02-13T12:00:00Z",
+            "stale": True,
+            "source_detail": "ib_holdings_fast_fallback",
+            "mode": mode,
+        },
+    )
+    monkeypatch.setattr(
+        ib_account_module,
+        "get_account_positions",
+        lambda _session, *, mode, force_refresh=False: {
+            "items": [{"symbol": "AAA", "position": 1.0}],
+            "refreshed_at": "2026-02-13T12:00:01Z",
+            "stale": False,
+            "source_detail": "ib_holdings",
+        },
+    )
+
+    payload = ib_account_module.get_account_positions_cached(
+        session=object(),
+        mode="paper",
+        force_refresh=False,
+    )
+    assert payload["source_detail"] == "ib_holdings"
+    assert payload["items"][0]["symbol"] == "AAA"
 
 
 def test_ib_account_positions_non_ib_source_does_not_infer_recent_fills(monkeypatch):
@@ -1708,3 +1831,272 @@ def test_order_newer_prefers_event_time_over_updated_at():
 
     # Even if updated_at is newer, stale status refreshes must not outrank newer execution events.
     assert ib_account_module._is_order_newer(older_event, direct_sell) is False
+
+
+def test_ibapi_verified_cache_reuses_payload_across_snapshot_tokens_within_interval(monkeypatch):
+    from app.services import ib_account as ib_account_module
+
+    ib_account_module._clear_account_positions_response_cache()
+    monkeypatch.setattr(
+        ib_account_module,
+        "_IBAPI_VERIFY_MIN_INTERVAL_SECONDS",
+        30.0,
+        raising=False,
+    )
+
+    calls = {"count": 0}
+
+    def _fake_fallback(_session, *, mode, refreshed_at, timeout_seconds=6.0):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return {
+                "items": [{"symbol": "OLD", "position": 1.0, "quantity": 1.0}],
+                "refreshed_at": refreshed_at,
+                "stale": False,
+                "source_detail": "ib_holdings_ibapi_fallback",
+            }
+        return {
+            "items": [{"symbol": "NEW", "position": 2.0, "quantity": 2.0}],
+            "refreshed_at": refreshed_at,
+            "stale": False,
+            "source_detail": "ib_holdings_ibapi_fallback",
+        }
+
+    monkeypatch.setattr(
+        ib_account_module,
+        "_load_positions_via_ibapi_fallback",
+        _fake_fallback,
+    )
+
+    first = ib_account_module._load_positions_via_ibapi_verified(
+        object(),
+        mode="paper",
+        refreshed_at="2026-02-13T17:23:30Z",
+        force=False,
+    )
+    second = ib_account_module._load_positions_via_ibapi_verified(
+        object(),
+        mode="paper",
+        refreshed_at="2026-02-13T17:23:31Z",
+        force=False,
+    )
+
+    assert calls["count"] == 1
+    assert first is not None and first["items"][0]["symbol"] == "OLD"
+    assert second is not None and second["items"][0]["symbol"] == "OLD"
+
+
+def test_ibapi_verified_uses_soft_timeout_for_non_force(monkeypatch):
+    from app.services import ib_account as ib_account_module
+
+    ib_account_module._clear_account_positions_response_cache()
+    monkeypatch.setattr(
+        ib_account_module,
+        "_IBAPI_VERIFY_MIN_INTERVAL_SECONDS",
+        0.0,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        ib_account_module,
+        "_IBAPI_VERIFY_TIMEOUT_SECONDS",
+        1.5,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        ib_account_module,
+        "_IBAPI_VERIFY_SOFT_TIMEOUT_SECONDS",
+        0.35,
+        raising=False,
+    )
+
+    timeouts: list[float] = []
+
+    def _fake_fallback(_session, *, mode, refreshed_at, timeout_seconds=6.0):
+        timeouts.append(float(timeout_seconds))
+        return {
+            "items": [{"symbol": "AAA", "position": 1.0, "quantity": 1.0}],
+            "refreshed_at": refreshed_at,
+            "stale": False,
+            "source_detail": "ib_holdings_ibapi_fallback",
+        }
+
+    monkeypatch.setattr(
+        ib_account_module,
+        "_load_positions_via_ibapi_fallback",
+        _fake_fallback,
+    )
+
+    _ = ib_account_module._load_positions_via_ibapi_verified(
+        object(),
+        mode="paper",
+        refreshed_at="2026-02-13T17:23:30Z",
+        force=False,
+    )
+    _ = ib_account_module._load_positions_via_ibapi_verified(
+        object(),
+        mode="paper",
+        refreshed_at="2026-02-13T17:23:31Z",
+        force=True,
+    )
+
+    assert len(timeouts) == 2
+    assert abs(timeouts[0] - 0.35) < 1e-9
+    assert abs(timeouts[1] - 1.5) < 1e-9
+
+
+def test_load_positions_via_ibapi_fallback_prefers_reused_session(monkeypatch):
+    from app.services import ib_account as ib_account_module
+
+    class _Settings:
+        host = "127.0.0.1"
+        port = 4002
+        account_id = None
+
+    class _SharedSession:
+        def __init__(self):
+            self.calls = 0
+
+        def fetch_positions(self, *, timeout_seconds: float):
+            self.calls += 1
+            return [
+                {
+                    "symbol": "AAPL",
+                    "position": 3.0,
+                    "quantity": 3.0,
+                    "avg_cost": 189.2,
+                }
+            ]
+
+    shared = _SharedSession()
+    monkeypatch.setattr(
+        ib_account_module,
+        "get_or_create_ib_settings",
+        lambda _session: _Settings(),
+    )
+    monkeypatch.setattr(
+        ib_account_module,
+        "get_ib_read_session",
+        lambda *, mode, host, port, client_id_hint=None: shared,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        ib_account_module,
+        "_fetch_positions_via_ibapi",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("transient_fetch_positions_should_not_run")),
+        raising=False,
+    )
+
+    payload = ib_account_module._load_positions_via_ibapi_fallback(
+        object(),
+        mode="paper",
+        refreshed_at="2026-02-20T22:16:00Z",
+        timeout_seconds=0.5,
+    )
+    assert payload is not None
+    assert payload["source_detail"] == "ib_holdings_ibapi_fallback"
+    assert payload["items"][0]["symbol"] == "AAPL"
+    assert shared.calls == 1
+
+
+def test_load_positions_via_ibapi_fallback_respects_transient_circuit(monkeypatch):
+    from app.services import ib_account as ib_account_module
+
+    class _Settings:
+        host = "127.0.0.1"
+        port = 4002
+        account_id = None
+
+    monkeypatch.setattr(
+        ib_account_module,
+        "get_or_create_ib_settings",
+        lambda _session: _Settings(),
+    )
+    monkeypatch.setattr(
+        ib_account_module,
+        "get_ib_read_session",
+        lambda *, mode, host, port, client_id_hint=None: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        ib_account_module,
+        "can_attempt_ib_transient_fallback",
+        lambda *, mode, host, port, purpose: False,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        ib_account_module,
+        "_fetch_positions_via_ibapi",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("transient_probe_should_be_blocked")),
+        raising=False,
+    )
+
+    payload = ib_account_module._load_positions_via_ibapi_fallback(
+        object(),
+        mode="paper",
+        refreshed_at="2026-02-20T22:16:00Z",
+        timeout_seconds=0.5,
+    )
+    assert payload is None
+
+
+def test_load_positions_via_ibapi_fallback_uses_stable_transient_client_id(monkeypatch):
+    from app.services import ib_account as ib_account_module
+
+    class _Settings:
+        host = "127.0.0.1"
+        port = 4002
+        account_id = None
+
+    tracker = {"client_id": None, "recorded_success": None}
+
+    monkeypatch.setattr(
+        ib_account_module,
+        "get_or_create_ib_settings",
+        lambda _session: _Settings(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        ib_account_module,
+        "get_ib_read_session",
+        lambda *, mode, host, port, client_id_hint=None: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        ib_account_module,
+        "can_attempt_ib_transient_fallback",
+        lambda *, mode, host, port, purpose: True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        ib_account_module,
+        "resolve_ib_transient_client_id",
+        lambda *, mode, purpose: 180001102,
+        raising=False,
+    )
+
+    def _fake_fetch(*, host: str, port: int, client_id: int, timeout_seconds: float):
+        tracker["client_id"] = int(client_id)
+        return []
+
+    monkeypatch.setattr(
+        ib_account_module,
+        "_fetch_positions_via_ibapi",
+        _fake_fetch,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        ib_account_module,
+        "record_ib_transient_fallback_result",
+        lambda *, mode, host, port, purpose, success: tracker.__setitem__("recorded_success", bool(success)),
+        raising=False,
+    )
+
+    payload = ib_account_module._load_positions_via_ibapi_fallback(
+        object(),
+        mode="paper",
+        refreshed_at="2026-02-20T22:16:00Z",
+        timeout_seconds=0.5,
+    )
+    assert payload is not None
+    assert tracker["client_id"] == 180001102
+    assert tracker["recorded_success"] is True

@@ -9,6 +9,12 @@ from zoneinfo import ZoneInfo
 
 from app.models import TradeOrder
 from app.services.ib_settings import get_or_create_ib_settings
+from app.services.ib_read_session import (
+    can_attempt_ib_transient_fallback,
+    get_ib_read_session,
+    record_ib_transient_fallback_result,
+    resolve_ib_transient_client_id,
+)
 from app.services.lean_execution import apply_execution_events
 from app.services.trade_orders import update_trade_order_status
 
@@ -136,6 +142,63 @@ def _parse_ib_completed_time_to_iso(value: object) -> str:
         completed_dt = parsed.replace(tzinfo=tzinfo)
         return completed_dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _normalize_execution_rows(rows: object) -> list[_IBExecutionRow]:
+    if not isinstance(rows, list):
+        return []
+    normalized: list[_IBExecutionRow] = []
+    for row in rows:
+        if isinstance(row, _IBExecutionRow):
+            normalized.append(row)
+            continue
+        if not isinstance(row, dict):
+            continue
+        try:
+            entry = _IBExecutionRow(
+                order_id=int(row.get("order_id") or row.get("orderId") or 0),
+                symbol=_normalize_symbol(row.get("symbol")),
+                side=str(row.get("side") or "").strip(),
+                shares=float(row.get("shares") or 0.0),
+                price=float(row.get("price") or 0.0),
+                exec_id=str(row.get("exec_id") or row.get("execId") or "").strip(),
+                time_raw=str(row.get("time_raw") or row.get("time") or "").strip(),
+            )
+        except Exception:
+            continue
+        if entry.order_id <= 0 or not entry.exec_id:
+            continue
+        normalized.append(entry)
+    return normalized
+
+
+def _normalize_completed_rows(rows: object) -> list[_IBCompletedOrderRow]:
+    if not isinstance(rows, list):
+        return []
+    normalized: list[_IBCompletedOrderRow] = []
+    for row in rows:
+        if isinstance(row, _IBCompletedOrderRow):
+            normalized.append(row)
+            continue
+        if not isinstance(row, dict):
+            continue
+        try:
+            entry = _IBCompletedOrderRow(
+                order_id=int(row.get("order_id") or row.get("orderId") or 0),
+                perm_id=int(row.get("perm_id") or row.get("permId") or 0),
+                symbol=_normalize_symbol(row.get("symbol")),
+                side=str(row.get("side") or "").strip(),
+                status=_normalize_completed_status(row.get("status")),
+                completed_time_raw=str(row.get("completed_time_raw") or row.get("completedTime") or "").strip(),
+                order_ref=str(row.get("order_ref") or row.get("orderRef") or "").strip(),
+                completed_status=str(row.get("completed_status") or row.get("completedStatus") or "").strip(),
+            )
+        except Exception:
+            continue
+        if entry.order_id <= 0 and not entry.order_ref:
+            continue
+        normalized.append(entry)
+    return normalized
 
 
 def _collect_candidate_orders(
@@ -595,14 +658,44 @@ def reconcile_orders_with_ib_completed_status(
         summary["errors"] += 1
         return summary
 
-    # Use a high transient client id so we don't conflict with long-lived bridge/strategy clients.
-    client_id = 1_910_000_000 + int(time.time()) % 10_000
+    completed_rows: list[_IBCompletedOrderRow] | None = None
+    shared_session = get_ib_read_session(
+        mode=str(getattr(settings_row, "mode", "") or "paper"),
+        host=host,
+        port=port,
+    )
+    if shared_session is not None:
+        shared_rows = shared_session.fetch_completed_orders(timeout_seconds=6.0)
+        if shared_rows is not None:
+            completed_rows = _normalize_completed_rows(shared_rows)
+
     try:
-        completed_rows = _fetch_ib_completed_orders(
-            host=host,
-            port=port,
-            client_id=client_id,
-        )
+        if completed_rows is None:
+            purpose = "completed_orders"
+            if not can_attempt_ib_transient_fallback(
+                mode=str(getattr(settings_row, "mode", "") or "paper"),
+                host=host,
+                port=port,
+                purpose=purpose,
+            ):
+                summary["throttled"] = 1
+                return summary
+            client_id = resolve_ib_transient_client_id(
+                mode=str(getattr(settings_row, "mode", "") or "paper"),
+                purpose=purpose,
+            )
+            completed_rows = _fetch_ib_completed_orders(
+                host=host,
+                port=port,
+                client_id=client_id,
+            )
+            record_ib_transient_fallback_result(
+                mode=str(getattr(settings_row, "mode", "") or "paper"),
+                host=host,
+                port=port,
+                purpose=purpose,
+                success=completed_rows is not None,
+            )
     except Exception:
         summary["errors"] += 1
         return summary
@@ -683,15 +776,48 @@ def reconcile_direct_orders_with_ib_executions(
         summary["errors"] += 1
         return summary
 
-    # Use a high transient client id so we don't conflict with long-lived bridge/strategy clients.
-    client_id = 1_900_000_000 + int(time.time()) % 10_000
-    try:
-        executions = _fetch_ib_executions(
-            host=host,
-            port=port,
-            client_id=client_id,
+    executions: list[_IBExecutionRow] | None = None
+    shared_session = get_ib_read_session(
+        mode=str(getattr(settings_row, "mode", "") or "paper"),
+        host=host,
+        port=port,
+    )
+    if shared_session is not None:
+        shared_rows = shared_session.fetch_executions(
             start_time_utc=start_time_utc,
+            timeout_seconds=6.0,
         )
+        if shared_rows is not None:
+            executions = _normalize_execution_rows(shared_rows)
+
+    try:
+        if executions is None:
+            purpose = "executions"
+            if not can_attempt_ib_transient_fallback(
+                mode=str(getattr(settings_row, "mode", "") or "paper"),
+                host=host,
+                port=port,
+                purpose=purpose,
+            ):
+                summary["throttled"] = 1
+                return summary
+            client_id = resolve_ib_transient_client_id(
+                mode=str(getattr(settings_row, "mode", "") or "paper"),
+                purpose=purpose,
+            )
+            executions = _fetch_ib_executions(
+                host=host,
+                port=port,
+                client_id=client_id,
+                start_time_utc=start_time_utc,
+            )
+            record_ib_transient_fallback_result(
+                mode=str(getattr(settings_row, "mode", "") or "paper"),
+                host=host,
+                port=port,
+                purpose=purpose,
+                success=executions is not None,
+            )
     except Exception:
         summary["errors"] += 1
         return summary

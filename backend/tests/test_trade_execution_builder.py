@@ -75,6 +75,17 @@ def test_execute_builds_orders_from_snapshot(tmp_path, monkeypatch):
         lambda _root: {"items": [], "stale": False},
         raising=False,
     )
+    monkeypatch.setattr(
+        trade_executor,
+        "get_account_positions",
+        lambda _session, *, mode, force_refresh=False: {
+            "items": [],
+            "stale": False,
+            "source_detail": "ib_holdings_ibapi_fallback",
+            "refreshed_at": "2026-02-14T00:00:00Z",
+        },
+        raising=False,
+    )
     session = Session()
     try:
         project = Project(name="p", description="")
@@ -186,6 +197,17 @@ def test_execute_builds_orders_with_fallback_prices(tmp_path, monkeypatch):
         },
         raising=False,
     )
+    monkeypatch.setattr(
+        trade_executor,
+        "get_account_positions",
+        lambda _session, *, mode, force_refresh=False: {
+            "items": [],
+            "stale": False,
+            "source_detail": "ib_holdings_ibapi_fallback",
+            "refreshed_at": "2026-02-14T00:00:00Z",
+        },
+        raising=False,
+    )
     monkeypatch.setattr(trade_executor.settings, "data_root", str(tmp_path))
 
     adjusted_dir = tmp_path / "curated_adjusted"
@@ -236,10 +258,145 @@ def test_build_orders_rounding():
     assert orders[0]["quantity"] == 2
 
 
+def test_execute_blocks_when_guard_precheck_halted(monkeypatch):
+    Session = _make_session_factory()
+    monkeypatch.setattr(trade_executor, "SessionLocal", Session)
+    monkeypatch.setattr(trade_executor, "_bridge_connection_ok", lambda *_a, **_k: True, raising=False)
+
+    def _fake_guard_eval(session, *, project_id, mode, risk_params=None, **_kwargs):
+        state = trade_executor.get_or_create_guard_state(
+            session,
+            project_id=project_id,
+            mode=mode,
+        )
+        state.status = "halted"
+        state.halt_reason = {
+            "reasons": ["max_daily_loss"],
+            "details": [{"reason": "max_daily_loss", "value": -0.07, "threshold": -0.05}],
+        }
+        session.commit()
+        return {
+            "status": "halted",
+            "reason": state.halt_reason,
+            "valuation_source": "test",
+            "equity": 0.0,
+            "thresholds": {"max_daily_loss": -0.05, "max_intraday_drawdown": 0.08, "cooldown_seconds": 900},
+            "metrics": {"daily_loss": -0.07, "drawdown": -0.08},
+            "trigger_details": [{"reason": "max_daily_loss", "value": -0.07, "threshold": -0.05}],
+        }
+
+    monkeypatch.setattr(trade_executor, "evaluate_intraday_guard", _fake_guard_eval, raising=False)
+
+    session = Session()
+    try:
+        project = Project(name="p", description="")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        run = TradeRun(
+            project_id=project.id,
+            decision_snapshot_id=None,
+            status="queued",
+            mode="paper",
+            params={},
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        result = trade_executor.execute_trade_run(run.id, dry_run=True, force=False)
+        assert result.status == "blocked"
+        assert result.message == "guard_halted"
+
+        session.expire_all()
+        refreshed = session.get(TradeRun, run.id)
+        assert refreshed is not None
+        params = refreshed.params if isinstance(refreshed.params, dict) else {}
+        precheck = params.get("guard_precheck") if isinstance(params, dict) else {}
+        assert isinstance(precheck, dict)
+        assert precheck.get("enabled") is True
+        assert precheck.get("status") == "halted"
+        assert precheck.get("thresholds", {}).get("max_daily_loss") == -0.05
+        blocked = params.get("guard_blocked") if isinstance(params, dict) else {}
+        assert isinstance(blocked, dict)
+        assert blocked.get("valuation_source") == "test"
+        assert "max_daily_loss" in ((blocked.get("reason") or {}).get("reasons") or [])
+    finally:
+        session.close()
+
+
+def test_execute_blocks_when_guard_precheck_degraded(monkeypatch):
+    Session = _make_session_factory()
+    monkeypatch.setattr(trade_executor, "SessionLocal", Session)
+    monkeypatch.setattr(trade_executor, "_bridge_connection_ok", lambda *_a, **_k: True, raising=False)
+
+    def _fake_guard_eval(session, *, project_id, mode, risk_params=None, **_kwargs):
+        state = trade_executor.get_or_create_guard_state(
+            session,
+            project_id=project_id,
+            mode=mode,
+        )
+        state.status = "active"
+        state.halt_reason = None
+        session.commit()
+        return {
+            "status": "degraded",
+            "reason": {
+                "reasons": ["valuation_unreliable"],
+                "details": [{"reason": "equity_non_positive", "value": 0.0, "threshold": 0.0}],
+            },
+            "valuation_source": "lean_bridge",
+            "equity": 0.0,
+            "equity_source": "local:lean_bridge",
+            "thresholds": {"max_daily_loss": -0.05, "max_intraday_drawdown": 0.08, "cooldown_seconds": 900},
+            "metrics": {"equity_adjusted": 0.0, "market_data_errors": 99},
+            "trigger_details": [],
+        }
+
+    monkeypatch.setattr(trade_executor, "evaluate_intraday_guard", _fake_guard_eval, raising=False)
+
+    session = Session()
+    try:
+        project = Project(name="p", description="")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        run = TradeRun(
+            project_id=project.id,
+            decision_snapshot_id=None,
+            status="queued",
+            mode="paper",
+            params={},
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        result = trade_executor.execute_trade_run(run.id, dry_run=True, force=False)
+        assert result.status == "blocked"
+        assert result.message == "guard_data_unreliable"
+
+        session.expire_all()
+        refreshed = session.get(TradeRun, run.id)
+        assert refreshed is not None
+        params = refreshed.params if isinstance(refreshed.params, dict) else {}
+        precheck = params.get("guard_precheck") if isinstance(params, dict) else {}
+        assert isinstance(precheck, dict)
+        assert precheck.get("status") == "degraded"
+        blocked = params.get("guard_blocked") if isinstance(params, dict) else {}
+        assert isinstance(blocked, dict)
+        assert blocked.get("status") == "degraded"
+    finally:
+        session.close()
+
+
 def test_execute_rewrites_intent_ids_when_missing(tmp_path, monkeypatch):
     Session = _make_session_factory()
     monkeypatch.setattr(trade_executor, "SessionLocal", Session)
     monkeypatch.setattr(trade_executor, "_bridge_connection_ok", lambda *_a, **_k: True, raising=False)
+    monkeypatch.setattr(trade_executor.settings, "data_root", str(tmp_path), raising=False)
     monkeypatch.setattr(
         trade_executor,
         "read_quotes",
@@ -292,3 +449,25 @@ def test_execute_rewrites_intent_ids_when_missing(tmp_path, monkeypatch):
         assert payload[0].get("order_intent_id")
     finally:
         session.close()
+
+
+def test_build_guard_alert_message_includes_drawdown_thresholds():
+    message = trade_executor._build_guard_alert_message(
+        42,
+        {
+            "reason": {"reasons": ["max_drawdown"]},
+            "valuation_source": "lean_bridge",
+            "equity_source": "ib_net_liquidation",
+            "thresholds": {
+                "max_daily_loss": -0.05,
+                "max_intraday_drawdown": 0.08,
+                "max_drawdown": 0.12,
+                "max_drawdown_52w": 0.15,
+                "drawdown_recovery_ratio": 0.9,
+                "cooldown_seconds": 900,
+            },
+        },
+    )
+    assert "max_drawdown=0.12" in message
+    assert "max_drawdown_52w=0.15" in message
+    assert "drawdown_recovery_ratio=0.9" in message

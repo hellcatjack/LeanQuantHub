@@ -58,11 +58,14 @@ def test_build_decision_configs_auto_snapshot_uses_latest_pit(tmp_path, monkeypa
 
     config = {"weights": {"A": 1.0}, "backtest_start": "2026-01-01", "backtest_end": "2026-01-13"}
     output_dir = tmp_path / "out"
+    effective_snapshot = decision_snapshot._resolve_effective_pit_snapshot(None)[
+        "effective_snapshot_date"
+    ]
     theme_path, weights_path = decision_snapshot._build_decision_configs(
         1,
         config,
         None,
-        None,
+        effective_snapshot,
         {},
         output_dir,
     )

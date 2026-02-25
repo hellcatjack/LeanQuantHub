@@ -27,19 +27,15 @@ def test_get_ib_state_uses_probe(monkeypatch):
         updated_at=datetime.utcnow(),
     )
 
-    called = {"probe": False}
+    called = {"cached": False}
 
-    def _probe(session):
-        called["probe"] = True
+    def _cached(session):
+        called["cached"] = True
         return dummy
 
-    def _update(*_args, **_kwargs):
-        raise AssertionError("update_ib_state should not be called")
-
-    monkeypatch.setattr(brokerage_routes, "probe_ib_connection", _probe)
-    monkeypatch.setattr(brokerage_routes, "update_ib_state", _update)
+    monkeypatch.setattr(brokerage_routes, "get_ib_state_cached", _cached)
 
     out = brokerage_routes.get_ib_state()
 
     assert out.status == "connected"
-    assert called["probe"] is True
+    assert called["cached"] is True

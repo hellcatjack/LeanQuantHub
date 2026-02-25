@@ -3,15 +3,23 @@ from __future__ import annotations
 import copy
 from pathlib import Path
 import json
+import math
+import socket
 from datetime import datetime, timedelta, timezone
 from threading import Event, Lock, Thread
 from time import monotonic
 from typing import Any
 
 from app.core.config import settings
-from app.models import TradeOrder, TradeRun
+from app.models import TradeGuardState, TradeOrder, TradeRun
 from app.services.lean_bridge_paths import resolve_bridge_root
 from app.services.ib_settings import ensure_ib_client_id, get_or_create_ib_settings
+from app.services.ib_read_session import (
+    can_attempt_ib_transient_fallback,
+    get_ib_read_session,
+    record_ib_transient_fallback_result,
+    resolve_ib_transient_client_id,
+)
 from app.services.lean_bridge_watchdog import ensure_lean_bridge_live
 from app.services.lean_bridge_reader import read_account_summary, read_positions, read_quotes
 from app.services.realized_pnl import compute_realized_pnl
@@ -57,9 +65,47 @@ _IBAPI_VERIFY_TIMEOUT_SECONDS = max(
     float(getattr(settings, "ib_account_positions_ibapi_verify_timeout_seconds", 1.5) or 1.5),
     0.3,
 )
+_IBAPI_VERIFY_SOFT_TIMEOUT_SECONDS = max(
+    float(getattr(settings, "ib_account_positions_ibapi_verify_soft_timeout_seconds", 0.35) or 0.35),
+    0.3,
+)
 _IBAPI_VERIFY_MIN_INTERVAL_SECONDS = max(
-    float(getattr(settings, "ib_account_positions_ibapi_verify_interval_seconds", 3.0) or 3.0),
+    float(getattr(settings, "ib_account_positions_ibapi_verify_interval_seconds", 10.0) or 10.0),
     0.0,
+)
+_IBAPI_SUMMARY_VERIFY_TIMEOUT_SECONDS = max(
+    float(getattr(settings, "ib_account_summary_ibapi_verify_timeout_seconds", 2.5) or 2.5),
+    0.3,
+)
+_IBAPI_SUMMARY_VERIFY_MIN_INTERVAL_SECONDS = max(
+    float(getattr(settings, "ib_account_summary_ibapi_verify_interval_seconds", 3.0) or 3.0),
+    0.0,
+)
+_IBAPI_SUMMARY_VERIFY_FAILURE_INTERVAL_SECONDS = max(
+    float(getattr(settings, "ib_account_summary_ibapi_verify_failure_interval_seconds", 20.0) or 20.0),
+    0.0,
+)
+_IBAPI_PNL_VERIFY_TIMEOUT_SECONDS = max(
+    float(getattr(settings, "ib_account_pnl_ibapi_verify_timeout_seconds", 2.5) or 2.5),
+    0.3,
+)
+_IBAPI_PNL_VERIFY_MIN_INTERVAL_SECONDS = max(
+    float(getattr(settings, "ib_account_pnl_ibapi_verify_interval_seconds", 3.0) or 3.0),
+    0.0,
+)
+_IBAPI_SUMMARY_FALLBACK_TAGS = (
+    "NetLiquidation",
+    "NetLiquidationByCurrency",
+    "UnrealizedPnL",
+    "RealizedPnL",
+    "TotalCashValue",
+    "AvailableFunds",
+    "CashBalance",
+)
+_SUMMARY_REQUIRED_PNL_TAGS = ("NetLiquidation", "UnrealizedPnL", "RealizedPnL")
+_GUARD_EQUITY_MAX_AGE_SECONDS = max(
+    int(getattr(settings, "ib_account_guard_equity_max_age_seconds", 86400) or 86400),
+    60,
 )
 _SYMBOL_LATEST_GUARD_STATUSES = (
     "NEW",
@@ -77,7 +123,13 @@ _account_positions_response_cache_lock = Lock()
 _account_positions_response_cache: dict[tuple[str], tuple[float, dict[str, object]]] = {}
 _account_positions_response_inflight: dict[tuple[str], tuple[Event, float]] = {}
 _ibapi_positions_verify_cache_lock = Lock()
-_ibapi_positions_verify_cache: dict[str, tuple[float, dict[str, object] | None]] = {}
+_ibapi_positions_verify_cache: dict[str, tuple[float, str, dict[str, object] | None]] = {}
+_ibapi_summary_verify_cache_lock = Lock()
+_ibapi_summary_verify_cache: dict[str, tuple[float, str, dict[str, object] | None]] = {}
+_ibapi_pnl_verify_cache_lock = Lock()
+_ibapi_pnl_verify_cache: dict[str, tuple[float, str, dict[str, float] | None]] = {}
+_ibapi_summary_account_cache_lock = Lock()
+_ibapi_summary_account_cache: dict[str, str] = {}
 
 
 def _account_positions_cache_key(*, mode: str) -> tuple[str]:
@@ -174,6 +226,12 @@ def _clear_account_positions_response_cache() -> None:
         _account_positions_response_inflight.clear()
     with _ibapi_positions_verify_cache_lock:
         _ibapi_positions_verify_cache.clear()
+    with _ibapi_summary_verify_cache_lock:
+        _ibapi_summary_verify_cache.clear()
+    with _ibapi_pnl_verify_cache_lock:
+        _ibapi_pnl_verify_cache.clear()
+    with _ibapi_summary_account_cache_lock:
+        _ibapi_summary_account_cache.clear()
 
 
 def _build_account_positions_fast_fallback(*, mode: str) -> dict[str, object]:
@@ -202,6 +260,26 @@ def _build_account_positions_fast_fallback(*, mode: str) -> dict[str, object]:
     }
 
 
+def _ibapi_socket_reachable(*, host: str, port: int, timeout_seconds: float) -> bool:
+    host_text = str(host or "").strip()
+    try:
+        port_value = int(port)
+    except (TypeError, ValueError):
+        return False
+    if not host_text or port_value <= 0:
+        return False
+    try:
+        timeout_value = float(timeout_seconds)
+    except (TypeError, ValueError):
+        timeout_value = 0.0
+    probe_timeout = min(max(timeout_value, 0.2), 1.0)
+    try:
+        with socket.create_connection((host_text, port_value), timeout=probe_timeout):
+            return True
+    except Exception:
+        return False
+
+
 def _fetch_positions_via_ibapi(
     *,
     host: str,
@@ -209,6 +287,8 @@ def _fetch_positions_via_ibapi(
     client_id: int,
     timeout_seconds: float = 6.0,
 ) -> list[dict[str, object]] | None:
+    if not _ibapi_socket_reachable(host=host, port=port, timeout_seconds=timeout_seconds):
+        return None
     # Lazy import so environments without ibapi can still import this module.
     from ibapi.client import EClient
     from ibapi.wrapper import EWrapper
@@ -293,14 +373,41 @@ def _load_positions_via_ibapi_fallback(
     if not host or port <= 0:
         return None
 
-    # Use high transient client id to avoid conflicts with leader/run clients.
-    client_id = 1_800_000_000 + int(monotonic() * 1000) % 100_000
-    items = _fetch_positions_via_ibapi(
+    normalized_timeout = max(0.3, float(timeout_seconds))
+    items = None
+    shared_session = get_ib_read_session(
+        mode=mode,
         host=host,
         port=port,
-        client_id=client_id,
-        timeout_seconds=max(0.3, float(timeout_seconds)),
     )
+    if shared_session is not None:
+        shared_items = shared_session.fetch_positions(timeout_seconds=normalized_timeout)
+        if isinstance(shared_items, list):
+            items = [dict(item) for item in shared_items if isinstance(item, dict)]
+
+    if items is None:
+        purpose = "positions"
+        if not can_attempt_ib_transient_fallback(
+            mode=mode,
+            host=host,
+            port=port,
+            purpose=purpose,
+        ):
+            return None
+        client_id = resolve_ib_transient_client_id(mode=mode, purpose=purpose)
+        items = _fetch_positions_via_ibapi(
+            host=host,
+            port=port,
+            client_id=client_id,
+            timeout_seconds=normalized_timeout,
+        )
+        record_ib_transient_fallback_result(
+            mode=mode,
+            host=host,
+            port=port,
+            purpose=purpose,
+            success=items is not None,
+        )
     if items is None:
         return None
     return {
@@ -355,23 +462,37 @@ def _load_positions_via_ibapi_verified(
     if session is None:
         return None
     mode_key = str(mode or "").strip().lower() or "paper"
+    snapshot_token = str(refreshed_at or "").strip()
     now_mono = monotonic()
     if not force and _IBAPI_VERIFY_MIN_INTERVAL_SECONDS > 0:
         with _ibapi_positions_verify_cache_lock:
             cached_entry = _ibapi_positions_verify_cache.get(mode_key)
             if cached_entry is not None:
-                cached_at, cached_payload = cached_entry
-                if (now_mono - float(cached_at)) < _IBAPI_VERIFY_MIN_INTERVAL_SECONDS:
+                cached_at, cached_token, cached_payload = cached_entry
+                cache_age = now_mono - float(cached_at)
+                # Reuse very recent probe result for this mode regardless of bridge snapshot token.
+                # Bridge refreshed_at can tick every couple of seconds and would otherwise cause
+                # unnecessary reconnect churn against Gateway/TWS.
+                if cache_age < _IBAPI_VERIFY_MIN_INTERVAL_SECONDS:
                     return copy.deepcopy(cached_payload) if isinstance(cached_payload, dict) else None
+
+    verify_timeout_seconds = _IBAPI_VERIFY_TIMEOUT_SECONDS
+    if not force:
+        # Keep default positions refresh responsive: this path is only a periodic consistency probe.
+        verify_timeout_seconds = min(verify_timeout_seconds, _IBAPI_VERIFY_SOFT_TIMEOUT_SECONDS)
 
     payload = _load_positions_via_ibapi_fallback(
         session,
         mode=mode,
         refreshed_at=refreshed_at,
-        timeout_seconds=_IBAPI_VERIFY_TIMEOUT_SECONDS,
+        timeout_seconds=verify_timeout_seconds,
     )
     with _ibapi_positions_verify_cache_lock:
-        _ibapi_positions_verify_cache[mode_key] = (now_mono, copy.deepcopy(payload) if isinstance(payload, dict) else None)
+        _ibapi_positions_verify_cache[mode_key] = (
+            now_mono,
+            snapshot_token,
+            copy.deepcopy(payload) if isinstance(payload, dict) else None,
+        )
     return payload
 
 
@@ -404,6 +525,8 @@ def _normalize_items(raw_items: Any) -> dict[str, object]:
     if isinstance(raw_items, dict):
         return raw_items
     items: dict[str, object] = {}
+    by_currency: dict[str, dict[str, object]] = {}
+    rows: list[dict[str, object]] = []
     if isinstance(raw_items, list):
         for item in raw_items:
             if not isinstance(item, dict):
@@ -411,8 +534,725 @@ def _normalize_items(raw_items: Any) -> dict[str, object]:
             name = item.get("name")
             if not name:
                 continue
-            items[str(name)] = item.get("value")
+            tag = str(name)
+            value = item.get("value")
+            items[tag] = value
+            currency_text = str(item.get("currency") or "").strip().upper()
+            if currency_text:
+                by_currency.setdefault(tag, {})[currency_text] = value
+            rows.append(
+                {
+                    "name": tag,
+                    "value": value,
+                    "currency": currency_text,
+                    "account": str(item.get("account") or "").strip() or None,
+                }
+            )
+    if by_currency:
+        items["__by_currency__"] = by_currency
+    if rows:
+        items["__rows__"] = rows
     return items
+
+
+def _has_summary_value(value: object) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str) and not value.strip():
+        return False
+    return True
+
+
+def _normalize_summary_currency_map(raw: object) -> dict[str, object]:
+    if not isinstance(raw, dict):
+        return {}
+    normalized: dict[str, object] = {}
+    for key, value in raw.items():
+        currency = str(key or "").strip().upper()
+        if not currency:
+            continue
+        if not _has_summary_value(value):
+            continue
+        normalized[currency] = value
+    return normalized
+
+
+def _collect_summary_by_currency(items: dict[str, object]) -> dict[str, dict[str, object]]:
+    out: dict[str, dict[str, object]] = {}
+    raw_by_currency = items.get("__by_currency__")
+    if isinstance(raw_by_currency, dict):
+        for tag, payload in raw_by_currency.items():
+            tag_name = str(tag or "").strip()
+            if not tag_name:
+                continue
+            normalized = _normalize_summary_currency_map(payload)
+            if normalized:
+                out[tag_name] = normalized
+    for key, value in items.items():
+        if not isinstance(key, str) or not key.endswith("ByCurrency"):
+            continue
+        tag_name = key[: -len("ByCurrency")]
+        if not tag_name:
+            continue
+        normalized = _normalize_summary_currency_map(value)
+        if not normalized:
+            continue
+        out.setdefault(tag_name, {}).update(normalized)
+    return out
+
+
+def _summary_needs_ibapi_enrichment(items: dict[str, object]) -> bool:
+    by_currency = _collect_summary_by_currency(items)
+    for tag in _SUMMARY_REQUIRED_PNL_TAGS:
+        if _has_summary_value(items.get(tag)):
+            continue
+        if by_currency.get(tag):
+            continue
+        return True
+    return False
+
+
+def _summary_needs_core_enrichment(items: dict[str, object]) -> bool:
+    by_currency = _collect_summary_by_currency(items)
+    for tag in CORE_TAGS:
+        if _has_summary_value(items.get(tag)):
+            return False
+        if by_currency.get(tag):
+            return False
+    return True
+
+
+def _coerce_summary_numeric(value: object) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(parsed):
+        return None
+    return float(parsed)
+
+
+def _build_quote_price_map_for_summary(raw_items: list[dict[str, object]]) -> dict[str, float]:
+    prices: dict[str, float] = {}
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        symbol = str(item.get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        price = _coerce_summary_numeric(item.get("last"))
+        if price in (None, 0.0):
+            bid = _coerce_summary_numeric(item.get("bid"))
+            ask = _coerce_summary_numeric(item.get("ask"))
+            if bid is not None and ask is not None:
+                price = (bid + ask) / 2.0
+            elif bid is not None:
+                price = bid
+            elif ask is not None:
+                price = ask
+        if price is None or price == 0.0:
+            continue
+        prices[symbol] = float(price)
+    return prices
+
+
+def _build_account_summary_from_positions_snapshot(*, mode: str) -> dict[str, object] | None:
+    root = _resolve_bridge_root()
+    positions_payload = read_positions(root)
+    source_detail = str(positions_payload.get("source_detail") or "").strip().lower()
+    raw_positions = (
+        positions_payload.get("items")
+        if isinstance(positions_payload.get("items"), list)
+        else []
+    )
+    if source_detail not in _VALID_HOLDINGS_SOURCE_DETAILS or not raw_positions:
+        return None
+
+    quotes_payload = read_quotes(root)
+    quote_items = (
+        quotes_payload.get("items")
+        if isinstance(quotes_payload.get("items"), list)
+        else []
+    )
+    quote_prices = _build_quote_price_map_for_summary(quote_items)
+
+    net_position_value = 0.0
+    gross_position_value = 0.0
+    unrealized_total = 0.0
+    unrealized_present = False
+
+    for item in raw_positions:
+        if not isinstance(item, dict):
+            continue
+        symbol = str(item.get("symbol") or "").strip().upper()
+        qty = _parse_position_quantity(item.get("position"))
+        if qty is None:
+            qty = _parse_position_quantity(item.get("quantity"))
+        if qty is None:
+            continue
+
+        market_price = _coerce_summary_numeric(item.get("market_price"))
+        if market_price in (None, 0.0) and symbol:
+            market_price = quote_prices.get(symbol)
+        market_value = _coerce_summary_numeric(item.get("market_value"))
+        if market_value in (None, 0.0) and market_price is not None:
+            market_value = float(market_price) * float(qty)
+        if market_value is not None:
+            net_position_value += float(market_value)
+            gross_position_value += abs(float(market_value))
+
+        unrealized = _coerce_summary_numeric(item.get("unrealized_pnl"))
+        if unrealized in (None, 0.0) and market_price is not None:
+            avg_cost = _coerce_summary_numeric(item.get("avg_cost"))
+            if avg_cost is not None:
+                unrealized = (float(market_price) - float(avg_cost)) * float(qty)
+        if unrealized is not None:
+            unrealized_total += float(unrealized)
+            unrealized_present = True
+
+    items: dict[str, object] = {}
+    if abs(net_position_value) > 1e-9 or abs(gross_position_value) > 1e-9:
+        net_liq = net_position_value if abs(net_position_value) > 1e-9 else gross_position_value
+        items["NetLiquidation"] = net_liq
+        items["EquityWithLoanValue"] = net_liq
+        items["GrossPositionValue"] = (
+            gross_position_value if abs(gross_position_value) > 1e-9 else abs(net_liq)
+        )
+    if unrealized_present:
+        items["UnrealizedPnL"] = unrealized_total
+    if not items:
+        return None
+
+    refreshed_at = (
+        positions_payload.get("updated_at")
+        or positions_payload.get("refreshed_at")
+        or quotes_payload.get("updated_at")
+        or quotes_payload.get("refreshed_at")
+    )
+    stale = bool(positions_payload.get("stale", True) or quotes_payload.get("stale", False))
+    return {
+        "items": items,
+        "refreshed_at": refreshed_at,
+        "stale": stale,
+        "source": "derived_positions",
+        "mode": mode,
+    }
+
+
+def _load_guard_equity_proxy(session, *, mode: str) -> float | None:
+    if session is None or not hasattr(session, "query"):
+        return None
+    mode_key = str(mode or "").strip().lower()
+    row = None
+    try:
+        query = session.query(TradeGuardState)
+        if mode_key:
+            row = (
+                query.filter(TradeGuardState.mode == mode_key)
+                .order_by(TradeGuardState.updated_at.desc(), TradeGuardState.id.desc())
+                .first()
+            )
+        if row is None:
+            row = query.order_by(TradeGuardState.updated_at.desc(), TradeGuardState.id.desc()).first()
+    except Exception:
+        return None
+    if row is None:
+        return None
+
+    updated_at = getattr(row, "updated_at", None)
+    if isinstance(updated_at, datetime):
+        now_utc = datetime.now(timezone.utc)
+        if updated_at.tzinfo is None:
+            updated_utc = updated_at.replace(tzinfo=timezone.utc)
+        else:
+            updated_utc = updated_at.astimezone(timezone.utc)
+        if (now_utc - updated_utc).total_seconds() > float(_GUARD_EQUITY_MAX_AGE_SECONDS):
+            return None
+
+    values: list[float] = []
+    for raw in (
+        getattr(row, "last_equity", None),
+        getattr(row, "day_start_equity", None),
+        getattr(row, "equity_peak", None),
+    ):
+        value = _coerce_summary_numeric(raw)
+        if value is None or value <= 0:
+            continue
+        values.append(float(value))
+    if not values:
+        return None
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2 == 1:
+        return float(ordered[middle])
+    return float((ordered[middle - 1] + ordered[middle]) / 2.0)
+
+
+def _should_apply_guard_equity(
+    *,
+    source: str,
+    items: dict[str, object],
+    guard_equity: float,
+) -> bool:
+    current_net_liq = _coerce_summary_numeric(items.get("NetLiquidation"))
+    if current_net_liq is None:
+        return True
+    if "derived_positions" not in str(source or ""):
+        return False
+    gross_position_value = _coerce_summary_numeric(items.get("GrossPositionValue"))
+    if gross_position_value is None:
+        return False
+    near_positions_only = abs(current_net_liq - gross_position_value) <= max(10.0, abs(gross_position_value) * 0.02)
+    if not near_positions_only:
+        return False
+    return guard_equity > (gross_position_value * 1.02)
+
+
+def _merge_summary_rows(
+    base_rows: list[dict[str, object]],
+    fallback_rows: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    merged: dict[tuple[str, str], dict[str, object]] = {}
+    for row in [*base_rows, *fallback_rows]:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "").strip()
+        if not name:
+            continue
+        currency = str(row.get("currency") or "").strip().upper()
+        value = row.get("value")
+        key = (name, currency)
+        current = merged.get(key)
+        if current is None:
+            merged[key] = {"name": name, "value": value, "currency": currency}
+            continue
+        if not _has_summary_value(current.get("value")) and _has_summary_value(value):
+            current["value"] = value
+    return list(merged.values())
+
+
+def _merge_account_summary_items(
+    base_items: dict[str, object],
+    fallback_items: dict[str, object],
+) -> dict[str, object]:
+    merged = dict(base_items)
+
+    for key, value in fallback_items.items():
+        if key in {"__by_currency__", "__rows__"}:
+            continue
+        if _has_summary_value(merged.get(key)):
+            continue
+        if _has_summary_value(value):
+            merged[key] = value
+
+    merged_by_currency = _collect_summary_by_currency(base_items)
+    fallback_by_currency = _collect_summary_by_currency(fallback_items)
+    for tag, currency_map in fallback_by_currency.items():
+        merged_by_currency.setdefault(tag, {}).update(currency_map)
+    if merged_by_currency:
+        merged["__by_currency__"] = merged_by_currency
+        for tag, currency_map in merged_by_currency.items():
+            merged[f"{tag}ByCurrency"] = dict(currency_map)
+
+    base_rows = base_items.get("__rows__") if isinstance(base_items.get("__rows__"), list) else []
+    fallback_rows = fallback_items.get("__rows__") if isinstance(fallback_items.get("__rows__"), list) else []
+    rows = _merge_summary_rows(base_rows, fallback_rows)
+    if rows:
+        merged["__rows__"] = rows
+
+    return merged
+
+
+def _fetch_account_summary_via_ibapi(
+    *,
+    host: str,
+    port: int,
+    client_id: int,
+    timeout_seconds: float = 6.0,
+    account_id: str | None = None,
+) -> list[dict[str, object]] | None:
+    if not _ibapi_socket_reachable(host=host, port=port, timeout_seconds=timeout_seconds):
+        return None
+    from ibapi.client import EClient
+    from ibapi.wrapper import EWrapper
+
+    class _App(EWrapper, EClient):
+        def __init__(self):
+            EClient.__init__(self, self)
+            self.ready = Event()
+            self.done = Event()
+            self.req_id = 900_000 + int(monotonic() * 1000) % 100_000
+            self.items: list[dict[str, object]] = []
+
+        def nextValidId(self, _order_id: int):
+            self.ready.set()
+
+        def accountSummary(self, reqId, account, tag, value, currency):
+            if reqId != self.req_id:
+                return
+            account_text = str(account or "").strip()
+            if normalized_account and account_text and account_text.upper() != normalized_account:
+                return
+            self.items.append(
+                {
+                    "name": str(tag or "").strip(),
+                    "value": value,
+                    "currency": str(currency or "").strip().upper(),
+                    "account": account_text or None,
+                }
+            )
+
+        def accountSummaryEnd(self, reqId):
+            if reqId == self.req_id:
+                self.done.set()
+
+    normalized_account = str(account_id or "").strip().upper() or None
+    app = _App()
+    thread: Thread | None = None
+    tags = ",".join(_IBAPI_SUMMARY_FALLBACK_TAGS)
+    try:
+        app.connect(host, int(port), int(client_id))
+        thread = Thread(target=app.run, daemon=True)
+        thread.start()
+        if not app.ready.wait(timeout_seconds):
+            return None
+        app.reqAccountSummary(app.req_id, "All", tags)
+        if not app.done.wait(timeout_seconds):
+            return None
+        return [item for item in app.items if str(item.get("name") or "").strip()]
+    except Exception:
+        return None
+    finally:
+        try:
+            app.cancelAccountSummary(getattr(app, "req_id", 0))
+        except Exception:
+            pass
+        try:
+            app.disconnect()
+        except Exception:
+            pass
+        if thread is not None:
+            thread.join(timeout=0.2)
+
+
+def _load_account_summary_via_ibapi_fallback(
+    session,
+    *,
+    mode: str,
+    refreshed_at: object,
+    timeout_seconds: float = 6.0,
+) -> dict[str, object] | None:
+    if session is None:
+        return None
+    mode_key = str(mode or "").strip().lower() or "paper"
+    try:
+        settings_row = get_or_create_ib_settings(session)
+    except Exception:
+        return None
+    host = str(getattr(settings_row, "host", "") or "").strip()
+    try:
+        port = int(getattr(settings_row, "port", 0) or 0)
+    except (TypeError, ValueError):
+        port = 0
+    if not host or port <= 0:
+        return None
+
+    account_id = str(getattr(settings_row, "account_id", "") or "").strip() or None
+    normalized_timeout = max(0.3, float(timeout_seconds))
+    rows = None
+    shared_session = get_ib_read_session(
+        mode=mode,
+        host=host,
+        port=port,
+    )
+    if shared_session is not None:
+        shared_rows = shared_session.fetch_account_summary(
+            tags=_IBAPI_SUMMARY_FALLBACK_TAGS,
+            account_id=account_id,
+            timeout_seconds=normalized_timeout,
+        )
+        if isinstance(shared_rows, list):
+            rows = [dict(item) for item in shared_rows if isinstance(item, dict)]
+
+    if rows is None:
+        purpose = "summary"
+        if not can_attempt_ib_transient_fallback(
+            mode=mode,
+            host=host,
+            port=port,
+            purpose=purpose,
+        ):
+            return None
+        client_id = resolve_ib_transient_client_id(mode=mode, purpose=purpose)
+        rows = _fetch_account_summary_via_ibapi(
+            host=host,
+            port=port,
+            client_id=client_id,
+            timeout_seconds=normalized_timeout,
+            account_id=account_id,
+        )
+        record_ib_transient_fallback_result(
+            mode=mode,
+            host=host,
+            port=port,
+            purpose=purpose,
+            success=bool(rows),
+        )
+    if not rows:
+        return None
+    resolved_account = account_id
+    if not resolved_account:
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            account_text = str(row.get("account") or "").strip()
+            if account_text:
+                resolved_account = account_text
+                break
+    if resolved_account:
+        with _ibapi_summary_account_cache_lock:
+            _ibapi_summary_account_cache[mode_key] = resolved_account
+    return {
+        "items": _normalize_items(rows),
+        "account_id": resolved_account,
+        "refreshed_at": refreshed_at or datetime.utcnow().isoformat() + "Z",
+        "stale": False,
+        "source": "ibapi",
+        "mode": mode,
+    }
+
+
+def _load_account_summary_via_ibapi_verified(
+    session,
+    *,
+    mode: str,
+    refreshed_at: object,
+    force: bool = False,
+    timeout_seconds: float | None = None,
+) -> dict[str, object] | None:
+    mode_key = str(mode or "").strip().lower() or "paper"
+    now_mono = monotonic()
+    snapshot_token = str(refreshed_at or "")
+    if not force and _IBAPI_SUMMARY_VERIFY_MIN_INTERVAL_SECONDS > 0:
+        with _ibapi_summary_verify_cache_lock:
+            cached_entry = _ibapi_summary_verify_cache.get(mode_key)
+            if cached_entry is not None:
+                cached_at, cached_token, cached_payload = cached_entry
+                cache_age = now_mono - float(cached_at)
+                # Keep a short mode-level cooldown for successful/failed probes to prevent
+                # bursty reconnect loops when bridge snapshot token changes quickly.
+                if isinstance(cached_payload, dict):
+                    if cache_age < _IBAPI_SUMMARY_VERIFY_MIN_INTERVAL_SECONDS:
+                        return copy.deepcopy(cached_payload)
+                else:
+                    failure_interval = max(
+                        _IBAPI_SUMMARY_VERIFY_MIN_INTERVAL_SECONDS,
+                        _IBAPI_SUMMARY_VERIFY_FAILURE_INTERVAL_SECONDS,
+                    )
+                    if cache_age < failure_interval:
+                        return None
+
+    verify_timeout_seconds = (
+        _IBAPI_SUMMARY_VERIFY_TIMEOUT_SECONDS
+        if timeout_seconds is None
+        else max(0.3, float(timeout_seconds))
+    )
+    payload = _load_account_summary_via_ibapi_fallback(
+        session,
+        mode=mode,
+        refreshed_at=refreshed_at,
+        timeout_seconds=verify_timeout_seconds,
+    )
+    with _ibapi_summary_verify_cache_lock:
+        _ibapi_summary_verify_cache[mode_key] = (
+            now_mono,
+            snapshot_token,
+            copy.deepcopy(payload) if isinstance(payload, dict) else None,
+        )
+    return payload
+
+
+def _coerce_ibapi_pnl_value(raw: object) -> float | None:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value):
+        return None
+    # IB uses very large sentinel values for "unset".
+    if abs(value) >= 1e100:
+        return None
+    return value
+
+
+def _fetch_account_pnl_via_ibapi(
+    *,
+    host: str,
+    port: int,
+    client_id: int,
+    account_id: str,
+    timeout_seconds: float = 6.0,
+) -> dict[str, float] | None:
+    if not _ibapi_socket_reachable(host=host, port=port, timeout_seconds=timeout_seconds):
+        return None
+    from ibapi.client import EClient
+    from ibapi.wrapper import EWrapper
+
+    class _App(EWrapper, EClient):
+        def __init__(self):
+            EClient.__init__(self, self)
+            self.ready = Event()
+            self.done = Event()
+            self.req_id = 950_000 + int(monotonic() * 1000) % 100_000
+            self.payload: dict[str, float] = {}
+
+        def nextValidId(self, _order_id: int):
+            self.ready.set()
+
+        def pnl(self, reqId, dailyPnL, unrealizedPnL, realizedPnL):
+            if reqId != self.req_id:
+                return
+            unrealized = _coerce_ibapi_pnl_value(unrealizedPnL)
+            realized = _coerce_ibapi_pnl_value(realizedPnL)
+            daily = _coerce_ibapi_pnl_value(dailyPnL)
+            if unrealized is not None:
+                self.payload["UnrealizedPnL"] = unrealized
+            if realized is not None:
+                self.payload["RealizedPnL"] = realized
+            if daily is not None:
+                self.payload["DailyPnL"] = daily
+            if self.payload:
+                self.done.set()
+
+    app = _App()
+    thread: Thread | None = None
+    try:
+        app.connect(host, int(port), int(client_id))
+        thread = Thread(target=app.run, daemon=True)
+        thread.start()
+        if not app.ready.wait(timeout_seconds):
+            return None
+        app.reqPnL(app.req_id, str(account_id), "")
+        if not app.done.wait(timeout_seconds):
+            return None
+        return dict(app.payload) if app.payload else None
+    except Exception:
+        return None
+    finally:
+        try:
+            app.cancelPnL(getattr(app, "req_id", 0))
+        except Exception:
+            pass
+        try:
+            app.disconnect()
+        except Exception:
+            pass
+        if thread is not None:
+            thread.join(timeout=0.2)
+
+
+def _load_account_pnl_via_ibapi_fallback(
+    session,
+    *,
+    mode: str,
+    refreshed_at: object,
+    timeout_seconds: float = 6.0,
+) -> dict[str, float] | None:
+    if session is None:
+        return None
+    mode_key = str(mode or "").strip().lower() or "paper"
+    try:
+        settings_row = get_or_create_ib_settings(session)
+    except Exception:
+        return None
+    host = str(getattr(settings_row, "host", "") or "").strip()
+    try:
+        port = int(getattr(settings_row, "port", 0) or 0)
+    except (TypeError, ValueError):
+        port = 0
+    account_id = str(getattr(settings_row, "account_id", "") or "").strip()
+    if not account_id:
+        with _ibapi_summary_account_cache_lock:
+            account_id = str(_ibapi_summary_account_cache.get(mode_key) or "").strip()
+    if not host or port <= 0 or not account_id:
+        return None
+
+    normalized_timeout = max(0.3, float(timeout_seconds))
+    pnl = None
+    shared_session = get_ib_read_session(
+        mode=mode,
+        host=host,
+        port=port,
+    )
+    if shared_session is not None:
+        shared_pnl = shared_session.fetch_account_pnl(
+            account_id=account_id,
+            timeout_seconds=normalized_timeout,
+        )
+        if isinstance(shared_pnl, dict):
+            pnl = dict(shared_pnl)
+
+    if pnl is None:
+        purpose = "pnl"
+        if not can_attempt_ib_transient_fallback(
+            mode=mode,
+            host=host,
+            port=port,
+            purpose=purpose,
+        ):
+            return None
+        client_id = resolve_ib_transient_client_id(mode=mode, purpose=purpose)
+        pnl = _fetch_account_pnl_via_ibapi(
+            host=host,
+            port=port,
+            client_id=client_id,
+            timeout_seconds=normalized_timeout,
+            account_id=account_id,
+        )
+        record_ib_transient_fallback_result(
+            mode=mode,
+            host=host,
+            port=port,
+            purpose=purpose,
+            success=bool(pnl),
+        )
+    if not pnl:
+        return None
+    return pnl
+
+
+def _load_account_pnl_via_ibapi_verified(
+    session,
+    *,
+    mode: str,
+    refreshed_at: object,
+    force: bool = False,
+) -> dict[str, float] | None:
+    mode_key = str(mode or "").strip().lower() or "paper"
+    now_mono = monotonic()
+    snapshot_token = str(refreshed_at or "")
+    if not force and _IBAPI_PNL_VERIFY_MIN_INTERVAL_SECONDS > 0:
+        with _ibapi_pnl_verify_cache_lock:
+            cached_entry = _ibapi_pnl_verify_cache.get(mode_key)
+            if cached_entry is not None:
+                cached_at, cached_token, cached_payload = cached_entry
+                cache_age = now_mono - float(cached_at)
+                if cache_age < _IBAPI_PNL_VERIFY_MIN_INTERVAL_SECONDS:
+                    return copy.deepcopy(cached_payload) if isinstance(cached_payload, dict) else None
+
+    payload = _load_account_pnl_via_ibapi_fallback(
+        session,
+        mode=mode,
+        refreshed_at=refreshed_at,
+        timeout_seconds=_IBAPI_PNL_VERIFY_TIMEOUT_SECONDS,
+    )
+    with _ibapi_pnl_verify_cache_lock:
+        _ibapi_pnl_verify_cache[mode_key] = (
+            now_mono,
+            snapshot_token,
+            copy.deepcopy(payload) if isinstance(payload, dict) else None,
+        )
+    return payload
 
 
 def _filter_summary(raw: Any, *, full: bool) -> dict[str, object]:
@@ -1044,6 +1884,12 @@ def _reconcile_non_stale_ib_holdings_with_recent_fills(
 def get_account_summary(
     session=None, *, mode: str, full: bool, force_refresh: bool = False
 ) -> dict[str, object]:
+    source = "lean_bridge"
+    source_detail = None
+    stale = True
+    refreshed_at = None
+    items: dict[str, object] = {}
+
     cache_payload = _read_cached_summary()
     if cache_payload is None and CACHE_ROOT is not None:
         try:
@@ -1058,18 +1904,120 @@ def get_account_summary(
         refreshed_at = cache_payload.get("refreshed_at")
         stale = bool(cache_payload.get("stale", False))
         source = cache_payload.get("source") or "cache"
-        return {
-            "items": items,
-            "refreshed_at": refreshed_at,
-            "source": source,
-            "stale": stale,
-            "full": full,
-        }
-    payload = read_account_summary(_resolve_bridge_root())
-    items = _normalize_items(payload.get("items"))
-    refreshed_at = payload.get("updated_at") or payload.get("refreshed_at")
-    stale = bool(payload.get("stale", True))
-    source = payload.get("source") or "lean_bridge"
+        source_detail = cache_payload.get("source_detail")
+    else:
+        payload = read_account_summary(_resolve_bridge_root())
+        items = _normalize_items(payload.get("items"))
+        refreshed_at = payload.get("updated_at") or payload.get("refreshed_at")
+        stale = bool(payload.get("stale", True))
+        source = payload.get("source") or "lean_bridge"
+        source_detail = payload.get("source_detail")
+
+    guard_equity = _load_guard_equity_proxy(session, mode=mode)
+    needs_enrichment = _summary_needs_ibapi_enrichment(items) if full else _summary_needs_core_enrichment(items)
+    source_detail_text = str(source_detail or "").strip().lower()
+    if (
+        session is not None
+        and hasattr(session, "query")
+        and not full
+        and not force_refresh
+        and needs_enrichment
+        and source_detail_text == "ib_account_empty"
+    ):
+        # Keep the lightweight overview responsive when bridge account summary is empty.
+        quick_derived = _build_account_summary_from_positions_snapshot(mode=mode)
+        if isinstance(quick_derived, dict):
+            quick_items = _normalize_items(quick_derived.get("items"))
+            if quick_items:
+                items = _merge_account_summary_items(items, quick_items)
+                source = f"{source}+derived_positions"
+                stale = bool(stale or bool(quick_derived.get("stale", True)))
+                if not refreshed_at:
+                    refreshed_at = quick_derived.get("refreshed_at")
+                needs_enrichment = _summary_needs_core_enrichment(items)
+
+    if (
+        session is not None
+        and hasattr(session, "query")
+        and needs_enrichment
+    ):
+        summary_probe_timeout = _IBAPI_SUMMARY_VERIFY_TIMEOUT_SECONDS
+        if not full and not force_refresh:
+            if source_detail_text == "ib_account_empty":
+                summary_probe_timeout = min(summary_probe_timeout, 0.35)
+        ibapi_payload = _load_account_summary_via_ibapi_verified(
+            session,
+            mode=mode,
+            refreshed_at=refreshed_at,
+            force=force_refresh,
+            timeout_seconds=summary_probe_timeout,
+        )
+        if isinstance(ibapi_payload, dict):
+            ibapi_items = _normalize_items(ibapi_payload.get("items"))
+            if ibapi_items:
+                items = _merge_account_summary_items(items, ibapi_items)
+                ibapi_source = str(ibapi_payload.get("source") or "ibapi").strip() or "ibapi"
+                source = f"{source}+{ibapi_source}"
+                stale = bool(stale and bool(ibapi_payload.get("stale", False)))
+                if not refreshed_at:
+                    refreshed_at = ibapi_payload.get("refreshed_at")
+                needs_enrichment = (
+                    _summary_needs_ibapi_enrichment(items)
+                    if full
+                    else _summary_needs_core_enrichment(items)
+                )
+
+    if (
+        full
+        and session is not None
+        and hasattr(session, "query")
+        and (
+            not _has_summary_value(items.get("RealizedPnL"))
+            or not _has_summary_value(items.get("UnrealizedPnL"))
+        )
+    ):
+        pnl_payload = _load_account_pnl_via_ibapi_verified(
+            session,
+            mode=mode,
+            refreshed_at=refreshed_at,
+            force=force_refresh,
+        )
+        pnl_applied = False
+        if isinstance(pnl_payload, dict):
+            if not _has_summary_value(items.get("RealizedPnL")) and _has_summary_value(pnl_payload.get("RealizedPnL")):
+                items["RealizedPnL"] = pnl_payload.get("RealizedPnL")
+                pnl_applied = True
+            if not _has_summary_value(items.get("UnrealizedPnL")) and _has_summary_value(
+                pnl_payload.get("UnrealizedPnL")
+            ):
+                items["UnrealizedPnL"] = pnl_payload.get("UnrealizedPnL")
+                pnl_applied = True
+        if pnl_applied:
+            source = f"{source}+ibapi_pnl"
+
+    needs_enrichment = _summary_needs_ibapi_enrichment(items) if full else _summary_needs_core_enrichment(items)
+    if (
+        session is not None
+        and hasattr(session, "query")
+        and needs_enrichment
+    ):
+        derived_payload = _build_account_summary_from_positions_snapshot(mode=mode)
+        if isinstance(derived_payload, dict):
+            derived_items = _normalize_items(derived_payload.get("items"))
+            if derived_items:
+                items = _merge_account_summary_items(items, derived_items)
+                source = f"{source}+derived_positions"
+                stale = bool(stale or bool(derived_payload.get("stale", True)))
+                if not refreshed_at:
+                    refreshed_at = derived_payload.get("refreshed_at")
+
+    if guard_equity is not None and _should_apply_guard_equity(source=source, items=items, guard_equity=guard_equity):
+        items["NetLiquidation"] = guard_equity
+        items["EquityWithLoanValue"] = guard_equity
+        if "guard_equity" not in str(source or ""):
+            source = f"{source}+guard_equity"
+        stale = True
+
     return {
         "items": items,
         "refreshed_at": refreshed_at,
@@ -1087,6 +2035,13 @@ def get_account_positions(session, *, mode: str, force_refresh: bool = False) ->
     source_detail = payload.get("source_detail") if isinstance(payload, dict) else None
     refreshed_at = payload.get("updated_at") or payload.get("refreshed_at")
     stale = bool(payload.get("stale", True))
+    raw_items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    can_use_stale_bridge_snapshot = bool(
+        not force_refresh
+        and stale
+        and source_detail in _VALID_HOLDINGS_SOURCE_DETAILS
+        and len(raw_items) > 0
+    )
 
     # Guardrail: bridge positions snapshots can look fresh while drifting from TWS.
     # Periodically verify against a direct reqPositions snapshot and prefer TWS when mismatched.
@@ -1095,6 +2050,7 @@ def get_account_positions(session, *, mode: str, force_refresh: bool = False) ->
         and hasattr(session, "query")
         and source_detail in _VALID_HOLDINGS_SOURCE_DETAILS
         and not stale
+        and (force_refresh or source_detail != "ib_holdings_ibapi_fallback")
     ):
         ibapi_verified = _load_positions_via_ibapi_verified(
             session,
@@ -1116,31 +2072,41 @@ def get_account_positions(session, *, mode: str, force_refresh: bool = False) ->
                 stale = bool(payload.get("stale", True))
 
     if source_detail not in _VALID_HOLDINGS_SOURCE_DETAILS or stale:
-        if session is None:
+        if session is None and not can_use_stale_bridge_snapshot:
             return {
                 "items": [],
                 "refreshed_at": refreshed_at,
                 "stale": True,
                 "source_detail": source_detail,
             }
-        ensure_lean_bridge_live(session, mode=mode, force=True)
-        payload = read_positions(_resolve_bridge_root())
-        source_detail = payload.get("source_detail") if isinstance(payload, dict) else None
-        refreshed_at = payload.get("updated_at") or payload.get("refreshed_at")
-        stale = bool(payload.get("stale", True))
-        if source_detail not in _VALID_HOLDINGS_SOURCE_DETAILS or stale:
-            if source_detail in _VALID_HOLDINGS_SOURCE_DETAILS and stale:
-                # Bridge holdings can be stale while still carrying outdated positions.
-                # Prefer IB API fallback first so UI reflects current account state.
+        if not can_use_stale_bridge_snapshot:
+            ensure_force_refresh = bool(force_refresh or source_detail not in _VALID_HOLDINGS_SOURCE_DETAILS)
+            ensure_lean_bridge_live(session, mode=mode, force=ensure_force_refresh)
+            payload = read_positions(_resolve_bridge_root())
+            source_detail = payload.get("source_detail") if isinstance(payload, dict) else None
+            refreshed_at = payload.get("updated_at") or payload.get("refreshed_at")
+            stale = bool(payload.get("stale", True))
+            if source_detail not in _VALID_HOLDINGS_SOURCE_DETAILS or stale:
+                # Position list must stay aligned with TWS only:
+                # prefer direct IB API holdings and avoid any local inferred overlay.
+                ibapi_timeout_seconds = (
+                    _IBAPI_VERIFY_TIMEOUT_SECONDS
+                    if not force_refresh
+                    else max(0.3, _IBAPI_VERIFY_TIMEOUT_SECONDS * 2.0)
+                )
                 ibapi_payload = _load_positions_via_ibapi_fallback(
                     session,
                     mode=mode,
                     refreshed_at=refreshed_at,
+                    timeout_seconds=ibapi_timeout_seconds,
                 )
                 if isinstance(ibapi_payload, dict):
-                    return ibapi_payload
-                stale_items = payload.get("items") if isinstance(payload.get("items"), list) else []
-                if stale_items:
+                    payload = ibapi_payload
+                    source_detail = payload.get("source_detail") if isinstance(payload, dict) else None
+                    refreshed_at = payload.get("updated_at") or payload.get("refreshed_at")
+                    stale = bool(payload.get("stale", True))
+                elif source_detail in _VALID_HOLDINGS_SOURCE_DETAILS:
+                    stale_items = payload.get("items") if isinstance(payload.get("items"), list) else []
                     payload = {
                         "items": stale_items,
                         "refreshed_at": refreshed_at,
@@ -1150,59 +2116,12 @@ def get_account_positions(session, *, mode: str, force_refresh: bool = False) ->
                     source_detail = payload["source_detail"]
                     stale = True
                 else:
-                    inferred_items = _infer_positions_from_recent_direct_fills(session, mode=mode)
-                    if inferred_items:
-                        payload = {
-                            "items": inferred_items,
-                            "refreshed_at": refreshed_at,
-                            "stale": True,
-                            "source_detail": "ib_holdings_inferred_recent_fills",
-                        }
-                        source_detail = payload["source_detail"]
-                        stale = True
-                    else:
-                        return {
-                            "items": [],
-                            "refreshed_at": refreshed_at,
-                            "stale": True,
-                            "source_detail": source_detail,
-                        }
-            else:
-                source_value = str(source_detail or "").strip().lower()
-                if source_value not in {
-                    "",
-                    "ib_holdings",
-                    "ib_holdings_empty",
-                    "ib_holdings_error",
-                    "brokerage_unavailable",
-                }:
                     return {
                         "items": [],
                         "refreshed_at": refreshed_at,
                         "stale": True,
                         "source_detail": source_detail,
                     }
-                inferred_items = _infer_positions_from_recent_direct_fills(session, mode=mode)
-                if inferred_items:
-                    payload = {
-                        "items": inferred_items,
-                        "refreshed_at": refreshed_at,
-                        "stale": True,
-                        "source_detail": "ib_holdings_inferred_recent_fills",
-                    }
-                    source_detail = payload["source_detail"]
-                    stale = True
-                else:
-                    return {
-                        "items": [],
-                        "refreshed_at": refreshed_at,
-                        "stale": True,
-                        "source_detail": source_detail,
-                    }
-    payload = _reconcile_non_stale_ib_holdings_with_recent_fills(session, mode=mode, payload=payload)
-    source_detail = payload.get("source_detail") if isinstance(payload, dict) else None
-    refreshed_at = payload.get("updated_at") or payload.get("refreshed_at")
-    stale = bool(payload.get("stale", True))
     quotes_payload = read_quotes(_resolve_bridge_root())
     quote_items = quotes_payload.get("items") if isinstance(quotes_payload.get("items"), list) else []
     quote_prices: dict[str, float] = {}
@@ -1326,8 +2245,11 @@ def get_account_positions_cached(
                 allow_steal_stale=True,
             )
         if not cache_owner:
-            # Avoid indefinite threadpool blocking when an inflight owner hangs.
-            return _build_account_positions_fast_fallback(mode=mode)
+            # Avoid returning a divergent fallback payload under contention.
+            payload = get_account_positions(session, mode=mode, force_refresh=False)
+            if _ACCOUNT_POSITIONS_RESPONSE_CACHE_TTL_SECONDS > 0:
+                _store_account_positions_response_cache(cache_key, payload)
+            return payload
 
     try:
         payload = get_account_positions(session, mode=mode, force_refresh=force_refresh)

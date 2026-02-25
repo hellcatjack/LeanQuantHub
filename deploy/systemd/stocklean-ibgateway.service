@@ -1,0 +1,18 @@
+[Unit]
+Description=StockLean IB Gateway (IBC)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/hellcat/IBC
+Environment=DISPLAY=:99
+Environment=LIBGL_ALWAYS_SOFTWARE=1
+Environment=MESA_LOADER_DRIVER_OVERRIDE=llvmpipe
+ExecStart=/bin/bash -lc '/home/hellcat/IBC/gatewaystart.sh -inline'
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+KillMode=control-group
+
+[Install]
+WantedBy=default.target

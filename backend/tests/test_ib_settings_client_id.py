@@ -8,7 +8,9 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from app.models import Base, IBSettings
+from datetime import datetime, timedelta
+
+from app.models import Base, IBConnectionState, IBSettings
 from app.services import ib_settings
 
 
@@ -91,5 +93,98 @@ def test_probe_ib_connection_connected_when_socket_ok(monkeypatch):
 
         state = ib_settings.probe_ib_connection(session, timeout_seconds=0.1)
         assert state.status == "connected"
+    finally:
+        session.close()
+
+
+def test_probe_ib_connection_keeps_connected_when_only_snapshots_stale(monkeypatch):
+    session = _make_session()
+    try:
+        row = IBSettings(client_id=101, host="127.0.0.1", port=7497, api_mode="ib")
+        session.add(row)
+        session.commit()
+
+        monkeypatch.setattr(
+            ib_settings,
+            "read_bridge_status",
+            lambda *args, **kwargs: {
+                "status": "ok",
+                "stale": True,
+                "stale_reasons": ["positions_stale", "quotes_stale"],
+                "last_error": None,
+            },
+        )
+        monkeypatch.setattr(
+            ib_settings,
+            "_probe_ib_socket",
+            lambda *args, **kwargs: True,
+            raising=False,
+        )
+
+        state = ib_settings.probe_ib_connection(session, timeout_seconds=0.1)
+        assert state.status == "connected"
+        assert "snapshot" in str(state.message or "").lower()
+    finally:
+        session.close()
+
+
+def test_get_ib_state_cached_skips_probe_within_interval(monkeypatch):
+    session = _make_session()
+    try:
+        settings_row = IBSettings(client_id=101, host="127.0.0.1", port=7497, api_mode="ib")
+        state_row = IBConnectionState(
+            status="connected",
+            message="cached",
+            last_heartbeat=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+        )
+        session.add(settings_row)
+        session.add(state_row)
+        session.commit()
+
+        monkeypatch.setattr(
+            ib_settings,
+            "probe_ib_connection",
+            lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not probe")),
+        )
+
+        state = ib_settings.get_ib_state_cached(
+            session,
+            probe_interval_seconds=60.0,
+            timeout_seconds=0.1,
+        )
+        assert state.status == "connected"
+        assert state.message == "cached"
+    finally:
+        session.close()
+
+
+def test_get_ib_state_cached_probes_after_interval(monkeypatch):
+    session = _make_session()
+    try:
+        settings_row = IBSettings(client_id=101, host="127.0.0.1", port=7497, api_mode="ib")
+        state_row = IBConnectionState(
+            status="connected",
+            message="old",
+            last_heartbeat=datetime.utcnow() - timedelta(seconds=120),
+            updated_at=datetime.utcnow(),
+        )
+        session.add(settings_row)
+        session.add(state_row)
+        session.commit()
+
+        called = {"probe": False}
+
+        def _probe(*_args, **_kwargs):
+            called["probe"] = True
+            return state_row
+
+        monkeypatch.setattr(ib_settings, "probe_ib_connection", _probe)
+        ib_settings.get_ib_state_cached(
+            session,
+            probe_interval_seconds=30.0,
+            timeout_seconds=0.1,
+        )
+        assert called["probe"] is True
     finally:
         session.close()

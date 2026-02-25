@@ -6,12 +6,14 @@ import os
 import subprocess
 import sys
 import time
+import traceback
 from dataclasses import dataclass
 from datetime import date, datetime, time as time_cls, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 import urllib.request
+from sqlalchemy import text
 from zoneinfo import ZoneInfo
 
 from app.core.config import settings
@@ -43,7 +45,11 @@ from app.routes.projects import _get_latest_version, _resolve_project_config, PR
 from app.services.alpha_fetch import load_alpha_fetch_config
 from app.services.alpha_rate import load_alpha_rate_config
 from app.services.bulk_auto import load_bulk_auto_config
-from app.services.decision_snapshot import generate_decision_snapshot, resolve_backtest_run_link
+from app.services.decision_snapshot import (
+    _sanitize_json,
+    generate_decision_snapshot,
+    resolve_backtest_run_link,
+)
 from app.services.factor_score_runner import run_factor_score_job
 from app.services.lean_bridge_paths import resolve_bridge_root
 from app.services.lean_bridge_reader import (
@@ -473,6 +479,61 @@ class StepContext:
             self.step.log_path = log_path
         self.step.updated_at = datetime.utcnow()
         self.session.commit()
+
+
+def _resolve_decision_snapshot_db_lock_wait_seconds(default: int = 30) -> int:
+    raw = (os.getenv("PRETRADE_DECISION_DB_LOCK_WAIT_SECONDS") or "").strip()
+    try:
+        value = int(raw) if raw else int(default)
+    except (TypeError, ValueError):
+        value = int(default)
+    return max(1, value)
+
+
+def _apply_decision_snapshot_db_timeouts(session, seconds: int) -> int:
+    resolved = max(1, int(seconds))
+    bind = session.get_bind() if hasattr(session, "get_bind") else None
+    dialect = getattr(getattr(bind, "dialect", None), "name", "")
+    if dialect != "mysql":
+        return resolved
+    session.execute(
+        text("SET SESSION innodb_lock_wait_timeout = :seconds"),
+        {"seconds": resolved},
+    )
+    session.execute(
+        text("SET SESSION lock_wait_timeout = :seconds"),
+        {"seconds": resolved},
+    )
+    return resolved
+
+
+def _mark_decision_snapshot_stage(
+    ctx: StepContext,
+    stage: str,
+    *,
+    extras: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    now = datetime.utcnow().isoformat() + "Z"
+    current = ctx.step.artifacts if isinstance(ctx.step.artifacts, dict) else {}
+    existing = current.get("decision_snapshot_stages")
+    stages: list[dict[str, Any]]
+    if isinstance(existing, list):
+        stages = [item for item in existing if isinstance(item, dict)]
+    else:
+        stages = []
+    entry = {"stage": stage, "at": now}
+    if extras:
+        entry.update(extras)
+    stages.append(entry)
+    artifacts = {
+        "decision_snapshot_stage": stage,
+        "decision_snapshot_stage_at": now,
+        "decision_snapshot_stages": stages,
+    }
+    if extras:
+        artifacts.update(extras)
+    ctx.update(artifacts=artifacts)
+    return artifacts
 
 
 def _get_or_create_settings(session) -> PreTradeSettings:
@@ -1077,6 +1138,15 @@ def step_decision_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResu
     settings_row = _get_or_create_settings(ctx.session)
     if not settings_row.auto_decision_snapshot:
         raise StepSkip("decision_snapshot_disabled")
+    lock_wait_seconds = _apply_decision_snapshot_db_timeouts(
+        ctx.session,
+        _resolve_decision_snapshot_db_lock_wait_seconds(),
+    )
+    _mark_decision_snapshot_stage(
+        ctx,
+        "start",
+        extras={"decision_snapshot_db_lock_wait_seconds": lock_wait_seconds},
+    )
     existing_snapshot_id = None
     existing_trade_run_id = None
     if isinstance(ctx.step.artifacts, dict):
@@ -1095,6 +1165,14 @@ def step_decision_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResu
         )
     except ValueError as exc:
         raise RuntimeError(str(exc)) from exc
+    _mark_decision_snapshot_stage(
+        ctx,
+        "generating",
+        extras={
+            "backtest_run_id": backtest_run_id,
+            "backtest_link_status": backtest_link_status,
+        },
+    )
     result = generate_decision_snapshot(
         ctx.session,
         project_id=ctx.run.project_id,
@@ -1106,14 +1184,49 @@ def step_decision_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResu
         backtest_link_status=backtest_link_status,
         preview=False,
     )
-    summary = result.get("summary") or {}
+    _mark_decision_snapshot_stage(
+        ctx,
+        "generated",
+        extras={
+            "decision_snapshot_path": result.get("summary_path"),
+            "decision_snapshot_log_path": result.get("log_path"),
+        },
+    )
+    summary = _sanitize_json(result.get("summary") or {})
+    result_params = result.get("params") if isinstance(result.get("params"), dict) else {}
+    effective_algo_params = summary.get("algorithm_parameters")
+    if not isinstance(effective_algo_params, dict):
+        effective_algo_params = _sanitize_json(result_params.get("algorithm_parameters")) or {}
+    if not isinstance(effective_algo_params, dict):
+        effective_algo_params = {}
+    algo_params_source = summary.get("algorithm_parameters_source")
+    if not isinstance(algo_params_source, str) or not algo_params_source.strip():
+        algo_params_source = result_params.get("algorithm_parameters_source")
+    if not isinstance(algo_params_source, str) or not algo_params_source.strip():
+        algo_params_source = "empty"
+    else:
+        algo_params_source = algo_params_source.strip()
     snapshot: DecisionSnapshot | None = None
     if existing_snapshot_id:
         try:
             snapshot = ctx.session.get(DecisionSnapshot, int(existing_snapshot_id))
         except Exception:
             snapshot = None
+    _mark_decision_snapshot_stage(ctx, "persist_snapshot")
     if snapshot is None:
+        snapshot_params = _sanitize_json(
+            {
+                "project_id": ctx.run.project_id,
+                "pipeline_id": params.get("pipeline_id"),
+                "train_job_id": params.get("train_job_id"),
+                "snapshot_date": summary.get("snapshot_date"),
+                "algorithm_parameters": effective_algo_params,
+                "algorithm_parameters_source": algo_params_source,
+                "backtest_run_id": backtest_run_id,
+                "backtest_link_status": backtest_link_status,
+                "pretrade_run_id": ctx.run.id,
+            }
+        )
         snapshot = DecisionSnapshot(
             project_id=ctx.run.project_id,
             pipeline_id=params.get("pipeline_id"),
@@ -1121,16 +1234,7 @@ def step_decision_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResu
             backtest_run_id=backtest_run_id,
             status="success",
             snapshot_date=summary.get("snapshot_date"),
-            params={
-                "project_id": ctx.run.project_id,
-                "pipeline_id": params.get("pipeline_id"),
-                "train_job_id": params.get("train_job_id"),
-                "snapshot_date": summary.get("snapshot_date"),
-                "algorithm_parameters": algo_params,
-                "backtest_run_id": backtest_run_id,
-                "backtest_link_status": backtest_link_status,
-                "pretrade_run_id": ctx.run.id,
-            },
+            params=snapshot_params,
             summary=summary,
             artifact_dir=result.get("artifact_dir"),
             summary_path=result.get("summary_path"),
@@ -1151,8 +1255,17 @@ def step_decision_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResu
                 existing_params["backtest_run_id"] = backtest_run_id
             if "backtest_link_status" not in existing_params:
                 existing_params["backtest_link_status"] = backtest_link_status
+            if not existing_params.get("algorithm_parameters"):
+                existing_params["algorithm_parameters"] = effective_algo_params
+            if not existing_params.get("algorithm_parameters_source"):
+                existing_params["algorithm_parameters_source"] = algo_params_source
             snapshot.params = existing_params
             ctx.session.commit()
+    _mark_decision_snapshot_stage(
+        ctx,
+        "snapshot_ready",
+        extras={"decision_snapshot_id": snapshot.id if snapshot else None},
+    )
     config = _resolve_project_config(ctx.session, ctx.run.project_id)
     version = _get_latest_version(ctx.session, ctx.run.project_id, PROJECT_CONFIG_TAG)
     strategy_snapshot = {
@@ -1179,6 +1292,7 @@ def step_decision_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResu
             .order_by(TradeRun.created_at.desc())
             .first()
         )
+    _mark_decision_snapshot_stage(ctx, "persist_trade_run")
     if trade_run is None:
         trade_run = TradeRun(
             project_id=ctx.run.project_id,
@@ -1201,12 +1315,21 @@ def step_decision_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResu
             existing_params["pretrade_run_id"] = ctx.run.id
         trade_run.params = existing_params
         ctx.session.commit()
+    stage_artifacts = _mark_decision_snapshot_stage(
+        ctx,
+        "trade_run_ready",
+        extras={"trade_run_id": trade_run.id if trade_run else None},
+    )
     return StepResult(
         artifacts={
-            "decision_snapshot": result.get("summary"),
+            "decision_snapshot": summary,
             "decision_snapshot_path": result.get("summary_path"),
             "decision_snapshot_id": snapshot.id if snapshot else None,
             "trade_run_id": trade_run.id if trade_run else None,
+            "decision_snapshot_stage": stage_artifacts.get("decision_snapshot_stage"),
+            "decision_snapshot_stage_at": stage_artifacts.get("decision_snapshot_stage_at"),
+            "decision_snapshot_stages": stage_artifacts.get("decision_snapshot_stages"),
+            "decision_snapshot_db_lock_wait_seconds": lock_wait_seconds,
         },
         log_path=result.get("log_path"),
     )
@@ -1570,6 +1693,32 @@ def _has_other_active_pretrade_runs(session, run_id: int) -> bool:
     )
 
 
+def _mark_run_crashed(session, run_id: int, error_key: str) -> None:
+    run = session.get(PreTradeRun, run_id)
+    if not run:
+        return
+    now = datetime.utcnow()
+    running_steps = (
+        session.query(PreTradeStep)
+        .filter(
+            PreTradeStep.run_id == run_id,
+            PreTradeStep.status == "running",
+        )
+        .all()
+    )
+    for step in running_steps:
+        step.status = "failed"
+        step.message = error_key
+        step.ended_at = now
+        step.updated_at = now
+    if run.status not in {"success", "failed", "canceled"}:
+        run.status = "failed"
+        run.message = error_key
+        run.ended_at = now
+        run.updated_at = now
+    session.commit()
+
+
 def run_pretrade_run(run_id: int, resume_step_id: int | None = None) -> None:
     session = SessionLocal()
     lock: JobLock | None = None
@@ -1604,7 +1753,7 @@ def run_pretrade_run(run_id: int, resume_step_id: int | None = None) -> None:
         run.deadline_at = deadline_at
         run.status = "running"
         run.started_at = run.started_at or datetime.utcnow()
-        run.params = _prepare_run_snapshot(run)
+        run.params = _sanitize_json(_prepare_run_snapshot(run))
         session.commit()
 
         steps = (
@@ -1662,7 +1811,7 @@ def run_pretrade_run(run_id: int, resume_step_id: int | None = None) -> None:
                     step.status = "skipped"
                     step.message = exc.reason
                     step.progress = 1.0
-                    step.artifacts = exc.artifacts or step.artifacts
+                    step.artifacts = _sanitize_json(exc.artifacts or step.artifacts)
                     step.next_retry_at = None
                     step.ended_at = datetime.utcnow()
                     session.commit()
@@ -1712,10 +1861,12 @@ def run_pretrade_run(run_id: int, resume_step_id: int | None = None) -> None:
                     step.message = "success"
                     step.next_retry_at = None
                     if result.artifacts:
-                        step.artifacts = {
-                            **(step.artifacts or {}),
-                            **result.artifacts,
-                        }
+                        step.artifacts = _sanitize_json(
+                            {
+                                **(step.artifacts or {}),
+                                **result.artifacts,
+                            }
+                        )
                     if result.log_path:
                         step.log_path = result.log_path
                     step.ended_at = datetime.utcnow()
@@ -1752,6 +1903,25 @@ def run_pretrade_run(run_id: int, resume_step_id: int | None = None) -> None:
                     run.fallback_run_id = last_success.id
                     run.message = f"fallback_to_run={last_success.id}"
                     session.commit()
+    except BaseException as exc:
+        error_key = f"runner_crash:{exc.__class__.__name__}"
+        try:
+            log_dir = _ensure_log_dir(run_id)
+            trace_path = log_dir / "runner_error.log"
+            trace_path.write_text(traceback.format_exc(), encoding="utf-8")
+        except Exception:
+            pass
+        try:
+            session.rollback()
+        except Exception:
+            pass
+        try:
+            _mark_run_crashed(session, run_id, error_key)
+        except Exception:
+            try:
+                session.rollback()
+            except Exception:
+                pass
     finally:
         if lock:
             lock.release()

@@ -53,8 +53,20 @@ npm run build
 
 # Deploy systemd user services
 cp deploy/systemd/*.service ~/.config/systemd/user/
+cp deploy/systemd/*.timer ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user restart stocklean-backend stocklean-frontend
+```
+
+Optional: override Gateway parameters (port, version, watchdog thresholds) in `~/.config/stocklean/ibgateway.env`.
+Important: if the machine already runs system-level `/etc/systemd/system/ibgateway.service`, do not enable user-level `stocklean-ibgateway.service`; keep only one manager.
+Current host convention: use user-level `stocklean-ibgateway.service` and keep system-level `ibgateway.service` `disabled/inactive`.
+
+Gateway management commands (user-level):
+```bash
+systemctl --user restart stocklean-ibgateway.service
+systemctl --user status stocklean-ibgateway.service
+systemctl --user status stocklean-ibgateway-watchdog.timer
 ```
 
 Default frontend: http://<host>:8081  

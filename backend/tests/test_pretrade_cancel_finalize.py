@@ -115,3 +115,65 @@ def test_finalize_cancel_keeps_running_when_lock_active(monkeypatch):
     assert changed is False
     assert run.status == "cancel_requested"
     assert "running" in statuses
+
+
+def test_pretrade_lock_inactive_when_heartbeat_stale(monkeypatch):
+    now = 1_000.0
+
+    class DummyLock:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def _read_metadata(self):
+            return {
+                "ttl_seconds": "900",
+                "heartbeat_at": "800.0",
+                "acquired_at": "800.0",
+                "pid": "123",
+                "host": "host",
+            }
+
+        def _is_stale(self, _meta):
+            return False
+
+        def _owner_alive(self, _meta):
+            return True
+
+        def _resolve_heartbeat_interval(self):
+            return 30
+
+    monkeypatch.setattr(pretrade_routes, "JobLock", DummyLock)
+    monkeypatch.setattr(pretrade_routes.time, "time", lambda: now)
+
+    assert pretrade_routes._pretrade_lock_active() is False
+
+
+def test_pretrade_lock_active_when_heartbeat_fresh(monkeypatch):
+    now = 1_000.0
+
+    class DummyLock:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def _read_metadata(self):
+            return {
+                "ttl_seconds": "900",
+                "heartbeat_at": "970.0",
+                "acquired_at": "970.0",
+                "pid": "123",
+                "host": "host",
+            }
+
+        def _is_stale(self, _meta):
+            return False
+
+        def _owner_alive(self, _meta):
+            return True
+
+        def _resolve_heartbeat_interval(self):
+            return 30
+
+    monkeypatch.setattr(pretrade_routes, "JobLock", DummyLock)
+    monkeypatch.setattr(pretrade_routes.time, "time", lambda: now)
+
+    assert pretrade_routes._pretrade_lock_active() is True

@@ -213,6 +213,130 @@ a {
   grid-column: 1 / -1;
 }
 
+.symbol-summary-card {
+  display: grid;
+  gap: 10px;
+}
+
+.symbol-summary-meta-list {
+  margin-top: 4px;
+}
+
+.symbol-summary-audit {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel-alt);
+  padding: 10px 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.symbol-summary-audit-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+}
+
+.symbol-summary-audit-item {
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 10px;
+  padding: 6px 8px;
+  background: #ffffff;
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.symbol-summary-audit-item span {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.3;
+}
+
+.symbol-summary-audit-item strong {
+  font-size: 13px;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.symbol-summary-audit-raw {
+  display: grid;
+  gap: 6px;
+}
+
+.symbol-summary-detail {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0 8px;
+  background: #ffffff;
+}
+
+.symbol-summary-detail summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 8px 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.symbol-summary-detail summary::-webkit-details-marker {
+  display: none;
+}
+
+.symbol-summary-detail[open] summary {
+  padding-bottom: 4px;
+}
+
+.symbol-summary-detail .pipeline-drawer-json {
+  margin-top: 0;
+  margin-bottom: 8px;
+  max-height: 180px;
+  overflow: auto;
+  padding: 8px;
+  font-size: 11px;
+}
+
+.table-scroll.symbol-summary-table-scroll {
+  margin-top: 4px;
+  max-height: none;
+  overflow: visible !important;
+  scrollbar-gutter: auto;
+  -webkit-overflow-scrolling: auto;
+  touch-action: auto;
+}
+
+.table-scroll.symbol-summary-table-scroll .table {
+  width: 100%;
+  min-width: 0;
+  table-layout: fixed;
+}
+
+.symbol-summary-table-scroll .table th,
+.symbol-summary-table-scroll .table td {
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.symbol-summary-table-scroll .table th:first-child,
+.symbol-summary-table-scroll .table td:first-child {
+  width: 84px;
+}
+
+.symbol-summary-table-scroll thead th {
+  position: static;
+  background: var(--panel-alt);
+}
+
+.symbol-summary-table-empty {
+  margin-top: 0;
+  padding: 18px 8px !important;
+  text-align: center;
+}
+
 .live-trade-positions {
   grid-column: auto;
   max-width: none;

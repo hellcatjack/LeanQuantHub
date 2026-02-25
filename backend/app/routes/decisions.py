@@ -18,6 +18,7 @@ from app.schemas import (
 from app.services.audit_log import record_audit
 from app.services.decision_snapshot import (
     build_preview_decision_snapshot,
+    build_snapshot_warning_message,
     load_decision_snapshot_detail,
     resolve_backtest_run_link,
     run_decision_snapshot_task,
@@ -71,7 +72,7 @@ def preview_decision_snapshot(payload: DecisionSnapshotRequest):
             summary_path=result.get("summary_path"),
             items_path=result.get("items_path"),
             filters_path=result.get("filters_path"),
-            message=None,
+            message=build_snapshot_warning_message(result.get("summary")),
             items=result.get("items") or [],
             filters=result.get("filters") or [],
         )

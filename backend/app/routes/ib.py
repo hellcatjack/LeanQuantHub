@@ -35,6 +35,7 @@ from app.schemas import (
 from app.services.audit_log import record_audit
 from app.services.ib_settings import (
     get_or_create_ib_settings,
+    normalize_workstation_type,
     probe_ib_connection,
     update_ib_state,
 )
@@ -86,6 +87,11 @@ def update_ib_settings(payload: IBSettingsUpdate):
             if value not in {"ib", "mock"}:
                 value = "ib"
             data["api_mode"] = value
+        if "workstation_type" in data:
+            data["workstation_type"] = normalize_workstation_type(
+                data.get("workstation_type"),
+                port=data.get("port") if "port" in data else settings.port,
+            )
         if "use_regulatory_snapshot" in data:
             data["use_regulatory_snapshot"] = bool(data.get("use_regulatory_snapshot"))
         for key, value in data.items():
@@ -100,6 +106,7 @@ def update_ib_settings(payload: IBSettingsUpdate):
             detail={
                 "host": settings.host,
                 "port": settings.port,
+                "workstation_type": settings.workstation_type,
                 "client_id": settings.client_id,
                 "mode": settings.mode,
                 "market_data_type": settings.market_data_type,

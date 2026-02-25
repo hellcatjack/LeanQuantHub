@@ -4,6 +4,7 @@ import sys
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+import pytest
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
@@ -129,5 +130,90 @@ def test_create_trade_run_requires_snapshot_for_auto_mode(monkeypatch):
             raise AssertionError("expected decision_snapshot_required")
         except Exception as exc:
             assert "decision_snapshot_required" in str(exc)
+    finally:
+        session.close()
+
+
+def test_create_trade_run_requires_explicit_snapshot_when_orders_empty(monkeypatch):
+    session = _make_session()
+    try:
+        project = Project(name="p", description="")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        snapshot = DecisionSnapshot(
+            project_id=project.id,
+            status="success",
+            snapshot_date="2024-01-05",
+            items_path="/tmp/x.csv",
+        )
+        session.add(snapshot)
+        session.commit()
+        session.refresh(snapshot)
+
+        @contextmanager
+        def _get_session():
+            yield session
+
+        monkeypatch.setattr(trade_routes, "get_session", _get_session)
+        monkeypatch.setattr(trade_routes, "check_market_health", lambda *_a, **_k: {"status": "ok"})
+
+        payload = trade_routes.TradeRunCreate(
+            project_id=project.id,
+            decision_snapshot_id=None,
+            mode="paper",
+            orders=[],
+            require_market_health=False,
+        )
+        with pytest.raises(Exception) as exc_info:
+            trade_routes.create_trade_run(payload)
+        assert "decision_snapshot_required" in str(exc_info.value)
+    finally:
+        session.close()
+
+
+def test_create_trade_run_live_rejects_non_latest_snapshot(monkeypatch):
+    session = _make_session()
+    try:
+        project = Project(name="p", description="")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        older = DecisionSnapshot(
+            project_id=project.id,
+            status="success",
+            snapshot_date="2024-01-05",
+            items_path="/tmp/old.csv",
+        )
+        newer = DecisionSnapshot(
+            project_id=project.id,
+            status="success",
+            snapshot_date="2024-01-12",
+            items_path="/tmp/new.csv",
+        )
+        session.add_all([older, newer])
+        session.commit()
+        session.refresh(older)
+
+        @contextmanager
+        def _get_session():
+            yield session
+
+        monkeypatch.setattr(trade_routes, "get_session", _get_session)
+        monkeypatch.setattr(trade_routes, "check_market_health", lambda *_a, **_k: {"status": "ok"})
+
+        payload = trade_routes.TradeRunCreate(
+            project_id=project.id,
+            decision_snapshot_id=older.id,
+            mode="live",
+            orders=[],
+            require_market_health=False,
+            live_confirm_token="LIVE",
+        )
+        with pytest.raises(Exception) as exc_info:
+            trade_routes.create_trade_run(payload)
+        assert "decision_snapshot_not_latest" in str(exc_info.value)
     finally:
         session.close()

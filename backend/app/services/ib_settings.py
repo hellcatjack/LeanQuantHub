@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import socket
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from app.models import IBConnectionState, IBSettings
 from app.core.config import settings
@@ -12,6 +12,7 @@ from app.services.lean_bridge_paths import resolve_bridge_root
 
 
 MAX_CLIENT_ID = 2_147_483_647
+_WORKSTATION_TYPES = {"tws", "gateway"}
 
 
 def derive_client_id(*, project_id: int, mode: str) -> int:
@@ -22,9 +23,25 @@ def derive_client_id(*, project_id: int, mode: str) -> int:
     return cid if cid <= MAX_CLIENT_ID else base
 
 
+def normalize_workstation_type(value: str | None, *, port: int | None = None) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in _WORKSTATION_TYPES:
+        return normalized
+    try:
+        port_value = int(port) if port is not None else None
+    except (TypeError, ValueError):
+        port_value = None
+    if port_value in {4001, 4002}:
+        return "gateway"
+    return "tws"
+
+
 def _resolve_default_settings() -> dict[str, object]:
     host = (os.getenv("IB_HOST") or "127.0.0.1").strip() or "127.0.0.1"
     port = int((os.getenv("IB_PORT") or "7497").strip() or 7497)
+    workstation_type = normalize_workstation_type(
+        os.getenv("IB_WORKSTATION_TYPE"), port=port
+    )
     client_id = int((os.getenv("IB_CLIENT_ID") or "101").strip() or 101)
     account_id = (os.getenv("IB_ACCOUNT") or "").strip() or None
     mode = (os.getenv("IB_MODE") or "paper").strip() or "paper"
@@ -35,6 +52,7 @@ def _resolve_default_settings() -> dict[str, object]:
     return {
         "host": host,
         "port": port,
+        "workstation_type": workstation_type,
         "client_id": client_id,
         "account_id": account_id,
         "mode": mode,
@@ -138,18 +156,46 @@ def probe_ib_connection(session, *, timeout_seconds: float = 2.0) -> IBConnectio
             heartbeat=True,
         )
     if not _probe_ib_socket(settings.host, settings.port, timeout_seconds=timeout_seconds):
+        workstation = normalize_workstation_type(
+            getattr(settings, "workstation_type", None),
+            port=getattr(settings, "port", None),
+        )
         return update_ib_state(
             session,
             status="disconnected",
-            message="tws unreachable",
+            message=f"{workstation} unreachable",
             heartbeat=True,
         )
     status_payload = read_bridge_status(session, mode=settings.mode or "paper", force=False)
     stale = bool(status_payload.get("stale", True))
+    stale_reasons_raw = status_payload.get("stale_reasons")
+    stale_reasons = {
+        str(item).strip().lower()
+        for item in (stale_reasons_raw if isinstance(stale_reasons_raw, list) else [])
+        if str(item).strip()
+    }
     raw_status = str(status_payload.get("status") or "unknown").strip().lower()
     last_error = status_payload.get("last_error")
+    heartbeat_stale = "heartbeat_stale" in stale_reasons
 
-    if stale or raw_status == "missing":
+    if raw_status == "missing" or heartbeat_stale:
+        return update_ib_state(
+            session,
+            status="disconnected",
+            message="lean bridge stale",
+            heartbeat=True,
+        )
+
+    if stale and raw_status in {"ok", "connected"} and stale_reasons:
+        reason_text = ",".join(sorted(stale_reasons))
+        return update_ib_state(
+            session,
+            status="connected",
+            message=f"lean bridge snapshots stale: {reason_text}",
+            heartbeat=True,
+        )
+
+    if stale:
         return update_ib_state(
             session,
             status="disconnected",
@@ -172,3 +218,31 @@ def probe_ib_connection(session, *, timeout_seconds: float = 2.0) -> IBConnectio
         message=message,
         heartbeat=True,
     )
+
+
+def get_ib_state_cached(
+    session,
+    *,
+    timeout_seconds: float = 2.0,
+    probe_interval_seconds: float | None = None,
+    force_probe: bool = False,
+) -> IBConnectionState:
+    state = get_or_create_ib_state(session)
+    if force_probe:
+        return probe_ib_connection(session, timeout_seconds=timeout_seconds)
+
+    interval_seconds: float
+    if probe_interval_seconds is None:
+        interval_seconds = float(getattr(settings, "ib_state_probe_min_interval_seconds", 45))
+    else:
+        interval_seconds = float(probe_interval_seconds)
+    interval_seconds = max(interval_seconds, 0.0)
+    if interval_seconds <= 0:
+        return probe_ib_connection(session, timeout_seconds=timeout_seconds)
+
+    last_heartbeat = state.last_heartbeat
+    if isinstance(last_heartbeat, datetime):
+        age = datetime.utcnow() - last_heartbeat
+        if age < timedelta(seconds=interval_seconds):
+            return state
+    return probe_ib_connection(session, timeout_seconds=timeout_seconds)

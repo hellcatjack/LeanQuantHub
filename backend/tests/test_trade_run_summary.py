@@ -10,6 +10,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from app.models import Base, DecisionSnapshot, TradeFill, TradeOrder, TradeRun
+from app.services import trade_run_summary
 from app.services.trade_run_summary import build_symbol_summary
 
 
@@ -20,10 +21,26 @@ def _make_session():
     return Session()
 
 
-def test_symbol_summary_aggregates():
+def test_symbol_summary_aggregates(monkeypatch):
     session = _make_session()
     tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".csv")
     try:
+        monkeypatch.setattr(
+            trade_run_summary,
+            "get_account_positions_cached",
+            lambda _session, *, mode, force_refresh=False: {
+                "items": [{"symbol": "SPY", "quantity": 2.0, "market_value": 20.0}],
+                "stale": False,
+                "source_detail": "ib_holdings_ibapi_fallback",
+            },
+            raising=False,
+        )
+        monkeypatch.setattr(
+            trade_run_summary,
+            "fetch_account_summary",
+            lambda _session: {"NetLiquidation": 1000.0},
+            raising=False,
+        )
         tmp_file.write(b"symbol,weight\nSPY,0.1\n")
         tmp_file.close()
         snapshot = DecisionSnapshot(project_id=1, status="success", items_path=tmp_file.name)

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import logging
 from datetime import datetime, timezone
 import inspect
 from pathlib import Path
 from threading import Event, Lock
 import time
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Response
 from sqlalchemy.exc import IntegrityError
@@ -258,6 +260,111 @@ def _merge_auto_recovery(
     return merged
 
 
+_TRADE_RISK_DEFAULTS: dict[str, float | int] = {
+    # Use explicit defaults so guard behavior is stable and auditable across projects.
+    "max_daily_loss": -0.05,
+    "max_intraday_drawdown": 0.08,
+    "cooldown_seconds": 900,
+}
+
+
+def _normalize_non_negative_int(raw: object, *, default: int = 0) -> int:
+    try:
+        value = int(float(raw))
+    except (TypeError, ValueError):
+        value = int(default)
+    return max(0, value)
+
+
+def _normalize_risk_defaults(raw: object) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        normalized: dict[str, Any] = {}
+    else:
+        normalized = dict(raw)
+
+    try:
+        daily_loss = float(normalized.get("max_daily_loss"))
+    except (TypeError, ValueError):
+        daily_loss = float(_TRADE_RISK_DEFAULTS["max_daily_loss"])
+    if not math.isfinite(daily_loss):
+        daily_loss = float(_TRADE_RISK_DEFAULTS["max_daily_loss"])
+    # Daily loss threshold is represented as a negative ratio.
+    normalized["max_daily_loss"] = -abs(daily_loss)
+
+    try:
+        intraday_drawdown = float(normalized.get("max_intraday_drawdown"))
+    except (TypeError, ValueError):
+        intraday_drawdown = float(_TRADE_RISK_DEFAULTS["max_intraday_drawdown"])
+    if not math.isfinite(intraday_drawdown):
+        intraday_drawdown = float(_TRADE_RISK_DEFAULTS["max_intraday_drawdown"])
+    # Drawdown threshold stored as a positive ratio.
+    normalized["max_intraday_drawdown"] = abs(intraday_drawdown)
+
+    normalized["cooldown_seconds"] = _normalize_non_negative_int(
+        normalized.get("cooldown_seconds"),
+        default=int(_TRADE_RISK_DEFAULTS["cooldown_seconds"]),
+    )
+    return normalized
+
+
+def _normalize_non_negative_float(raw: object, *, default: float = 0.0) -> float:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = float(default)
+    if not math.isfinite(value):
+        value = float(default)
+    return max(0.0, value)
+
+
+def _resolve_deadband_defaults(risk_defaults: dict[str, Any] | None) -> tuple[float, float]:
+    defaults = _normalize_risk_defaults(risk_defaults)
+    return (
+        _normalize_non_negative_float(defaults.get("deadband_min_notional"), default=0.0),
+        _normalize_non_negative_float(defaults.get("deadband_min_weight"), default=0.0),
+    )
+
+
+def _resolve_latest_effective_decision_snapshot(session, project_id: int) -> DecisionSnapshot | None:
+    utc_today = datetime.utcnow().date().isoformat()
+    latest_by_date = (
+        session.query(DecisionSnapshot)
+        .filter(DecisionSnapshot.project_id == project_id)
+        .filter(DecisionSnapshot.status == "success")
+        .filter(DecisionSnapshot.items_path.isnot(None))
+        .filter(DecisionSnapshot.snapshot_date.isnot(None))
+        .filter(DecisionSnapshot.snapshot_date <= utc_today)
+        .order_by(DecisionSnapshot.snapshot_date.desc(), DecisionSnapshot.created_at.desc())
+        .first()
+    )
+    if latest_by_date:
+        return latest_by_date
+    return (
+        session.query(DecisionSnapshot)
+        .filter(DecisionSnapshot.project_id == project_id)
+        .filter(DecisionSnapshot.status == "success")
+        .filter(DecisionSnapshot.items_path.isnot(None))
+        .filter(DecisionSnapshot.snapshot_date.is_(None))
+        .order_by(DecisionSnapshot.created_at.desc())
+        .first()
+    )
+
+
+def _build_trade_settings_out(settings_row: TradeSettings) -> TradeSettingsOut:
+    risk_defaults = _normalize_risk_defaults(settings_row.risk_defaults)
+    deadband_min_notional, deadband_min_weight = _resolve_deadband_defaults(risk_defaults)
+    return TradeSettingsOut(
+        id=settings_row.id,
+        risk_defaults=risk_defaults,
+        deadband_min_notional=deadband_min_notional,
+        deadband_min_weight=deadband_min_weight,
+        execution_data_source=settings_row.execution_data_source,
+        auto_recovery=settings_row.auto_recovery,
+        created_at=settings_row.created_at,
+        updated_at=settings_row.updated_at,
+    )
+
+
 @router.get("/settings", response_model=TradeSettingsOut)
 def get_trade_settings():
     with get_session() as session:
@@ -274,7 +381,7 @@ def get_trade_settings():
             settings_row.execution_data_source = "lean"
             session.commit()
             session.refresh(settings_row)
-        return TradeSettingsOut.model_validate(settings_row, from_attributes=True)
+        return _build_trade_settings_out(settings_row)
 
 
 @router.get("/overview")
@@ -287,15 +394,30 @@ def get_trade_overview(project_id: int, mode: str = "paper"):
 def update_trade_settings(payload: TradeSettingsUpdate):
     with get_session() as session:
         settings_row = session.query(TradeSettings).order_by(TradeSettings.id.desc()).first()
+        base_risk_defaults = (
+            _normalize_risk_defaults(payload.risk_defaults)
+            if payload.risk_defaults is not None
+            else _normalize_risk_defaults(settings_row.risk_defaults if settings_row else None)
+        )
+        if payload.deadband_min_notional is not None:
+            base_risk_defaults["deadband_min_notional"] = _normalize_non_negative_float(
+                payload.deadband_min_notional,
+                default=0.0,
+            )
+        if payload.deadband_min_weight is not None:
+            base_risk_defaults["deadband_min_weight"] = _normalize_non_negative_float(
+                payload.deadband_min_weight,
+                default=0.0,
+            )
         if settings_row is None:
             settings_row = TradeSettings(
-                risk_defaults=payload.risk_defaults or {},
+                risk_defaults=base_risk_defaults,
                 execution_data_source="lean",
             )
             settings_row.auto_recovery = _merge_auto_recovery(payload.auto_recovery, None)
             session.add(settings_row)
         else:
-            settings_row.risk_defaults = payload.risk_defaults
+            settings_row.risk_defaults = base_risk_defaults
             # Execution must go through Lean bridge. Keep this locked to "lean" so risk settings
             # updates cannot accidentally flip the executor into a blocked state.
             settings_row.execution_data_source = "lean"
@@ -306,7 +428,7 @@ def update_trade_settings(payload: TradeSettingsUpdate):
                 )
         session.commit()
         session.refresh(settings_row)
-        return TradeSettingsOut.model_validate(settings_row, from_attributes=True)
+        return _build_trade_settings_out(settings_row)
 
 
 @router.get("/guard", response_model=TradeGuardStateOut)
@@ -417,7 +539,7 @@ def get_trade_run_detail(
         )
         reconcile_cancel_requested_orders(session, run_id=run_id)
         try:
-            run, orders, fills, last_update_at = build_trade_run_detail(
+            run, orders, fills, last_update_at, risk_audit = build_trade_run_detail(
                 session, run_id, limit=limit, offset=offset
             )
         except ValueError as exc:
@@ -432,6 +554,7 @@ def get_trade_run_detail(
             orders=[TradeOrderOut.model_validate(order) for order in orders],
             fills=[TradeFillDetailOut.model_validate(fill) for fill in fills],
             last_update_at=last_update_at,
+            risk_audit=risk_audit,
         )
 
 
@@ -466,7 +589,10 @@ def get_trade_run_symbols(run_id: int):
         try:
             items = build_symbol_summary(session, run_id)
         except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+            detail = str(exc)
+            if detail == "current_positions_not_precise":
+                raise HTTPException(status_code=409, detail=detail) from exc
+            raise HTTPException(status_code=404, detail=detail) from exc
         last_update_at = build_last_update_at(session, run_id)
         return TradeSymbolSummaryPageOut(
             items=[TradeSymbolSummaryOut(**item) for item in items],
@@ -477,38 +603,56 @@ def get_trade_run_symbols(run_id: int):
 @router.post("/runs", response_model=TradeRunOut)
 def create_trade_run(payload: TradeRunCreate):
     with get_session() as session:
-        if (payload.mode or "").lower() == "live":
+        mode = str(payload.mode or "paper").strip().lower() or "paper"
+        if mode == "live":
             token = (payload.live_confirm_token or "").strip().upper()
             if token != "LIVE":
                 raise HTTPException(status_code=403, detail="live_confirm_required")
-        params = payload.model_dump(exclude={"orders"})
+        settings_row = session.query(TradeSettings).order_by(TradeSettings.id.desc()).first()
+        deadband_default_notional, deadband_default_weight = _resolve_deadband_defaults(
+            settings_row.risk_defaults if settings_row else None
+        )
+        params = payload.model_dump(exclude={"orders"}, exclude_none=True)
+        params["deadband_min_notional"] = _normalize_non_negative_float(
+            payload.deadband_min_notional,
+            default=deadband_default_notional,
+        )
+        params["deadband_min_weight"] = _normalize_non_negative_float(
+            payload.deadband_min_weight,
+            default=deadband_default_weight,
+        )
         orders = payload.orders or []
         snapshot_id = payload.decision_snapshot_id
-        if snapshot_id is None:
-            latest = (
-                session.query(DecisionSnapshot)
-                .filter(DecisionSnapshot.project_id == payload.project_id)
-                .filter(DecisionSnapshot.status == "success")
-                .order_by(DecisionSnapshot.created_at.desc())
-                .first()
-            )
+        allow_implicit_snapshot = bool(orders) and mode != "live"
+        if snapshot_id is None and allow_implicit_snapshot:
+            latest = _resolve_latest_effective_decision_snapshot(session, payload.project_id)
             if latest:
                 snapshot_id = latest.id
-        if not orders:
-            if snapshot_id is None:
-                raise HTTPException(status_code=409, detail="decision_snapshot_required")
-            snapshot = session.get(DecisionSnapshot, snapshot_id)
-            if snapshot is None:
+        if snapshot_id is None and (mode == "live" or not orders):
+            raise HTTPException(status_code=409, detail="decision_snapshot_required")
+
+        selected_snapshot: DecisionSnapshot | None = None
+        if snapshot_id is not None:
+            selected_snapshot = session.get(DecisionSnapshot, snapshot_id)
+            if selected_snapshot is None:
                 raise HTTPException(status_code=404, detail="decision_snapshot_not_found")
-            if str(snapshot.status or "").lower() != "success" or not snapshot.items_path:
+            if str(selected_snapshot.status or "").lower() != "success" or not selected_snapshot.items_path:
                 raise HTTPException(status_code=409, detail="decision_snapshot_not_ready")
+
+        if mode == "live":
+            latest_effective = _resolve_latest_effective_decision_snapshot(session, payload.project_id)
+            if latest_effective and snapshot_id != latest_effective.id:
+                raise HTTPException(status_code=409, detail="decision_snapshot_not_latest")
+
+        if not orders and selected_snapshot is None:
+            raise HTTPException(status_code=409, detail="decision_snapshot_not_ready")
         day_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
         existing = (
             session.query(TradeRun)
             .filter(
                 TradeRun.project_id == payload.project_id,
                 TradeRun.decision_snapshot_id == snapshot_id,
-                TradeRun.mode == payload.mode,
+                TradeRun.mode == mode,
                 TradeRun.created_at >= day_start,
             )
             .order_by(TradeRun.created_at.desc())
@@ -526,7 +670,7 @@ def create_trade_run(payload: TradeRunCreate):
         run = TradeRun(
             project_id=payload.project_id,
             decision_snapshot_id=snapshot_id,
-            mode=payload.mode,
+            mode=mode,
             status="queued",
             params=params,
         )
@@ -602,8 +746,15 @@ def execute_trade_run_route(run_id: int, payload: TradeRunExecuteRequest):
             token = (payload.live_confirm_token or "").strip().upper()
             if token != "LIVE":
                 raise HTTPException(status_code=403, detail="live_confirm_required")
+    if payload.risk_off_drill and not payload.dry_run:
+        raise HTTPException(status_code=409, detail="risk_off_drill_requires_dry_run")
     try:
-        result = execute_trade_run(run_id, dry_run=payload.dry_run, force=payload.force)
+        result = execute_trade_run(
+            run_id,
+            dry_run=payload.dry_run,
+            force=payload.force,
+            risk_off_drill=payload.risk_off_drill,
+        )
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     with get_session() as session:
@@ -619,9 +770,12 @@ def execute_trade_run_route(run_id: int, payload: TradeRunExecuteRequest):
                 "rejected": result.rejected,
                 "skipped": result.skipped,
                 "dry_run": result.dry_run,
+                "risk_off_drill": bool(payload.risk_off_drill),
             },
         )
         session.commit()
+    if result.status == "blocked" and str(result.message or "").strip().lower() == "current_positions_not_precise":
+        raise HTTPException(status_code=409, detail="current_positions_not_precise")
     return TradeRunExecuteOut(**result.__dict__)
 
 

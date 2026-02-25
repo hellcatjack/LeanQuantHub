@@ -37,10 +37,31 @@ def test_trade_settings_defaults_roundtrip(monkeypatch):
     dumped = resp.model_dump()
     assert "risk_defaults" in dumped
     assert "execution_data_source" in dumped
+    assert dumped["risk_defaults"]["max_daily_loss"] == -0.05
+    assert dumped["risk_defaults"]["max_intraday_drawdown"] == 0.08
+    assert dumped["risk_defaults"]["cooldown_seconds"] == 900
+    assert dumped.get("deadband_min_notional") == 0.0
+    assert dumped.get("deadband_min_weight") == 0.0
 
-    updated = TradeSettingsUpdate(risk_defaults={"max_order_notional": 1000})
+    updated = TradeSettingsUpdate(
+        risk_defaults={
+            "max_order_notional": 1000,
+            "max_daily_loss": 0.2,
+            "max_intraday_drawdown": -0.3,
+            "cooldown_seconds": -10,
+        },
+        deadband_min_notional=1500.0,
+        deadband_min_weight=0.01,
+    )
     resp2 = trade_routes.update_trade_settings(updated)
     assert resp2.risk_defaults["max_order_notional"] == 1000
+    assert resp2.risk_defaults["max_daily_loss"] == -0.2
+    assert resp2.risk_defaults["max_intraday_drawdown"] == 0.3
+    assert resp2.risk_defaults["cooldown_seconds"] == 0
+    assert resp2.risk_defaults["deadband_min_notional"] == 1500.0
+    assert resp2.risk_defaults["deadband_min_weight"] == 0.01
+    assert resp2.deadband_min_notional == 1500.0
+    assert resp2.deadband_min_weight == 0.01
 
     session.close()
 

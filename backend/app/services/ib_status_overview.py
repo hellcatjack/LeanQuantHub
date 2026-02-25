@@ -38,6 +38,7 @@ def _read_config(session) -> dict[str, Any]:
     return {
         "host": settings.host,
         "port": settings.port,
+        "workstation_type": settings.workstation_type,
         "client_id": settings.client_id,
         "account_id": _mask_account(settings.account_id),
         "mode": settings.mode,

@@ -5,6 +5,7 @@ from datetime import datetime, time, timezone
 from typing import Any
 import csv
 import json
+import math
 import os
 import signal
 import re
@@ -19,6 +20,7 @@ from pathlib import Path
 
 from app.services.job_lock import JobLock
 from app.services.trade_guard import (
+    evaluate_intraday_guard,
     get_or_create_guard_state,
     record_guard_event,
 )
@@ -27,7 +29,7 @@ from app.services.trade_orders import create_trade_order, force_update_trade_ord
 from app.services.trade_order_types import is_limit_like, normalize_order_type, validate_order_type
 from app.services.trade_risk_engine import evaluate_orders
 from app.services.trade_alerts import notify_trade_alert
-from app.services.ib_account import fetch_account_summary
+from app.services.ib_account import fetch_account_summary, get_account_positions
 from app.services.trade_order_intent import write_order_intent, ensure_order_intent_ids
 from app.services.lean_bridge_paths import resolve_bridge_root
 from app.services.lean_bridge_reader import (
@@ -50,6 +52,11 @@ from app.services.trade_run_progress import is_market_open, is_trade_run_stalled
 
 
 ARTIFACT_ROOT = Path(settings.artifact_root) if settings.artifact_root else Path("/app/stocklean/artifacts")
+_PRECISE_POSITIONS_SOURCE_DETAILS = {
+    "ib_holdings",
+    "ib_holdings_empty",
+    "ib_holdings_ibapi_fallback",
+}
 
 
 @dataclass
@@ -1125,6 +1132,15 @@ def _build_positions_map(positions_payload: dict | None) -> dict[str, dict[str, 
                 avg_cost = None
         positions[symbol] = {"quantity": quantity, "avg_cost": avg_cost}
     return positions
+
+
+def _is_precise_positions_payload(positions_payload: dict | None) -> bool:
+    if not isinstance(positions_payload, dict):
+        return False
+    if bool(positions_payload.get("stale", True)):
+        return False
+    source_detail = str(positions_payload.get("source_detail") or "").strip()
+    return source_detail in _PRECISE_POSITIONS_SOURCE_DETAILS
 
 
 def _load_order_intent_items(path: str) -> list[dict[str, Any]]:
@@ -2217,6 +2233,58 @@ def _read_decision_items(path: str | None) -> list[dict[str, Any]]:
         return []
 
 
+def _parse_symbol_list(raw: object) -> list[str]:
+    candidates: list[object] = []
+    if isinstance(raw, str):
+        candidates = re.split(r"[,;|\s]+", raw)
+    elif isinstance(raw, (list, tuple, set)):
+        candidates = list(raw)
+
+    symbols: list[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        symbol = str(item or "").strip().upper()
+        if not symbol:
+            continue
+        if symbol in seen:
+            continue
+        seen.add(symbol)
+        symbols.append(symbol)
+    return symbols
+
+
+def _resolve_risk_off_drill_targets(snapshot: DecisionSnapshot) -> tuple[dict[str, float], dict[str, Any]]:
+    summary = snapshot.summary if isinstance(snapshot.summary, dict) else {}
+    algo_params = summary.get("algorithm_parameters") if isinstance(summary.get("algorithm_parameters"), dict) else {}
+
+    symbols = _parse_symbol_list(algo_params.get("risk_off_symbols"))
+    if not symbols:
+        symbols = _parse_symbol_list(summary.get("risk_off_symbol"))
+    if not symbols:
+        symbols = _parse_symbol_list(algo_params.get("risk_off_symbol"))
+    if not symbols:
+        return {}, {"symbols": [], "exposure_cap": 0.0}
+
+    cap_candidates = [
+        summary.get("effective_exposure_cap"),
+        summary.get("max_exposure"),
+        algo_params.get("max_exposure"),
+    ]
+    exposure_cap = 1.0
+    for raw in cap_candidates:
+        value = _coerce_non_negative_float(raw, default=-1.0)
+        if value >= 0.0:
+            exposure_cap = value
+            break
+    exposure_cap = min(exposure_cap, 1.0)
+    if not math.isfinite(exposure_cap) or exposure_cap < 0:
+        exposure_cap = 1.0
+
+    per_symbol = (exposure_cap / len(symbols)) if symbols else 0.0
+    target_weights = {symbol: float(per_symbol) for symbol in symbols}
+    return target_weights, {"symbols": symbols, "exposure_cap": float(exposure_cap)}
+
+
 def _build_client_order_id(run_id: int, snapshot_id: int | None, symbol: str, side: str) -> str:
     base = f"{run_id}:{symbol}:{side}"
     if snapshot_id:
@@ -2233,12 +2301,100 @@ def _merge_risk_params(defaults: dict[str, Any] | None, overrides: dict[str, Any
     return merged
 
 
+def _coerce_non_negative_float(raw: object, *, default: float = 0.0) -> float:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = float(default)
+    if not math.isfinite(value):
+        value = float(default)
+    return max(0.0, value)
+
+
+def _coerce_bool(raw: object, *, default: bool = True) -> bool:
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return bool(raw)
+    if isinstance(raw, str):
+        normalized = raw.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off"}:
+            return False
+    return default
+
+
+def _is_guard_precheck_enabled() -> bool:
+    settings_value = getattr(settings, "trade_guard_precheck_enabled", None)
+    if settings_value is not None:
+        return _coerce_bool(settings_value, default=True)
+    env_value = os.getenv("TRADE_GUARD_PRECHECK_ENABLED")
+    if env_value is not None:
+        return _coerce_bool(env_value, default=True)
+    return True
+
+
+def _guard_reason_list(reason: Any) -> list[str]:
+    if isinstance(reason, dict):
+        raw = reason.get("reasons")
+        if isinstance(raw, list):
+            return [str(item).strip() for item in raw if str(item).strip()]
+    if isinstance(reason, str) and reason.strip():
+        return [reason.strip()]
+    return []
+
+
+def _build_guard_alert_message(run_id: int, guard_payload: dict[str, Any] | None) -> str:
+    payload = guard_payload if isinstance(guard_payload, dict) else {}
+    reasons = _guard_reason_list(payload.get("reason"))
+    reasons_text = ",".join(reasons) if reasons else "unknown"
+    valuation_source = str(payload.get("valuation_source") or "unknown")
+    equity_source = str(payload.get("equity_source") or "unknown")
+    thresholds = payload.get("thresholds") if isinstance(payload.get("thresholds"), dict) else {}
+    threshold_bits: list[str] = []
+    for key in (
+        "max_daily_loss",
+        "max_intraday_drawdown",
+        "max_drawdown",
+        "max_drawdown_52w",
+        "drawdown_recovery_ratio",
+        "cooldown_seconds",
+    ):
+        if key not in thresholds:
+            continue
+        threshold_bits.append(f"{key}={thresholds.get(key)}")
+    threshold_text = ",".join(threshold_bits) if threshold_bits else "n/a"
+    return (
+        f"Trade run blocked: guard halted "
+        f"(run={run_id}, reasons={reasons_text}, valuation={valuation_source}, equity_source={equity_source}, thresholds={threshold_text})"
+    )
+
+
+def _build_guard_unreliable_alert_message(run_id: int, guard_payload: dict[str, Any] | None) -> str:
+    payload = guard_payload if isinstance(guard_payload, dict) else {}
+    reasons = _guard_reason_list(payload.get("reason"))
+    reasons_text = ",".join(reasons) if reasons else "valuation_unreliable"
+    valuation_source = str(payload.get("valuation_source") or "unknown")
+    equity_source = str(payload.get("equity_source") or "unknown")
+    return (
+        f"Trade run blocked: guard data unreliable "
+        f"(run={run_id}, reasons={reasons_text}, valuation={valuation_source}, equity_source={equity_source})"
+    )
+
+
 def execute_trade_run(
     run_id: int,
     *,
     dry_run: bool = False,
     force: bool = False,
+    risk_off_drill: bool = False,
 ) -> TradeExecutionResult:
+    if risk_off_drill and not dry_run:
+        raise RuntimeError("risk_off_drill_requires_dry_run")
+
     session = SessionLocal()
     lock = None
     if not dry_run:
@@ -2256,34 +2412,11 @@ def execute_trade_run(
         if run.status != "queued" and not force:
             raise RuntimeError("trade_run_not_queued")
 
-        guard_state = get_or_create_guard_state(
-            session,
-            project_id=run.project_id,
-            mode=run.mode,
-        )
-        if guard_state.status == "halted" and not force:
-            run.status = "blocked"
-            run.message = "guard_halted"
-            run.ended_at = datetime.utcnow()
-            run.updated_at = datetime.utcnow()
-            session.commit()
-            notify_trade_alert(session, f"Trade run blocked: guard halted (run={run.id})")
-            return TradeExecutionResult(
-                run_id=run.id,
-                status=run.status,
-                filled=0,
-                cancelled=0,
-                rejected=0,
-                skipped=0,
-                message=run.message,
-                dry_run=dry_run,
-            )
-
+        params = dict(run.params or {})
         settings_row = session.query(TradeSettings).order_by(TradeSettings.id.desc()).first()
         execution_source = (settings_row.execution_data_source if settings_row else "lean") or "lean"
         skip_build = _should_skip_order_build(execution_source)
         if execution_source.lower() != "lean":
-            params = dict(run.params or {})
             params["execution_data_source"] = execution_source
             params["expected_execution_data_source"] = "lean"
             run.status = "blocked"
@@ -2321,14 +2454,182 @@ def execute_trade_run(
                 dry_run=dry_run,
             )
 
+        guard_state = get_or_create_guard_state(
+            session,
+            project_id=run.project_id,
+            mode=run.mode,
+        )
+        guard_precheck_enabled = _is_guard_precheck_enabled()
+        guard_overrides: dict[str, Any] = {}
+        if isinstance(params.get("risk"), dict):
+            guard_overrides.update(params.get("risk") or {})
+        if isinstance(params.get("risk_overrides"), dict):
+            guard_overrides.update(params.get("risk_overrides") or {})
+        if guard_precheck_enabled:
+            try:
+                guard_result = evaluate_intraday_guard(
+                    session,
+                    project_id=run.project_id,
+                    mode=run.mode,
+                    risk_params=guard_overrides or None,
+                )
+                guard_state = get_or_create_guard_state(
+                    session,
+                    project_id=run.project_id,
+                    mode=run.mode,
+                )
+                params["guard_precheck"] = {
+                    "enabled": True,
+                    "status": guard_result.get("status"),
+                    "valuation_source": guard_result.get("valuation_source"),
+                    "reason": guard_result.get("reason"),
+                    "equity": guard_result.get("equity"),
+                    "equity_source": guard_result.get("equity_source"),
+                    "cashflow_adjustment": guard_result.get("cashflow_adjustment"),
+                    "dd_all": guard_result.get("dd_all"),
+                    "dd_52w": guard_result.get("dd_52w"),
+                    "dd_lock_state": guard_result.get("dd_lock_state"),
+                    "thresholds": guard_result.get("thresholds"),
+                    "metrics": guard_result.get("metrics"),
+                    "trigger_details": guard_result.get("trigger_details"),
+                }
+            except Exception as exc:
+                params["guard_precheck"] = {
+                    "enabled": True,
+                    "status": "error",
+                    "error": str(exc),
+                }
+                run.params = dict(params)
+                run.status = "blocked"
+                run.message = "guard_evaluate_failed"
+                run.ended_at = datetime.utcnow()
+                run.updated_at = datetime.utcnow()
+                session.commit()
+                notify_trade_alert(session, f"Trade run blocked: guard evaluate failed (run={run.id}, error={exc})")
+                return TradeExecutionResult(
+                    run_id=run.id,
+                    status=run.status,
+                    filled=0,
+                    cancelled=0,
+                    rejected=0,
+                    skipped=0,
+                    message=run.message,
+                    dry_run=dry_run,
+                )
+        else:
+            params["guard_precheck"] = {"enabled": False}
+
+        guard_precheck = params.get("guard_precheck") if isinstance(params.get("guard_precheck"), dict) else {}
+        guard_precheck_status = str(guard_precheck.get("status") or "").strip().lower()
+        if guard_precheck_status in {"degraded", "unreliable"} and not force:
+            guard_blocked = {
+                "status": guard_precheck_status or "degraded",
+                "reason": guard_precheck.get("reason"),
+                "valuation_source": guard_precheck.get("valuation_source") or guard_state.valuation_source,
+                "equity_source": guard_precheck.get("equity_source"),
+                "cashflow_adjustment": guard_precheck.get("cashflow_adjustment"),
+                "dd_all": guard_precheck.get("dd_all"),
+                "dd_52w": guard_precheck.get("dd_52w"),
+                "dd_lock_state": guard_precheck.get("dd_lock_state"),
+                "thresholds": guard_precheck.get("thresholds"),
+                "metrics": guard_precheck.get("metrics"),
+                "trigger_details": guard_precheck.get("trigger_details"),
+            }
+            params["guard_blocked"] = guard_blocked
+            run.params = dict(params)
+            run.status = "blocked"
+            run.message = "guard_data_unreliable"
+            run.ended_at = datetime.utcnow()
+            run.updated_at = datetime.utcnow()
+            session.commit()
+            notify_trade_alert(session, _build_guard_unreliable_alert_message(run.id, guard_blocked))
+            return TradeExecutionResult(
+                run_id=run.id,
+                status=run.status,
+                filled=0,
+                cancelled=0,
+                rejected=0,
+                skipped=0,
+                message=run.message,
+                dry_run=dry_run,
+            )
+
+        if guard_state.status == "halted" and not force:
+            guard_blocked = {
+                "status": "halted",
+                "reason": guard_precheck.get("reason") or guard_state.halt_reason,
+                "valuation_source": guard_precheck.get("valuation_source") or guard_state.valuation_source,
+                "equity_source": guard_precheck.get("equity_source"),
+                "cashflow_adjustment": guard_precheck.get("cashflow_adjustment"),
+                "dd_all": guard_precheck.get("dd_all"),
+                "dd_52w": guard_precheck.get("dd_52w"),
+                "dd_lock_state": guard_precheck.get("dd_lock_state"),
+                "thresholds": guard_precheck.get("thresholds"),
+                "metrics": guard_precheck.get("metrics"),
+                "trigger_details": guard_precheck.get("trigger_details"),
+            }
+            params["guard_blocked"] = guard_blocked
+            run.params = dict(params)
+            run.status = "blocked"
+            run.message = "guard_halted"
+            run.ended_at = datetime.utcnow()
+            run.updated_at = datetime.utcnow()
+            session.commit()
+            notify_trade_alert(session, _build_guard_alert_message(run.id, guard_blocked))
+            return TradeExecutionResult(
+                run_id=run.id,
+                status=run.status,
+                filled=0,
+                cancelled=0,
+                rejected=0,
+                skipped=0,
+                message=run.message,
+                dry_run=dry_run,
+            )
+
         orders = (
             session.query(TradeOrder)
             .filter(TradeOrder.run_id == run.id)
             .order_by(TradeOrder.id.asc())
             .all()
         )
+        if risk_off_drill and orders:
+            params["risk_off_drill"] = {
+                "enabled": True,
+                "applied": False,
+                "reason": "orders_already_exist",
+            }
+            run.params = dict(params)
+            run.status = "blocked"
+            run.message = "risk_off_drill_auto_only"
+            run.ended_at = datetime.utcnow()
+            run.updated_at = datetime.utcnow()
+            session.commit()
+            return TradeExecutionResult(
+                run_id=run.id,
+                status=run.status,
+                filled=0,
+                cancelled=0,
+                rejected=0,
+                skipped=0,
+                message=run.message,
+                dry_run=dry_run,
+            )
+
         price_map: dict[str, float] = {}
-        params = dict(run.params or {})
+        settings_defaults = settings_row.risk_defaults if settings_row and isinstance(settings_row.risk_defaults, dict) else {}
+        deadband_default_notional = _coerce_non_negative_float(
+            settings_defaults.get("deadband_min_notional"),
+            default=0.0,
+        )
+        deadband_default_weight = _coerce_non_negative_float(
+            settings_defaults.get("deadband_min_weight"),
+            default=0.0,
+        )
+        if "deadband_min_notional" not in params or params.get("deadband_min_notional") is None:
+            params["deadband_min_notional"] = deadband_default_notional
+        if "deadband_min_weight" not in params or params.get("deadband_min_weight") is None:
+            params["deadband_min_weight"] = deadband_default_weight
         if not orders:
             if run.decision_snapshot_id is None:
                 run.status = "blocked"
@@ -2383,7 +2684,41 @@ def execute_trade_run(
             # - size targets from snapshot weights
             # - compare against *current* positions
             # - emit delta BUY/SELL orders
-            positions_payload = read_positions(_resolve_bridge_root())
+            # Auto trade sizing must use precise current holdings from the same canonical
+            # account-positions path as the positions page. If holdings are stale/unknown,
+            # block the run instead of building orders from fallback snapshots.
+            positions_payload: dict[str, Any] | None = None
+            try:
+                positions_payload = get_account_positions(
+                    session,
+                    mode=str(run.mode or "paper").strip().lower() or "paper",
+                    force_refresh=True,
+                )
+            except Exception:
+                positions_payload = None
+            if not _is_precise_positions_payload(positions_payload):
+                run.status = "blocked"
+                run.message = "current_positions_not_precise"
+                params["positions_source"] = {
+                    "stale": bool((positions_payload or {}).get("stale", True)),
+                    "source_detail": (positions_payload or {}).get("source_detail"),
+                    "refreshed_at": (positions_payload or {}).get("refreshed_at")
+                    or (positions_payload or {}).get("updated_at"),
+                }
+                run.params = dict(params)
+                run.ended_at = datetime.utcnow()
+                run.updated_at = datetime.utcnow()
+                session.commit()
+                return TradeExecutionResult(
+                    run_id=run.id,
+                    status=run.status,
+                    filled=0,
+                    cancelled=0,
+                    rejected=0,
+                    skipped=0,
+                    message=run.message,
+                    dry_run=dry_run,
+                )
             positions_map = _build_positions_map(positions_payload)
             current_positions: dict[str, float] = {
                 symbol: float(meta.get("quantity") or 0.0) for symbol, meta in positions_map.items()
@@ -2399,6 +2734,39 @@ def execute_trade_run(
                 except (TypeError, ValueError):
                     continue
                 target_weights[symbol] = float(weight_value)
+
+            if risk_off_drill:
+                drill_target_weights, drill_meta = _resolve_risk_off_drill_targets(snapshot)
+                if not drill_target_weights:
+                    params["risk_off_drill"] = {
+                        "enabled": True,
+                        "applied": False,
+                        "reason": "risk_off_symbols_missing",
+                    }
+                    run.params = dict(params)
+                    run.status = "blocked"
+                    run.message = "risk_off_drill_symbols_missing"
+                    run.ended_at = datetime.utcnow()
+                    run.updated_at = datetime.utcnow()
+                    session.commit()
+                    return TradeExecutionResult(
+                        run_id=run.id,
+                        status=run.status,
+                        filled=0,
+                        cancelled=0,
+                        rejected=0,
+                        skipped=0,
+                        message=run.message,
+                        dry_run=dry_run,
+                    )
+                target_weights = dict(drill_target_weights)
+                params["risk_off_drill"] = {
+                    "enabled": True,
+                    "applied": True,
+                    "symbols": drill_meta.get("symbols") or [],
+                    "exposure_cap": drill_meta.get("exposure_cap"),
+                    "decision_snapshot_id": run.decision_snapshot_id,
+                }
 
             held_symbols = {
                 symbol
@@ -2487,6 +2855,16 @@ def execute_trade_run(
             cash_buffer_ratio = float(params.get("cash_buffer_ratio") or 0.0)
             lot_size = int(params.get("lot_size") or 1)
             min_qty = int(params.get("min_qty") or 1)
+            deadband_min_notional = _coerce_non_negative_float(
+                params.get("deadband_min_notional"),
+                default=deadband_default_notional,
+            )
+            deadband_min_weight = _coerce_non_negative_float(
+                params.get("deadband_min_weight"),
+                default=deadband_default_weight,
+            )
+            params["deadband_min_notional"] = deadband_min_notional
+            params["deadband_min_weight"] = deadband_min_weight
 
             # Delta rebalance orders (BUY/SELL) compiled from target weights vs current positions.
             rebalance_orders = build_rebalance_orders(
@@ -2497,6 +2875,8 @@ def execute_trade_run(
                 cash_buffer_ratio=cash_buffer_ratio,
                 lot_size=lot_size,
                 min_qty=min_qty,
+                deadband_min_notional=deadband_min_notional,
+                deadband_min_weight=deadband_min_weight,
                 order_type=order_type,
             )
             if not rebalance_orders:
@@ -2656,6 +3036,8 @@ def execute_trade_run(
             execution_params = {
                 "min_qty": int(params.get("min_qty") or 1),
                 "lot_size": int(params.get("lot_size") or 1),
+                "deadband_min_notional": float(params.get("deadband_min_notional") or 0.0),
+                "deadband_min_weight": float(params.get("deadband_min_weight") or 0.0),
                 "cash_buffer_ratio": float(params.get("cash_buffer_ratio") or 0.0),
                 "fee_bps": float(params.get("fee_bps") or 0.0),
                 "slippage_open_bps": float(params.get("slippage_open_bps") or 0.0),
@@ -2706,6 +3088,8 @@ def execute_trade_run(
                 "lot_size": lot_size,
                 "order_type": validate_order_type(order_type),
                 "min_qty": min_qty,
+                "deadband_min_notional": deadband_min_notional,
+                "deadband_min_weight": deadband_min_weight,
                 "created_orders": created,
                 "target_symbols": len(target_weights),
                 "held_symbols": len(held_symbols),

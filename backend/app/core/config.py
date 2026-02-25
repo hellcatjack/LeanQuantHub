@@ -46,14 +46,23 @@ class Settings(BaseSettings):
     # IB brokerage response wait (seconds). Reducing this prevents the bridge from hanging for minutes
     # on cancel/update requests when TWS doesn't respond (or responds with "not found").
     lean_ib_response_timeout_seconds: int = 20
+    ib_state_probe_min_interval_seconds: int = 45
     lean_bridge_heartbeat_timeout_seconds: int = 60
     lean_bridge_leader_check_seconds: int = 2
     lean_bridge_watchdog_heavy_task_interval_seconds: int = 15
+    trade_guard_watchdog_enabled: bool = True
+    trade_guard_watchdog_interval_seconds: int = 60
     lean_bridge_watchlist_refresh_seconds: int = 5
     lean_bridge_snapshot_seconds: int = 2
     lean_bridge_open_orders_seconds: int = 2
     lean_bridge_executions_seconds: int = 2
     lean_bridge_commands_seconds: int = 1
+    ib_read_session_enabled: bool = True
+    ib_read_session_client_id_paper: int = 180000101
+    ib_read_session_client_id_live: int = 180000201
+    ib_transient_fallback_enabled: bool = True
+    ib_transient_fallback_backoff_base_seconds: float = 60.0
+    ib_transient_fallback_backoff_max_seconds: float = 180.0
     lean_pool_size: int = 10
     lean_pool_max_active_connections: int = 10
     lean_pool_heartbeat_ttl_seconds: int = 20
