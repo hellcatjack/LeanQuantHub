@@ -4,7 +4,11 @@ import { describe, expect, it } from "vitest";
 import { I18nProvider, useI18n } from "../i18n";
 import LiveTradePage, {
   filterActionablePositions,
+  isGatewayRuntimeRecovering,
   isPositionActionable,
+  resolveAccountPositionsErrorState,
+  resolveAccountPositionsResponseState,
+  resolveGatewayTradeBlockState,
   TradeIntentMismatchCard,
   resolveSessionByEasternTime,
 } from "./LiveTradePage";
@@ -20,6 +24,15 @@ const TradeStatusLabel = () => {
     "span",
     null,
     t("trade.statusLabel", { system: t("data.ib.workstationTypeTws") })
+  );
+};
+
+const GatewayRecoveryLabel = () => {
+  const { t } = useI18n();
+  return React.createElement(
+    "span",
+    null,
+    `${t("trade.gatewayRuntimeLabel")} ${t("trade.accountPositionsTrustedFallbackHint")}`
   );
 };
 
@@ -51,6 +64,58 @@ describe("LiveTradePage", () => {
     expect(actionable.map((item) => item.symbol)).toEqual(["B", "C"]);
   });
 
+  it("keeps last trusted positions when stale refresh returns empty", () => {
+    const fresh = resolveAccountPositionsResponseState({
+      response: {
+        items: [{ symbol: "AAPL", position: 10, account: "DU1", currency: "USD" }],
+        refreshed_at: "2026-03-10T14:00:00Z",
+        stale: false,
+      },
+    });
+    const stale = resolveAccountPositionsResponseState({
+      response: {
+        items: [],
+        refreshed_at: "2026-03-10T14:05:00Z",
+        stale: true,
+      },
+      trustedItems: fresh.trustedItems,
+      trustedUpdatedAt: fresh.trustedUpdatedAt,
+    });
+    expect(stale.usingTrustedFallback).toBe(true);
+    expect(stale.displayItems).toEqual(fresh.trustedItems);
+    expect(stale.displayUpdatedAt).toBe("2026-03-10T14:00:00Z");
+  });
+
+  it("keeps last trusted positions when refresh request fails", () => {
+    const fresh = resolveAccountPositionsResponseState({
+      response: {
+        items: [{ symbol: "MSFT", position: 3, account: "DU1", currency: "USD" }],
+        refreshed_at: "2026-03-10T14:00:00Z",
+        stale: false,
+      },
+    });
+    const failed = resolveAccountPositionsErrorState({
+      trustedItems: fresh.trustedItems,
+      trustedUpdatedAt: fresh.trustedUpdatedAt,
+    });
+    expect(failed.usingTrustedFallback).toBe(true);
+    expect(failed.displayItems).toEqual(fresh.trustedItems);
+    expect(failed.displayUpdatedAt).toBe("2026-03-10T14:00:00Z");
+    expect(failed.displayStale).toBe(true);
+  });
+
+  it("marks gateway degraded states as blocked and recovering", () => {
+    expect(resolveGatewayTradeBlockState({ state: "gateway_degraded" })).toBe(
+      "gateway_degraded"
+    );
+    expect(resolveGatewayTradeBlockState({ state: "gateway_restarting" })).toBe(
+      "gateway_restarting"
+    );
+    expect(resolveGatewayTradeBlockState({ state: "recovering" })).toBeNull();
+    expect(isGatewayRuntimeRecovering({ state: "recovering" })).toBe(true);
+    expect(isGatewayRuntimeRecovering({ state: "healthy" })).toBe(false);
+  });
+
   it("renders market snapshot card", () => {
     const html = ReactDOMServer.renderToString(React.createElement(LiveTradePage));
     expect(html).toContain("trade.snapshotTitle");
@@ -73,6 +138,13 @@ describe("LiveTradePage", () => {
     expect(html).toContain("trade.fillsTitle");
   });
 
+  it("renders decision basis markers in execution view", () => {
+    const html = ReactDOMServer.renderToString(React.createElement(LiveTradePage));
+    expect(html).toContain("trade.decisionBasisTitle");
+    expect(html).toContain("trade.decisionBasisEffectivePitDate");
+    expect(html).toContain("trade.decisionBasisSummaryLine");
+  });
+
   it("renders client order id column", () => {
     const html = ReactDOMServer.renderToString(React.createElement(LiveTradePage));
     expect(html).toContain("trade.orderTable.clientOrderId");
@@ -92,6 +164,18 @@ describe("LiveTradePage", () => {
       )
     );
     expect(html).toContain("净清算值");
+  });
+
+  it("renders new gateway recovery translations with i18n provider", () => {
+    const html = ReactDOMServer.renderToString(
+      React.createElement(
+        I18nProvider,
+        null,
+        React.createElement(GatewayRecoveryLabel)
+      )
+    );
+    expect(html).toContain("Gateway 运行状态");
+    expect(html).toContain("最后一次可信持仓");
   });
 
   it("renders pipeline tab label translation", () => {

@@ -122,6 +122,7 @@ interface IBBridgeStatusOut {
   last_refresh_result?: string | null;
   last_refresh_reason?: string | null;
   last_refresh_message?: string | null;
+  runtime_health?: IBGatewayRuntimeHealth | null;
 }
 
 interface IBBridgeRefreshOut {
@@ -152,6 +153,22 @@ interface IBAccountPositionsOut {
   items: IBAccountPosition[];
   refreshed_at?: string | null;
   stale: boolean;
+}
+
+interface IBGatewayRuntimeHealth {
+  state?: string | null;
+  failure_count?: number | null;
+  pending_command_count?: number | null;
+  oldest_pending_command_age_seconds?: number | null;
+  last_positions_at?: string | null;
+  last_open_orders_at?: string | null;
+  last_account_summary_at?: string | null;
+  last_command_result_at?: string | null;
+  last_probe_result?: string | null;
+  last_probe_latency_ms?: number | null;
+  last_recovery_action?: string | null;
+  last_recovery_at?: string | null;
+  next_allowed_action_at?: string | null;
 }
 
 interface ProjectSummary {
@@ -299,6 +316,7 @@ interface TradeRunDetail {
   fills: TradeFillDetail[];
   last_update_at?: string | null;
   risk_audit?: Record<string, any> | null;
+  decision_basis?: Record<string, any> | null;
 }
 
 interface IntentOrderMismatch {
@@ -363,8 +381,41 @@ interface TradeSettings {
   updated_at: string;
 }
 
+interface DecisionBasis {
+  decision_snapshot_id?: number | null;
+  decision_snapshot_status?: string | null;
+  decision_snapshot_date?: string | null;
+  pit_requested_date?: string | null;
+  pit_effective_date?: string | null;
+  pit_latest_available_date?: string | null;
+  pit_fallback_used?: boolean | null;
+  pit_fallback_reason?: string | null;
+  pit_age_days?: number | null;
+  pit_stale_warning?: boolean | null;
+  pit_stale_days_threshold?: number | null;
+  pit_warning_codes: string[];
+  pit_warning_message?: string | null;
+  decision_as_of_time?: string | null;
+  algorithm_parameters_source?: string | null;
+}
+
 type TradeSessionValue = "rth" | "pre" | "post" | "night";
 type PositionLike = { position?: number | null };
+type AccountPositionsResolvedState = {
+  displayItems: IBAccountPosition[];
+  displayUpdatedAt: string | null;
+  displayStale: boolean;
+  usingTrustedFallback: boolean;
+  trustedItems: IBAccountPosition[];
+  trustedUpdatedAt: string | null;
+};
+
+const GATEWAY_TRADE_BLOCK_STATES = new Set(["gateway_restarting", "gateway_degraded"]);
+const GATEWAY_RECOVERY_STATES = new Set([
+  "gateway_restarting",
+  "gateway_degraded",
+  "recovering",
+]);
 
 export const isPositionActionable = (row: PositionLike): boolean => {
   const qty = Number(row?.position ?? 0);
@@ -415,6 +466,94 @@ export const resolveSessionByEasternTime = (date: Date = new Date()): TradeSessi
   }
 };
 
+const normalizeGatewayRuntimeState = (value?: string | null): string => {
+  const normalized = String(value || "").trim().toLowerCase();
+  return normalized || "unknown";
+};
+
+export const resolveGatewayTradeBlockState = (
+  runtimeHealth?: IBGatewayRuntimeHealth | null
+): string | null => {
+  const normalized = normalizeGatewayRuntimeState(runtimeHealth?.state);
+  return GATEWAY_TRADE_BLOCK_STATES.has(normalized) ? normalized : null;
+};
+
+export const isGatewayRuntimeRecovering = (
+  runtimeHealth?: IBGatewayRuntimeHealth | null
+): boolean => GATEWAY_RECOVERY_STATES.has(normalizeGatewayRuntimeState(runtimeHealth?.state));
+
+export const resolveAccountPositionsResponseState = ({
+  response,
+  trustedItems = [],
+  trustedUpdatedAt = null,
+}: {
+  response: IBAccountPositionsOut;
+  trustedItems?: IBAccountPosition[];
+  trustedUpdatedAt?: string | null;
+}): AccountPositionsResolvedState => {
+  const nextItems = Array.isArray(response?.items) ? response.items : [];
+  const nextUpdatedAt = response?.refreshed_at || null;
+  const nextStale = Boolean(response?.stale);
+
+  if (!nextStale) {
+    return {
+      displayItems: nextItems,
+      displayUpdatedAt: nextUpdatedAt,
+      displayStale: false,
+      usingTrustedFallback: false,
+      trustedItems: nextItems,
+      trustedUpdatedAt: nextUpdatedAt,
+    };
+  }
+
+  if (!nextItems.length && trustedItems.length > 0) {
+    return {
+      displayItems: trustedItems,
+      displayUpdatedAt: trustedUpdatedAt,
+      displayStale: true,
+      usingTrustedFallback: true,
+      trustedItems,
+      trustedUpdatedAt,
+    };
+  }
+
+  return {
+    displayItems: nextItems,
+    displayUpdatedAt: nextUpdatedAt,
+    displayStale: true,
+    usingTrustedFallback: false,
+    trustedItems,
+    trustedUpdatedAt,
+  };
+};
+
+export const resolveAccountPositionsErrorState = ({
+  trustedItems = [],
+  trustedUpdatedAt = null,
+}: {
+  trustedItems?: IBAccountPosition[];
+  trustedUpdatedAt?: string | null;
+}): AccountPositionsResolvedState => {
+  if (trustedItems.length > 0) {
+    return {
+      displayItems: trustedItems,
+      displayUpdatedAt: trustedUpdatedAt,
+      displayStale: true,
+      usingTrustedFallback: true,
+      trustedItems,
+      trustedUpdatedAt,
+    };
+  }
+  return {
+    displayItems: [],
+    displayUpdatedAt: null,
+    displayStale: false,
+    usingTrustedFallback: false,
+    trustedItems: [],
+    trustedUpdatedAt: null,
+  };
+};
+
 const resolveDefaultOrderTypeBySession = (session: string) =>
   String(session || "").trim().toLowerCase() === "rth" ? "ADAPTIVE_LMT" : "LMT";
 
@@ -441,6 +580,112 @@ const normalizeSymbolList = (raw: unknown) => {
   return raw
     .map((item) => String(item ?? "").trim().toUpperCase())
     .filter((item) => item.length > 0);
+};
+
+const toNullableString = (value: unknown): string | null => {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  const text = String(value).trim();
+  return text ? text : null;
+};
+
+const toNullableNumber = (value: unknown): number | null => {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const toNullableBoolean = (value: unknown): boolean | null => {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (typeof value === "boolean") {
+    return value;
+  }
+  const text = String(value).trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(text)) {
+    return true;
+  }
+  if (["0", "false", "no", "off"].includes(text)) {
+    return false;
+  }
+  return null;
+};
+
+const normalizeWarningCodes = (raw: unknown): string[] => {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  return raw
+    .map((item) => String(item ?? "").trim())
+    .filter((item) => item.length > 0);
+};
+
+const normalizeDecisionBasis = (
+  raw: unknown,
+  defaults?: Partial<DecisionBasis>
+): DecisionBasis | null => {
+  const base = defaults || {};
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    const hasDefaults =
+      base.decision_snapshot_id != null ||
+      base.decision_snapshot_date != null ||
+      base.pit_effective_date != null;
+    if (!hasDefaults) {
+      return null;
+    }
+    return {
+      ...base,
+      pit_warning_codes: [],
+    };
+  }
+  const payload = raw as Record<string, unknown>;
+  const pitWarningCodes = normalizeWarningCodes(payload.pit_warning_codes || payload.warnings);
+  return {
+    decision_snapshot_id:
+      toNullableNumber(payload.decision_snapshot_id) ??
+      toNullableNumber(base.decision_snapshot_id) ??
+      null,
+    decision_snapshot_status:
+      toNullableString(payload.decision_snapshot_status) ??
+      toNullableString(base.decision_snapshot_status),
+    decision_snapshot_date:
+      toNullableString(payload.decision_snapshot_date) ??
+      toNullableString(base.decision_snapshot_date),
+    pit_requested_date:
+      toNullableString(payload.pit_requested_date) ??
+      toNullableString(payload.requested_snapshot_date),
+    pit_effective_date:
+      toNullableString(payload.pit_effective_date) ??
+      toNullableString(payload.effective_snapshot_date) ??
+      toNullableString(base.pit_effective_date),
+    pit_latest_available_date:
+      toNullableString(payload.pit_latest_available_date) ??
+      toNullableString(payload.snapshot_latest_available),
+    pit_fallback_used:
+      toNullableBoolean(payload.pit_fallback_used) ??
+      toNullableBoolean(payload.snapshot_fallback_used),
+    pit_fallback_reason:
+      toNullableString(payload.pit_fallback_reason) ??
+      toNullableString(payload.snapshot_fallback_reason),
+    pit_age_days:
+      toNullableNumber(payload.pit_age_days) ??
+      toNullableNumber(payload.snapshot_age_days),
+    pit_stale_warning:
+      toNullableBoolean(payload.pit_stale_warning) ??
+      toNullableBoolean(payload.snapshot_stale_warning),
+    pit_stale_days_threshold:
+      toNullableNumber(payload.pit_stale_days_threshold) ??
+      toNullableNumber(payload.snapshot_stale_days_threshold),
+    pit_warning_codes: pitWarningCodes,
+    pit_warning_message:
+      toNullableString(payload.pit_warning_message) ?? toNullableString(payload.message),
+    decision_as_of_time: toNullableString(payload.decision_as_of_time) ?? toNullableString(payload.as_of_time),
+    algorithm_parameters_source: toNullableString(payload.algorithm_parameters_source),
+  };
 };
 
 const resolveWorkstationType = (value: unknown, portValue?: unknown): "tws" | "gateway" => {
@@ -573,6 +818,13 @@ export default function LiveTradePage() {
   const [accountPositions, setAccountPositions] = useState<IBAccountPosition[]>([]);
   const [accountPositionsUpdatedAt, setAccountPositionsUpdatedAt] = useState<string | null>(null);
   const [accountPositionsStale, setAccountPositionsStale] = useState(false);
+  const [trustedAccountPositions, setTrustedAccountPositions] = useState<IBAccountPosition[]>([]);
+  const [trustedAccountPositionsUpdatedAt, setTrustedAccountPositionsUpdatedAt] =
+    useState<string | null>(null);
+  const [accountPositionsUsingTrustedFallback, setAccountPositionsUsingTrustedFallback] =
+    useState(false);
+  const trustedAccountPositionsRef = useRef<IBAccountPosition[]>([]);
+  const trustedAccountPositionsUpdatedAtRef = useRef<string | null>(null);
   const [accountPositionsLoading, setAccountPositionsLoading] = useState(false);
   const [accountPositionsError, setAccountPositionsError] = useState("");
   const [positionSelections, setPositionSelections] = useState<Record<string, boolean>>({});
@@ -1090,15 +1342,30 @@ export default function LiveTradePage() {
           force_refresh: forceRefresh,
         },
       });
-      setAccountPositions(res.data.items || []);
-      setAccountPositionsUpdatedAt(res.data.refreshed_at || null);
-      setAccountPositionsStale(Boolean(res.data.stale));
+      const nextState = resolveAccountPositionsResponseState({
+        response: res.data,
+        trustedItems: trustedAccountPositionsRef.current,
+        trustedUpdatedAt: trustedAccountPositionsUpdatedAtRef.current,
+      });
+      setAccountPositions(nextState.displayItems);
+      setAccountPositionsUpdatedAt(nextState.displayUpdatedAt);
+      setAccountPositionsStale(nextState.displayStale);
+      setAccountPositionsUsingTrustedFallback(nextState.usingTrustedFallback);
+      trustedAccountPositionsRef.current = nextState.trustedItems;
+      trustedAccountPositionsUpdatedAtRef.current = nextState.trustedUpdatedAt;
+      setTrustedAccountPositions(nextState.trustedItems);
+      setTrustedAccountPositionsUpdatedAt(nextState.trustedUpdatedAt);
     } catch (err: any) {
       const detail = err?.response?.data?.detail || t("trade.accountPositionsError");
       setAccountPositionsError(String(detail));
-      setAccountPositions([]);
-      setAccountPositionsUpdatedAt(null);
-      setAccountPositionsStale(false);
+      const nextState = resolveAccountPositionsErrorState({
+        trustedItems: trustedAccountPositionsRef.current,
+        trustedUpdatedAt: trustedAccountPositionsUpdatedAtRef.current,
+      });
+      setAccountPositions(nextState.displayItems);
+      setAccountPositionsUpdatedAt(nextState.displayUpdatedAt);
+      setAccountPositionsStale(nextState.displayStale);
+      setAccountPositionsUsingTrustedFallback(nextState.usingTrustedFallback);
     } finally {
       setAccountPositionsLoading(false);
     }
@@ -1278,6 +1545,10 @@ export default function LiveTradePage() {
       setPositionActionError(t("trade.positionActionErrorNoSelection"));
       return;
     }
+    if (gatewayTradeBlockState) {
+      setPositionActionError(gatewayTradeBlockMessage);
+      return;
+    }
     const projectId = Number(selectedProjectId) || latestTradeRun?.project_id || 0;
     if (!projectId) {
       setPositionActionError(t("trade.directOrderProjectRequired"));
@@ -1323,8 +1594,8 @@ export default function LiveTradePage() {
       setPositionActionResult(t("trade.positionActionResult", { count: orders.length }));
       await Promise.all([loadTradeActivity(), loadAccountPositions(true)]);
     } catch (err: any) {
-      const detail = err?.response?.data?.detail || t("trade.tradeError");
-      setPositionActionError(String(detail));
+      const detail = err?.response?.data?.detail;
+      setPositionActionError(translateTradeActionError(detail, "trade.tradeError"));
     } finally {
       setPositionActionLoading(false);
     }
@@ -1711,7 +1982,6 @@ export default function LiveTradePage() {
     } catch (err: any) {
       const detail = err?.response?.data?.detail || t("trade.bridgeStatusLoadError");
       setBridgeStatusError(String(detail));
-      setBridgeStatus(null);
     } finally {
       if (!silent) {
         setBridgeStatusLoading(false);
@@ -2119,8 +2389,10 @@ export default function LiveTradePage() {
         await loadPipelineDetail(pipelineTraceId);
       }
     } catch (err: any) {
-      const detail = err?.response?.data?.detail || t("trade.pipeline.errors.actionFailed");
-      setPipelineActionError(String(detail));
+      const detail = err?.response?.data?.detail;
+      setPipelineActionError(
+        translateTradeActionError(detail, "trade.pipeline.errors.actionFailed")
+      );
     } finally {
       setPipelineActionLoading((prev) => {
         const next = { ...prev };
@@ -2157,6 +2429,10 @@ export default function LiveTradePage() {
   };
 
   const executePipelineTrade = async (runId: number) => {
+    if (gatewayTradeBlockState) {
+      setPipelineActionError(gatewayTradeBlockMessage);
+      return;
+    }
     await runPipelineAction(
       `trade-run-${runId}`,
       async () => {
@@ -2196,23 +2472,40 @@ export default function LiveTradePage() {
     setDetailLoading(true);
     setDetailError("");
     try {
-      const [detailRes, symbolsRes] = await Promise.all([
+      const [detailResult, symbolsResult] = await Promise.allSettled([
         api.get<TradeRunDetail>(`/api/trade/runs/${runId}/detail`, {
           params: { limit: 50, offset: 0 },
         }),
         api.get<TradeSymbolSummaryPage>(`/api/trade/runs/${runId}/symbols`),
       ]);
-      setRunDetail(detailRes.data);
-      setSymbolSummary(symbolsRes.data?.items || []);
-      setSymbolSummaryUpdatedAt(
-        symbolsRes.data?.last_update_at || detailRes.data?.last_update_at || null
-      );
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail || t("trade.detailError");
-      setDetailError(String(detail));
-      setRunDetail(null);
-      setSymbolSummary([]);
-      setSymbolSummaryUpdatedAt(null);
+
+      const extractErrorDetail = (reason: any) =>
+        String(reason?.response?.data?.detail || reason?.message || t("trade.detailError"));
+
+      let detailData: TradeRunDetail | null = null;
+      let errorMessage = "";
+      if (detailResult.status === "fulfilled") {
+        detailData = detailResult.value.data;
+        setRunDetail(detailData);
+      } else {
+        errorMessage = extractErrorDetail(detailResult.reason);
+        setRunDetail(null);
+      }
+
+      if (symbolsResult.status === "fulfilled") {
+        const symbolsData = symbolsResult.value.data;
+        setSymbolSummary(symbolsData?.items || []);
+        setSymbolSummaryUpdatedAt(
+          symbolsData?.last_update_at || detailData?.last_update_at || null
+        );
+      } else {
+        const symbolsError = extractErrorDetail(symbolsResult.reason);
+        errorMessage = errorMessage ? `${errorMessage} | ${symbolsError}` : symbolsError;
+        setSymbolSummary([]);
+        setSymbolSummaryUpdatedAt(detailData?.last_update_at || null);
+      }
+
+      setDetailError(errorMessage);
     } finally {
       setDetailLoading(false);
     }
@@ -2222,6 +2515,11 @@ export default function LiveTradePage() {
     setExecuteLoading(true);
     setExecuteError("");
     setExecuteResult("");
+    if (gatewayTradeBlockState) {
+      setExecuteError(gatewayTradeBlockMessage);
+      setExecuteLoading(false);
+      return;
+    }
     const runId = Number.parseInt(executeForm.run_id, 10);
     if (!runId) {
       setExecuteError(t("trade.executeRunRequired"));
@@ -2245,8 +2543,8 @@ export default function LiveTradePage() {
         await loadTradeActivity();
       }
     } catch (err: any) {
-      const detail = err?.response?.data?.detail || t("trade.executeError");
-      setExecuteError(String(detail));
+      const detail = err?.response?.data?.detail;
+      setExecuteError(translateTradeActionError(detail, "trade.executeError"));
     } finally {
       setExecuteLoading(false);
     }
@@ -2591,10 +2889,16 @@ export default function LiveTradePage() {
   }, [latestTradeRun?.id, executeForm.run_id]);
 
   useEffect(() => {
-    if (latestTradeRun?.id && selectedRunId === null) {
-      setSelectedRunId(latestTradeRun.id);
+    if (!filteredTradeRuns.length) {
+      if (selectedRunId !== null) {
+        setSelectedRunId(null);
+      }
+      return;
     }
-  }, [latestTradeRun?.id, selectedRunId]);
+    if (selectedRunId === null || !filteredTradeRuns.some((run) => run.id === selectedRunId)) {
+      setSelectedRunId(filteredTradeRuns[0].id);
+    }
+  }, [filteredTradeRuns, selectedRunId]);
 
   useEffect(() => {
     if (selectedRunId) {
@@ -2705,6 +3009,69 @@ export default function LiveTradePage() {
     return t("trade.bridgeStatus.unknown");
   }, [bridgeIsStale, bridgeStatus?.status, ibStreamStatus?.status, accountSummary?.refreshed_at, t]);
 
+  const gatewayRuntime = useMemo(
+    () => bridgeStatus?.runtime_health ?? null,
+    [bridgeStatus?.runtime_health]
+  );
+
+  const gatewayTradeBlockState = useMemo(
+    () => resolveGatewayTradeBlockState(gatewayRuntime),
+    [gatewayRuntime]
+  );
+
+  const gatewayRecoveryState = useMemo(
+    () => isGatewayRuntimeRecovering(gatewayRuntime),
+    [gatewayRuntime]
+  );
+
+  const formatGatewayRuntimeState = useCallback(
+    (value?: string | null) => {
+      const normalized = normalizeGatewayRuntimeState(value);
+      return t(`trade.gatewayRuntimeState.${normalized}`);
+    },
+    [t]
+  );
+
+  const formatGatewayProbeResult = useCallback(
+    (value?: string | null) => {
+      const normalized = String(value || "").trim().toLowerCase() || "unknown";
+      return t(`trade.gatewayProbeResult.${normalized}`);
+    },
+    [t]
+  );
+
+  const formatGatewayRecoveryAction = useCallback(
+    (value?: string | null) => {
+      const normalized = String(value || "").trim().toLowerCase() || "none";
+      return t(`trade.gatewayRecoveryAction.${normalized}`);
+    },
+    [t]
+  );
+
+  const gatewayRuntimeLabel = useMemo(
+    () => formatGatewayRuntimeState(gatewayRuntime?.state),
+    [formatGatewayRuntimeState, gatewayRuntime?.state]
+  );
+
+  const gatewayTradeBlockMessage = useMemo(() => {
+    if (!gatewayTradeBlockState) {
+      return "";
+    }
+    return t(`trade.gatewayTradeBlock.${gatewayTradeBlockState}`);
+  }, [gatewayTradeBlockState, t]);
+
+  const translateTradeActionError = useCallback(
+    (detail: unknown, fallbackKey: string) => {
+      const normalized = String(detail || "").trim().toLowerCase();
+      if (normalized === "gateway_restarting" || normalized === "gateway_degraded") {
+        return t(`trade.gatewayTradeBlock.${normalized}`);
+      }
+      const text = String(detail || "").trim();
+      return text || t(fallbackKey);
+    },
+    [t]
+  );
+
   const bridgeSource = useMemo(() => {
     return accountSummary?.source || "lean_bridge";
   }, [accountSummary?.source]);
@@ -2802,8 +3169,8 @@ export default function LiveTradePage() {
   }, [snapshot?.id, snapshot?.status, snapshotLoading, t]);
 
   const canExecute = useMemo(
-    () => Boolean(selectedProjectId && snapshot?.id && snapshotReady),
-    [selectedProjectId, snapshot?.id, snapshotReady]
+    () => Boolean(selectedProjectId && snapshot?.id && snapshotReady && !gatewayTradeBlockState),
+    [gatewayTradeBlockState, selectedProjectId, snapshot?.id, snapshotReady]
   );
 
   const statusLabel = useMemo(() => {
@@ -3188,6 +3555,42 @@ export default function LiveTradePage() {
     return raw as Record<string, any>;
   }, [runDetail?.risk_audit]);
 
+  const activeRunDecisionBasis = useMemo(() => {
+    const defaults: Partial<DecisionBasis> = {
+      decision_snapshot_id: activeTradeRun?.decision_snapshot_id ?? null,
+      decision_snapshot_date: null,
+    };
+    return normalizeDecisionBasis(runDetail?.decision_basis, defaults);
+  }, [activeTradeRun?.decision_snapshot_id, runDetail?.decision_basis]);
+
+  const latestSnapshotDecisionBasis = useMemo(() => {
+    const defaults: Partial<DecisionBasis> = {
+      decision_snapshot_id: snapshot?.id ?? null,
+      decision_snapshot_status: snapshot?.status ?? null,
+      decision_snapshot_date: snapshot?.snapshot_date ?? null,
+      pit_effective_date: snapshot?.snapshot_date ?? null,
+    };
+    return normalizeDecisionBasis(snapshot?.summary, defaults);
+  }, [snapshot?.id, snapshot?.status, snapshot?.summary, snapshot?.snapshot_date]);
+
+  const executionDecisionBasis = useMemo(
+    () => activeRunDecisionBasis || latestSnapshotDecisionBasis,
+    [activeRunDecisionBasis, latestSnapshotDecisionBasis]
+  );
+
+  const formatDecisionBasisFallbackReason = useCallback(
+    (value?: string | null) => {
+      const normalized = String(value || "").trim();
+      if (!normalized) {
+        return t("common.none");
+      }
+      const key = `trade.decisionBasisFallbackReasonCode.${normalized}`;
+      const translated = t(key);
+      return translated === key ? normalized : translated;
+    },
+    [t]
+  );
+
   const runRiskAuditCurrencyPnl = useMemo(() => {
     const raw = runRiskAudit?.pnl_total_by_currency;
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -3268,6 +3671,128 @@ export default function LiveTradePage() {
     return Number.isFinite(volume) ? volume : null;
   }, [snapshotData]);
 
+  const renderDecisionBasisBlock = useCallback(
+    (basis: DecisionBasis | null, options: { testIdPrefix: string }) => {
+      const testIdPrefix = options.testIdPrefix;
+      const requestedDate = basis?.pit_requested_date || null;
+      const effectiveDate = basis?.pit_effective_date || basis?.decision_snapshot_date || null;
+      const latestDate = basis?.pit_latest_available_date || null;
+      const fallbackUsed = basis?.pit_fallback_used;
+      const staleWarning = basis?.pit_stale_warning;
+      const warningMessage = basis?.pit_warning_message || null;
+      const pitAgeDays = basis?.pit_age_days;
+      const staleThreshold = basis?.pit_stale_days_threshold;
+      const asOfTime = basis?.decision_as_of_time || null;
+      const snapshotId = basis?.decision_snapshot_id;
+      const snapshotDate = basis?.decision_snapshot_date || null;
+      const fallbackLabel =
+        fallbackUsed === null || fallbackUsed === undefined
+          ? t("common.none")
+          : fallbackUsed
+            ? formatDecisionBasisFallbackReason(basis?.pit_fallback_reason)
+            : t("trade.decisionBasisNoFallback");
+      const ageLabel =
+        pitAgeDays === null || pitAgeDays === undefined
+          ? t("common.none")
+          : t("trade.decisionBasisAgeDaysShort", { days: pitAgeDays });
+      const summaryLine = t("trade.decisionBasisSummaryLine", {
+        requested: requestedDate || t("common.none"),
+        effective: effectiveDate || t("common.none"),
+        latest: latestDate || t("common.none"),
+        fallback: fallbackLabel,
+        age: ageLabel,
+      });
+
+      return (
+        <div className="card-subsection decision-basis-block" style={{ marginTop: "12px" }}>
+          <div className="form-label">{t("trade.decisionBasisTitle")}</div>
+          <div className="form-hint">{t("trade.decisionBasisMeta")}</div>
+          <div className="form-hint" data-testid={`${testIdPrefix}-summary-line`} style={{ marginTop: "8px" }}>
+            {summaryLine}
+          </div>
+          <div className="meta-list" style={{ marginTop: "8px" }}>
+            <div className="meta-row">
+              <span>{t("trade.decisionBasisSnapshotId")}</span>
+              <strong data-testid={`${testIdPrefix}-snapshot-id`}>
+                {snapshotId ? `#${snapshotId}` : t("common.none")}
+              </strong>
+            </div>
+            <div className="meta-row">
+              <span>{t("trade.decisionBasisSnapshotDate")}</span>
+              <strong data-testid={`${testIdPrefix}-snapshot-date`}>
+                {snapshotDate || t("common.none")}
+              </strong>
+            </div>
+            <div className="meta-row">
+              <span>{t("trade.decisionBasisRequestedPitDate")}</span>
+              <strong data-testid={`${testIdPrefix}-requested-pit-date`}>
+                {requestedDate || t("common.none")}
+              </strong>
+            </div>
+            <div className="meta-row">
+              <span>{t("trade.decisionBasisEffectivePitDate")}</span>
+              <strong data-testid={`${testIdPrefix}-effective-pit-date`}>
+                {effectiveDate || t("common.none")}
+              </strong>
+            </div>
+            <div className="meta-row">
+              <span>{t("trade.decisionBasisLatestPitDate")}</span>
+              <strong data-testid={`${testIdPrefix}-latest-pit-date`}>
+                {latestDate || t("common.none")}
+              </strong>
+            </div>
+            <div className="meta-row">
+              <span>{t("trade.decisionBasisFallbackUsed")}</span>
+              <strong data-testid={`${testIdPrefix}-fallback-used`}>
+                {fallbackUsed === null || fallbackUsed === undefined
+                  ? t("common.none")
+                  : fallbackUsed
+                    ? t("common.boolean.true")
+                    : t("common.boolean.false")}
+              </strong>
+            </div>
+            <div className="meta-row">
+              <span>{t("trade.decisionBasisFallbackReason")}</span>
+              <strong data-testid={`${testIdPrefix}-fallback-reason`}>
+                {formatDecisionBasisFallbackReason(basis?.pit_fallback_reason)}
+              </strong>
+            </div>
+            <div className="meta-row">
+              <span>{t("trade.decisionBasisStaleWarning")}</span>
+              <strong data-testid={`${testIdPrefix}-stale-warning`}>
+                {staleWarning === null || staleWarning === undefined
+                  ? t("common.none")
+                  : staleWarning
+                    ? t("common.boolean.true")
+                    : t("common.boolean.false")}
+              </strong>
+            </div>
+            <div className="meta-row">
+              <span>{t("trade.decisionBasisAgeDays")}</span>
+              <strong data-testid={`${testIdPrefix}-age-days`}>
+                {pitAgeDays === null || pitAgeDays === undefined ? t("common.none") : `${pitAgeDays}`}
+                {staleThreshold === null || staleThreshold === undefined
+                  ? ""
+                  : ` / ${t("trade.decisionBasisStaleThreshold", { days: staleThreshold })}`}
+              </strong>
+            </div>
+            <div className="meta-row">
+              <span>{t("trade.decisionBasisAsOfTime")}</span>
+              <strong data-testid={`${testIdPrefix}-as-of-time`}>
+                {asOfTime || t("common.none")}
+              </strong>
+            </div>
+          </div>
+          {warningMessage ? (
+            <div className="form-hint warn" style={{ marginTop: "8px" }}>
+              {warningMessage}
+            </div>
+          ) : null}
+        </div>
+      );
+    },
+    [formatDecisionBasisFallbackReason, t]
+  );
 
   const sections = getLiveTradeSections();
 
@@ -3324,6 +3849,12 @@ export default function LiveTradePage() {
             <span>{t("trade.bridgeSource")}</span>
             <strong>{bridgeSource || t("common.none")}</strong>
           </div>
+          {gatewayRuntime && (
+            <div className={`meta-row${gatewayRecoveryState ? " meta-warn" : ""}`}>
+              <span>{t("trade.gatewayRuntimeLabel")}</span>
+              <strong>{gatewayRuntimeLabel}</strong>
+            </div>
+          )}
           {ibSettings?.api_mode && (
             <div className="meta-row">
               <span>{t("data.ib.apiMode")}</span>
@@ -3345,7 +3876,7 @@ export default function LiveTradePage() {
             <strong>{ibState?.updated_at ? formatDateTime(ibState.updated_at) : "-"}</strong>
           </div>
           {ibState?.message && (
-            <div className="meta-row">
+            <div className="meta-row meta-row-stack">
               <span>{t("data.ib.message")}</span>
               <strong>{ibState.message}</strong>
             </div>
@@ -3458,14 +3989,57 @@ export default function LiveTradePage() {
                   {formatBridgeRefreshReason(t, bridgeStatus?.last_refresh_reason)}
                 </strong>
               </div>
-              {bridgeStatus?.last_refresh_message && (
+              <div
+                className={`meta-row${gatewayRecoveryState || gatewayTradeBlockState ? " meta-warn" : ""}`}
+                data-testid="gateway-runtime-row"
+              >
+                <span>{t("trade.gatewayRuntimeLabel")}</span>
+                <strong>{gatewayRuntimeLabel}</strong>
+              </div>
+              <div className="meta-row">
+                <span>{t("trade.gatewayProbeResultLabel")}</span>
+                <strong>{formatGatewayProbeResult(gatewayRuntime?.last_probe_result)}</strong>
+              </div>
+              <div className="meta-row">
+                <span>{t("trade.gatewayProbeLatencyLabel")}</span>
+                <strong>
+                  {gatewayRuntime?.last_probe_latency_ms != null
+                    ? t("trade.gatewayProbeLatencyValue", {
+                        value: Number(gatewayRuntime.last_probe_latency_ms).toFixed(0),
+                      })
+                    : t("common.none")}
+                </strong>
+              </div>
+              <div className="meta-row">
+                <span>{t("trade.gatewayRecoveryActionLabel")}</span>
+                <strong>
+                  {formatGatewayRecoveryAction(gatewayRuntime?.last_recovery_action)}
+                </strong>
+              </div>
+              <div className="meta-row">
+                <span>{t("trade.gatewayRecoveryAtLabel")}</span>
+                <strong>{formatDateTime(gatewayRuntime?.last_recovery_at)}</strong>
+              </div>
+              {gatewayRuntime?.next_allowed_action_at && (
                 <div className="meta-row">
+                  <span>{t("trade.gatewayNextRecoveryLabel")}</span>
+                  <strong>{formatDateTime(gatewayRuntime.next_allowed_action_at)}</strong>
+                </div>
+              )}
+              {gatewayTradeBlockState && (
+                <div className="meta-row meta-row-stack">
+                  <span>{t("trade.gatewayTradeBlockLabel")}</span>
+                  <strong>{gatewayTradeBlockMessage}</strong>
+                </div>
+              )}
+              {bridgeStatus?.last_refresh_message && (
+                <div className="meta-row meta-row-stack">
                   <span>{t("trade.bridgeRefreshMessageLabel")}</span>
                   <strong>{bridgeStatus.last_refresh_message}</strong>
                 </div>
               )}
               {bridgeStatus?.last_error && (
-                <div className="meta-row">
+                <div className="meta-row meta-row-stack">
                   <span>{t("trade.bridgeLastError")}</span>
                   <strong>{bridgeStatus.last_error}</strong>
                 </div>
@@ -3624,6 +4198,32 @@ export default function LiveTradePage() {
             </div>
           </div>
         )}
+        {accountPositionsUsingTrustedFallback && (
+          <div
+            className="form-hint warn positions-fallback-banner"
+            style={{ marginTop: "8px" }}
+            data-testid="positions-trusted-fallback-banner"
+          >
+            <div>{t("trade.accountPositionsTrustedFallbackHint")}</div>
+            <div className="meta-row" style={{ marginTop: "6px" }}>
+              <span>{t("trade.accountPositionsTrustedAt")}</span>
+              <strong>
+                {trustedAccountPositionsUpdatedAt
+                  ? formatDateTime(trustedAccountPositionsUpdatedAt)
+                  : t("common.none")}
+              </strong>
+            </div>
+          </div>
+        )}
+        {gatewayTradeBlockState && (
+          <div
+            className="form-hint danger positions-fallback-banner"
+            style={{ marginTop: "8px" }}
+            data-testid="gateway-trade-block-banner"
+          >
+            {gatewayTradeBlockMessage}
+          </div>
+        )}
         {accountPositionsError && <div className="form-hint">{accountPositionsError}</div>}
         <div className="meta-list" style={{ marginTop: "12px" }}>
           <div className="meta-row">
@@ -3665,7 +4265,9 @@ export default function LiveTradePage() {
           <button
             className="button-secondary"
             data-testid="positions-batch-close"
-            disabled={positionActionLoading || selectedPositions.length === 0}
+            disabled={
+              positionActionLoading || selectedPositions.length === 0 || Boolean(gatewayTradeBlockState)
+            }
             onClick={() => handleClosePositions(selectedPositions)}
           >
             {positionActionLoading
@@ -3675,7 +4277,11 @@ export default function LiveTradePage() {
           <button
             className="danger-button"
             data-testid="positions-liquidate-all"
-            disabled={positionActionLoading || actionableAccountPositions.length === 0}
+            disabled={
+              positionActionLoading ||
+              actionableAccountPositions.length === 0 ||
+              Boolean(gatewayTradeBlockState)
+            }
             onClick={handleLiquidateAll}
           >
             {t("trade.positionActionLiquidateAll")}
@@ -3690,7 +4296,9 @@ export default function LiveTradePage() {
                     type="checkbox"
                     aria-label={t("trade.positionActionSelectAll")}
                     checked={allPositionsSelected}
-                    disabled={actionableAccountPositions.length === 0}
+                    disabled={
+                      actionableAccountPositions.length === 0 || Boolean(gatewayTradeBlockState)
+                    }
                     onChange={toggleSelectAllPositions}
                   />
                 </th>
@@ -3737,7 +4345,7 @@ export default function LiveTradePage() {
                             symbol: row.symbol,
                           })}
                           checked={!!positionSelections[key]}
-                          disabled={!positionActionable}
+                          disabled={!positionActionable || Boolean(gatewayTradeBlockState)}
                           onChange={(event) => updatePositionSelection(key, event.target.checked)}
                         />
                       </td>
@@ -3759,6 +4367,7 @@ export default function LiveTradePage() {
                             min="0"
                             step="1"
                             value={qtyValue}
+                            disabled={Boolean(gatewayTradeBlockState)}
                             onChange={(event) =>
                               updatePositionQuantity(key, event.target.value)
                             }
@@ -3768,6 +4377,7 @@ export default function LiveTradePage() {
                             style={{ width: "110px" }}
                             value={sessionValue}
                             data-testid="positions-action-session"
+                            disabled={Boolean(gatewayTradeBlockState)}
                             onChange={(event) => updatePositionSession(row, key, event.target.value)}
                           >
                             <option value="rth">{t("trade.manualSession.rth")}</option>
@@ -3780,7 +4390,7 @@ export default function LiveTradePage() {
                             style={{ width: "150px" }}
                             value={orderTypeValue}
                             data-testid="positions-action-order-type"
-                            disabled={sessionValue !== "rth"}
+                            disabled={sessionValue !== "rth" || Boolean(gatewayTradeBlockState)}
                             onChange={(event) =>
                               updatePositionOrderType(row, key, event.target.value)
                             }
@@ -3802,6 +4412,7 @@ export default function LiveTradePage() {
                               placeholder={t("trade.positionLimitPricePlaceholder")}
                               value={limitValue}
                               data-testid="positions-action-limit-price"
+                              disabled={Boolean(gatewayTradeBlockState)}
                               onChange={(event) =>
                                 updatePositionLimitPrice(key, event.target.value)
                               }
@@ -3810,21 +4421,25 @@ export default function LiveTradePage() {
                           <button
                             className="button-compact positions-action-button"
                             onClick={() => handlePositionOrder(row, "BUY", index)}
-                            disabled={positionActionLoading}
+                            disabled={positionActionLoading || Boolean(gatewayTradeBlockState)}
                           >
                             {t("trade.positionActionBuy")}
                           </button>
                           <button
                             className="button-compact positions-action-button"
                             onClick={() => handlePositionOrder(row, "SELL", index)}
-                            disabled={positionActionLoading}
+                            disabled={positionActionLoading || Boolean(gatewayTradeBlockState)}
                           >
                             {t("trade.positionActionSell")}
                           </button>
                           <button
                             className="button-compact positions-action-button"
                             onClick={() => handleClosePosition(row, index)}
-                            disabled={positionActionLoading || !positionActionable}
+                            disabled={
+                              positionActionLoading ||
+                              !positionActionable ||
+                              Boolean(gatewayTradeBlockState)
+                            }
                           >
                             {t("trade.positionActionClose")}
                           </button>
@@ -4813,6 +5428,9 @@ export default function LiveTradePage() {
             </div>
           </div>
         </div>
+        {renderDecisionBasisBlock(executionDecisionBasis, {
+          testIdPrefix: "trade-decision-basis-execution",
+        })}
         {tradeSettingsError && <div className="form-hint">{tradeSettingsError}</div>}
         {tradeError && <div className="form-hint">{tradeError}</div>}
         <div className="form-grid" style={{ marginTop: "12px" }}>
@@ -5092,10 +5710,18 @@ export default function LiveTradePage() {
             {executeLoading ? t("common.actions.loading") : t("trade.executeSubmit")}
           </button>
         </div>
-        {!canExecute && selectedProjectId && !snapshotError && (
+        {gatewayTradeBlockState ? (
+          <div className="form-hint danger" style={{ marginTop: "8px" }}>
+            {gatewayTradeBlockMessage}
+          </div>
+        ) : (
+          !canExecute &&
+          selectedProjectId &&
+          !snapshotError && (
           <div className="form-hint" style={{ marginTop: "8px" }}>
             {t("trade.executeBlockedSnapshot")}
           </div>
+          )
         )}
         {executeError && (
           <div className="form-hint" data-testid="paper-trade-error">
@@ -5127,6 +5753,9 @@ export default function LiveTradePage() {
             <strong data-testid="trade-symbol-summary-count">{symbolSummary.length}</strong>
           </div>
         </div>
+        {renderDecisionBasisBlock(activeRunDecisionBasis || executionDecisionBasis, {
+          testIdPrefix: "trade-decision-basis-symbol",
+        })}
         {runRiskAudit ? (
           <div className="symbol-summary-audit">
             <div className="symbol-summary-audit-grid">
@@ -5543,7 +6172,10 @@ export default function LiveTradePage() {
                             <button
                               type="button"
                               className="button-secondary button-compact"
-                              disabled={pipelineActionLoading[`trade-run-${event.task_id}`]}
+                              disabled={
+                                pipelineActionLoading[`trade-run-${event.task_id}`] ||
+                                Boolean(gatewayTradeBlockState)
+                              }
                               onClick={() => executePipelineTrade(event.task_id as number)}
                             >
                               {pipelineActionLoading[`trade-run-${event.task_id}`]

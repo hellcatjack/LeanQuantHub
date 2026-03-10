@@ -539,7 +539,7 @@ def get_trade_run_detail(
         )
         reconcile_cancel_requested_orders(session, run_id=run_id)
         try:
-            run, orders, fills, last_update_at, risk_audit = build_trade_run_detail(
+            run, orders, fills, last_update_at, risk_audit, decision_basis = build_trade_run_detail(
                 session, run_id, limit=limit, offset=offset
             )
         except ValueError as exc:
@@ -555,6 +555,7 @@ def get_trade_run_detail(
             fills=[TradeFillDetailOut.model_validate(fill) for fill in fills],
             last_update_at=last_update_at,
             risk_audit=risk_audit,
+            decision_basis=decision_basis,
         )
 
 
@@ -587,7 +588,7 @@ def get_trade_run_symbols(run_id: int):
         reconcile_cancel_requested_orders(session, run_id=run_id)
         trade_executor.recompute_trade_run_completion_summary(session, run_row)
         try:
-            items = build_symbol_summary(session, run_id)
+            items = build_symbol_summary(session, run_id, strict_positions=False)
         except ValueError as exc:
             detail = str(exc)
             if detail == "current_positions_not_precise":
@@ -1177,7 +1178,13 @@ def create_direct_trade_order_route(payload: TradeDirectOrderRequest):
             detail = str(exc)
             if detail == "live_confirm_required":
                 raise HTTPException(status_code=403, detail=detail) from exc
-            if detail in {"ib_api_mode_disabled", "ib_settings_missing", "client_id_busy"}:
+            if detail in {
+                "ib_api_mode_disabled",
+                "ib_settings_missing",
+                "client_id_busy",
+                "gateway_degraded",
+                "gateway_restarting",
+            }:
                 raise HTTPException(status_code=409, detail=detail) from exc
             raise HTTPException(status_code=400, detail=detail) from exc
         return result

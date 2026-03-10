@@ -86,8 +86,8 @@ export default function LeanBridgePoolPage() {
           {error && <div className="form-error" style={{ marginTop: "8px" }}>{error}</div>}
         </div>
 
-        <div className="table-scroll" style={{ marginTop: "16px" }}>
-          <table className="table">
+        <div className="table-scroll bridge-pool-table-scroll" style={{ marginTop: "16px" }}>
+          <table className="table bridge-pool-table">
             <thead>
               <tr>
                 <th>{t("trade.bridgePoolColumns.role")}</th>

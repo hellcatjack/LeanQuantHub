@@ -201,6 +201,51 @@ def test_build_symbol_summary_rejects_non_precise_positions(tmp_path, monkeypatc
         session.close()
 
 
+def test_build_symbol_summary_allows_stale_positions_in_best_effort_mode(tmp_path, monkeypatch):
+    Session = _make_session_factory()
+    session = Session()
+    try:
+        project = Project(name="p", description="")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        run = TradeRun(
+            project_id=project.id,
+            decision_snapshot_id=None,
+            status="queued",
+            mode="paper",
+            params={"portfolio_value": 5000.0},
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        monkeypatch.setattr(
+            trade_run_summary,
+            "get_account_positions_cached",
+            lambda _session, *, mode, force_refresh=False: {
+                "items": [{"symbol": "AMD", "quantity": 2.0, "market_value": 200.0}],
+                "stale": True,
+                "source_detail": "ib_holdings",
+            },
+            raising=False,
+        )
+        monkeypatch.setattr(
+            trade_run_summary,
+            "fetch_account_summary",
+            lambda _session: {"NetLiquidation": 5000.0},
+            raising=False,
+        )
+
+        items = trade_run_summary.build_symbol_summary(session, run.id, strict_positions=False)
+        by_symbol = {item["symbol"]: item for item in items}
+        assert set(by_symbol.keys()) == {"AMD"}
+        assert by_symbol["AMD"]["current_value"] == 200.0
+    finally:
+        session.close()
+
+
 def test_build_symbol_summary_prefers_latest_net_liquidation_over_run_portfolio_value(
     tmp_path, monkeypatch
 ):

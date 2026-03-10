@@ -1517,6 +1517,22 @@ class IBStreamSnapshotOut(BaseModel):
     error: str | None = None
 
 
+class IBGatewayRuntimeHealthOut(BaseModel):
+    state: str = "unknown"
+    failure_count: int = 0
+    pending_command_count: int = 0
+    oldest_pending_command_age_seconds: int | None = None
+    last_positions_at: str | None = None
+    last_open_orders_at: str | None = None
+    last_account_summary_at: str | None = None
+    last_command_result_at: str | None = None
+    last_probe_result: str = "unknown"
+    last_probe_latency_ms: int | None = None
+    last_recovery_action: str | None = None
+    last_recovery_at: str | None = None
+    next_allowed_action_at: str | None = None
+
+
 class IBBridgeStatusOut(BaseModel):
     status: str | None = None
     stale: bool = False
@@ -1528,6 +1544,7 @@ class IBBridgeStatusOut(BaseModel):
     last_refresh_result: str | None = None
     last_refresh_reason: str | None = None
     last_refresh_message: str | None = None
+    runtime_health: IBGatewayRuntimeHealthOut | None = None
 
 
 class IBBridgeRefreshOut(BaseModel):
@@ -1811,6 +1828,7 @@ class IBStatusOverviewOut(BaseModel):
     snapshot_cache: dict
     orders: dict
     alerts: dict
+    gateway_runtime: IBGatewayRuntimeHealthOut | None = None
     partial: bool = False
     errors: list[str] = []
     refreshed_at: datetime
@@ -2020,6 +2038,7 @@ class TradeRunDetailOut(BaseModel):
     fills: list[TradeFillDetailOut]
     last_update_at: datetime | None
     risk_audit: dict | None = None
+    decision_basis: dict | None = None
 
 
 class TradeSymbolSummaryOut(BaseModel):

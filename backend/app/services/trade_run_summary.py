@@ -21,7 +21,7 @@ _PRECISE_POSITIONS_SOURCE_DETAILS = {
 }
 
 
-def _load_precise_positions_payload(session, *, mode: str) -> dict[str, Any]:
+def _load_positions_payload(session, *, mode: str, strict: bool = True) -> dict[str, Any]:
     payload = get_account_positions_cached(
         session,
         mode=str(mode or "").strip().lower() or "paper",
@@ -29,6 +29,8 @@ def _load_precise_positions_payload(session, *, mode: str) -> dict[str, Any]:
     )
     if not isinstance(payload, dict):
         raise ValueError("current_positions_not_precise")
+    if not strict:
+        return payload
     stale = bool(payload.get("stale", True))
     source_detail = str(payload.get("source_detail") or "").strip()
     if stale or source_detail not in _PRECISE_POSITIONS_SOURCE_DETAILS:
@@ -215,6 +217,73 @@ def _build_risk_audit_payload(session, run: TradeRun) -> dict[str, Any] | None:
     }
 
 
+def _to_bool_or_none(value: object) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return None
+
+
+def _to_int_or_none(value: object) -> int | None:
+    try:
+        if value is None:
+            return None
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_decision_basis_payload(run: TradeRun, snapshot: DecisionSnapshot | None) -> dict[str, Any] | None:
+    snapshot_id = int(run.decision_snapshot_id or 0)
+    if snapshot_id <= 0 and snapshot is None:
+        return None
+    summary = snapshot.summary if snapshot and isinstance(snapshot.summary, dict) else {}
+    warning_codes_raw = summary.get("warnings")
+    warning_codes: list[str] = []
+    if isinstance(warning_codes_raw, list):
+        warning_codes = [
+            str(item).strip()
+            for item in warning_codes_raw
+            if str(item).strip()
+        ]
+    pit_fallback_reason = str(summary.get("snapshot_fallback_reason") or "").strip() or None
+    pit_fallback_used = _to_bool_or_none(summary.get("snapshot_fallback_used"))
+    if pit_fallback_used is None and pit_fallback_reason:
+        pit_fallback_used = True
+    pit_stale_warning = _to_bool_or_none(summary.get("snapshot_stale_warning"))
+    if pit_stale_warning is None and warning_codes:
+        pit_stale_warning = any(code.startswith("snapshot_stale") for code in warning_codes)
+
+    payload = {
+        "decision_snapshot_id": snapshot.id if snapshot else snapshot_id or None,
+        "decision_snapshot_status": snapshot.status if snapshot else None,
+        "decision_snapshot_date": snapshot.snapshot_date if snapshot else None,
+        "decision_snapshot_created_at": snapshot.created_at if snapshot else None,
+        "pit_requested_date": summary.get("requested_snapshot_date"),
+        "pit_effective_date": summary.get("effective_snapshot_date") or (snapshot.snapshot_date if snapshot else None),
+        "pit_latest_available_date": summary.get("snapshot_latest_available"),
+        "pit_fallback_used": pit_fallback_used,
+        "pit_fallback_reason": pit_fallback_reason,
+        "pit_age_days": _to_int_or_none(summary.get("snapshot_age_days")),
+        "pit_stale_warning": pit_stale_warning,
+        "pit_stale_days_threshold": _to_int_or_none(summary.get("snapshot_stale_days_threshold")),
+        "pit_warning_codes": warning_codes,
+        "pit_warning_message": (snapshot.message if snapshot else None) or summary.get("message"),
+        "decision_as_of_time": summary.get("as_of_time"),
+        "algorithm_parameters_source": summary.get("algorithm_parameters_source"),
+        "backtest_run_id": summary.get("backtest_run_id"),
+        "selected_count": _to_int_or_none(summary.get("selected_count")),
+        "filtered_count": _to_int_or_none(summary.get("filtered_count")),
+    }
+    return payload
+
+
 def build_trade_run_detail(session, run_id: int, *, limit: int = 200, offset: int = 0):
     run = session.get(TradeRun, run_id)
     if not run:
@@ -293,10 +362,12 @@ def build_trade_run_detail(session, run_id: int, *, limit: int = 200, offset: in
         + [fill.updated_at for fill in fills]
     )
     risk_audit = _build_risk_audit_payload(session, run)
-    return run, order_payloads, fill_payloads, last_update_at, risk_audit
+    decision_snapshot = session.get(DecisionSnapshot, run.decision_snapshot_id) if run.decision_snapshot_id else None
+    decision_basis = _build_decision_basis_payload(run, decision_snapshot)
+    return run, order_payloads, fill_payloads, last_update_at, risk_audit, decision_basis
 
 
-def build_symbol_summary(session, run_id: int) -> list[dict[str, Any]]:
+def build_symbol_summary(session, run_id: int, *, strict_positions: bool = True) -> list[dict[str, Any]]:
     run = session.get(TradeRun, run_id)
     if not run:
         raise ValueError("trade_run_not_found")
@@ -340,9 +411,10 @@ def build_symbol_summary(session, run_id: int) -> list[dict[str, Any]]:
             if net_liq_value > 0:
                 portfolio_value = net_liq_value
 
-    positions_payload = _load_precise_positions_payload(
+    positions_payload = _load_positions_payload(
         session,
         mode=str(run.mode or "").strip().lower() or "paper",
+        strict=bool(strict_positions),
     )
     positions_items = (
         positions_payload.get("items") if isinstance(positions_payload.get("items"), list) else []
