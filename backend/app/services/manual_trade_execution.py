@@ -6,6 +6,7 @@ from pathlib import Path
 
 from app.core.config import settings
 from app.models import TradeOrder
+from app.services.ib_gateway_runtime import get_gateway_trade_block_state
 from app.services.lean_bridge_paths import resolve_bridge_root
 from app.services.lean_execution import build_execution_config, launch_execution_async
 from app.services.trade_price_seed import resolve_price_seed
@@ -72,6 +73,9 @@ def execute_manual_order(
     project_id: int,
     mode: str,
 ) -> str:
+    blocked_state = get_gateway_trade_block_state(resolve_bridge_root())
+    if blocked_state:
+        raise ValueError(blocked_state)
     intent_path = write_manual_order_intent(order, output_dir=ARTIFACT_ROOT / "order_intents")
     bridge_root = resolve_bridge_root()
     output_dir = bridge_root / f"direct_{order.id}"

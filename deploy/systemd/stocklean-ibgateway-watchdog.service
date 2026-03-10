@@ -4,5 +4,6 @@ Description=StockLean IB Gateway Watchdog
 [Service]
 Type=oneshot
 WorkingDirectory=/app/stocklean
+EnvironmentFile=-/app/stocklean/backend/.env
 EnvironmentFile=-%h/.config/stocklean/ibgateway.env
 ExecStart=/app/stocklean/scripts/ib_gateway_watchdog.sh

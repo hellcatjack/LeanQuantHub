@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import or_
 
 from app.models import AuditLog, TradeFill, TradeOrder
+from app.services.ib_gateway_runtime import build_gateway_runtime_health, load_gateway_runtime_health
 from app.services.lean_bridge_paths import resolve_bridge_root
 from app.services.lean_bridge_reader import read_bridge_status, read_quotes
 from app.services.lean_bridge_watchlist import refresh_leader_watchlist
@@ -77,6 +78,13 @@ def _read_snapshot_cache() -> dict[str, Any]:
         "last_snapshot_at": last_snapshot_at,
         "symbol_sample_count": len(items),
     }
+
+
+def _read_gateway_runtime(root: Path) -> dict[str, Any]:
+    return build_gateway_runtime_health(
+        bridge_root=root,
+        previous_payload=load_gateway_runtime_health(root),
+    )
 
 
 def _resolve_bridge_root() -> Path:
@@ -150,6 +158,7 @@ def build_ib_status_overview(session) -> dict[str, Any]:
         refresh_leader_watchlist(session, max_symbols=200)
     except Exception:
         pass
+    root = _resolve_bridge_root()
     errors: list[str] = []
     partial = {"value": False}
     connection = _read_section("connection", lambda: _read_connection(session), errors, partial)
@@ -158,6 +167,7 @@ def build_ib_status_overview(session) -> dict[str, Any]:
     snapshot_cache = _read_section("snapshot_cache", _read_snapshot_cache, errors, partial)
     orders = _read_section("orders", lambda: _read_orders(session), errors, partial)
     alerts = _read_section("alerts", lambda: _read_alerts(session), errors, partial)
+    gateway_runtime = _read_section("gateway_runtime", lambda: _read_gateway_runtime(root), errors, partial)
     return {
         "connection": connection,
         "config": config,
@@ -165,6 +175,7 @@ def build_ib_status_overview(session) -> dict[str, Any]:
         "snapshot_cache": snapshot_cache,
         "orders": orders,
         "alerts": alerts,
+        "gateway_runtime": gateway_runtime,
         "partial": bool(partial["value"]),
         "errors": errors,
         "refreshed_at": datetime.utcnow(),

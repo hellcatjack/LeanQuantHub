@@ -8,6 +8,7 @@ from typing import Any
 from app.core.config import settings
 from app.models import TradeOrder
 from app.services.audit_log import record_audit
+from app.services.ib_gateway_runtime import get_gateway_trade_block_state
 from app.services.ib_settings import get_or_create_ib_settings, resolve_ib_api_mode
 from app.services.lean_bridge_commands import write_submit_order_command
 from app.services.lean_bridge_paths import resolve_bridge_root
@@ -908,6 +909,9 @@ def submit_direct_order(session, payload: dict[str, Any]) -> TradeDirectOrderOut
 
     project_id = int(payload.get("project_id") or 0)
     mode = str(payload.get("mode") or "paper").strip().lower() or "paper"
+    blocked_state = get_gateway_trade_block_state(resolve_bridge_root())
+    if blocked_state:
+        raise ValueError(blocked_state)
 
     settings_row = get_or_create_ib_settings(session)
     api_mode = resolve_ib_api_mode(settings_row)

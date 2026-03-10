@@ -418,6 +418,44 @@ def _load_positions_via_ibapi_fallback(
     }
 
 
+def probe_positions_via_ibapi(
+    session,
+    *,
+    mode: str,
+    timeout_seconds: float | None = None,
+) -> dict[str, object]:
+    started_at = monotonic()
+    refreshed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    normalized_timeout = (
+        _IBAPI_VERIFY_SOFT_TIMEOUT_SECONDS
+        if timeout_seconds is None
+        else max(0.3, float(timeout_seconds))
+    )
+    payload = _load_positions_via_ibapi_fallback(
+        session,
+        mode=mode,
+        refreshed_at=refreshed_at,
+        timeout_seconds=normalized_timeout,
+    )
+    latency_ms = max(0, int(round((monotonic() - started_at) * 1000.0)))
+    if isinstance(payload, dict):
+        items = payload.get("items") if isinstance(payload.get("items"), list) else []
+        return {
+            "ok": True,
+            "latency_ms": latency_ms,
+            "item_count": len(items),
+            "refreshed_at": payload.get("refreshed_at") or refreshed_at,
+            "source_detail": payload.get("source_detail"),
+        }
+    return {
+        "ok": False,
+        "latency_ms": latency_ms,
+        "item_count": 0,
+        "refreshed_at": refreshed_at,
+        "error": "positions_probe_failed",
+    }
+
+
 def _positions_items_to_map(items: list[dict[str, object]]) -> dict[str, float]:
     positions: dict[str, float] = {}
     for item in items:

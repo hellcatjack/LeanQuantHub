@@ -31,6 +31,7 @@ from app.services.trade_risk_engine import evaluate_orders
 from app.services.trade_alerts import notify_trade_alert
 from app.services.ib_account import fetch_account_summary, get_account_positions
 from app.services.trade_order_intent import write_order_intent, ensure_order_intent_ids
+from app.services.ib_gateway_runtime import get_gateway_trade_block_state
 from app.services.lean_bridge_paths import resolve_bridge_root
 from app.services.lean_bridge_reader import (
     parse_bridge_timestamp,
@@ -2411,6 +2412,9 @@ def execute_trade_run(
             raise RuntimeError("trade_run_status_invalid")
         if run.status != "queued" and not force:
             raise RuntimeError("trade_run_not_queued")
+        blocked_state = get_gateway_trade_block_state(_resolve_bridge_root())
+        if blocked_state:
+            raise RuntimeError(blocked_state)
 
         params = dict(run.params or {})
         settings_row = session.query(TradeSettings).order_by(TradeSettings.id.desc()).first()

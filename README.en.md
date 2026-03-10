@@ -69,6 +69,36 @@ systemctl --user status stocklean-ibgateway.service
 systemctl --user status stocklean-ibgateway-watchdog.timer
 ```
 
+### IB Gateway Auto Recovery
+- `stocklean-ibgateway.service` remains the **only** Gateway manager. It launches and supervises Gateway through IBC; do not enable a second system-level `ibgateway.service` or another supervisor in parallel.
+- `stocklean-ibgateway-watchdog.service` performs staged recovery. It no longer relies only on process/port checks; it also uses business-level probes:
+  - whether `positions/open_orders/account_summary` snapshots keep advancing
+  - whether `commands/` contains timed-out pending commands
+  - whether `command_results/` keeps receiving results
+  - whether the direct `reqPositions` probe fails repeatedly
+- Current recovery state machine:
+  - `healthy`
+  - `snapshot_stale`
+  - `command_stuck`
+  - `bridge_degraded`
+  - `gateway_restarting`
+  - `gateway_degraded`
+  - `recovering`
+- Recovery ladder:
+  1. Force Lean Bridge refresh
+  2. Restart Lean Bridge leader
+  3. Run `systemctl --user restart stocklean-ibgateway.service`
+  4. If recovery still fails, enter `gateway_degraded` and block new executions and new orders
+- While in `gateway_restarting/gateway_degraded`, the frontend keeps showing the last trusted positions and clearly marks the page as recovering/degraded.
+
+Common troubleshooting commands:
+```bash
+systemctl --user status stocklean-ibgateway.service --no-pager
+systemctl --user status stocklean-ibgateway-watchdog.timer --no-pager
+journalctl --user -u stocklean-ibgateway-watchdog.service -n 100 --no-pager
+journalctl --user -u stocklean-ibgateway.service -n 100 --no-pager
+```
+
 Default frontend: http://<host>:8081  
 Default backend: http://<host>:8021
 

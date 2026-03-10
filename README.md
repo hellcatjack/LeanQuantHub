@@ -68,6 +68,36 @@ systemctl --user status stocklean-ibgateway.service
 systemctl --user status stocklean-ibgateway-watchdog.timer
 ```
 
+### IB Gateway 半挂自动恢复
+- `stocklean-ibgateway.service` 仍是 **唯一** 的 Gateway 管理器，底层通过 IBC 启动和守护 Gateway；不要再额外启用系统级 `ibgateway.service` 或其他 supervisor。
+- `stocklean-ibgateway-watchdog.service` 负责自动恢复，不再只看进程/端口，还会综合业务级探针：
+  - `positions/open_orders/account_summary` 快照是否持续前进
+  - `commands/` 是否有超时未消费命令
+  - `command_results/` 是否持续产生结果
+  - 直连 `reqPositions` 探针是否连续失败
+- 当前恢复状态机：
+  - `healthy`
+  - `snapshot_stale`
+  - `command_stuck`
+  - `bridge_degraded`
+  - `gateway_restarting`
+  - `gateway_degraded`
+  - `recovering`
+- 自动恢复梯度：
+  1. 强制刷新 Lean Bridge
+  2. 重启 Lean Bridge leader
+  3. 执行 `systemctl --user restart stocklean-ibgateway.service`
+  4. 若仍未恢复，进入 `gateway_degraded`，阻止新的批次执行和新订单
+- 前端在 `gateway_restarting/gateway_degraded` 时会保留“最后一次可信持仓”，并明确提示当前处于恢复/降级状态。
+
+常用排查命令：
+```bash
+systemctl --user status stocklean-ibgateway.service --no-pager
+systemctl --user status stocklean-ibgateway-watchdog.timer --no-pager
+journalctl --user -u stocklean-ibgateway-watchdog.service -n 100 --no-pager
+journalctl --user -u stocklean-ibgateway.service -n 100 --no-pager
+```
+
 默认前端：http://<host>:8081  
 默认后端：http://<host>:8021
 

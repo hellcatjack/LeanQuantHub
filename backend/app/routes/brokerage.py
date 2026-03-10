@@ -42,6 +42,7 @@ from app.services.ib_settings import (
     update_ib_state,
 )
 from app.services.ib_health import build_ib_health
+from app.services.ib_gateway_runtime import build_gateway_runtime_health, load_gateway_runtime_health
 from app.services.ib_status_overview import build_ib_status_overview
 from app.services.ib_market import (
     check_market_health,
@@ -62,6 +63,16 @@ router = APIRouter(prefix="/api/brokerage", tags=["brokerage"])
 
 def _resolve_bridge_root() -> Path:
     return resolve_bridge_root()
+
+
+def _build_bridge_status_payload(root: Path) -> dict[str, object]:
+    status = build_bridge_status(root)
+    runtime_health = build_gateway_runtime_health(
+        bridge_root=root,
+        previous_payload=load_gateway_runtime_health(root),
+    )
+    status["runtime_health"] = runtime_health
+    return status
 
 
 def _mask_account(value: str | None) -> str | None:
@@ -283,7 +294,7 @@ def stop_ib_stream():
 
 @router.get("/bridge/status", response_model=IBBridgeStatusOut)
 def get_bridge_status():
-    status = build_bridge_status(_resolve_bridge_root())
+    status = _build_bridge_status_payload(_resolve_bridge_root())
     return IBBridgeStatusOut(**status)
 
 
@@ -295,6 +306,10 @@ def refresh_bridge_status(
 ):
     with get_session() as session:
         status = refresh_bridge(session, mode=mode, reason=reason, force=force)
+    status["runtime_health"] = build_gateway_runtime_health(
+        bridge_root=_resolve_bridge_root(),
+        previous_payload=load_gateway_runtime_health(_resolve_bridge_root()),
+    )
     return IBBridgeRefreshOut(bridge_status=IBBridgeStatusOut(**status))
 
 
