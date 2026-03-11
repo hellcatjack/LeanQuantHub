@@ -1,7 +1,9 @@
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import importlib.util
 import sys
+import time
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = BACKEND_ROOT.parent
@@ -265,3 +267,33 @@ def test_recovery_handles_probe_exception_without_crashing(monkeypatch, tmp_path
 
     assert result["action"] == "bridge_refresh"
     assert refresh_calls == [("paper", "gateway_watchdog", True)]
+
+
+def test_probe_positions_with_hard_timeout_returns_failure_payload(monkeypatch):
+    def _slow_probe(_session, *, mode: str, timeout_seconds: float):
+        assert mode == "paper"
+        assert timeout_seconds == 0.3
+        time.sleep(0.2)
+        return {"ok": True, "latency_ms": 5, "item_count": 1}
+
+    monkeypatch.setattr(ib_gateway_watchdog, "probe_positions_via_ibapi", _slow_probe)
+
+    payload = ib_gateway_watchdog._probe_positions_with_hard_timeout(
+        object(),
+        mode="paper",
+        timeout_seconds=0.3,
+        hard_timeout_seconds=0.05,
+        session_factory=lambda: nullcontext(object()),
+    )
+
+    assert payload["ok"] is False
+    assert payload["error"] == "probe_hard_timeout"
+    assert payload["latency_ms"] == 50
+    assert payload["item_count"] == 0
+
+
+def test_watchdog_systemd_unit_template_declares_timeout():
+    unit_path = REPO_ROOT / "deploy" / "systemd" / "stocklean-ibgateway-watchdog.service"
+    unit_text = unit_path.read_text(encoding="utf-8")
+
+    assert "TimeoutStartSec=30s" in unit_text

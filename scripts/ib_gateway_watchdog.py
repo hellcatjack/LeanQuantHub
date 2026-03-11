@@ -7,8 +7,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import logging
 import os
+from queue import Empty, Queue
 import subprocess
 import sys
+from threading import Thread
+from time import monotonic
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BACKEND_ROOT = REPO_ROOT / "backend"
@@ -66,6 +69,10 @@ GATEWAY_RESTART_COOLDOWN_SECONDS = max(
 PROBE_TIMEOUT_SECONDS = max(
     float(getattr(settings, "ib_gateway_runtime_probe_timeout_seconds", 0.35) or 0.35),
     0.3,
+)
+PROBE_HARD_TIMEOUT_SECONDS = max(
+    float(getattr(settings, "ib_gateway_runtime_probe_hard_timeout_seconds", 1.5) or 1.5),
+    0.5,
 )
 
 
@@ -153,6 +160,85 @@ def _systemd_restart_gateway(*, service_name: str, runner=subprocess.run) -> Non
     )
 
 
+def _probe_positions_with_hard_timeout(
+    session,
+    *,
+    mode: str,
+    timeout_seconds: float,
+    hard_timeout_seconds: float = PROBE_HARD_TIMEOUT_SECONDS,
+    session_factory=None,
+) -> dict[str, object]:
+    normalized_timeout = max(0.3, float(timeout_seconds))
+    effective_hard_timeout = max(0.05, float(hard_timeout_seconds))
+    result_queue: Queue[tuple[str, dict[str, object] | None]] = Queue(maxsize=1)
+    started_at = monotonic()
+
+    def _resolve_session_context():
+        if callable(session_factory):
+            try:
+                session_cm = session_factory()
+            except Exception:
+                logger.exception("Failed to open dedicated probe session; falling back to caller session")
+            else:
+                if session_cm is not None:
+                    return session_cm
+        return nullcontext(session)
+
+    def _worker() -> None:
+        try:
+            with _resolve_session_context() as probe_session:
+                payload = probe_positions_via_ibapi(
+                    probe_session,
+                    mode=mode,
+                    timeout_seconds=normalized_timeout,
+                )
+        except Exception:
+            logger.exception("Gateway direct probe failed inside watchdog worker")
+            try:
+                result_queue.put_nowait(("failure", None))
+            except Exception:
+                pass
+            return
+        try:
+            result_queue.put_nowait(("success", payload if isinstance(payload, dict) else None))
+        except Exception:
+            pass
+
+    worker = Thread(target=_worker, name="ib-gateway-watchdog-probe", daemon=True)
+    worker.start()
+    worker.join(timeout=effective_hard_timeout)
+    if worker.is_alive():
+        elapsed_ms = max(0, int(round((monotonic() - started_at) * 1000.0)))
+        logger.error(
+            "Gateway direct probe exceeded hard timeout mode=%s soft_timeout=%.3fs hard_timeout=%.3fs",
+            mode,
+            normalized_timeout,
+            effective_hard_timeout,
+        )
+        return {
+            "ok": False,
+            "latency_ms": max(elapsed_ms, int(round(effective_hard_timeout * 1000.0))),
+            "item_count": 0,
+            "refreshed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "error": "probe_hard_timeout",
+        }
+
+    try:
+        status, payload = result_queue.get_nowait()
+    except Empty:
+        status, payload = ("failure", None)
+    if status == "success" and isinstance(payload, dict):
+        return payload
+    elapsed_ms = max(0, int(round((monotonic() - started_at) * 1000.0)))
+    return {
+        "ok": False,
+        "latency_ms": elapsed_ms,
+        "item_count": 0,
+        "refreshed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "error": "positions_probe_failed",
+    }
+
+
 def run_gateway_watchdog_once(
     *,
     bridge_root: Path | str | None = None,
@@ -172,10 +258,11 @@ def run_gateway_watchdog_once(
 
     if direct_probe is None and session is not None:
         try:
-            direct_probe = probe_positions_via_ibapi(
+            direct_probe = _probe_positions_with_hard_timeout(
                 session,
                 mode=resolved_mode,
                 timeout_seconds=probe_timeout_seconds,
+                session_factory=get_session if callable(get_session) else None,
             )
         except Exception:
             logger.exception("Gateway direct probe failed; continuing without probe result")

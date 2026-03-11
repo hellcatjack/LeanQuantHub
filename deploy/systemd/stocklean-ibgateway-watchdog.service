@@ -3,6 +3,7 @@ Description=StockLean IB Gateway Watchdog
 
 [Service]
 Type=oneshot
+TimeoutStartSec=30s
 WorkingDirectory=/app/stocklean
 EnvironmentFile=-/app/stocklean/backend/.env
 EnvironmentFile=-%h/.config/stocklean/ibgateway.env
