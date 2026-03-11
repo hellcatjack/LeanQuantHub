@@ -21,6 +21,7 @@ from app.schemas import (
     IBHistoryJobOut,
     IBHistoricalOut,
     IBHistoricalRequest,
+    PriceChartOut,
     IBMarketHealthOut,
     IBMarketHealthRequest,
     IBMarketSnapshotOut,
@@ -50,6 +51,7 @@ from app.services.ib_market import (
     fetch_market_snapshots,
     refresh_contract_cache,
 )
+from app.services.price_chart_history import load_chart_history as build_price_chart_history
 from app.services.ib_account import get_account_summary, get_account_positions_cached
 from app.services.project_symbols import collect_active_project_symbols
 from app.services.lean_bridge_paths import resolve_bridge_root
@@ -387,6 +389,27 @@ def fetch_ib_history(payload: IBHistoricalRequest):
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return IBHistoricalOut(**result)
+
+
+@router.get("/history/chart", response_model=PriceChartOut)
+def get_price_chart_history(
+    symbol: str = Query(..., min_length=1),
+    interval: str = Query("1D"),
+    mode: str = Query("paper"),
+    use_rth: bool = Query(True),
+):
+    with get_session() as session:
+        try:
+            payload = build_price_chart_history(
+                symbol=symbol,
+                interval=interval,
+                mode=mode,
+                use_rth=use_rth,
+                session=session,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return PriceChartOut(**payload)
 
 
 @router.post("/market/health", response_model=IBMarketHealthOut)

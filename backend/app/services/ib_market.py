@@ -3,10 +3,13 @@ from __future__ import annotations
 import os
 from contextlib import contextmanager
 from datetime import datetime
+import json
 from pathlib import Path
 from typing import Any, Iterable
 
 from app.core.config import settings
+from app.services.ib_read_session import get_ib_read_session
+from app.services.ib_settings import get_or_create_ib_settings
 from app.services.lean_bridge_paths import resolve_bridge_root
 from app.services.lean_bridge_reader import read_quotes
 
@@ -160,7 +163,7 @@ def refresh_contract_cache(
 
 
 def fetch_historical_bars(
-    _session,
+    session,
     *,
     symbol: str,
     duration: str,
@@ -169,4 +172,63 @@ def fetch_historical_bars(
     use_rth: bool = True,
     store: bool = True,
 ) -> dict[str, Any]:
-    return {"symbol": _normalize_symbol(symbol), "bars": 0, "path": None, "error": "unsupported"}
+    normalized = _normalize_symbol(symbol)
+    if not normalized:
+        return {"symbol": normalized, "bars": 0, "path": None, "error": "symbol_required"}
+    if session is None:
+        return {"symbol": normalized, "bars": 0, "path": None, "error": "session_required"}
+    try:
+        settings_row = get_or_create_ib_settings(session)
+    except Exception:
+        return {"symbol": normalized, "bars": 0, "path": None, "error": "settings_unavailable"}
+    host = str(getattr(settings_row, "host", "") or "").strip()
+    try:
+        port = int(getattr(settings_row, "port", 0) or 0)
+    except (TypeError, ValueError):
+        port = 0
+    mode = str(getattr(settings_row, "mode", "") or "paper").strip().lower() or "paper"
+    if not host or port <= 0:
+        return {"symbol": normalized, "bars": 0, "path": None, "error": "settings_invalid"}
+    read_session = get_ib_read_session(mode=mode, host=host, port=port)
+    if read_session is None:
+        return {"symbol": normalized, "bars": 0, "path": None, "error": "ib_history_unavailable"}
+    items = read_session.fetch_historical_bars(
+        symbol=normalized,
+        duration=str(duration or "").strip(),
+        bar_size=str(bar_size or "").strip(),
+        end_datetime=end_datetime,
+        use_rth=bool(use_rth),
+    )
+    if not isinstance(items, list) or not items:
+        return {"symbol": normalized, "bars": 0, "path": None, "error": "ib_history_unavailable"}
+    path = None
+    if store:
+        history_dir = _ib_data_root() / "history"
+        history_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        safe_bar_size = "".join(ch if ch.isalnum() else "_" for ch in str(bar_size or "").strip())
+        safe_duration = "".join(ch if ch.isalnum() else "_" for ch in str(duration or "").strip())
+        output_path = history_dir / f"{normalized}_{safe_bar_size}_{safe_duration}_{stamp}.json"
+        output_path.write_text(
+            json.dumps(
+                {
+                    "symbol": normalized,
+                    "duration": duration,
+                    "bar_size": bar_size,
+                    "end_datetime": end_datetime,
+                    "use_rth": bool(use_rth),
+                    "items": items,
+                },
+                ensure_ascii=True,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        path = str(output_path)
+    return {
+        "symbol": normalized,
+        "bars": len(items),
+        "path": path,
+        "error": None,
+        "items": items,
+    }

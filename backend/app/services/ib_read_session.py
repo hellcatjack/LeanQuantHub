@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from threading import Event, Lock, Thread
 from time import monotonic
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from app.core.config import settings
 
@@ -30,6 +31,7 @@ _TRANSIENT_PURPOSE_OFFSETS = {
     "pnl": 1003,
     "executions": 1004,
     "completed_orders": 1005,
+    "historical": 1006,
 }
 
 
@@ -131,6 +133,46 @@ def _local_timezone():
     return datetime.now().astimezone().tzinfo or timezone.utc
 
 
+def _normalize_historical_bar_time(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.isdigit():
+        if len(text) == 8:
+            try:
+                parsed = datetime.strptime(text, "%Y%m%d").replace(tzinfo=timezone.utc)
+            except ValueError:
+                return None
+            return int(parsed.timestamp())
+        try:
+            return int(text)
+        except ValueError:
+            return None
+    normalized = " ".join(text.split())
+    tzinfo = timezone.utc
+    base = normalized
+    if " " in normalized:
+        maybe_base, maybe_zone = normalized.rsplit(" ", 1)
+        if "/" in maybe_zone or maybe_zone.upper() in {"UTC", "GMT"}:
+            base = maybe_base
+            if maybe_zone.upper() in {"UTC", "GMT"}:
+                tzinfo = timezone.utc
+            else:
+                try:
+                    tzinfo = ZoneInfo(maybe_zone)
+                except Exception:
+                    tzinfo = _local_timezone()
+    try:
+        parsed = datetime.strptime(base, "%Y%m%d %H:%M:%S")
+    except ValueError:
+        return None
+    return int(parsed.replace(tzinfo=tzinfo).timestamp())
+
+
 def _create_ibapi_app():
     try:
         from ibapi.client import EClient
@@ -151,6 +193,7 @@ def _create_ibapi_app():
             self._execution_requests: dict[int, dict[str, Any]] = {}
             self._completed_event: Event | None = None
             self._completed_rows: list[dict[str, object]] = []
+            self._historical_requests: dict[int, dict[str, Any]] = {}
 
         def nextValidId(self, _order_id: int):
             self.ready.set()
@@ -244,6 +287,23 @@ def _create_ibapi_app():
                 self._completed_event = None
                 return rows
 
+        def begin_historical_request(self) -> tuple[int, Event]:
+            req_id = self._alloc_req_id()
+            with self._request_lock:
+                event = Event()
+                self._historical_requests[req_id] = {
+                    "event": event,
+                    "rows": [],
+                }
+                return req_id, event
+
+        def end_historical_request(self, req_id: int) -> list[dict[str, object]]:
+            with self._request_lock:
+                state = self._historical_requests.pop(int(req_id), None)
+                if not isinstance(state, dict):
+                    return []
+                return list(state.get("rows") or [])
+
         def _signal_on_error(self, req_id: int, error_code: int):
             if int(error_code) in _INFO_ERROR_CODES:
                 return
@@ -261,6 +321,11 @@ def _create_ibapi_app():
                 execution_state = self._execution_requests.get(int(req_id))
                 if isinstance(execution_state, dict):
                     event = execution_state.get("event")
+                    if isinstance(event, Event):
+                        event.set()
+                historical_state = self._historical_requests.get(int(req_id))
+                if isinstance(historical_state, dict):
+                    event = historical_state.get("event")
                     if isinstance(event, Event):
                         event.set()
 
@@ -424,6 +489,41 @@ def _create_ibapi_app():
             with self._request_lock:
                 if self._completed_event is not None:
                     self._completed_event.set()
+
+        def historicalData(self, reqId, bar):
+            req_id = int(reqId)
+            with self._request_lock:
+                state = self._historical_requests.get(req_id)
+                if not isinstance(state, dict):
+                    return
+                rows = state.get("rows")
+                if not isinstance(rows, list):
+                    return
+                timestamp = _normalize_historical_bar_time(getattr(bar, "date", None))
+                if timestamp is None:
+                    return
+                try:
+                    row = {
+                        "time": timestamp,
+                        "open": float(getattr(bar, "open", 0.0) or 0.0),
+                        "high": float(getattr(bar, "high", 0.0) or 0.0),
+                        "low": float(getattr(bar, "low", 0.0) or 0.0),
+                        "close": float(getattr(bar, "close", 0.0) or 0.0),
+                        "volume": float(getattr(bar, "volume", 0.0) or 0.0),
+                    }
+                except (TypeError, ValueError):
+                    return
+                rows.append(row)
+
+        def historicalDataEnd(self, reqId, _start, _end):
+            req_id = int(reqId)
+            with self._request_lock:
+                state = self._historical_requests.get(req_id)
+                if not isinstance(state, dict):
+                    return
+                event = state.get("event")
+                if isinstance(event, Event):
+                    event.set()
 
     return _App()
 
@@ -649,6 +749,60 @@ class IBReadSession:
             finally:
                 if rows is None:
                     app.end_completed_orders_request()
+
+        return self._run_request(_callback, timeout_seconds=timeout_seconds)
+
+    def fetch_historical_bars(
+        self,
+        *,
+        symbol: str,
+        duration: str,
+        bar_size: str,
+        end_datetime: str | None = None,
+        use_rth: bool = True,
+        timeout_seconds: float = 8.0,
+    ) -> list[dict[str, object]] | None:
+        try:
+            from ibapi.contract import Contract
+        except Exception:
+            return None
+
+        symbol_text = str(symbol or "").strip().upper()
+        if not symbol_text:
+            return None
+
+        def _callback(app, timeout):
+            req_id, event = app.begin_historical_request()
+            rows: list[dict[str, object]] | None = None
+            try:
+                contract = Contract()
+                contract.symbol = symbol_text
+                contract.secType = "STK"
+                contract.exchange = "SMART"
+                contract.currency = "USD"
+                app.reqHistoricalData(
+                    req_id,
+                    contract,
+                    str(end_datetime or "").strip(),
+                    str(duration or "").strip(),
+                    str(bar_size or "").strip(),
+                    "TRADES",
+                    1 if use_rth else 0,
+                    1,
+                    False,
+                    [],
+                )
+                if not event.wait(timeout):
+                    return None
+                rows = app.end_historical_request(req_id)
+                return rows
+            finally:
+                if rows is None:
+                    app.end_historical_request(req_id)
+                try:
+                    app.cancelHistoricalData(req_id)
+                except Exception:
+                    pass
 
         return self._run_request(_callback, timeout_seconds=timeout_seconds)
 

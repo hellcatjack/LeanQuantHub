@@ -10,6 +10,8 @@ import {
 import TopBar from "../components/TopBar";
 import IdChip from "../components/IdChip";
 import PaginationBar from "../components/PaginationBar";
+import PositionChartWorkspace from "../components/trade/PositionChartWorkspace";
+import { resolveSelectedChartSymbol } from "../components/trade/positionChartUtils";
 import { api, apiLong, getBackendBackoffUntilMs } from "../api";
 import { useI18n } from "../i18n";
 import { resolveAccountSummaryLabel } from "../utils/accountSummary";
@@ -818,6 +820,7 @@ export default function LiveTradePage() {
   const [accountPositions, setAccountPositions] = useState<IBAccountPosition[]>([]);
   const [accountPositionsUpdatedAt, setAccountPositionsUpdatedAt] = useState<string | null>(null);
   const [accountPositionsStale, setAccountPositionsStale] = useState(false);
+  const [selectedPositionChartSymbol, setSelectedPositionChartSymbol] = useState<string | null>(null);
   const [trustedAccountPositions, setTrustedAccountPositions] = useState<IBAccountPosition[]>([]);
   const [trustedAccountPositionsUpdatedAt, setTrustedAccountPositionsUpdatedAt] =
     useState<string | null>(null);
@@ -2780,6 +2783,12 @@ export default function LiveTradePage() {
     });
   }, [accountPositions]);
 
+  useEffect(() => {
+    setSelectedPositionChartSymbol((current) =>
+      resolveSelectedChartSymbol(accountPositions, current)
+    );
+  }, [accountPositions]);
+
   const filteredTradeRuns = useMemo(() => {
     if (!selectedProjectId) {
       return tradeRuns;
@@ -4188,277 +4197,341 @@ export default function LiveTradePage() {
       <div className="card live-trade-positions" data-testid="account-positions-card">
         <div className="card-title">{t("trade.accountPositionsTitle")}</div>
         <div className="card-meta">{t("trade.accountPositionsMeta")}</div>
-        {renderRefreshSchedule("positions", "positions", "inline")}
-        {positionsStale && (
-          <div className="form-hint warn" style={{ marginTop: "8px" }}>
-            <div>{t("trade.accountPositionsStaleHint")}</div>
-            <div className="meta-row" style={{ marginTop: "6px" }}>
-              <span>{t("trade.accountPositionsStaleUpdatedAt")}</span>
-              <strong>{bridgeUpdatedAt ? formatDateTime(bridgeUpdatedAt) : t("common.none")}</strong>
+        <div className="positions-workspace">
+          <div className="positions-table-pane">
+            {renderRefreshSchedule("positions", "positions", "inline")}
+            {positionsStale && (
+              <div className="form-hint warn" style={{ marginTop: "8px" }}>
+                <div>{t("trade.accountPositionsStaleHint")}</div>
+                <div className="meta-row" style={{ marginTop: "6px" }}>
+                  <span>{t("trade.accountPositionsStaleUpdatedAt")}</span>
+                  <strong>{bridgeUpdatedAt ? formatDateTime(bridgeUpdatedAt) : t("common.none")}</strong>
+                </div>
+              </div>
+            )}
+            {accountPositionsUsingTrustedFallback && (
+              <div
+                className="form-hint warn positions-fallback-banner"
+                style={{ marginTop: "8px" }}
+                data-testid="positions-trusted-fallback-banner"
+              >
+                <div>{t("trade.accountPositionsTrustedFallbackHint")}</div>
+                <div className="meta-row" style={{ marginTop: "6px" }}>
+                  <span>{t("trade.accountPositionsTrustedAt")}</span>
+                  <strong>
+                    {trustedAccountPositionsUpdatedAt
+                      ? formatDateTime(trustedAccountPositionsUpdatedAt)
+                      : t("common.none")}
+                  </strong>
+                </div>
+              </div>
+            )}
+            {gatewayTradeBlockState && (
+              <div
+                className="form-hint danger positions-fallback-banner"
+                style={{ marginTop: "8px" }}
+                data-testid="gateway-trade-block-banner"
+              >
+                {gatewayTradeBlockMessage}
+              </div>
+            )}
+            {accountPositionsError && <div className="form-hint">{accountPositionsError}</div>}
+            <div className="meta-list" style={{ marginTop: "12px" }}>
+              <div className="meta-row">
+                <span>{t("trade.accountPositionsUpdatedAt")}</span>
+                <strong>
+                  {accountPositionsUpdatedAt
+                    ? formatDateTime(accountPositionsUpdatedAt)
+                    : t("common.none")}
+                </strong>
+              </div>
             </div>
-          </div>
-        )}
-        {accountPositionsUsingTrustedFallback && (
-          <div
-            className="form-hint warn positions-fallback-banner"
-            style={{ marginTop: "8px" }}
-            data-testid="positions-trusted-fallback-banner"
-          >
-            <div>{t("trade.accountPositionsTrustedFallbackHint")}</div>
-            <div className="meta-row" style={{ marginTop: "6px" }}>
-              <span>{t("trade.accountPositionsTrustedAt")}</span>
-              <strong>
-                {trustedAccountPositionsUpdatedAt
-                  ? formatDateTime(trustedAccountPositionsUpdatedAt)
-                  : t("common.none")}
-              </strong>
+            {positionActionError && (
+              <div className="form-hint danger" style={{ marginTop: "12px" }}>
+                {positionActionError}
+              </div>
+            )}
+            {positionActionWarning && (
+              <div className="form-hint warn" style={{ marginTop: "12px" }}>
+                {positionActionWarning}
+              </div>
+            )}
+            {positionActionResult && (
+              <div className="form-success" style={{ marginTop: "12px" }}>
+                {positionActionResult}
+              </div>
+            )}
+            <div
+              style={{
+                marginTop: "12px",
+                display: "flex",
+                gap: "10px",
+                flexWrap: "wrap",
+                alignItems: "center",
+              }}
+            >
+              <div className="meta-row">
+                <span>{t("trade.positionActionSelected", { count: selectedPositions.length })}</span>
+              </div>
+              <button
+                className="button-secondary"
+                data-testid="positions-batch-close"
+                disabled={
+                  positionActionLoading || selectedPositions.length === 0 || Boolean(gatewayTradeBlockState)
+                }
+                onClick={() => handleClosePositions(selectedPositions)}
+              >
+                {positionActionLoading
+                  ? t("common.actions.loading")
+                  : t("trade.positionActionBatchClose")}
+              </button>
+              <button
+                className="danger-button"
+                data-testid="positions-liquidate-all"
+                disabled={
+                  positionActionLoading ||
+                  actionableAccountPositions.length === 0 ||
+                  Boolean(gatewayTradeBlockState)
+                }
+                onClick={handleLiquidateAll}
+              >
+                {t("trade.positionActionLiquidateAll")}
+              </button>
             </div>
-          </div>
-        )}
-        {gatewayTradeBlockState && (
-          <div
-            className="form-hint danger positions-fallback-banner"
-            style={{ marginTop: "8px" }}
-            data-testid="gateway-trade-block-banner"
-          >
-            {gatewayTradeBlockMessage}
-          </div>
-        )}
-        {accountPositionsError && <div className="form-hint">{accountPositionsError}</div>}
-        <div className="meta-list" style={{ marginTop: "12px" }}>
-          <div className="meta-row">
-            <span>{t("trade.accountPositionsUpdatedAt")}</span>
-            <strong>
-              {accountPositionsUpdatedAt
-                ? formatDateTime(accountPositionsUpdatedAt)
-                : t("common.none")}
-            </strong>
-          </div>
-        </div>
-        {positionActionError && (
-          <div className="form-hint danger" style={{ marginTop: "12px" }}>
-            {positionActionError}
-          </div>
-        )}
-        {positionActionWarning && (
-          <div className="form-hint warn" style={{ marginTop: "12px" }}>
-            {positionActionWarning}
-          </div>
-        )}
-        {positionActionResult && (
-          <div className="form-success" style={{ marginTop: "12px" }}>
-            {positionActionResult}
-          </div>
-        )}
-        <div
-          style={{
-            marginTop: "12px",
-            display: "flex",
-            gap: "10px",
-            flexWrap: "wrap",
-            alignItems: "center",
-          }}
-        >
-          <div className="meta-row">
-            <span>{t("trade.positionActionSelected", { count: selectedPositions.length })}</span>
-          </div>
-          <button
-            className="button-secondary"
-            data-testid="positions-batch-close"
-            disabled={
-              positionActionLoading || selectedPositions.length === 0 || Boolean(gatewayTradeBlockState)
-            }
-            onClick={() => handleClosePositions(selectedPositions)}
-          >
-            {positionActionLoading
-              ? t("common.actions.loading")
-              : t("trade.positionActionBatchClose")}
-          </button>
-          <button
-            className="danger-button"
-            data-testid="positions-liquidate-all"
-            disabled={
-              positionActionLoading ||
-              actionableAccountPositions.length === 0 ||
-              Boolean(gatewayTradeBlockState)
-            }
-            onClick={handleLiquidateAll}
-          >
-            {t("trade.positionActionLiquidateAll")}
-          </button>
-        </div>
-        <div className="table-scroll" style={{ marginTop: "12px" }}>
-          <table className="table positions-table" data-testid="account-positions-table">
-            <thead>
-              <tr>
-                <th>
-                  <input
-                    type="checkbox"
-                    aria-label={t("trade.positionActionSelectAll")}
-                    checked={allPositionsSelected}
-                    disabled={
-                      actionableAccountPositions.length === 0 || Boolean(gatewayTradeBlockState)
-                    }
-                    onChange={toggleSelectAllPositions}
-                  />
-                </th>
-                <th>{t("trade.positionTable.symbol")}</th>
-                <th>{t("trade.positionTable.position")}</th>
-                <th>{t("trade.positionTable.avgCost")}</th>
-                <th>{t("trade.positionTable.marketPrice")}</th>
-                <th>{t("trade.positionTable.marketValue")}</th>
-                <th>{t("trade.positionTable.unrealized")}</th>
-                <th>{t("trade.positionTable.realized")}</th>
-                <th>{t("trade.positionTable.account")}</th>
-                <th>{t("trade.positionTable.currency")}</th>
-                <th>{t("trade.positionTable.actions")}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {accountPositions.length ? (
-                accountPositions.map((row, index) => {
-                  const key = buildPositionKey(row);
-                  const positionActionable = isPositionActionable(row);
-                  const absolutePosition = Math.abs(Number(row.position ?? 0));
-                  const qtyValue =
-                    positionQuantities[key] ??
-                    String(
-                      Number.isFinite(absolutePosition) && absolutePosition > 0
-                        ? absolutePosition
-                        : 0
-                    );
-                  const sessionValue = normalizeTradeSession(positionSessions[key] ?? defaultSession);
-                  const rawOrderType = normalizeOrderType(
-                    positionOrderTypes[key] ?? resolveDefaultOrderTypeBySession(sessionValue)
-                  );
-                  const orderTypeValue = sessionValue === "rth" ? rawOrderType : "LMT";
-                  const fallbackLimit = Number(row.market_price ?? null);
-                  const limitValue =
-                    positionLimitPrices[key] ??
-                    (Number.isFinite(fallbackLimit) && fallbackLimit > 0 ? String(fallbackLimit) : "");
-                  return (
-                    <tr key={key}>
-                      <td>
-                        <input
-                          type="checkbox"
-                          aria-label={t("trade.positionActionSelectSymbol", {
-                            symbol: row.symbol,
-                          })}
-                          checked={!!positionSelections[key]}
-                          disabled={!positionActionable || Boolean(gatewayTradeBlockState)}
-                          onChange={(event) => updatePositionSelection(key, event.target.checked)}
-                        />
-                      </td>
-                      <td>{row.symbol}</td>
-                      <td>{formatNumber(row.position ?? null, 4)}</td>
-                      <td>{formatNumber(row.avg_cost ?? null)}</td>
-                      <td>{formatNumber(row.market_price ?? null)}</td>
-                      <td>{formatNumber(row.market_value ?? null)}</td>
-                      <td>{formatNumber(row.unrealized_pnl ?? null)}</td>
-                      <td>{formatRealizedPnl(row.realized_pnl ?? null)}</td>
-                      <td>{row.account || t("common.none")}</td>
-                      <td>{row.currency || t("common.none")}</td>
-                      <td>
-                        <div className="positions-action-group">
-                          <input
-                            className="form-input positions-action-input"
-                            style={{ width: "90px" }}
-                            type="number"
-                            min="0"
-                            step="1"
-                            value={qtyValue}
-                            disabled={Boolean(gatewayTradeBlockState)}
-                            onChange={(event) =>
-                              updatePositionQuantity(key, event.target.value)
-                            }
-                          />
-                          <select
-                            className="form-select positions-action-select"
-                            style={{ width: "110px" }}
-                            value={sessionValue}
-                            data-testid="positions-action-session"
-                            disabled={Boolean(gatewayTradeBlockState)}
-                            onChange={(event) => updatePositionSession(row, key, event.target.value)}
-                          >
-                            <option value="rth">{t("trade.manualSession.rth")}</option>
-                            <option value="pre">{t("trade.manualSession.pre")}</option>
-                            <option value="post">{t("trade.manualSession.post")}</option>
-                            <option value="night">{t("trade.manualSession.night")}</option>
-                          </select>
-                          <select
-                            className="form-select positions-action-select"
-                            style={{ width: "150px" }}
-                            value={orderTypeValue}
-                            data-testid="positions-action-order-type"
-                            disabled={sessionValue !== "rth" || Boolean(gatewayTradeBlockState)}
-                            onChange={(event) =>
-                              updatePositionOrderType(row, key, event.target.value)
-                            }
-                          >
-                            <option value="MKT">{formatOrderTypeLabel("MKT")}</option>
-                            <option value="LMT">{formatOrderTypeLabel("LMT")}</option>
-                            <option value="ADAPTIVE_LMT">
-                              {formatOrderTypeLabel("ADAPTIVE_LMT")}
-                            </option>
-                            <option value="PEG_MID">{formatOrderTypeLabel("PEG_MID")}</option>
-                          </select>
-                          {isLimitLikeOrderType(orderTypeValue) && (
+            <div className="table-scroll" style={{ marginTop: "12px" }}>
+              <table className="table positions-table" data-testid="account-positions-table">
+                <thead>
+                  <tr>
+                    <th>
+                      <input
+                        type="checkbox"
+                        aria-label={t("trade.positionActionSelectAll")}
+                        checked={allPositionsSelected}
+                        disabled={
+                          actionableAccountPositions.length === 0 || Boolean(gatewayTradeBlockState)
+                        }
+                        onChange={toggleSelectAllPositions}
+                      />
+                    </th>
+                    <th>{t("trade.positionTable.symbol")}</th>
+                    <th>{t("trade.positionTable.position")}</th>
+                    <th>{t("trade.positionTable.avgCost")}</th>
+                    <th>{t("trade.positionTable.marketPrice")}</th>
+                    <th>{t("trade.positionTable.marketValue")}</th>
+                    <th>{t("trade.positionTable.unrealized")}</th>
+                    <th>{t("trade.positionTable.realized")}</th>
+                    <th>{t("trade.positionTable.account")}</th>
+                    <th>{t("trade.positionTable.currency")}</th>
+                    <th>{t("trade.positionTable.actions")}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {accountPositions.length ? (
+                    accountPositions.map((row, index) => {
+                      const key = buildPositionKey(row);
+                      const positionActionable = isPositionActionable(row);
+                      const absolutePosition = Math.abs(Number(row.position ?? 0));
+                      const qtyValue =
+                        positionQuantities[key] ??
+                        String(
+                          Number.isFinite(absolutePosition) && absolutePosition > 0
+                            ? absolutePosition
+                            : 0
+                        );
+                      const sessionValue = normalizeTradeSession(positionSessions[key] ?? defaultSession);
+                      const rawOrderType = normalizeOrderType(
+                        positionOrderTypes[key] ?? resolveDefaultOrderTypeBySession(sessionValue)
+                      );
+                      const orderTypeValue = sessionValue === "rth" ? rawOrderType : "LMT";
+                      const limitOrderType = isLimitLikeOrderType(orderTypeValue);
+                      const fallbackLimit = Number(row.market_price ?? null);
+                      const limitValue =
+                        positionLimitPrices[key] ??
+                        (Number.isFinite(fallbackLimit) && fallbackLimit > 0 ? String(fallbackLimit) : "");
+                      const isChartSelected =
+                        String(selectedPositionChartSymbol || "").trim().toUpperCase() === row.symbol;
+                      return (
+                        <tr
+                          key={key}
+                          className={isChartSelected ? "is-chart-selected" : undefined}
+                        >
+                          <td>
                             <input
-                              className="form-input positions-action-limit"
-                              style={{ width: "110px" }}
-                              type="number"
-                              min="0"
-                              step="0.01"
-                              placeholder={t("trade.positionLimitPricePlaceholder")}
-                              value={limitValue}
-                              data-testid="positions-action-limit-price"
-                              disabled={Boolean(gatewayTradeBlockState)}
-                              onChange={(event) =>
-                                updatePositionLimitPrice(key, event.target.value)
-                              }
+                              type="checkbox"
+                              aria-label={t("trade.positionActionSelectSymbol", {
+                                symbol: row.symbol,
+                              })}
+                              checked={!!positionSelections[key]}
+                              disabled={!positionActionable || Boolean(gatewayTradeBlockState)}
+                              onChange={(event) => updatePositionSelection(key, event.target.checked)}
                             />
-                          )}
-                          <button
-                            className="button-compact positions-action-button"
-                            onClick={() => handlePositionOrder(row, "BUY", index)}
-                            disabled={positionActionLoading || Boolean(gatewayTradeBlockState)}
-                          >
-                            {t("trade.positionActionBuy")}
-                          </button>
-                          <button
-                            className="button-compact positions-action-button"
-                            onClick={() => handlePositionOrder(row, "SELL", index)}
-                            disabled={positionActionLoading || Boolean(gatewayTradeBlockState)}
-                          >
-                            {t("trade.positionActionSell")}
-                          </button>
-                          <button
-                            className="button-compact positions-action-button"
-                            onClick={() => handleClosePosition(row, index)}
-                            disabled={
-                              positionActionLoading ||
-                              !positionActionable ||
-                              Boolean(gatewayTradeBlockState)
-                            }
-                          >
-                            {t("trade.positionActionClose")}
-                          </button>
-                        </div>
+                          </td>
+                          <td>
+                            <button
+                              type="button"
+                              className="position-symbol-button"
+                              data-testid={`position-chart-symbol-${row.symbol}`}
+                              onClick={() => setSelectedPositionChartSymbol(row.symbol)}
+                            >
+                              {row.symbol}
+                            </button>
+                          </td>
+                          <td>{formatNumber(row.position ?? null, 4)}</td>
+                          <td>{formatNumber(row.avg_cost ?? null)}</td>
+                          <td>{formatNumber(row.market_price ?? null)}</td>
+                          <td>{formatNumber(row.market_value ?? null)}</td>
+                          <td>{formatNumber(row.unrealized_pnl ?? null)}</td>
+                          <td>{formatRealizedPnl(row.realized_pnl ?? null)}</td>
+                          <td>{row.account || t("common.none")}</td>
+                          <td>{row.currency || t("common.none")}</td>
+                          <td className="positions-action-cell">
+                            <div
+                              className="positions-action-panel"
+                              data-testid={`positions-action-panel-${row.symbol}`}
+                            >
+                              <div
+                                className="positions-action-controls"
+                                data-testid={`positions-action-controls-${row.symbol}`}
+                              >
+                                <label className="positions-action-field">
+                                  <span className="positions-action-field-label">
+                                    {t("trade.positionActionQtyShort")}
+                                  </span>
+                                  <input
+                                    className="form-input positions-action-input"
+                                    type="number"
+                                    min="0"
+                                    step="1"
+                                    value={qtyValue}
+                                    disabled={Boolean(gatewayTradeBlockState)}
+                                    onChange={(event) =>
+                                      updatePositionQuantity(key, event.target.value)
+                                    }
+                                  />
+                                </label>
+                                <label className="positions-action-field">
+                                  <span className="positions-action-field-label">
+                                    {t("trade.positionActionSessionShort")}
+                                  </span>
+                                  <select
+                                    className="form-select positions-action-select"
+                                    value={sessionValue}
+                                    data-testid="positions-action-session"
+                                    disabled={Boolean(gatewayTradeBlockState)}
+                                    onChange={(event) =>
+                                      updatePositionSession(row, key, event.target.value)
+                                    }
+                                  >
+                                    <option value="rth">{t("trade.manualSession.rth")}</option>
+                                    <option value="pre">{t("trade.manualSession.pre")}</option>
+                                    <option value="post">{t("trade.manualSession.post")}</option>
+                                    <option value="night">{t("trade.manualSession.night")}</option>
+                                  </select>
+                                </label>
+                                <label className="positions-action-field">
+                                  <span className="positions-action-field-label">
+                                    {t("trade.positionActionTypeShort")}
+                                  </span>
+                                  <select
+                                    className="form-select positions-action-select"
+                                    value={orderTypeValue}
+                                    data-testid="positions-action-order-type"
+                                    disabled={sessionValue !== "rth" || Boolean(gatewayTradeBlockState)}
+                                    onChange={(event) =>
+                                      updatePositionOrderType(row, key, event.target.value)
+                                    }
+                                  >
+                                    <option value="MKT">{formatOrderTypeLabel("MKT")}</option>
+                                    <option value="LMT">{formatOrderTypeLabel("LMT")}</option>
+                                    <option value="ADAPTIVE_LMT">
+                                      {formatOrderTypeLabel("ADAPTIVE_LMT")}
+                                    </option>
+                                    <option value="PEG_MID">{formatOrderTypeLabel("PEG_MID")}</option>
+                                  </select>
+                                </label>
+                                <label
+                                  className={`positions-action-field${
+                                    limitOrderType ? "" : " is-disabled"
+                                  }`}
+                                  title={
+                                    limitOrderType
+                                      ? undefined
+                                      : t("trade.positionActionLimitDisabledTitle")
+                                  }
+                                >
+                                  <span className="positions-action-field-label">
+                                    {t("trade.positionActionLimitShort")}
+                                  </span>
+                                  <input
+                                    className="form-input positions-action-limit"
+                                    type="number"
+                                    min="0"
+                                    step="0.01"
+                                    placeholder={t("trade.positionActionLimitShortPlaceholder")}
+                                    value={limitOrderType ? limitValue : ""}
+                                    data-testid="positions-action-limit-price"
+                                    disabled={!limitOrderType || Boolean(gatewayTradeBlockState)}
+                                    onChange={(event) =>
+                                      updatePositionLimitPrice(key, event.target.value)
+                                    }
+                                  />
+                                </label>
+                              </div>
+                              <div
+                                className="positions-action-buttons"
+                                data-testid={`positions-action-buttons-${row.symbol}`}
+                              >
+                                <button
+                                  className="button-compact positions-action-button"
+                                  onClick={() => handlePositionOrder(row, "BUY", index)}
+                                  disabled={positionActionLoading || Boolean(gatewayTradeBlockState)}
+                                >
+                                  {t("trade.positionActionBuy")}
+                                </button>
+                                <button
+                                  className="button-compact positions-action-button"
+                                  onClick={() => handlePositionOrder(row, "SELL", index)}
+                                  disabled={positionActionLoading || Boolean(gatewayTradeBlockState)}
+                                >
+                                  {t("trade.positionActionSell")}
+                                </button>
+                                <button
+                                  className="button-compact positions-action-button"
+                                  onClick={() => handleClosePosition(row, index)}
+                                  disabled={
+                                    positionActionLoading ||
+                                    !positionActionable ||
+                                    Boolean(gatewayTradeBlockState)
+                                  }
+                                >
+                                  {t("trade.positionActionClose")}
+                                </button>
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  ) : (
+                    <tr>
+                      <td colSpan={11} className="empty-state">
+                        {accountPositionsLoading
+                          ? t("common.actions.loading")
+                          : t("trade.accountPositionsEmpty")}
                       </td>
                     </tr>
-                  );
-                })
-              ) : (
-                <tr>
-                  <td colSpan={11} className="empty-state">
-                    {accountPositionsLoading
-                      ? t("common.actions.loading")
-                      : t("trade.accountPositionsEmpty")}
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <PositionChartWorkspace
+            positions={accountPositions}
+            selectedSymbol={selectedPositionChartSymbol}
+            mode={ibSettings?.mode || ibSettingsForm.mode || "paper"}
+            gatewayRuntimeState={gatewayRuntime?.state}
+            positionsLoading={accountPositionsLoading}
+          />
         </div>
       </div>
     ),

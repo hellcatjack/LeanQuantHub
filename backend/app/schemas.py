@@ -1798,6 +1798,42 @@ class IBHistoricalOut(BaseModel):
     error: str | None = None
 
 
+class PriceChartBarOut(BaseModel):
+    time: int
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float | None = None
+
+
+class PriceChartMarkerOut(BaseModel):
+    time: int
+    position: str
+    shape: str
+    color: str
+    text: str | None = None
+
+
+class PriceChartMetaOut(BaseModel):
+    price_precision: int | None = None
+    currency: str | None = None
+    range_label: str | None = None
+    last_bar_at: str | None = None
+
+
+class PriceChartOut(BaseModel):
+    symbol: str
+    interval: str
+    source: str
+    fallback_used: bool = False
+    stale: bool = False
+    bars: list[PriceChartBarOut] = Field(default_factory=list)
+    markers: list[PriceChartMarkerOut] = Field(default_factory=list)
+    meta: PriceChartMetaOut | None = None
+    error: str | None = None
+
+
 class IBConnectionHeartbeat(BaseModel):
     status: str | None = None
     message: str | None = None
