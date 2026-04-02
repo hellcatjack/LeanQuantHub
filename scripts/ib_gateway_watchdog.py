@@ -74,6 +74,10 @@ PROBE_HARD_TIMEOUT_SECONDS = max(
     float(getattr(settings, "ib_gateway_runtime_probe_hard_timeout_seconds", 1.5) or 1.5),
     0.5,
 )
+RECOVERY_QUIET_PERIOD_SECONDS = max(
+    int(getattr(settings, "ib_gateway_recovery_quiet_period_seconds", 240) or 240),
+    30,
+)
 
 
 def _utcnow(now: datetime | None = None) -> datetime:
@@ -124,6 +128,16 @@ def _cooldown_active(previous_payload: dict[str, object], *, now: datetime) -> b
     return next_allowed > now
 
 
+def _recovery_quiet_period_active(previous_payload: dict[str, object], *, now: datetime) -> bool:
+    action = str(previous_payload.get("last_recovery_action") or "").strip().lower()
+    if action not in {"leader_restart", "gateway_restart"}:
+        return False
+    recovered_at = _parse_iso(previous_payload.get("last_recovery_at"))
+    if recovered_at is None:
+        return False
+    return (now - recovered_at).total_seconds() < RECOVERY_QUIET_PERIOD_SECONDS
+
+
 def _record_recovery_audit(session, *, action: str, runtime_health: dict[str, object]) -> None:
     if session is None or not hasattr(session, "add"):
         return
@@ -155,7 +169,7 @@ def _record_recovery_audit(session, *, action: str, runtime_health: dict[str, ob
 
 def _systemd_restart_gateway(*, service_name: str, runner=subprocess.run) -> None:
     runner(
-        ["systemctl", "--user", "restart", service_name],
+        ["systemctl", "--user", "restart", "--no-block", service_name],
         check=False,
     )
 
@@ -277,6 +291,7 @@ def run_gateway_watchdog_once(
 
     previous_state = str(previous_payload.get("state") or "").strip().lower()
     recovery_failure_count = int(previous_payload.get("recovery_failure_count") or 0)
+    quiet_period_active = _recovery_quiet_period_active(previous_payload, now=current_time)
     action = "none"
 
     if runtime_health.get("state") == "healthy":
@@ -285,6 +300,13 @@ def run_gateway_watchdog_once(
             runtime_health["state"] = "recovering"
         elif previous_state == "recovering":
             runtime_health["state"] = "healthy"
+    elif quiet_period_active:
+        runtime_health["recovery_failure_count"] = recovery_failure_count
+        previous_action = str(previous_payload.get("last_recovery_action") or "").strip().lower()
+        if previous_action == "gateway_restart":
+            runtime_health["state"] = "gateway_restarting"
+        elif previous_action == "leader_restart":
+            runtime_health["state"] = "bridge_degraded"
     else:
         recovery_failure_count += 1
         runtime_health["recovery_failure_count"] = recovery_failure_count

@@ -115,7 +115,7 @@ def test_recovery_second_failure_triggers_leader_restart(monkeypatch, tmp_path):
 
 
 def test_recovery_escalates_to_systemd_restart_after_threshold(monkeypatch, tmp_path):
-    now = datetime(2026, 3, 10, 14, 7, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 3, 10, 14, 11, 0, tzinfo=timezone.utc)
     calls: list[list[str]] = []
     write_gateway_runtime_health(
         tmp_path,
@@ -154,12 +154,12 @@ def test_recovery_escalates_to_systemd_restart_after_threshold(monkeypatch, tmp_
 
     assert result["action"] == "gateway_restart"
     assert result["state"] == "gateway_restarting"
-    assert calls == [["systemctl", "--user", "restart", "stocklean-ibgateway.service"]]
+    assert calls == [["systemctl", "--user", "restart", "--no-block", "stocklean-ibgateway.service"]]
     assert result["next_allowed_action_at"] is not None
 
 
 def test_recovery_respects_gateway_restart_cooldown(monkeypatch, tmp_path):
-    now = datetime(2026, 3, 10, 14, 8, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 3, 10, 14, 12, 0, tzinfo=timezone.utc)
     calls: list[list[str]] = []
     write_gateway_runtime_health(
         tmp_path,
@@ -189,6 +189,85 @@ def test_recovery_respects_gateway_restart_cooldown(monkeypatch, tmp_path):
 
     assert result["action"] == "gateway_degraded"
     assert result["state"] == "gateway_degraded"
+    assert calls == []
+
+
+def test_recovery_does_not_escalate_during_leader_restart_quiet_period(monkeypatch, tmp_path):
+    restart_at = datetime(2026, 3, 10, 14, 6, 0, tzinfo=timezone.utc)
+    calls: list[list[str]] = []
+    write_gateway_runtime_health(
+        tmp_path,
+        {
+            **_runtime_health("bridge_degraded", failure_count=2),
+            "recovery_failure_count": 2,
+            "last_recovery_action": "leader_restart",
+            "last_recovery_at": restart_at.isoformat().replace("+00:00", "Z"),
+        },
+    )
+
+    monkeypatch.setattr(
+        ib_gateway_watchdog,
+        "build_gateway_runtime_health",
+        lambda **_kwargs: _runtime_health("bridge_degraded", failure_count=2),
+    )
+    monkeypatch.setattr(
+        ib_gateway_watchdog,
+        "ensure_lean_bridge_leader",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("leader restart should not run in quiet period")),
+    )
+    monkeypatch.setattr(
+        ib_gateway_watchdog,
+        "refresh_bridge",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("bridge refresh should not run in quiet period")),
+    )
+
+    result = ib_gateway_watchdog.run_gateway_watchdog_once(
+        bridge_root=tmp_path,
+        session=None,
+        mode="paper",
+        now=restart_at + timedelta(seconds=30),
+        direct_probe={"ok": False, "latency_ms": 1500, "error": "timeout"},
+        subprocess_run=lambda cmd, **_kwargs: calls.append(cmd) or None,
+    )
+
+    assert result["action"] == "none"
+    assert result["state"] == "bridge_degraded"
+    assert result["recovery_failure_count"] == 2
+    assert calls == []
+
+
+def test_recovery_does_not_repeat_gateway_restart_during_quiet_period(monkeypatch, tmp_path):
+    restart_at = datetime(2026, 3, 10, 14, 7, 0, tzinfo=timezone.utc)
+    calls: list[list[str]] = []
+    write_gateway_runtime_health(
+        tmp_path,
+        {
+            **_runtime_health("gateway_restarting", failure_count=3),
+            "recovery_failure_count": 3,
+            "last_recovery_action": "gateway_restart",
+            "last_recovery_at": restart_at.isoformat().replace("+00:00", "Z"),
+            "next_allowed_action_at": (restart_at + timedelta(minutes=15)).isoformat().replace("+00:00", "Z"),
+        },
+    )
+
+    monkeypatch.setattr(
+        ib_gateway_watchdog,
+        "build_gateway_runtime_health",
+        lambda **_kwargs: _runtime_health("bridge_degraded", failure_count=3),
+    )
+
+    result = ib_gateway_watchdog.run_gateway_watchdog_once(
+        bridge_root=tmp_path,
+        session=None,
+        mode="paper",
+        now=restart_at + timedelta(seconds=45),
+        direct_probe={"ok": False, "latency_ms": 1500, "error": "timeout"},
+        subprocess_run=lambda cmd, **_kwargs: calls.append(cmd) or None,
+    )
+
+    assert result["action"] == "none"
+    assert result["state"] == "gateway_restarting"
+    assert result["recovery_failure_count"] == 3
     assert calls == []
 
 
