@@ -10,7 +10,7 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from app.models import Base, Project, DecisionSnapshot
+from app.models import BacktestRun, Base, Project, DecisionSnapshot, TradeRun
 from app.routes import trade as trade_routes
 
 
@@ -215,5 +215,65 @@ def test_create_trade_run_live_rejects_non_latest_snapshot(monkeypatch):
         with pytest.raises(Exception) as exc_info:
             trade_routes.create_trade_run(payload)
         assert "decision_snapshot_not_latest" in str(exc_info.value)
+    finally:
+        session.close()
+
+
+def test_create_trade_run_strategy_snapshot_prefers_snapshot_backtest_run(monkeypatch):
+    session = _make_session()
+    try:
+        project = Project(name="p", description="")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        backtest_run = BacktestRun(
+            project_id=project.id,
+            status="success",
+            params={
+                "benchmark": "QQQ",
+                "algorithm_parameters": {
+                    "risk_off_symbols": "SGOV,VGSH,IEF,GLD",
+                    "risk_off_symbol": "SGOV",
+                    "max_exposure": 0.3,
+                },
+            },
+        )
+        session.add(backtest_run)
+        session.commit()
+        session.refresh(backtest_run)
+
+        snapshot = DecisionSnapshot(
+            project_id=project.id,
+            status="success",
+            items_path="/tmp/x.csv",
+            backtest_run_id=backtest_run.id,
+        )
+        session.add(snapshot)
+        session.commit()
+        session.refresh(snapshot)
+
+        @contextmanager
+        def _get_session():
+            yield session
+
+        monkeypatch.setattr(trade_routes, "get_session", _get_session)
+        monkeypatch.setattr(trade_routes, "check_market_health", lambda *_a, **_k: {"status": "ok"})
+
+        payload = trade_routes.TradeRunCreate(
+            project_id=project.id,
+            decision_snapshot_id=snapshot.id,
+            mode="paper",
+            orders=[],
+            require_market_health=False,
+        )
+        result = trade_routes.create_trade_run(payload)
+        created = session.get(TradeRun, result.id)
+        assert created is not None
+        params = created.params or {}
+        strategy_snapshot = params.get("strategy_snapshot") or {}
+        assert strategy_snapshot.get("backtest_run_id") == backtest_run.id
+        assert strategy_snapshot.get("backtest_params", {}).get("risk_off_symbols") == "SGOV,VGSH,IEF,GLD"
+        assert strategy_snapshot.get("benchmark") == "QQQ"
     finally:
         session.close()

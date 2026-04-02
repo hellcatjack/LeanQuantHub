@@ -41,7 +41,7 @@ from app.routes.datasets import (
     _refresh_alpha_listing,
     _start_bulk_sync_worker,
 )
-from app.routes.projects import _get_latest_version, _resolve_project_config, PROJECT_CONFIG_TAG
+from app.routes.projects import _resolve_project_config
 from app.services.alpha_fetch import load_alpha_fetch_config
 from app.services.alpha_rate import load_alpha_rate_config
 from app.services.bulk_auto import load_bulk_auto_config
@@ -78,6 +78,7 @@ from app.services.trading_calendar import (
     load_trading_days,
     trading_calendar_csv_path,
 )
+from app.services.trade_strategy_snapshot import build_trade_strategy_snapshot
 from app.services.project_symbols import (
     collect_active_project_symbols,
     collect_project_symbols,
@@ -1266,19 +1267,11 @@ def step_decision_snapshot(ctx: StepContext, params: dict[str, Any]) -> StepResu
         "snapshot_ready",
         extras={"decision_snapshot_id": snapshot.id if snapshot else None},
     )
-    config = _resolve_project_config(ctx.session, ctx.run.project_id)
-    version = _get_latest_version(ctx.session, ctx.run.project_id, PROJECT_CONFIG_TAG)
-    strategy_snapshot = {
-        "project_config_version_id": version.id if version else None,
-        "project_config_hash": version.content_hash if version else None,
-        "project_config_created_at": version.created_at.isoformat() if version else None,
-        "backtest_params": config.get("backtest_params") if isinstance(config, dict) else None,
-        "strategy": config.get("strategy") if isinstance(config, dict) else None,
-        "signal_mode": config.get("signal_mode") if isinstance(config, dict) else None,
-        "backtest_start": config.get("backtest_start") if isinstance(config, dict) else None,
-        "backtest_end": config.get("backtest_end") if isinstance(config, dict) else None,
-        "benchmark": config.get("benchmark") if isinstance(config, dict) else None,
-    }
+    strategy_snapshot = build_trade_strategy_snapshot(
+        ctx.session,
+        project_id=ctx.run.project_id,
+        snapshot=snapshot,
+    )
     trade_run: TradeRun | None = None
     if existing_trade_run_id:
         trade_run = ctx.session.get(TradeRun, int(existing_trade_run_id))

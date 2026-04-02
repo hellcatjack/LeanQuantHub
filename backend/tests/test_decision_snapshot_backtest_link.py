@@ -42,7 +42,7 @@ def test_resolve_backtest_run_link_prefers_explicit():
     session.close()
 
 
-def test_resolve_backtest_run_link_pipeline_then_project():
+def test_resolve_backtest_run_link_defaults_to_current_context():
     session = _make_session()
     project = Project(name="p1", description="")
     session.add(project)
@@ -67,8 +67,8 @@ def test_resolve_backtest_run_link_pipeline_then_project():
         pipeline_id=pipeline.id,
         explicit_backtest_run_id=None,
     )
-    assert resolved == pipeline_run.id
-    assert status == "auto_pipeline"
+    assert resolved is None
+    assert status == "current_pipeline"
 
     resolved2, status2 = resolve_backtest_run_link(
         session,
@@ -76,12 +76,12 @@ def test_resolve_backtest_run_link_pipeline_then_project():
         pipeline_id=None,
         explicit_backtest_run_id=None,
     )
-    assert resolved2 == project_run.id
-    assert status2 == "auto_project"
+    assert resolved2 is None
+    assert status2 == "current_project"
     session.close()
 
 
-def test_resolve_backtest_run_link_missing():
+def test_resolve_backtest_run_link_defaults_to_current_project_without_history():
     session = _make_session()
     project = Project(name="p1", description="")
     session.add(project)
@@ -95,7 +95,7 @@ def test_resolve_backtest_run_link_missing():
         explicit_backtest_run_id=None,
     )
     assert resolved is None
-    assert status == "missing"
+    assert status == "current_project"
     session.close()
 
 

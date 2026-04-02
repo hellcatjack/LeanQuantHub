@@ -20,6 +20,11 @@ from app.routes.projects import (
     _resolve_project_config,
 )
 from app.services.project_symbols import collect_project_theme_map
+from app.services.trade_execution_targets import (
+    _RISK_OFF_DEFENSIVE_MODES,
+    _resolve_idle_symbol,
+    _select_from_defensive_basket,
+)
 
 
 DECISION_ACTIVE_STATUSES = {"queued", "running"}
@@ -58,31 +63,8 @@ def resolve_backtest_run_link(
             raise ValueError("backtest_run_project_mismatch")
         return run.id, "explicit"
     if pipeline_id:
-        pipeline_run = (
-            session.query(BacktestRun)
-            .filter(
-                BacktestRun.project_id == project_id,
-                BacktestRun.pipeline_id == pipeline_id,
-                BacktestRun.status == "success",
-            )
-            .order_by(BacktestRun.created_at.desc())
-            .first()
-        )
-        if pipeline_run:
-            return pipeline_run.id, "auto_pipeline"
-    project_run = (
-        session.query(BacktestRun)
-        .filter(
-            BacktestRun.project_id == project_id,
-            BacktestRun.status == "success",
-            BacktestRun.pipeline_id.is_(None),
-        )
-        .order_by(BacktestRun.created_at.desc())
-        .first()
-    )
-    if project_run:
-        return project_run.id, "auto_project"
-    return None, "missing"
+        return None, "current_pipeline"
+    return None, "current_project"
 
 
 def _read_csv_rows(path: Path) -> list[dict[str, str]]:
@@ -396,6 +378,57 @@ def _normalize_snapshot_row(
             normalized["snapshot_date"] = fallback_date
         if not normalized.get("rebalance_date"):
             normalized["rebalance_date"] = fallback_date
+    return normalized
+
+
+def _hydrate_snapshot_runtime_fields(
+    row: dict[str, str] | None,
+    *,
+    algo_params: dict[str, Any],
+) -> dict[str, str] | None:
+    if row is None:
+        return None
+    normalized = dict(row)
+    summary_context: dict[str, Any] = {
+        "snapshot_date": normalized.get("snapshot_date"),
+        "rebalance_date": normalized.get("rebalance_date"),
+        "risk_off": normalized.get("risk_off") == "1",
+        "risk_off_mode": normalized.get("risk_off_mode"),
+        "risk_off_symbol": normalized.get("risk_off_symbol"),
+        "idle_allocation_mode": normalized.get("idle_allocation_mode"),
+        "idle_symbol": normalized.get("idle_symbol"),
+        "benchmark": normalized.get("benchmark"),
+    }
+    risk_off_mode = str(normalized.get("risk_off_mode") or "").strip().lower()
+    risk_off_selection = str(normalized.get("risk_off_selection") or "").strip().lower()
+
+    if summary_context["risk_off"] and risk_off_mode in _RISK_OFF_DEFENSIVE_MODES:
+        risk_off_symbol = str(normalized.get("risk_off_symbol") or "").strip().upper()
+        if not risk_off_symbol:
+            resolved_symbol, _missing = _select_from_defensive_basket(
+                summary=summary_context,
+                algo_params=algo_params,
+            )
+            if resolved_symbol:
+                normalized["risk_off_symbol"] = resolved_symbol
+                if risk_off_selection in {"", "defensive_missing"}:
+                    normalized["risk_off_selection"] = "compat_defensive_pick"
+
+    if not summary_context["risk_off"]:
+        idle_mode, idle_symbol, _missing = _resolve_idle_symbol(
+            summary=summary_context,
+            algo_params=algo_params,
+        )
+        if idle_mode != "none" and idle_symbol and not str(normalized.get("idle_symbol") or "").strip():
+            normalized["idle_symbol"] = idle_symbol
+        if idle_mode != "none" and not str(normalized.get("idle_weight") or "").strip():
+            try:
+                weights_sum = float(normalized.get("weights_sum") or 0.0)
+            except (TypeError, ValueError):
+                weights_sum = 0.0
+            idle_weight = max(0.0, 1.0 - weights_sum)
+            if idle_weight > 0.0001:
+                normalized["idle_weight"] = f"{idle_weight:.8f}"
     return normalized
 
 
@@ -885,6 +918,10 @@ def generate_decision_snapshot(
             "risk_off_selection": "",
         }
     snapshot_row = _normalize_snapshot_row(snapshot_row, effective_snapshot) or snapshot_row
+    snapshot_row = _hydrate_snapshot_runtime_fields(
+        snapshot_row,
+        algo_params=algo_params,
+    ) or snapshot_row
 
     theme_map, theme_weights = collect_project_theme_map(config)
     listing_meta = _load_listing_meta(_resolve_data_root())

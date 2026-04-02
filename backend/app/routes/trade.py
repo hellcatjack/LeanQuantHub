@@ -68,6 +68,7 @@ from app.services.trade_order_intent import write_order_intent_manual
 from app.services import trade_executor
 from app.services.trade_run_summary import build_last_update_at, build_symbol_summary, build_trade_run_detail
 from app.services.trade_run_progress import update_trade_run_progress
+from app.services.trade_strategy_snapshot import build_trade_strategy_snapshot
 
 router = APIRouter(prefix="/api/trade", tags=["trade"])
 logger = logging.getLogger("uvicorn.error")
@@ -665,9 +666,24 @@ def create_trade_run(payload: TradeRunCreate):
             # snapshot+mode within the same day (usually from repeated button clicks).
             # Completed runs (done/partial/failed/blocked) should allow new runs.
             if status in {"queued", "running", "stalled"}:
+                existing_params = dict(existing.params or {})
+                if selected_snapshot is not None and "strategy_snapshot" not in existing_params:
+                    existing_params["strategy_snapshot"] = build_trade_strategy_snapshot(
+                        session,
+                        project_id=payload.project_id,
+                        snapshot=selected_snapshot,
+                    )
+                    existing.params = existing_params
+                    session.commit()
                 out = TradeRunOut.model_validate(existing, from_attributes=True)
                 out.orders_created = 0
                 return out
+        if selected_snapshot is not None and "strategy_snapshot" not in params:
+            params["strategy_snapshot"] = build_trade_strategy_snapshot(
+                session,
+                project_id=payload.project_id,
+                snapshot=selected_snapshot,
+            )
         run = TradeRun(
             project_id=payload.project_id,
             decision_snapshot_id=snapshot_id,
@@ -870,12 +886,20 @@ def create_manual_trade_run(payload: TradeManualRunCreate):
             token = (payload.live_confirm_token or "").strip().upper()
             if token != "LIVE":
                 raise HTTPException(status_code=403, detail="live_confirm_required")
+        snapshot = session.get(DecisionSnapshot, payload.decision_snapshot_id) if payload.decision_snapshot_id else None
+        params = {"source": "manual"}
+        if snapshot is not None:
+            params["strategy_snapshot"] = build_trade_strategy_snapshot(
+                session,
+                project_id=payload.project_id,
+                snapshot=snapshot,
+            )
         run = TradeRun(
             project_id=payload.project_id,
             decision_snapshot_id=payload.decision_snapshot_id,
             mode=payload.mode,
             status="queued",
-            params={"source": "manual"},
+            params=params,
         )
         session.add(run)
         session.commit()
