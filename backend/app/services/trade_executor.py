@@ -48,6 +48,7 @@ from app.services.lean_execution import (
 )
 from app.services.lean_execution_params import write_execution_params
 from app.services.audit_log import record_audit
+from app.services.trade_execution_targets import resolve_snapshot_execution_targets
 from app.services.trade_open_orders_sync import sync_trade_orders_from_open_orders
 from app.services.trade_run_progress import is_market_open, is_trade_run_stalled, update_trade_run_progress
 
@@ -489,11 +490,35 @@ _STALLED_WINDOW_MINUTES = 15
 _LEADER_BRIDGE_READY_STATES = {"ok", "connected", "running", "degraded"}
 _LEADER_COMMAND_STALE_SECONDS = 8
 _LEADER_COMMAND_HISTORY_SECONDS = 300
+_LEADER_SUBMIT_BATCH_SIZE = 6
 _SUBMIT_COMMAND_PENDING_STALLED_SECONDS = 12
+_SUBMIT_COMMAND_PENDING_BATCH_SCALE_SECONDS = 3
+_SUBMIT_COMMAND_PENDING_BATCH_MAX_SECONDS = 90
 _OPEN_ORDERS_PAYLOAD_FRESH_SECONDS = 90
+_AUTO_RESUME_PARTIAL_MAX_ATTEMPTS = 1
 # Direct orders that timed out in leader-submit and were superseded to short-lived fallback
 # can otherwise stay SUBMITTED forever when no further execution events arrive.
 _DIRECT_SUPERSEDED_NO_FILL_FINALIZE_SECONDS = 900
+_AUTO_RESUME_RESET_PARAM_KEYS = {
+    "order_intent_path",
+    "execution_params_path",
+    "price_map",
+    "positions_baseline",
+    "positions_source",
+    "builder",
+    "completion_summary",
+    "completion_summary_recomputed_at",
+    "lean_execution",
+    "leader_submit_fallback",
+    "leader_submit_runtime_fallback",
+    "submit_command_pending_timeout",
+    "no_orders_submitted",
+    "already_held_orders",
+    "risk_blocked",
+    "guard_blocked",
+    "guard_precheck",
+    "market_health",
+}
 
 
 def _normalize_order_status(value: str | None) -> str:
@@ -607,6 +632,68 @@ def _should_use_leader_submit(params: dict[str, Any], orders: list[TradeOrder]) 
         if str(order.order_type or "").strip().upper() != "ADAPTIVE_LMT":
             return False
     return True
+
+
+def _resolve_leader_submit_batch_size(params: dict[str, Any] | None, *, total_orders: int = 0) -> int:
+    raw = params.get("leader_submit_batch_size") if isinstance(params, dict) else None
+    try:
+        size = int(raw or _LEADER_SUBMIT_BATCH_SIZE)
+    except (TypeError, ValueError):
+        size = _LEADER_SUBMIT_BATCH_SIZE
+    size = max(1, min(20, size))
+    if total_orders > 0:
+        size = min(size, total_orders)
+    return size
+
+
+def _has_leader_submit_command(order: TradeOrder) -> bool:
+    params = dict(order.params or {})
+    submit_meta = params.get("submit_command")
+    if not isinstance(submit_meta, dict):
+        return False
+    command_id = str(submit_meta.get("command_id") or "").strip()
+    if not command_id:
+        return False
+    source = str(submit_meta.get("source") or "").strip().lower()
+    return source in {"", "leader_command"}
+
+
+def _is_leader_submit_pending_order(order: TradeOrder) -> bool:
+    params = dict(order.params or {})
+    submit_meta = params.get("submit_command")
+    if not isinstance(submit_meta, dict):
+        return False
+    source = str(submit_meta.get("source") or "").strip().lower()
+    if source not in {"", "leader_command"}:
+        return False
+    return _as_bool(submit_meta.get("pending"), default=False)
+
+
+def _merge_leader_submit_meta(
+    existing: dict[str, Any] | None,
+    batch_meta: dict[str, Any],
+    *,
+    batch_orders: list[TradeOrder],
+    batch_size: int,
+    total_orders: int,
+) -> dict[str, Any]:
+    merged = dict(existing or {})
+    commands = [item for item in (batch_meta.get("commands") or []) if isinstance(item, dict)]
+    history = [item for item in (merged.get("command_history") or []) if isinstance(item, dict)]
+    history.extend(commands)
+    merged.update(batch_meta)
+    merged["commands"] = commands
+    merged["command_history"] = history[-500:]
+    merged["batch_size"] = int(batch_size)
+    merged["total_orders"] = int(max(total_orders, int(merged.get("total_orders") or 0)))
+    previous_dispatched = int(existing.get("dispatched_orders") or 0) if isinstance(existing, dict) else 0
+    previous_batches = int(existing.get("dispatched_batches") or 0) if isinstance(existing, dict) else 0
+    merged["dispatched_orders"] = int(previous_dispatched + len(batch_orders))
+    merged["dispatched_batches"] = int(previous_batches + 1)
+    merged["current_batch_order_ids"] = [int(order.id) for order in batch_orders if getattr(order, "id", None) is not None]
+    merged["current_batch_size"] = int(len(batch_orders))
+    merged["current_batch_submitted_at"] = batch_meta.get("submitted_at")
+    return merged
 
 
 def _is_leader_command_channel_healthy(
@@ -738,6 +825,69 @@ def _submit_run_orders_via_leader(
     return run_meta
 
 
+def _dispatch_next_leader_submit_batch(
+    session,
+    run: TradeRun,
+    *,
+    bridge_root: Path,
+) -> bool:
+    params = dict(run.params or {})
+    lean_exec = params.get("lean_execution") if isinstance(params.get("lean_execution"), dict) else {}
+    if str(lean_exec.get("source") or "").strip().lower() != "leader_command":
+        return False
+    fallback_meta = params.get("leader_submit_runtime_fallback")
+    if isinstance(fallback_meta, dict) and bool(fallback_meta.get("triggered")):
+        return False
+
+    orders = (
+        session.query(TradeOrder)
+        .filter(TradeOrder.run_id == run.id)
+        .order_by(TradeOrder.id.asc())
+        .all()
+    )
+    if not orders:
+        return False
+    if any(_is_leader_submit_pending_order(order) for order in orders):
+        return False
+
+    undispatched = [
+        order
+        for order in orders
+        if str(order.status or "").strip().upper() == "NEW" and not _has_leader_submit_command(order)
+    ]
+    if not undispatched:
+        return False
+
+    batch_size = _resolve_leader_submit_batch_size(params, total_orders=len(orders))
+    batch_orders = undispatched[:batch_size]
+    batch_meta = _submit_run_orders_via_leader(
+        session,
+        run=run,
+        orders=batch_orders,
+        params=params,
+        bridge_root=bridge_root,
+    )
+    params["lean_execution"] = _merge_leader_submit_meta(
+        lean_exec,
+        batch_meta,
+        batch_orders=batch_orders,
+        batch_size=batch_size,
+        total_orders=len(orders),
+    )
+    run.params = dict(params)
+    run.updated_at = datetime.utcnow()
+    run.message = "submitted_leader"
+    session.commit()
+    update_trade_run_progress(
+        session,
+        run,
+        "submitted_leader_batch",
+        reason=f"leader_batch_{params['lean_execution'].get('dispatched_batches')}",
+        commit=True,
+    )
+    return True
+
+
 def _reconcile_submit_command_results(session, run: TradeRun, *, bridge_root: Path) -> int:
     updated = 0
     orders = (
@@ -852,16 +1002,55 @@ def _collect_timed_out_submit_pending_orders(
     else:
         clock = clock.astimezone(timezone.utc)
     active_source = ""
+    leader_command_count = 0
+    current_batch_size = 0
     if isinstance(run.params, dict):
         lean_exec = run.params.get("lean_execution")
         if isinstance(lean_exec, dict):
             active_source = str(lean_exec.get("source") or "").strip().lower()
+            commands = lean_exec.get("commands")
+            if isinstance(commands, list):
+                leader_command_count = len([item for item in commands if isinstance(item, dict)])
+            try:
+                current_batch_size = int(lean_exec.get("current_batch_size") or 0)
+            except (TypeError, ValueError):
+                current_batch_size = 0
+            if current_batch_size <= 0:
+                current_batch_ids = lean_exec.get("current_batch_order_ids")
+                if isinstance(current_batch_ids, list):
+                    current_batch_size = len([item for item in current_batch_ids if item is not None])
     orders = (
         session.query(TradeOrder)
         .filter(TradeOrder.run_id == run.id, TradeOrder.status == "NEW")
         .order_by(TradeOrder.id.asc())
         .all()
     )
+    leader_pending_count = 0
+    for order in orders:
+        params = dict(order.params or {})
+        submit_meta = params.get("submit_command")
+        if not isinstance(submit_meta, dict) or not _as_bool(submit_meta.get("pending"), default=False):
+            continue
+        submit_source = str(submit_meta.get("source") or "").strip().lower()
+        if active_source and active_source != "leader_command" and submit_source in {"", "leader_command"}:
+            continue
+        if submit_source in {"", "leader_command"}:
+            leader_pending_count += 1
+    if active_source == "leader_command":
+        scaled_batch_count = max(
+            int(current_batch_size or 0),
+            int(leader_command_count or 0),
+            int(leader_pending_count or 0),
+        )
+        if scaled_batch_count > 1:
+            scaled_threshold = _SUBMIT_COMMAND_PENDING_STALLED_SECONDS + (
+                (scaled_batch_count - 1) * _SUBMIT_COMMAND_PENDING_BATCH_SCALE_SECONDS
+            )
+            threshold = min(_SUBMIT_COMMAND_PENDING_BATCH_MAX_SECONDS, max(threshold, scaled_threshold))
+    summary["threshold_seconds"] = int(threshold)
+    summary["batch_pending_count"] = int(leader_pending_count)
+    summary["batch_command_count"] = int(leader_command_count)
+    summary["current_batch_size"] = int(current_batch_size)
     for order in orders:
         summary["checked"] += 1
         params = dict(order.params or {})
@@ -1055,6 +1244,147 @@ def determine_run_status(order_statuses: list[str]) -> tuple[str | None, dict[st
     if summary["rejected"] > 0 or summary["cancelled"] > 0 or summary["skipped"] > 0:
         return "partial", summary
     return "done", summary
+
+
+def _resolve_partial_auto_resume_policy(session, params: dict[str, Any] | None) -> tuple[bool, int]:
+    auto_cfg: dict[str, Any] = {}
+    settings_row = session.query(TradeSettings).order_by(TradeSettings.id.desc()).first()
+    if settings_row and isinstance(settings_row.auto_recovery, dict):
+        auto_cfg.update(settings_row.auto_recovery)
+    if isinstance(params, dict) and isinstance(params.get("auto_recovery"), dict):
+        auto_cfg.update(params.get("auto_recovery") or {})
+    enabled = _coerce_bool(auto_cfg.get("auto_resume_partial_remaining"), default=True)
+    try:
+        max_attempts = int(auto_cfg.get("auto_resume_partial_max_attempts") or _AUTO_RESUME_PARTIAL_MAX_ATTEMPTS)
+    except (TypeError, ValueError):
+        max_attempts = _AUTO_RESUME_PARTIAL_MAX_ATTEMPTS
+    return enabled, max(0, max_attempts)
+
+
+def _build_partial_auto_resume_params(run: TradeRun, params: dict[str, Any], *, attempt: int) -> dict[str, Any]:
+    child_params = dict(params or {})
+    for key in _AUTO_RESUME_RESET_PARAM_KEYS:
+        child_params.pop(key, None)
+    child_params.pop("auto_resume", None)
+    child_params["auto_resume_parent_run_id"] = int(run.id)
+    child_params["auto_resume_root_run_id"] = int(
+        params.get("auto_resume_root_run_id")
+        or params.get("auto_resume_parent_run_id")
+        or run.id
+    )
+    child_params["auto_resume_attempt"] = int(attempt)
+    child_params["auto_resume_reason"] = "partial_remaining"
+    return child_params
+
+
+def _maybe_auto_resume_partial_run(
+    session,
+    run: TradeRun,
+    *,
+    summary: dict[str, int],
+) -> int | None:
+    params = dict(run.params or {})
+    enabled, max_attempts = _resolve_partial_auto_resume_policy(session, params)
+    if not enabled or run.decision_snapshot_id is None:
+        return None
+    if int(summary.get("filled") or 0) <= 0:
+        return None
+    if int(summary.get("rejected") or 0) > 0:
+        return None
+    if int(summary.get("cancelled") or 0) + int(summary.get("skipped") or 0) <= 0:
+        return None
+
+    auto_resume_meta = dict(params.get("auto_resume") or {})
+    if auto_resume_meta.get("child_run_id"):
+        return None
+
+    try:
+        current_attempt = int(params.get("auto_resume_attempt") or 0)
+    except (TypeError, ValueError):
+        current_attempt = 0
+    next_attempt = current_attempt + 1
+    if next_attempt > max_attempts:
+        auto_resume_meta.update(
+            {
+                "enabled": True,
+                "skipped": "attempt_limit",
+                "max_attempts": int(max_attempts),
+                "summary": dict(summary),
+            }
+        )
+        params["auto_resume"] = auto_resume_meta
+        run.params = params
+        run.updated_at = datetime.utcnow()
+        session.commit()
+        return None
+
+    child_run = TradeRun(
+        project_id=run.project_id,
+        decision_snapshot_id=run.decision_snapshot_id,
+        mode=run.mode,
+        status="queued",
+        params=_build_partial_auto_resume_params(run, params, attempt=next_attempt),
+    )
+    session.add(child_run)
+    session.commit()
+    session.refresh(child_run)
+
+    queued_at = datetime.utcnow().replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+    auto_resume_meta.update(
+        {
+            "enabled": True,
+            "reason": "partial_remaining",
+            "child_run_id": int(child_run.id),
+            "attempt": int(next_attempt),
+            "max_attempts": int(max_attempts),
+            "summary": dict(summary),
+            "queued_at": queued_at,
+        }
+    )
+    params["auto_resume"] = auto_resume_meta
+    run.params = params
+    run.updated_at = datetime.utcnow()
+    session.commit()
+
+    record_audit(
+        session,
+        action="trade_run.auto_resume_queued",
+        resource_type="trade_run",
+        resource_id=run.id,
+        detail={"child_run_id": child_run.id, "attempt": next_attempt, "summary": dict(summary)},
+    )
+    session.commit()
+
+    try:
+        result = execute_trade_run(child_run.id, dry_run=False, force=False)
+    except Exception as exc:
+        refreshed_run = session.get(TradeRun, run.id)
+        if refreshed_run is not None:
+            refreshed_params = dict(refreshed_run.params or {})
+            refreshed_auto = dict(refreshed_params.get("auto_resume") or {})
+            refreshed_auto["execute_error"] = str(exc)
+            refreshed_auto["executed_at"] = datetime.utcnow().replace(tzinfo=timezone.utc).isoformat().replace(
+                "+00:00", "Z"
+            )
+            refreshed_params["auto_resume"] = refreshed_auto
+            refreshed_run.params = refreshed_params
+            refreshed_run.updated_at = datetime.utcnow()
+            session.commit()
+        return int(child_run.id)
+
+    refreshed_run = session.get(TradeRun, run.id)
+    if refreshed_run is not None:
+        refreshed_params = dict(refreshed_run.params or {})
+        refreshed_auto = dict(refreshed_params.get("auto_resume") or {})
+        refreshed_auto["execute_status"] = str(result.status or "")
+        refreshed_auto["executed_at"] = datetime.utcnow().replace(tzinfo=timezone.utc).isoformat().replace(
+            "+00:00", "Z"
+        )
+        refreshed_params["auto_resume"] = refreshed_auto
+        refreshed_run.params = refreshed_params
+        refreshed_run.updated_at = datetime.utcnow()
+        session.commit()
+    return int(child_run.id)
 
 
 def recompute_trade_run_completion_summary(session, run: TradeRun) -> bool:
@@ -1886,6 +2216,12 @@ def refresh_trade_run_status(session, run: TradeRun) -> bool:
             },
         )
         return True
+    if active_status == "running" and _dispatch_next_leader_submit_batch(
+        session,
+        run,
+        bridge_root=bridge_root,
+    ):
+        return True
     if active_status == "stalled":
         params = dict(run.params or {})
         fallback_meta = params.get("leader_submit_runtime_fallback")
@@ -2198,8 +2534,9 @@ def refresh_trade_run_status(session, run: TradeRun) -> bool:
         )
         return True
     run.status = status
-    run.ended_at = datetime.utcnow()
-    run.updated_at = datetime.utcnow()
+    now = datetime.utcnow()
+    run.ended_at = now
+    run.updated_at = now
     run.stalled_at = None
     run.stalled_reason = None
     params = dict(run.params or {})
@@ -2207,6 +2544,9 @@ def refresh_trade_run_status(session, run: TradeRun) -> bool:
     run.params = params
     if not run.message or run.message in {"submitted_lean", "submitted_leader"}:
         run.message = "orders_complete"
+    session.commit()
+    if status == "partial":
+        _maybe_auto_resume_partial_run(session, run, summary=summary)
     return True
 
 
@@ -2652,7 +2992,7 @@ def execute_trade_run(
                     dry_run=dry_run,
                 )
             snapshot = session.get(DecisionSnapshot, run.decision_snapshot_id)
-            if snapshot is None or not snapshot.items_path:
+            if snapshot is None:
                 run.status = "failed"
                 run.message = "decision_snapshot_items_missing"
                 run.ended_at = datetime.utcnow()
@@ -2668,9 +3008,10 @@ def execute_trade_run(
                     dry_run=dry_run,
                 )
             items = _read_decision_items(snapshot.items_path)
-            if not items:
+            target_weights, effective_target_meta = resolve_snapshot_execution_targets(snapshot, items)
+            if not items and effective_target_meta.get("source") == "decision_items":
                 run.status = "failed"
-                run.message = "decision_snapshot_items_empty"
+                run.message = "decision_snapshot_items_missing" if not snapshot.items_path else "decision_snapshot_items_empty"
                 run.ended_at = datetime.utcnow()
                 session.commit()
                 return TradeExecutionResult(
@@ -2683,6 +3024,8 @@ def execute_trade_run(
                     message=run.message,
                     dry_run=dry_run,
                 )
+            params["effective_target_source"] = effective_target_meta.get("source")
+            params["effective_target_meta"] = dict(effective_target_meta)
 
             # Build a SetHoldings-style rebalance plan:
             # - size targets from snapshot weights
@@ -2728,17 +3071,6 @@ def execute_trade_run(
                 symbol: float(meta.get("quantity") or 0.0) for symbol, meta in positions_map.items()
             }
 
-            target_weights: dict[str, float] = {}
-            for item in items:
-                symbol = str(item.get("symbol") or "").strip().upper()
-                if not symbol:
-                    continue
-                try:
-                    weight_value = float(item.get("weight") or 0.0)
-                except (TypeError, ValueError):
-                    continue
-                target_weights[symbol] = float(weight_value)
-
             if risk_off_drill:
                 drill_target_weights, drill_meta = _resolve_risk_off_drill_targets(snapshot)
                 if not drill_target_weights:
@@ -2770,6 +3102,13 @@ def execute_trade_run(
                     "symbols": drill_meta.get("symbols") or [],
                     "exposure_cap": drill_meta.get("exposure_cap"),
                     "decision_snapshot_id": run.decision_snapshot_id,
+                }
+                params["effective_target_source"] = "risk_off_drill"
+                params["effective_target_meta"] = {
+                    "source": "risk_off_drill",
+                    "decision_snapshot_id": run.decision_snapshot_id,
+                    "symbols": drill_meta.get("symbols") or [],
+                    "exposure_cap": drill_meta.get("exposure_cap"),
                 }
 
             held_symbols = {
@@ -3421,23 +3760,27 @@ def execute_trade_run(
         bridge_root = _resolve_bridge_root()
         prefer_leader_submit = _should_use_leader_submit(params, orders)
         if prefer_leader_submit and _is_bridge_ready_for_submit(bridge_root):
-            leader_submit = _submit_run_orders_via_leader(
-                session,
-                run=run,
-                orders=orders,
-                params=params,
-                bridge_root=bridge_root,
-            )
             params.setdefault("lean_execution", {})
             if isinstance(params.get("lean_execution"), dict):
-                params["lean_execution"].update(leader_submit)
+                params["lean_execution"].setdefault("source", "leader_command")
+                params["lean_execution"].setdefault("mode", run.mode)
+                params["lean_execution"].setdefault("output_dir", str(bridge_root))
+                params["lean_execution"].setdefault("total_orders", len(orders))
+                params["lean_execution"].setdefault(
+                    "batch_size",
+                    _resolve_leader_submit_batch_size(params, total_orders=len(orders)),
+                )
             run.params = dict(params)
-            run.updated_at = datetime.utcnow()
-            session.commit()
             run.status = "running"
             run.message = "submitted_leader"
             run.updated_at = datetime.utcnow()
             session.commit()
+            if not _dispatch_next_leader_submit_batch(
+                session,
+                run,
+                bridge_root=bridge_root,
+            ):
+                raise RuntimeError("leader_batch_dispatch_failed")
             update_trade_run_progress(session, run, "submitted_leader", reason="leader_command", commit=True)
 
             return TradeExecutionResult(
