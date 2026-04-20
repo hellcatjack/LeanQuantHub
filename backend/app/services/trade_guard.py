@@ -461,6 +461,7 @@ def _try_unlock_non_drawdown_halt(
     unlock_reason: str,
     metrics: dict[str, Any],
     thresholds: dict[str, Any],
+    ignore_cooldown: bool = False,
 ) -> bool:
     if str(state.status or "").strip().lower() != "halted":
         return False
@@ -472,7 +473,7 @@ def _try_unlock_non_drawdown_halt(
     if not reason_list:
         return False
     cooldown_until = state.cooldown_until
-    if cooldown_until is not None and cooldown_until > now:
+    if not ignore_cooldown and cooldown_until is not None and cooldown_until > now:
         return False
     state.status = "active"
     state.cooldown_until = None
@@ -483,6 +484,57 @@ def _try_unlock_non_drawdown_halt(
         "thresholds": thresholds,
     }
     return True
+
+
+def _sanitize_intraday_peak(
+    raw_peak: float | None,
+    *,
+    day_start_equity: float | None,
+    current_equity: float,
+    peak_52w: float | None,
+    outlier_ratio: float,
+) -> dict[str, float | bool | None]:
+    anchor_candidates = []
+    if day_start_equity is not None and float(day_start_equity) > 0:
+        anchor_candidates.append(float(day_start_equity))
+    if peak_52w is not None and float(peak_52w) > 0:
+        anchor_candidates.append(float(peak_52w))
+    if current_equity > 0:
+        anchor_candidates.append(float(current_equity))
+    anchor = max(anchor_candidates) if anchor_candidates else None
+    raw_value = float(raw_peak) if raw_peak is not None and float(raw_peak) > 0 else anchor
+    if anchor is None or raw_value is None:
+        return {
+            "raw": raw_value,
+            "sanitized": raw_value,
+            "filtered": False,
+            "anchor": anchor,
+            "max_allowed": None,
+        }
+    if outlier_ratio <= 1.0:
+        return {
+            "raw": raw_value,
+            "sanitized": raw_value,
+            "filtered": False,
+            "anchor": anchor,
+            "max_allowed": None,
+        }
+    max_allowed = anchor * float(outlier_ratio)
+    if raw_value > max_allowed:
+        return {
+            "raw": raw_value,
+            "sanitized": anchor,
+            "filtered": True,
+            "anchor": anchor,
+            "max_allowed": max_allowed,
+        }
+    return {
+        "raw": raw_value,
+        "sanitized": raw_value,
+        "filtered": False,
+        "anchor": anchor,
+        "max_allowed": max_allowed,
+    }
 
 
 def _compute_drawdown_metrics(
@@ -511,7 +563,11 @@ def _compute_drawdown_metrics(
         }
 
     prior_window_rows = (
-        session.query(TradeGuardState.last_equity)
+        session.query(
+            TradeGuardState.last_equity,
+            TradeGuardState.day_start_equity,
+            TradeGuardState.valuation_source,
+        )
         .filter(
             TradeGuardState.project_id == project_id,
             TradeGuardState.mode == mode,
@@ -522,31 +578,55 @@ def _compute_drawdown_metrics(
         .limit(251)
         .all()
     )
-    window_values = [float(row[0]) for row in reversed(prior_window_rows) if row[0] is not None and float(row[0]) > 0]
+    window_values = []
+    for row in reversed(prior_window_rows):
+        raw_last = _coerce_optional_float(row[0])
+        day_start = _coerce_optional_float(row[1])
+        valuation_source = str(row[2] or "").strip().lower()
+        if raw_last is None or raw_last <= 0:
+            continue
+        if valuation_source.startswith("local:") and day_start is not None and day_start > 0:
+            max_allowed_local = float(day_start) * float(outlier_ratio)
+            if raw_last > max_allowed_local:
+                raw_last = float(day_start)
+        if raw_last > 0:
+            window_values.append(float(raw_last))
     window_values.append(float(current_equity))
     peak_52w = max(window_values) if window_values else float(current_equity)
     dd_52w = max(0.0, 1.0 - (float(current_equity) / peak_52w)) if peak_52w > 0 else None
 
-    prior_peak_eq, prior_peak_last = (
+    prior_peak_rows = (
         session.query(
-            func.max(TradeGuardState.equity_peak),
-            func.max(TradeGuardState.last_equity),
+            TradeGuardState.equity_peak,
+            TradeGuardState.last_equity,
+            TradeGuardState.day_start_equity,
+            TradeGuardState.valuation_source,
         )
         .filter(
             TradeGuardState.project_id == project_id,
             TradeGuardState.mode == mode,
             TradeGuardState.trade_date < trade_date,
         )
-        .one()
+        .all()
     )
     peak_all_candidates = [
         float(current_equity),
         float(current_day_peak) if current_day_peak > 0 else float(current_equity),
     ]
-    if prior_peak_eq is not None:
-        peak_all_candidates.append(float(prior_peak_eq))
-    if prior_peak_last is not None:
-        peak_all_candidates.append(float(prior_peak_last))
+    for prior_peak_eq, prior_peak_last, prior_day_start, prior_source in prior_peak_rows:
+        day_start = _coerce_optional_float(prior_day_start)
+        valuation_source = str(prior_source or "").strip().lower()
+        max_allowed_local = None
+        if valuation_source.startswith("local:") and day_start is not None and day_start > 0:
+            max_allowed_local = float(day_start) * float(outlier_ratio)
+        for raw_value in (prior_peak_eq, prior_peak_last):
+            value = _coerce_optional_float(raw_value)
+            if value is None or value <= 0:
+                continue
+            if max_allowed_local is not None and value > max_allowed_local:
+                value = float(day_start)
+            if value > 0:
+                peak_all_candidates.append(float(value))
     peak_all_raw = max(peak_all_candidates) if peak_all_candidates else float(current_equity)
     peak_all = peak_all_raw
     peak_all_outlier_filtered = False
@@ -638,8 +718,43 @@ def load_guard_ib_snapshot(session, *, mode: str) -> dict[str, Any]:
     return _load_ib_equity_snapshot(session, mode=mode)
 
 
-def _load_positions(session, *, project_id: int, mode: str) -> dict[str, float]:
-    positions: dict[str, float] = defaultdict(float)
+def _load_positions_via_broker(session, *, mode: str) -> dict[str, float] | None:
+    try:
+        bind = getattr(session, "bind", None)
+        dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
+        if str(dialect_name or "").strip().lower() == "sqlite":
+            return None
+    except Exception:
+        return None
+
+    try:
+        from app.services.ib_account import get_account_positions
+
+        payload = get_account_positions(session, mode=mode, force_refresh=False)
+    except Exception:
+        return None
+
+    if isinstance(payload, dict) and not bool(payload.get("stale", True)):
+        items = payload.get("items") if isinstance(payload.get("items"), list) else []
+        positions: dict[str, float] = {}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            symbol = str(item.get("symbol") or "").strip().upper()
+            qty = _coerce_optional_float(item.get("quantity"))
+            if not symbol or qty is None or abs(qty) <= 1e-9:
+                continue
+            positions[symbol] = float(qty)
+        return positions
+    return None
+
+
+def _load_positions(session, *, project_id: int, mode: str) -> tuple[dict[str, float], str]:
+    broker_positions = _load_positions_via_broker(session, mode=mode)
+    if broker_positions is not None:
+        return broker_positions, "broker_positions"
+
+    positions = defaultdict(float)
     rows = (
         session.query(TradeOrder.symbol, TradeOrder.side, func.sum(TradeFill.fill_quantity))
         .join(TradeFill, TradeFill.order_id == TradeOrder.id)
@@ -656,7 +771,7 @@ def _load_positions(session, *, project_id: int, mode: str) -> dict[str, float]:
             continue
         sign = 1.0 if (side or "").upper() == "BUY" else -1.0
         positions[str(symbol).upper()] += sign * float(qty)
-    return {symbol: qty for symbol, qty in positions.items() if qty != 0}
+    return {symbol: qty for symbol, qty in positions.items() if qty != 0}, "fills_history"
 
 
 def _resolve_prices(
@@ -732,7 +847,7 @@ def evaluate_intraday_guard(
 
     stale_seconds = int(risk_params.get("valuation_stale_seconds") or 120)
 
-    positions = _load_positions(session, project_id=project_id, mode=mode)
+    positions, positions_source = _load_positions(session, project_id=project_id, mode=mode)
     symbols = sorted(positions.keys())
     prices, valuation_source, market_errors = _resolve_prices(
         session,
@@ -815,6 +930,14 @@ def evaluate_intraday_guard(
 
     using_local_valuation = str(equity_source).startswith("local:")
     if using_local_valuation and required_symbols > 0:
+        if positions_source != "broker_positions" and had_positive_equity_baseline:
+            valuation_quality_details.append(
+                {
+                    "reason": "positions_source_untrusted",
+                    "value": positions_source,
+                    "threshold": "broker_positions",
+                }
+            )
         if priced_symbols <= 0:
             valuation_quality_details.append(
                 {
@@ -929,15 +1052,13 @@ def evaluate_intraday_guard(
     state.valuation_source = equity_source
 
     day_start = state.day_start_equity or 0.0
-    peak_intraday = state.equity_peak or 0.0
     daily_loss: float | None = None
-    intraday_drawdown: float | None = None
     max_daily_loss = float(risk_params.get("max_daily_loss"))
     max_intraday_drawdown = float(risk_params.get("max_intraday_drawdown"))
     if day_start > 0:
         daily_loss = (adjusted_equity - day_start) / day_start
-    if peak_intraday > 0:
-        intraday_drawdown = (adjusted_equity - peak_intraday) / peak_intraday
+
+    raw_intraday_peak = _coerce_optional_float(state.equity_peak)
 
     drawdown_metrics = _compute_drawdown_metrics(
         session,
@@ -945,7 +1066,7 @@ def evaluate_intraday_guard(
         mode=mode,
         trade_date=state.trade_date,
         current_equity=adjusted_equity,
-        current_day_peak=peak_intraday if peak_intraday > 0 else adjusted_equity,
+        current_day_peak=raw_intraday_peak if raw_intraday_peak is not None and raw_intraday_peak > 0 else adjusted_equity,
         peak_all_outlier_ratio=risk_params.get("peak_all_outlier_ratio"),
     )
     dd_all = _coerce_optional_float(drawdown_metrics.get("dd_all"))
@@ -955,6 +1076,25 @@ def evaluate_intraday_guard(
     peak_all_raw = _coerce_optional_float(drawdown_metrics.get("peak_all_raw"))
     peak_all_outlier_filtered = bool(drawdown_metrics.get("peak_all_outlier_filtered"))
     peak_all_outlier_ratio = _coerce_peak_all_outlier_ratio(risk_params.get("peak_all_outlier_ratio"))
+    intraday_peak_payload = _sanitize_intraday_peak(
+        raw_intraday_peak,
+        day_start_equity=state.day_start_equity,
+        current_equity=adjusted_equity,
+        peak_52w=peak_52w,
+        outlier_ratio=peak_all_outlier_ratio,
+    )
+    intraday_peak_raw = _coerce_optional_float(intraday_peak_payload.get("raw"))
+    peak_intraday = _coerce_optional_float(intraday_peak_payload.get("sanitized")) or 0.0
+    intraday_peak_outlier_filtered = bool(intraday_peak_payload.get("filtered"))
+    intraday_peak_anchor = _coerce_optional_float(intraday_peak_payload.get("anchor"))
+    intraday_peak_max_allowed = _coerce_optional_float(intraday_peak_payload.get("max_allowed"))
+    if intraday_peak_outlier_filtered and peak_intraday > 0:
+        state.equity_peak = peak_intraday
+
+    intraday_drawdown: float | None = None
+    if peak_intraday > 0:
+        intraday_drawdown = (adjusted_equity - peak_intraday) / peak_intraday
+
     max_drawdown = _coerce_positive_ratio(risk_params.get("max_drawdown"))
     max_drawdown_52w = _coerce_positive_ratio(risk_params.get("max_drawdown_52w"))
     drawdown_recovery_ratio = _coerce_recovery_ratio(risk_params.get("drawdown_recovery_ratio"), default=0.9)
@@ -1103,6 +1243,11 @@ def evaluate_intraday_guard(
         "peak_all_raw": peak_all_raw,
         "peak_all_outlier_filtered": peak_all_outlier_filtered,
         "peak_52w": peak_52w,
+        "intraday_peak_raw": intraday_peak_raw,
+        "intraday_peak_sanitized": peak_intraday if peak_intraday > 0 else None,
+        "intraday_peak_outlier_filtered": intraday_peak_outlier_filtered,
+        "intraday_peak_anchor": intraday_peak_anchor,
+        "intraday_peak_max_allowed": intraday_peak_max_allowed,
         "dd_lock_state": False,
         "market_data_errors": int(state.market_data_errors or 0),
         "order_failures": int(state.order_failures or 0),
@@ -1114,17 +1259,23 @@ def evaluate_intraday_guard(
         "ib_snapshot_stale": ib_stale,
     }
 
-    if not reasons:
+    prior_reason_list = _extract_reason_list(state.halt_reason)
+    only_prior_intraday_halt = bool(prior_reason_list) and set(prior_reason_list) == {"max_intraday_drawdown"}
+    if not reasons and intraday_peak_outlier_filtered and only_prior_intraday_halt:
+        _try_unlock_non_drawdown_halt(
+            state,
+            now=now,
+            unlock_reason="intraday_peak_outlier_filtered",
+            metrics=metrics_payload,
+            thresholds=thresholds_payload,
+            ignore_cooldown=True,
+        )
+    elif not reasons:
         _try_unlock_non_drawdown_halt(
             state,
             now=now,
             unlock_reason="cooldown_elapsed",
-            metrics={
-                "daily_loss": daily_loss,
-                "intraday_drawdown": intraday_drawdown,
-                "dd_all": dd_all,
-                "dd_52w": dd_52w,
-            },
+            metrics=metrics_payload,
             thresholds=thresholds_payload,
         )
 

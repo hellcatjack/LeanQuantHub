@@ -45,6 +45,11 @@ def test_guard_triggers_daily_loss(monkeypatch):
     session = _make_session()
     try:
         monkeypatch.setattr(trade_guard, "_load_ib_equity_snapshot", lambda _session, *, mode: {})
+        monkeypatch.setattr(
+            trade_guard,
+            "_load_positions_via_broker",
+            lambda _session, *, mode: {"SPY": 10.0},
+        )
         _seed_position(session)
         state = TradeGuardState(
             project_id=1,
@@ -325,6 +330,156 @@ def test_guard_ignores_stale_peak_all_outlier(monkeypatch):
         assert abs(float(metrics.get("peak_all_raw") or 0.0) - 1000.0) < 1e-9
         assert abs(float(metrics.get("peak_all") or 0.0) - 100.0) < 1e-9
         assert metrics.get("peak_all_outlier_filtered") is True
+    finally:
+        session.close()
+
+
+def test_guard_filters_intraday_peak_outlier_and_repairs_state(monkeypatch):
+    session = _make_session()
+    try:
+        monkeypatch.setattr(trade_guard, "_load_ib_equity_snapshot", lambda _session, *, mode: {})
+        run_date = date(2026, 1, 17)
+        session.add(
+            TradeGuardState(
+                project_id=1,
+                trade_date=run_date,
+                mode="paper",
+                status="active",
+                day_start_equity=100.0,
+                equity_peak=1000.0,
+                last_equity=100.0,
+            )
+        )
+        session.commit()
+
+        result = evaluate_intraday_guard(
+            session,
+            project_id=1,
+            mode="paper",
+            risk_params={
+                "cash_available": 95.0,
+                "max_daily_loss": -1.0,
+                "max_intraday_drawdown": 0.08,
+                "max_drawdown": 1.0,
+                "max_drawdown_52w": 1.0,
+                "peak_all_outlier_ratio": 3.0,
+            },
+            trade_date=run_date,
+        )
+
+        assert result["status"] == "active"
+        metrics = result.get("metrics") or {}
+        assert metrics.get("intraday_peak_outlier_filtered") is True
+        assert abs(float(metrics.get("intraday_peak_raw") or 0.0) - 1000.0) < 1e-9
+        assert abs(float(metrics.get("intraday_peak_sanitized") or 0.0) - 100.0) < 1e-9
+
+        refreshed = (
+            session.query(TradeGuardState)
+            .filter(
+                TradeGuardState.project_id == 1,
+                TradeGuardState.mode == "paper",
+                TradeGuardState.trade_date == run_date,
+            )
+            .one()
+        )
+        assert abs(float(refreshed.equity_peak or 0.0) - 100.0) < 1e-9
+    finally:
+        session.close()
+
+
+def test_guard_unlocks_intraday_peak_outlier_halt_immediately(monkeypatch):
+    session = _make_session()
+    try:
+        monkeypatch.setattr(trade_guard, "_load_ib_equity_snapshot", lambda _session, *, mode: {})
+        run_date = date(2026, 1, 17)
+        session.add(
+            TradeGuardState(
+                project_id=1,
+                trade_date=run_date,
+                mode="paper",
+                status="halted",
+                halt_reason={"reasons": ["max_intraday_drawdown"]},
+                day_start_equity=100.0,
+                equity_peak=1000.0,
+                last_equity=95.0,
+                cooldown_until=datetime.utcnow() + timedelta(minutes=15),
+            )
+        )
+        session.commit()
+
+        result = evaluate_intraday_guard(
+            session,
+            project_id=1,
+            mode="paper",
+            risk_params={
+                "cash_available": 95.0,
+                "max_daily_loss": -1.0,
+                "max_intraday_drawdown": 0.08,
+                "max_drawdown": 1.0,
+                "max_drawdown_52w": 1.0,
+                "peak_all_outlier_ratio": 3.0,
+            },
+            trade_date=run_date,
+        )
+
+        assert result["status"] == "active"
+        reason = result.get("reason") or {}
+        assert reason.get("unlock_reason") == "intraday_peak_outlier_filtered"
+
+        refreshed = (
+            session.query(TradeGuardState)
+            .filter(
+                TradeGuardState.project_id == 1,
+                TradeGuardState.mode == "paper",
+                TradeGuardState.trade_date == run_date,
+            )
+            .one()
+        )
+        assert refreshed.status == "active"
+        assert refreshed.cooldown_until is None
+    finally:
+        session.close()
+
+
+def test_guard_keeps_real_intraday_drawdown_blocked_with_reasonable_peak(monkeypatch):
+    session = _make_session()
+    try:
+        monkeypatch.setattr(trade_guard, "_load_ib_equity_snapshot", lambda _session, *, mode: {})
+        run_date = date(2026, 1, 17)
+        session.add(
+            TradeGuardState(
+                project_id=1,
+                trade_date=run_date,
+                mode="paper",
+                status="active",
+                day_start_equity=100.0,
+                equity_peak=120.0,
+                last_equity=120.0,
+            )
+        )
+        session.commit()
+
+        result = evaluate_intraday_guard(
+            session,
+            project_id=1,
+            mode="paper",
+            risk_params={
+                "cash_available": 95.0,
+                "max_daily_loss": -1.0,
+                "max_intraday_drawdown": 0.08,
+                "max_drawdown": 1.0,
+                "max_drawdown_52w": 1.0,
+                "peak_all_outlier_ratio": 3.0,
+            },
+            trade_date=run_date,
+        )
+
+        assert result["status"] == "halted"
+        reason = result.get("reason") or {}
+        assert "max_intraday_drawdown" in (reason.get("reasons") or [])
+        metrics = result.get("metrics") or {}
+        assert metrics.get("intraday_peak_outlier_filtered") is False
+        assert abs(float(metrics.get("intraday_peak_sanitized") or 0.0) - 120.0) < 1e-9
     finally:
         session.close()
 
@@ -721,5 +876,120 @@ def test_guard_can_rebase_equity_baseline(monkeypatch):
         assert abs(float(metrics.get("equity_adjusted") or 0.0) - 200.0) < 1e-9
         assert abs(float(metrics.get("daily_loss") or 0.0)) < 1e-9
         assert bool(metrics.get("baseline_rebased")) is True
+    finally:
+        session.close()
+
+
+def test_guard_local_fallback_uses_current_broker_positions_instead_of_lifetime_fills(monkeypatch):
+    session = _make_session()
+    try:
+        _seed_position(session)
+        run = TradeRun(project_id=1, mode="paper", status="done", params={"portfolio_value": 1000})
+        session.add(run)
+        session.flush()
+        polluted_order = TradeOrder(
+            run_id=run.id,
+            client_order_id="run-2-BIG",
+            symbol="BIG",
+            side="BUY",
+            quantity=1000,
+            status="FILLED",
+        )
+        session.add(polluted_order)
+        session.flush()
+        session.add(TradeFill(order_id=polluted_order.id, exec_id="E2", fill_quantity=1000, fill_price=500))
+        session.commit()
+
+        monkeypatch.setattr(
+            trade_guard,
+            "_load_ib_equity_snapshot",
+            lambda _session, *, mode: {"stale": True, "source": "ib"},
+        )
+        monkeypatch.setattr(
+            trade_guard,
+            "_load_positions_via_broker",
+            lambda _session, *, mode: {"SPY": 10.0},
+        )
+
+        result = evaluate_intraday_guard(
+            session,
+            project_id=1,
+            mode="paper",
+            risk_params={
+                "cash_available": 0.0,
+                "max_daily_loss": -1.0,
+                "max_intraday_drawdown": 1.0,
+                "max_drawdown": 1.0,
+                "max_drawdown_52w": 1.0,
+            },
+            price_map={"SPY": 100.0, "BIG": 500.0},
+            trade_date=date(2026, 1, 17),
+        )
+
+        metrics = result.get("metrics") or {}
+        assert result["status"] == "active"
+        assert abs(float(result.get("equity") or 0.0) - 1000.0) < 1e-9
+        assert metrics.get("required_symbols") == 1
+        assert metrics.get("priced_symbols") == 1
+    finally:
+        session.close()
+
+
+def test_guard_ignores_local_valuation_outlier_rows_in_historical_drawdown(monkeypatch):
+    session = _make_session()
+    try:
+        monkeypatch.setattr(trade_guard, "_load_ib_equity_snapshot", lambda _session, *, mode: {})
+        monkeypatch.setattr(
+            trade_guard,
+            "_load_positions_via_broker",
+            lambda _session, *, mode: {},
+        )
+        session.add(
+            TradeGuardState(
+                project_id=1,
+                trade_date=date(2026, 1, 15),
+                mode="paper",
+                status="active",
+                day_start_equity=100.0,
+                equity_peak=100.0,
+                last_equity=100.0,
+                valuation_source="ib_net_liquidation",
+            )
+        )
+        session.add(
+            TradeGuardState(
+                project_id=1,
+                trade_date=date(2026, 1, 16),
+                mode="paper",
+                status="active",
+                day_start_equity=100.0,
+                equity_peak=1000.0,
+                last_equity=1000.0,
+                valuation_source="local:lean_bridge",
+            )
+        )
+        session.commit()
+
+        result = evaluate_intraday_guard(
+            session,
+            project_id=1,
+            mode="paper",
+            risk_params={
+                "cash_available": 95.0,
+                "max_daily_loss": -1.0,
+                "max_intraday_drawdown": 1.0,
+                "max_drawdown": 0.08,
+                "max_drawdown_52w": 0.12,
+                "peak_all_outlier_ratio": 3.0,
+            },
+            trade_date=date(2026, 1, 17),
+        )
+
+        assert result["status"] == "active"
+        metrics = result.get("metrics") or {}
+        assert abs(float(metrics.get("dd_all") or 0.0) - 0.05) < 1e-9
+        assert abs(float(metrics.get("dd_52w") or 0.0) - 0.05) < 1e-9
+        assert abs(float(metrics.get("peak_all") or 0.0) - 100.0) < 1e-9
+        assert abs(float(metrics.get("peak_52w") or 0.0) - 100.0) < 1e-9
     finally:
         session.close()
