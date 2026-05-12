@@ -1604,8 +1604,14 @@ def _build_step_plan(template: PreTradeTemplate | None) -> list[dict[str, Any]]:
     return _normalize_step_plan(build_default_steps())
 
 
-def _create_steps(session, run: PreTradeRun, template: PreTradeTemplate | None) -> None:
-    step_plan = _build_step_plan(template)
+def _create_steps(
+    session,
+    run: PreTradeRun,
+    template: PreTradeTemplate | None,
+    *,
+    step_plan: list[dict[str, Any]] | None = None,
+) -> None:
+    step_plan = _normalize_step_plan(step_plan) if step_plan is not None else _build_step_plan(template)
     order_index = 0
     for item in step_plan:
         key = str(item.get("key") or "").strip()
@@ -1631,13 +1637,26 @@ def create_pretrade_run_for_project(
     *,
     project_id: int,
     template_id: int | None = None,
+    params: dict[str, Any] | None = None,
+    window_start: datetime | None = None,
+    window_end: datetime | None = None,
+    deadline_at: datetime | None = None,
+    step_plan: list[dict[str, Any]] | None = None,
 ) -> PreTradeRun:
     template = session.get(PreTradeTemplate, template_id) if template_id else None
-    run = PreTradeRun(project_id=project_id, status="queued", params={})
+    run = PreTradeRun(
+        project_id=project_id,
+        template_id=template.id if template else None,
+        status="queued",
+        params=params or {},
+        window_start=window_start,
+        window_end=window_end,
+        deadline_at=deadline_at,
+    )
     session.add(run)
     session.commit()
     session.refresh(run)
-    _create_steps(session, run, template)
+    _create_steps(session, run, template, step_plan=step_plan)
     return run
 
 

@@ -4,9 +4,20 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 
 from app.db import get_session
 from app.models import AutoWeeklyJob, Project
-from app.schemas import AutoWeeklyJobCreate, AutoWeeklyJobOut
+from app.schemas import (
+    AutoWeeklyJobCreate,
+    AutoWeeklyJobOut,
+    WeeklyRebalanceOut,
+    WeeklyRebalanceRequest,
+    WeeklyRebalanceStatusOut,
+)
 from app.services.audit_log import record_audit
 from app.services.automation_runner import run_auto_weekly_job
+from app.services.weekly_rebalance import (
+    execute_weekly_rebalance,
+    get_weekly_rebalance_status,
+    prepare_weekly_rebalance,
+)
 
 router = APIRouter(prefix="/api/automation", tags=["automation"])
 
@@ -59,3 +70,32 @@ def create_weekly_job(payload: AutoWeeklyJobCreate, background_tasks: Background
         session.commit()
     background_tasks.add_task(run_auto_weekly_job, job.id)
     return job
+
+
+@router.post("/weekly-rebalance/prepare", response_model=WeeklyRebalanceOut)
+def prepare_weekly_rebalance_route(payload: WeeklyRebalanceRequest):
+    result = prepare_weekly_rebalance(
+        project_id=payload.project_id,
+        force=payload.force,
+    )
+    return WeeklyRebalanceOut(**result.__dict__)
+
+
+@router.get("/weekly-rebalance/status", response_model=WeeklyRebalanceStatusOut)
+def weekly_rebalance_status_route(
+    project_id: int | None = Query(default=None),
+    limit: int = Query(20, ge=1, le=200),
+):
+    return WeeklyRebalanceStatusOut(
+        **get_weekly_rebalance_status(project_id=project_id, limit=limit)
+    )
+
+
+@router.post("/weekly-rebalance/execute", response_model=WeeklyRebalanceOut)
+def execute_weekly_rebalance_route(payload: WeeklyRebalanceRequest):
+    result = execute_weekly_rebalance(
+        project_id=payload.project_id,
+        force=payload.force,
+        dry_run=payload.dry_run,
+    )
+    return WeeklyRebalanceOut(**result.__dict__)

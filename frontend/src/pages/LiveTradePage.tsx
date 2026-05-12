@@ -217,6 +217,73 @@ interface TradeRunExecuteOut {
   dry_run: boolean;
 }
 
+export type WeeklyRebalancePhase = "prepare" | "execute";
+
+interface WeeklyRebalanceSchedule {
+  phase: string;
+  timer_unit: string;
+  service_unit: string;
+  on_calendar: string;
+  description?: string | null;
+  active_state?: string | null;
+  sub_state?: string | null;
+  load_state?: string | null;
+  unit_file_state?: string | null;
+  next_elapse_at?: string | null;
+  last_trigger_at?: string | null;
+  error?: string | null;
+}
+
+interface WeeklyRebalanceHistoryItem {
+  project_id?: number | null;
+  week_key?: string | null;
+  phase?: string | null;
+  pretrade_run_id?: number | null;
+  pretrade_status?: string | null;
+  pretrade_message?: string | null;
+  pretrade_created_at?: string | null;
+  pretrade_started_at?: string | null;
+  pretrade_ended_at?: string | null;
+  pretrade_updated_at?: string | null;
+  trade_run_id?: number | null;
+  trade_status?: string | null;
+  trade_message?: string | null;
+  trade_created_at?: string | null;
+  trade_started_at?: string | null;
+  trade_ended_at?: string | null;
+  trade_updated_at?: string | null;
+  attempt_id?: number | null;
+  attempt_phase?: string | null;
+  attempt_status?: string | null;
+  attempt_message?: string | null;
+  attempt_created_at?: string | null;
+  attempt_started_at?: string | null;
+  attempt_ended_at?: string | null;
+  notification_sent?: boolean | null;
+  weekly_rebalance?: Record<string, any> | null;
+  trade_weekly_rebalance?: Record<string, any> | null;
+  attempt_weekly_rebalance?: Record<string, any> | null;
+}
+
+export interface WeeklyRebalanceStatus {
+  project_id?: number | null;
+  generated_at: string;
+  schedules: WeeklyRebalanceSchedule[];
+  history: WeeklyRebalanceHistoryItem[];
+}
+
+interface WeeklyRebalanceActionOut {
+  project_id: number;
+  phase: string;
+  status: string;
+  message?: string | null;
+  week_key: string;
+  pretrade_run_id?: number | null;
+  trade_run_id?: number | null;
+  trade_status?: string | null;
+  notification_sent: boolean;
+}
+
 interface TradeOrder {
   id: number;
   run_id?: number | null;
@@ -784,6 +851,265 @@ export const TradeIntentMismatchCard = ({
   );
 };
 
+interface WeeklyRebalancePanelProps {
+  selectedProjectId: string;
+  status: WeeklyRebalanceStatus | null;
+  loading: boolean;
+  actionLoading: WeeklyRebalancePhase | null;
+  error: string;
+  result: string;
+  force: boolean;
+  dryRun: boolean;
+  onForceChange: (value: boolean) => void;
+  onDryRunChange: (value: boolean) => void;
+  onRefresh: () => void;
+  onTrigger: (phase: WeeklyRebalancePhase) => void;
+  formatStatus: (value?: string | null) => string;
+  formatDateTime: (value?: string | null) => string;
+}
+
+export const WeeklyRebalancePanel = ({
+  selectedProjectId,
+  status,
+  loading,
+  actionLoading,
+  error,
+  result,
+  force,
+  dryRun,
+  onForceChange,
+  onDryRunChange,
+  onRefresh,
+  onTrigger,
+  formatStatus,
+  formatDateTime,
+}: WeeklyRebalancePanelProps) => {
+  const { t } = useI18n();
+  const schedules = status?.schedules || [];
+  const history = status?.history || [];
+  const actionDisabled = !selectedProjectId || loading || actionLoading !== null;
+  const formatPhase = (phase?: string | null) => {
+    const normalized = String(phase || "").toLowerCase();
+    const key = `trade.weeklyRebalance.phase.${normalized}`;
+    const translated = t(key);
+    return translated === key ? phase || t("common.none") : translated;
+  };
+  const formatMaybeDateTime = (value?: string | null) => {
+    if (!value) {
+      return t("common.none");
+    }
+    const parsed = Date.parse(value);
+    if (Number.isNaN(parsed)) {
+      return value;
+    }
+    return formatDateTime(new Date(parsed).toISOString());
+  };
+  const formatHistoryStatus = (value?: string | null) =>
+    value ? formatStatus(value) : t("common.none");
+  return (
+    <div
+      className="card-subsection"
+      style={{ marginTop: "12px" }}
+      data-testid="weekly-rebalance-panel"
+    >
+      <div
+        style={{
+          display: "flex",
+          gap: "12px",
+          justifyContent: "space-between",
+          alignItems: "flex-start",
+          flexWrap: "wrap",
+        }}
+      >
+        <div>
+          <div className="form-label">{t("trade.weeklyRebalance.title")}</div>
+          <div className="form-hint">{t("trade.weeklyRebalance.meta")}</div>
+        </div>
+        <button
+          type="button"
+          className="button-secondary"
+          onClick={onRefresh}
+          disabled={loading || !selectedProjectId}
+        >
+          {loading ? t("common.actions.loading") : t("common.actions.refresh")}
+        </button>
+      </div>
+      <div
+        style={{
+          display: "flex",
+          gap: "14px",
+          flexWrap: "wrap",
+          alignItems: "center",
+          marginTop: "12px",
+        }}
+      >
+        <label className="checkbox-row" style={{ marginTop: 0 }}>
+          <input
+            type="checkbox"
+            checked={force}
+            onChange={(event) => onForceChange(event.target.checked)}
+          />
+          <span>{t("trade.weeklyRebalance.force")}</span>
+        </label>
+        <label className="checkbox-row" style={{ marginTop: 0 }}>
+          <input
+            type="checkbox"
+            checked={dryRun}
+            onChange={(event) => onDryRunChange(event.target.checked)}
+          />
+          <span>{t("trade.weeklyRebalance.dryRun")}</span>
+        </label>
+        <button
+          type="button"
+          className="button-secondary"
+          onClick={() => onTrigger("prepare")}
+          disabled={actionDisabled}
+        >
+          {actionLoading === "prepare"
+            ? t("common.actions.loading")
+            : t("trade.weeklyRebalance.manualPrepare")}
+        </button>
+        <button
+          type="button"
+          className="button-primary"
+          onClick={() => onTrigger("execute")}
+          disabled={actionDisabled}
+        >
+          {actionLoading === "execute"
+            ? t("common.actions.loading")
+            : t("trade.weeklyRebalance.manualExecute")}
+        </button>
+      </div>
+      {!selectedProjectId ? (
+        <div className="form-hint" style={{ marginTop: "8px" }}>
+          {t("trade.weeklyRebalance.projectRequired")}
+        </div>
+      ) : null}
+      {error ? (
+        <div className="form-hint danger" style={{ marginTop: "8px" }}>
+          {error}
+        </div>
+      ) : null}
+      {result ? (
+        <div className="form-success" style={{ marginTop: "8px" }}>
+          {result}
+        </div>
+      ) : null}
+      <div className="table-scroll" style={{ marginTop: "12px" }}>
+        <table className="table">
+          <thead>
+            <tr>
+              <th>{t("trade.weeklyRebalance.schedule.phase")}</th>
+              <th>{t("trade.weeklyRebalance.schedule.unit")}</th>
+              <th>{t("trade.weeklyRebalance.schedule.status")}</th>
+              <th>{t("trade.weeklyRebalance.schedule.next")}</th>
+              <th>{t("trade.weeklyRebalance.schedule.last")}</th>
+              <th>{t("trade.weeklyRebalance.schedule.error")}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {schedules.length ? (
+              schedules.map((item) => (
+                <tr key={item.timer_unit}>
+                  <td>{formatPhase(item.phase)}</td>
+                  <td>
+                    <div>{item.timer_unit}</div>
+                    <div className="muted">{item.on_calendar}</div>
+                  </td>
+                  <td>
+                    {formatHistoryStatus(item.active_state)}
+                    {item.sub_state ? ` / ${item.sub_state}` : ""}
+                  </td>
+                  <td>{formatMaybeDateTime(item.next_elapse_at)}</td>
+                  <td>{formatMaybeDateTime(item.last_trigger_at)}</td>
+                  <td>{item.error || t("common.none")}</td>
+                </tr>
+              ))
+            ) : (
+              <tr>
+                <td colSpan={6} className="empty-state">
+                  {t("trade.weeklyRebalance.schedule.empty")}
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      <div className="table-scroll" style={{ marginTop: "12px" }}>
+        <table className="table">
+          <thead>
+            <tr>
+              <th>{t("trade.weeklyRebalance.history.week")}</th>
+              <th>{t("trade.weeklyRebalance.history.phase")}</th>
+              <th>{t("trade.weeklyRebalance.history.pretrade")}</th>
+              <th>{t("trade.weeklyRebalance.history.trade")}</th>
+              <th>{t("trade.weeklyRebalance.history.time")}</th>
+              <th>{t("trade.weeklyRebalance.history.message")}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {history.length ? (
+              history.map((item) => (
+                <tr
+                  key={`${item.week_key || "week"}-${item.pretrade_run_id || "pre"}-${item.trade_run_id || "trade"}-${item.attempt_id || "attempt"}`}
+                >
+                  <td>{item.week_key || t("common.none")}</td>
+                  <td>
+                    <div>{formatPhase(item.attempt_phase || item.phase)}</div>
+                    <div className="muted">{formatHistoryStatus(item.attempt_status)}</div>
+                  </td>
+                  <td>
+                    {item.pretrade_run_id ? (
+                      <IdChip
+                        label={t("trade.weeklyRebalance.history.pretradeShort")}
+                        value={item.pretrade_run_id}
+                      />
+                    ) : (
+                      t("common.none")
+                    )}
+                    <div className="muted">{formatHistoryStatus(item.pretrade_status)}</div>
+                  </td>
+                  <td>
+                    {item.trade_run_id ? (
+                      <IdChip label={t("trade.id.run")} value={item.trade_run_id} />
+                    ) : (
+                      t("common.none")
+                    )}
+                    <div className="muted">{formatHistoryStatus(item.trade_status)}</div>
+                  </td>
+                  <td>
+                    <div>
+                      {formatMaybeDateTime(item.attempt_created_at || item.pretrade_created_at)}
+                    </div>
+                    <div className="muted">{formatMaybeDateTime(item.trade_created_at)}</div>
+                  </td>
+                  <td>
+                    {item.attempt_message ||
+                      item.trade_message ||
+                      item.pretrade_message ||
+                      t("common.none")}
+                  </td>
+                </tr>
+              ))
+            ) : (
+              <tr>
+                <td colSpan={6} className="empty-state">
+                  {t("trade.weeklyRebalance.history.empty")}
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      <div className="form-hint" style={{ marginTop: "8px" }}>
+        {t("trade.weeklyRebalance.updatedAt", {
+          at: status?.generated_at ? formatMaybeDateTime(status.generated_at) : t("common.none"),
+        })}
+      </div>
+    </div>
+  );
+};
+
 export default function LiveTradePage() {
   const { t, formatDateTime, getMessage } = useI18n();
   const [ibSettings, setIbSettings] = useState<IBSettings | null>(null);
@@ -946,6 +1272,15 @@ export default function LiveTradePage() {
   const [guardLoading, setGuardLoading] = useState(false);
   const [guardError, setGuardError] = useState("");
   const [tradeError, setTradeError] = useState("");
+  const [weeklyRebalanceStatus, setWeeklyRebalanceStatus] =
+    useState<WeeklyRebalanceStatus | null>(null);
+  const [weeklyRebalanceLoading, setWeeklyRebalanceLoading] = useState(false);
+  const [weeklyRebalanceError, setWeeklyRebalanceError] = useState("");
+  const [weeklyRebalanceResult, setWeeklyRebalanceResult] = useState("");
+  const [weeklyRebalanceActionLoading, setWeeklyRebalanceActionLoading] =
+    useState<WeeklyRebalancePhase | null>(null);
+  const [weeklyRebalanceForce, setWeeklyRebalanceForce] = useState(false);
+  const [weeklyRebalanceDryRun, setWeeklyRebalanceDryRun] = useState(false);
   const [loading, setLoading] = useState(false);
   const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(true);
   const [mainTab, setMainTab] = useState<"overview" | "pipeline">("overview");
@@ -2143,6 +2478,79 @@ export default function LiveTradePage() {
     }
   };
 
+  const loadWeeklyRebalanceStatus = async (projectId: string = selectedProjectId) => {
+    const normalizedProjectId = Number(projectId);
+    if (!Number.isFinite(normalizedProjectId) || normalizedProjectId <= 0) {
+      setWeeklyRebalanceStatus(null);
+      setWeeklyRebalanceError("");
+      return;
+    }
+    setWeeklyRebalanceLoading(true);
+    try {
+      const res = await api.get<WeeklyRebalanceStatus>(
+        "/api/automation/weekly-rebalance/status",
+        {
+          params: { project_id: normalizedProjectId, limit: 20 },
+        }
+      );
+      setWeeklyRebalanceStatus(res.data);
+      setWeeklyRebalanceError("");
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("trade.weeklyRebalance.loadError");
+      setWeeklyRebalanceError(String(detail));
+    } finally {
+      setWeeklyRebalanceLoading(false);
+    }
+  };
+
+  const triggerWeeklyRebalance = async (phase: WeeklyRebalancePhase) => {
+    const normalizedProjectId = Number(selectedProjectId);
+    setWeeklyRebalanceError("");
+    setWeeklyRebalanceResult("");
+    if (!Number.isFinite(normalizedProjectId) || normalizedProjectId <= 0) {
+      setWeeklyRebalanceError(t("trade.weeklyRebalance.projectRequired"));
+      return;
+    }
+    if (
+      phase === "execute" &&
+      !weeklyRebalanceDryRun &&
+      !window.confirm(t("trade.weeklyRebalance.confirmExecute"))
+    ) {
+      return;
+    }
+    setWeeklyRebalanceActionLoading(phase);
+    try {
+      const payload = {
+        project_id: normalizedProjectId,
+        force: weeklyRebalanceForce,
+        dry_run: phase === "execute" ? weeklyRebalanceDryRun : false,
+      };
+      const res = await apiLong.post<WeeklyRebalanceActionOut>(
+        `/api/automation/weekly-rebalance/${phase}`,
+        payload
+      );
+      const phaseLabel = t(`trade.weeklyRebalance.phase.${phase}`);
+      setWeeklyRebalanceResult(
+        t("trade.weeklyRebalance.actionResult", {
+          phase: phaseLabel,
+          status: formatStatus(res.data?.status),
+          pretrade: res.data?.pretrade_run_id ? `#${res.data.pretrade_run_id}` : t("common.none"),
+          trade: res.data?.trade_run_id ? `#${res.data.trade_run_id}` : t("common.none"),
+          message: res.data?.message || t("common.none"),
+        })
+      );
+      await Promise.all([
+        loadWeeklyRebalanceStatus(String(normalizedProjectId)),
+        loadTradeActivity(),
+      ]);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("trade.weeklyRebalance.actionError");
+      setWeeklyRebalanceError(String(detail));
+    } finally {
+      setWeeklyRebalanceActionLoading(null);
+    }
+  };
+
   const cancelTradeOrder = async (order: TradeOrder) => {
       const orderId = Number(order?.id || 0);
       if (!Number.isFinite(orderId) || orderId <= 0) {
@@ -2603,6 +3011,7 @@ export default function LiveTradePage() {
           loadTradeActivity(ordersPage, ordersPageSize),
           loadTradeReceipts(receiptsPage, receiptsPageSize),
           loadIbHistoryJobs(),
+          selectedProjectId ? loadWeeklyRebalanceStatus(selectedProjectId) : Promise.resolve(),
         ]);
       },
       snapshot: async () => {
@@ -2683,6 +3092,16 @@ export default function LiveTradePage() {
 
   useEffect(() => {
     loadLatestSnapshot(selectedProjectId);
+  }, [selectedProjectId]);
+
+  useEffect(() => {
+    if (!selectedProjectId) {
+      setWeeklyRebalanceStatus(null);
+      setWeeklyRebalanceError("");
+      setWeeklyRebalanceResult("");
+      return;
+    }
+    loadWeeklyRebalanceStatus(selectedProjectId);
   }, [selectedProjectId]);
 
   useEffect(() => {
@@ -5501,6 +5920,22 @@ export default function LiveTradePage() {
             </div>
           </div>
         </div>
+        <WeeklyRebalancePanel
+          selectedProjectId={selectedProjectId}
+          status={weeklyRebalanceStatus}
+          loading={weeklyRebalanceLoading}
+          actionLoading={weeklyRebalanceActionLoading}
+          error={weeklyRebalanceError}
+          result={weeklyRebalanceResult}
+          force={weeklyRebalanceForce}
+          dryRun={weeklyRebalanceDryRun}
+          onForceChange={setWeeklyRebalanceForce}
+          onDryRunChange={setWeeklyRebalanceDryRun}
+          onRefresh={() => loadWeeklyRebalanceStatus(selectedProjectId)}
+          onTrigger={triggerWeeklyRebalance}
+          formatStatus={formatStatus}
+          formatDateTime={formatDateTime}
+        />
         {renderDecisionBasisBlock(executionDecisionBasis, {
           testIdPrefix: "trade-decision-basis-execution",
         })}

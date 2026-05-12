@@ -1,0 +1,10 @@
+[Unit]
+Description=Run StockLean Weekly Rebalance Prepare
+
+[Timer]
+OnCalendar=Mon *-*-* 08:00:00
+Persistent=true
+Unit=stocklean-weekly-rebalance-prepare.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=StockLean Weekly Rebalance Prepare
+After=stocklean-backend.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/app/stocklean
+Environment=STOCKLEAN_ROOT=/app/stocklean
+Environment=STOCKLEAN_BACKEND_URL=http://127.0.0.1:8021
+Environment=STOCKLEAN_PROJECT_ID=18
+ExecStart=/app/stocklean/scripts/weekly_rebalance.sh prepare

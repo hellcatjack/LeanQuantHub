@@ -3524,6 +3524,12 @@ a {
   padding: 8px 10px;
 }
 
+.muted {
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
 .id-chip {
   display: inline-flex;
   align-items: center;

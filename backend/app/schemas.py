@@ -1316,6 +1316,77 @@ class AutoWeeklyJobOut(BaseModel):
         from_attributes = True
 
 
+class WeeklyRebalanceRequest(BaseModel):
+    project_id: int
+    force: bool = False
+    dry_run: bool = False
+
+
+class WeeklyRebalanceOut(BaseModel):
+    project_id: int
+    phase: str
+    status: str
+    message: str | None = None
+    week_key: str
+    pretrade_run_id: int | None = None
+    trade_run_id: int | None = None
+    trade_status: str | None = None
+    notification_sent: bool = False
+
+
+class WeeklyRebalanceScheduleOut(BaseModel):
+    phase: str
+    timer_unit: str
+    service_unit: str
+    on_calendar: str
+    description: str | None = None
+    active_state: str | None = None
+    sub_state: str | None = None
+    load_state: str | None = None
+    unit_file_state: str | None = None
+    next_elapse_at: str | None = None
+    last_trigger_at: str | None = None
+    error: str | None = None
+
+
+class WeeklyRebalanceHistoryItemOut(BaseModel):
+    project_id: int | None = None
+    week_key: str | None = None
+    phase: str | None = None
+    pretrade_run_id: int | None = None
+    pretrade_status: str | None = None
+    pretrade_message: str | None = None
+    pretrade_created_at: str | None = None
+    pretrade_started_at: str | None = None
+    pretrade_ended_at: str | None = None
+    pretrade_updated_at: str | None = None
+    trade_run_id: int | None = None
+    trade_status: str | None = None
+    trade_message: str | None = None
+    trade_created_at: str | None = None
+    trade_started_at: str | None = None
+    trade_ended_at: str | None = None
+    trade_updated_at: str | None = None
+    attempt_id: int | None = None
+    attempt_phase: str | None = None
+    attempt_status: str | None = None
+    attempt_message: str | None = None
+    attempt_created_at: str | None = None
+    attempt_started_at: str | None = None
+    attempt_ended_at: str | None = None
+    notification_sent: bool | None = None
+    weekly_rebalance: dict | None = None
+    trade_weekly_rebalance: dict | None = None
+    attempt_weekly_rebalance: dict | None = None
+
+
+class WeeklyRebalanceStatusOut(BaseModel):
+    project_id: int | None = None
+    generated_at: str
+    schedules: list[WeeklyRebalanceScheduleOut] = Field(default_factory=list)
+    history: list[WeeklyRebalanceHistoryItemOut] = Field(default_factory=list)
+
+
 class PreTradeTemplateCreate(BaseModel):
     project_id: int | None = None
     name: str

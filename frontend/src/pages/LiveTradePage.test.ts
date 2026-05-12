@@ -10,6 +10,8 @@ import LiveTradePage, {
   resolveAccountPositionsResponseState,
   resolveGatewayTradeBlockState,
   TradeIntentMismatchCard,
+  WeeklyRebalancePanel,
+  type WeeklyRebalanceStatus,
   resolveSessionByEasternTime,
 } from "./LiveTradePage";
 
@@ -114,6 +116,67 @@ describe("LiveTradePage", () => {
     expect(resolveGatewayTradeBlockState({ state: "recovering" })).toBeNull();
     expect(isGatewayRuntimeRecovering({ state: "recovering" })).toBe(true);
     expect(isGatewayRuntimeRecovering({ state: "healthy" })).toBe(false);
+  });
+
+  it("renders weekly rebalance schedule and manual controls", () => {
+    const status: WeeklyRebalanceStatus = {
+      project_id: 18,
+      generated_at: "2026-05-12T12:00:00Z",
+      schedules: [
+        {
+          phase: "prepare",
+          timer_unit: "stocklean-weekly-rebalance-prepare.timer",
+          service_unit: "stocklean-weekly-rebalance-prepare.service",
+          on_calendar: "Mon *-*-* 08:00:00",
+          active_state: "active",
+          sub_state: "waiting",
+          next_elapse_at: "2026-05-18T12:00:00Z",
+          last_trigger_at: "2026-05-11T12:00:00Z",
+        },
+      ],
+      history: [
+        {
+          project_id: 18,
+          week_key: "2026-W20",
+          phase: "execute",
+          pretrade_run_id: 11,
+          pretrade_status: "success",
+          pretrade_created_at: "2026-05-11T12:00:00Z",
+          trade_run_id: 22,
+          trade_status: "running",
+          trade_created_at: "2026-05-11T13:35:00Z",
+        },
+      ],
+    };
+    const html = ReactDOMServer.renderToString(
+      React.createElement(
+        I18nProvider,
+        null,
+        React.createElement(WeeklyRebalancePanel, {
+          selectedProjectId: "18",
+          status,
+          loading: false,
+          actionLoading: null,
+          error: "",
+          result: "",
+          force: false,
+          dryRun: false,
+          onForceChange: () => undefined,
+          onDryRunChange: () => undefined,
+          onRefresh: () => undefined,
+          onTrigger: () => undefined,
+          formatStatus: (value) => String(value || "-"),
+          formatDateTime: (value) => String(value || "-"),
+        })
+      )
+    );
+
+    expect(html).toContain("周度自动调仓");
+    expect(html).toContain("stocklean-weekly-rebalance-prepare.timer");
+    expect(html).toContain("手工运行 PreTrade");
+    expect(html).toContain("2026-W20");
+    expect(html).toContain("#11");
+    expect(html).toContain("#22");
   });
 
   it("renders market snapshot card", () => {

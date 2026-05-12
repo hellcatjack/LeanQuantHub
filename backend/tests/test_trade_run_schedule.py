@@ -99,6 +99,40 @@ def test_create_pretrade_run_for_project_creates_steps():
         session.close()
 
 
+def test_create_pretrade_run_for_project_accepts_step_plan_override():
+    Session = _make_session_factory()
+    session = Session()
+    try:
+        project = Project(name="pretrade-custom-plan", description="")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        run = pretrade_runner.create_pretrade_run_for_project(
+            session,
+            project_id=project.id,
+            params={"weekly_rebalance": {"week_key": "2026-W20"}},
+            step_plan=[
+                {"key": "calendar_refresh", "enabled": True, "params": {}},
+                {"key": "trade_execute", "enabled": False, "params": {}},
+            ],
+        )
+        steps = (
+            session.query(PreTradeStep)
+            .filter(PreTradeStep.run_id == run.id)
+            .order_by(PreTradeStep.step_order.asc())
+            .all()
+        )
+
+        assert (run.params or {}).get("weekly_rebalance", {}).get("week_key") == "2026-W20"
+        assert [(step.step_key, step.status) for step in steps] == [
+            ("calendar_refresh", "queued"),
+            ("trade_execute", "skipped"),
+        ]
+    finally:
+        session.close()
+
+
 def test_apply_decision_snapshot_db_timeouts_for_mysql_session():
     executed: list[tuple[str, dict[str, int] | None]] = []
 
