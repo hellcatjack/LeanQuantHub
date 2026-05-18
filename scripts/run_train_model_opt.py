@@ -9,6 +9,8 @@ from typing import Dict
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
+from app.services.defensive_policy import DEFAULT_BENCHMARK, DEFAULT_DEFENSIVE_BASKET
+
 API = "http://127.0.0.1:8021"
 PROJECT_ID = 18
 START = "2020-01-01"
@@ -32,7 +34,8 @@ BASE_PARAMS: Dict[str, str] = {
     "max_drawdown_52w": "0.15",
     "risk_off_mode": "defensive",
     "risk_off_pick": "lowest_vol",
-    "risk_off_symbols": "SHY,IEF,GLD,TLT",
+    "benchmark": DEFAULT_BENCHMARK,
+    "risk_off_symbols": DEFAULT_DEFENSIVE_BASKET,
     "initial_cash": "30000.0",
     "fee_bps": "10.0",
 }
@@ -94,6 +97,7 @@ def build_payload(train_job_id: int, params: Dict[str, float]) -> dict:
         "project_id": PROJECT_ID,
         "params": {
             "pipeline_train_job_id": train_job_id,
+            "benchmark": DEFAULT_BENCHMARK,
             "algorithm_parameters": algorithm_parameters,
         },
     }

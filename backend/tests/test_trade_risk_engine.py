@@ -76,3 +76,26 @@ def test_risk_min_cash_buffer_ratio_blocks():
     )
     assert ok is False
     assert any(r.startswith("min_cash_buffer_ratio") for r in reasons)
+
+
+def test_risk_projected_cash_blocks_buy_cost_over_available_cash_without_sell_offset():
+    ok, blocked, reasons = evaluate_orders(
+        [
+            {"symbol": "A", "side": "SELL", "quantity": 100, "price": 10},
+            {"symbol": "B", "side": "BUY", "quantity": 11, "price": 100},
+        ],
+        max_order_notional=None,
+        max_position_ratio=None,
+        portfolio_value=10_000,
+        max_total_notional=None,
+        max_symbols=None,
+        cash_available=1000,
+        min_cash_buffer_ratio=None,
+        enforce_cash_budget=True,
+        cash_buffer_ratio=0.0,
+        buy_cost_buffer_bps=0.0,
+    )
+
+    assert ok is False
+    assert blocked and blocked[0]["symbol"] == "B"
+    assert reasons == ["cash_budget"]

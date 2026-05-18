@@ -74,6 +74,25 @@ PROBE_HARD_TIMEOUT_SECONDS = max(
     float(getattr(settings, "ib_gateway_runtime_probe_hard_timeout_seconds", 1.5) or 1.5),
     0.5,
 )
+HEALTHY_PROBE_INTERVAL_SECONDS = max(
+    int(getattr(settings, "ib_gateway_watchdog_healthy_probe_interval_seconds", 600) or 600),
+    60,
+)
+GATEWAY_CPU_WATCHDOG_ENABLED = bool(
+    getattr(settings, "ib_gateway_cpu_watchdog_enabled", True)
+)
+GATEWAY_CPU_HOT_THRESHOLD_PERCENT = max(
+    float(getattr(settings, "ib_gateway_cpu_hot_threshold_percent", 75.0) or 75.0),
+    1.0,
+)
+GATEWAY_CPU_HOT_CONSECUTIVE_THRESHOLD = max(
+    int(getattr(settings, "ib_gateway_cpu_hot_consecutive_threshold", 2) or 2),
+    1,
+)
+SNAPSHOT_STALE_SECONDS = max(
+    int(getattr(settings, "ib_gateway_runtime_snapshot_stale_seconds", 120) or 120),
+    30,
+)
 RECOVERY_QUIET_PERIOD_SECONDS = max(
     int(getattr(settings, "ib_gateway_recovery_quiet_period_seconds", 240) or 240),
     30,
@@ -138,6 +157,33 @@ def _recovery_quiet_period_active(previous_payload: dict[str, object], *, now: d
     return (now - recovered_at).total_seconds() < RECOVERY_QUIET_PERIOD_SECONDS
 
 
+def _timestamp_is_recent(previous_payload: dict[str, object], key: str, *, now: datetime) -> bool:
+    parsed = _parse_iso(previous_payload.get(key))
+    if parsed is None:
+        return False
+    return (now - parsed).total_seconds() <= SNAPSHOT_STALE_SECONDS
+
+
+def _should_skip_direct_probe(previous_payload: dict[str, object], *, now: datetime) -> bool:
+    if str(previous_payload.get("state") or "").strip().lower() != "healthy":
+        return False
+    if str(previous_payload.get("last_probe_result") or "").strip().lower() != "success":
+        return False
+    if int(previous_payload.get("pending_command_count") or 0) > 0:
+        return False
+
+    last_probe_at = _parse_iso(previous_payload.get("last_probe_at"))
+    if last_probe_at is None:
+        return False
+    if (now - last_probe_at).total_seconds() > HEALTHY_PROBE_INTERVAL_SECONDS:
+        return False
+
+    return all(
+        _timestamp_is_recent(previous_payload, key, now=now)
+        for key in ("last_positions_at", "last_open_orders_at", "last_account_summary_at")
+    )
+
+
 def _record_recovery_audit(session, *, action: str, runtime_health: dict[str, object]) -> None:
     if session is None or not hasattr(session, "add"):
         return
@@ -172,6 +218,108 @@ def _systemd_restart_gateway(*, service_name: str, runner=subprocess.run) -> Non
         ["systemctl", "--user", "restart", "--no-block", service_name],
         check=False,
     )
+
+
+def _parse_systemd_show(stdout: str) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for raw_line in str(stdout or "").splitlines():
+        if "=" not in raw_line:
+            continue
+        key, value = raw_line.split("=", 1)
+        parsed[key.strip()] = value.strip()
+    return parsed
+
+
+def _parse_int(value: object) -> int | None:
+    try:
+        parsed = int(str(value or "").strip())
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _collect_gateway_process_probe(
+    *,
+    service_name: str,
+    previous_payload: dict[str, object],
+    now: datetime,
+    subprocess_run=subprocess.run,
+) -> dict[str, object] | None:
+    if not GATEWAY_CPU_WATCHDOG_ENABLED:
+        return None
+
+    sampled_at = _iso_z(now)
+    try:
+        result = subprocess_run(
+            [
+                "systemctl",
+                "--user",
+                "show",
+                service_name,
+                "-p",
+                "MainPID",
+                "-p",
+                "CPUUsageNSec",
+                "-p",
+                "MemoryCurrent",
+                "-p",
+                "TasksCurrent",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except Exception as exc:
+        logger.exception("Failed to collect gateway process CPU probe")
+        return {
+            "ok": False,
+            "sampled_at": sampled_at,
+            "error": f"systemctl_show_failed:{exc.__class__.__name__}",
+        }
+
+    if int(getattr(result, "returncode", 1) or 0) != 0:
+        return {
+            "ok": False,
+            "sampled_at": sampled_at,
+            "error": "systemctl_show_failed",
+        }
+
+    props = _parse_systemd_show(getattr(result, "stdout", ""))
+    main_pid = _parse_int(props.get("MainPID"))
+    cpu_usage_nsec = _parse_int(props.get("CPUUsageNSec"))
+    memory_current = _parse_int(props.get("MemoryCurrent"))
+    tasks_current = _parse_int(props.get("TasksCurrent"))
+
+    previous_at = _parse_iso(previous_payload.get("gateway_cpu_sample_at"))
+    previous_usage = _parse_int(previous_payload.get("gateway_cpu_usage_nsec"))
+    previous_hot_count = _parse_int(previous_payload.get("gateway_cpu_hot_count")) or 0
+
+    elapsed_seconds: float | None = None
+    cpu_percent: float | None = None
+    if previous_at is not None and previous_usage is not None and cpu_usage_nsec is not None:
+        elapsed_seconds = max(0.0, (now - previous_at).total_seconds())
+        delta_nsec = int(cpu_usage_nsec) - int(previous_usage)
+        if elapsed_seconds > 0 and delta_nsec >= 0:
+            cpu_percent = round((float(delta_nsec) / (elapsed_seconds * 1_000_000_000.0)) * 100.0, 2)
+
+    sample_hot = cpu_percent is not None and cpu_percent >= GATEWAY_CPU_HOT_THRESHOLD_PERCENT
+    hot_count = previous_hot_count + 1 if sample_hot else 0
+    cpu_hot = hot_count >= GATEWAY_CPU_HOT_CONSECUTIVE_THRESHOLD
+
+    return {
+        "ok": True,
+        "sampled_at": sampled_at,
+        "main_pid": main_pid,
+        "cpu_usage_nsec": cpu_usage_nsec,
+        "memory_current": memory_current,
+        "tasks_current": tasks_current,
+        "elapsed_seconds": elapsed_seconds,
+        "cpu_percent": cpu_percent,
+        "cpu_hot": cpu_hot,
+        "cpu_hot_count": hot_count,
+        "cpu_threshold_percent": GATEWAY_CPU_HOT_THRESHOLD_PERCENT,
+        "cpu_consecutive_threshold": GATEWAY_CPU_HOT_CONSECUTIVE_THRESHOLD,
+    }
 
 
 def _probe_positions_with_hard_timeout(
@@ -263,6 +411,7 @@ def run_gateway_watchdog_once(
     direct_probe: dict[str, object] | None = None,
     probe_timeout_seconds: float = PROBE_TIMEOUT_SECONDS,
     restart_cooldown_seconds: int = GATEWAY_RESTART_COOLDOWN_SECONDS,
+    process_probe: dict[str, object] | None = None,
     subprocess_run=subprocess.run,
 ) -> dict[str, object]:
     root = Path(bridge_root) if bridge_root is not None else resolve_bridge_root()
@@ -270,22 +419,36 @@ def run_gateway_watchdog_once(
     previous_payload = load_gateway_runtime_health(root)
     resolved_mode = _resolve_mode(session, explicit_mode=mode)
 
+    if process_probe is None and direct_probe is None:
+        process_probe = _collect_gateway_process_probe(
+            service_name=service_name,
+            previous_payload=previous_payload,
+            now=current_time,
+            subprocess_run=subprocess_run,
+        )
+
     if direct_probe is None and session is not None:
-        try:
-            direct_probe = _probe_positions_with_hard_timeout(
-                session,
-                mode=resolved_mode,
-                timeout_seconds=probe_timeout_seconds,
-                session_factory=get_session if callable(get_session) else None,
-            )
-        except Exception:
-            logger.exception("Gateway direct probe failed; continuing without probe result")
-            direct_probe = None
+        if isinstance(process_probe, dict) and bool(process_probe.get("cpu_hot")):
+            logger.warning("Skipping gateway direct probe while gateway CPU is hot")
+        elif _should_skip_direct_probe(previous_payload, now=current_time):
+            logger.info("Skipping gateway direct probe while runtime remains healthy and recent")
+        else:
+            try:
+                direct_probe = _probe_positions_with_hard_timeout(
+                    session,
+                    mode=resolved_mode,
+                    timeout_seconds=probe_timeout_seconds,
+                    session_factory=get_session if callable(get_session) else None,
+                )
+            except Exception:
+                logger.exception("Gateway direct probe failed; continuing without probe result")
+                direct_probe = None
 
     runtime_health = build_gateway_runtime_health(
         bridge_root=root,
         previous_payload=previous_payload,
         direct_probe=direct_probe,
+        process_probe=process_probe,
         now=current_time,
     )
 
@@ -307,6 +470,20 @@ def run_gateway_watchdog_once(
             runtime_health["state"] = "gateway_restarting"
         elif previous_action == "leader_restart":
             runtime_health["state"] = "bridge_degraded"
+    elif str(runtime_health.get("state") or "").strip().lower() == "gateway_hot":
+        recovery_failure_count += 1
+        runtime_health["recovery_failure_count"] = recovery_failure_count
+        cooldown_active = _cooldown_active(previous_payload, now=current_time)
+        if cooldown_active:
+            runtime_health["state"] = "gateway_degraded"
+            action = "gateway_degraded"
+        else:
+            _systemd_restart_gateway(service_name=service_name, runner=subprocess_run)
+            runtime_health["state"] = "gateway_restarting"
+            action = "gateway_restart"
+            runtime_health["next_allowed_action_at"] = _iso_z(
+                current_time + timedelta(seconds=max(60, int(restart_cooldown_seconds)))
+            )
     else:
         recovery_failure_count += 1
         runtime_health["recovery_failure_count"] = recovery_failure_count

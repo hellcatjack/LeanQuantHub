@@ -10,6 +10,7 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
 from app.services.backtest_opt_cagr import build_grid
+from app.services.defensive_policy import DEFAULT_BENCHMARK, DEFAULT_DEFENSIVE_BASKET
 
 API = "http://127.0.0.1:8021"
 PROJECT_ID = 18
@@ -35,7 +36,8 @@ BASE_PARAMS: Dict[str, str] = {
     "max_drawdown_52w": "0.15",
     "risk_off_mode": "defensive",
     "risk_off_pick": "lowest_vol",
-    "risk_off_symbols": "SHY,IEF,GLD,TLT",
+    "benchmark": DEFAULT_BENCHMARK,
+    "risk_off_symbols": DEFAULT_DEFENSIVE_BASKET,
     "score_csv_path": "/app/stocklean/artifacts/ml_job_83/scores.csv",
     "initial_cash": "30000.0",
     "fee_bps": "10.0",
@@ -96,6 +98,7 @@ def build_payload(params: Dict[str, float]) -> dict:
         "project_id": PROJECT_ID,
         "params": {
             "pipeline_train_job_id": TRAIN_JOB_ID,
+            "benchmark": DEFAULT_BENCHMARK,
             "algorithm_parameters": algorithm_parameters,
         },
     }

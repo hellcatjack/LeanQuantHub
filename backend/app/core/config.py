@@ -57,6 +57,14 @@ class Settings(BaseSettings):
     lean_bridge_open_orders_seconds: int = 2
     lean_bridge_executions_seconds: int = 2
     lean_bridge_commands_seconds: int = 1
+    ib_gateway_runtime_probe_timeout_seconds: float = 1.5
+    ib_gateway_runtime_probe_hard_timeout_seconds: float = 5.0
+    ib_gateway_watchdog_healthy_probe_interval_seconds: int = 600
+    ib_gateway_restart_cooldown_seconds: int = 900
+    ib_gateway_recovery_quiet_period_seconds: int = 240
+    ib_gateway_cpu_watchdog_enabled: bool = True
+    ib_gateway_cpu_hot_threshold_percent: float = 75.0
+    ib_gateway_cpu_hot_consecutive_threshold: int = 2
     ib_read_session_enabled: bool = True
     ib_read_session_client_id_paper: int = 180000101
     ib_read_session_client_id_live: int = 180000201

@@ -103,10 +103,10 @@ class CompositeTrendLowVol(QCAlgorithm):
             self.lowvol_weight /= weight_total
 
         self.defensive_symbols = self._parse_symbol_list(
-            defensive_params.get("symbols", ["VGSH", "IEF"])
+            defensive_params.get("symbols", ["SGOV"])
         )
         if not self.defensive_symbols:
-            self.defensive_symbols = ["VGSH", "IEF"]
+            self.defensive_symbols = ["SGOV"]
 
         self.theme_weights = {
             str(key).strip().upper(): float(value)

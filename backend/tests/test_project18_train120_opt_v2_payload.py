@@ -21,7 +21,9 @@ def test_v2_payload_risk_off_and_drawdown() -> None:
     }
     payload = build_payload(overrides, baseline_algo, "/tmp/scores.csv")
     algo = payload["params"]["algorithm_parameters"]
-    assert algo["risk_off_symbols"] == "VGSH,IEF,GLD,TLT"
+    assert payload["params"]["benchmark"] == "SPY"
+    assert algo["risk_off_symbols"] == "SGOV,VGSH"
+    assert algo["benchmark"] == "SPY"
     assert algo["score_csv_path"] == "/tmp/scores.csv"
     assert algo["drawdown_tiers"] == "0.05,0.09,0.12"
     assert algo["drawdown_exposures"] == "0.45,0.30,0.20"

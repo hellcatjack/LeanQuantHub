@@ -103,7 +103,7 @@ type AlgorithmParams = {
   notes?: string;
 };
 
-const defaultParams: AlgorithmParams = {
+export const DEFAULT_ALGORITHM_PARAMS: AlgorithmParams = {
   cadence: "weekly",
   universe: {
     market: "US",
@@ -116,7 +116,7 @@ const defaultParams: AlgorithmParams = {
     redistribute: "cash",
   },
   defensive: {
-    symbols: ["VGSH", "IEF"],
+    symbols: ["SGOV", "VGSH"],
   },
   theme_weights: {},
   blend: {
@@ -150,18 +150,18 @@ const defaultParams: AlgorithmParams = {
 
 const normalizeParams = (input?: AlgorithmParams | null): AlgorithmParams => {
   if (!input) {
-    return { ...defaultParams };
+    return { ...DEFAULT_ALGORITHM_PARAMS };
   }
   return {
-    ...defaultParams,
+    ...DEFAULT_ALGORITHM_PARAMS,
     ...input,
-    universe: { ...defaultParams.universe, ...(input.universe || {}) },
-    core: { ...defaultParams.core, ...(input.core || {}) },
-    defensive: { ...defaultParams.defensive, ...(input.defensive || {}) },
-    theme_weights: { ...defaultParams.theme_weights, ...(input.theme_weights || {}) },
-    blend: { ...defaultParams.blend, ...(input.blend || {}) },
-    selection: { ...defaultParams.selection, ...(input.selection || {}) },
-    risk: { ...defaultParams.risk, ...(input.risk || {}) },
+    universe: { ...DEFAULT_ALGORITHM_PARAMS.universe, ...(input.universe || {}) },
+    core: { ...DEFAULT_ALGORITHM_PARAMS.core, ...(input.core || {}) },
+    defensive: { ...DEFAULT_ALGORITHM_PARAMS.defensive, ...(input.defensive || {}) },
+    theme_weights: { ...DEFAULT_ALGORITHM_PARAMS.theme_weights, ...(input.theme_weights || {}) },
+    blend: { ...DEFAULT_ALGORITHM_PARAMS.blend, ...(input.blend || {}) },
+    selection: { ...DEFAULT_ALGORITHM_PARAMS.selection, ...(input.selection || {}) },
+    risk: { ...DEFAULT_ALGORITHM_PARAMS.risk, ...(input.risk || {}) },
   };
 };
 
@@ -206,7 +206,7 @@ export default function AlgorithmsPage() {
   });
   const [versionErrorKey, setVersionErrorKey] = useState("");
   const [activeVersionId, setActiveVersionId] = useState("");
-  const [paramsForm, setParamsForm] = useState<AlgorithmParams>(defaultParams);
+  const [paramsForm, setParamsForm] = useState<AlgorithmParams>(DEFAULT_ALGORITHM_PARAMS);
   const [diffFromId, setDiffFromId] = useState("");
   const [diffToId, setDiffToId] = useState("");
   const [diffResult, setDiffResult] = useState("");
@@ -1440,7 +1440,7 @@ export default function AlgorithmsPage() {
                               .filter(Boolean),
                           })
                         }
-                        placeholder="VGSH, IEF"
+                        placeholder="SGOV,VGSH"
                       />
                       <div className="form-hint">{t("algorithms.params.defensiveHint")}</div>
                     </div>
@@ -1477,7 +1477,7 @@ export default function AlgorithmsPage() {
                   </div>
                 )}
                 <div className="algo-actions">
-                  <button className="button-secondary" onClick={() => setParamsForm(defaultParams)}>
+                  <button className="button-secondary" onClick={() => setParamsForm(DEFAULT_ALGORITHM_PARAMS)}>
                     {t("algorithms.params.reset")}
                   </button>
                   <button className="button-primary" onClick={createVersion}>

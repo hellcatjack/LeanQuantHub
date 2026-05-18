@@ -83,6 +83,12 @@ def test_execute_trade_run_uses_async_lean_launcher(monkeypatch, tmp_path):
         monkeypatch.setattr(trade_executor, "SessionLocal", Session, raising=False)
         monkeypatch.setattr(trade_executor, "JobLock", _DummyLock, raising=False)
         monkeypatch.setattr(trade_executor, "_bridge_connection_ok", lambda: True, raising=False)
+        monkeypatch.setattr(
+            trade_executor,
+            "get_gateway_trade_block_state",
+            lambda *_a, **_k: None,
+            raising=False,
+        )
         monkeypatch.setattr(trade_executor, "_build_price_map", lambda symbols: {"AAPL": 100.0}, raising=False)
         monkeypatch.setattr(trade_executor, "fetch_account_summary", lambda _session: {"NetLiquidation": 10000.0}, raising=False)
         monkeypatch.setattr(trade_executor, "launch_execution_async", _fake_launch_execution_async, raising=False)

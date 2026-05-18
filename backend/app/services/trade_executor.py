@@ -25,11 +25,13 @@ from app.services.trade_guard import (
     record_guard_event,
 )
 from app.services.trade_order_builder import build_intent_orders, build_orders, build_rebalance_orders
+from app.services.trade_cash_guard import apply_cash_budget_to_order_drafts
 from app.services.trade_orders import create_trade_order, force_update_trade_order_status, update_trade_order_status
 from app.services.trade_order_types import is_limit_like, normalize_order_type, validate_order_type
 from app.services.trade_risk_engine import evaluate_orders
 from app.services.trade_alerts import notify_trade_alert
 from app.services.ib_account import fetch_account_summary, get_account_positions
+from app.services.ib_execution_backfill import reconcile_orders_with_ib_completed_status
 from app.services.trade_order_intent import write_order_intent, ensure_order_intent_ids
 from app.services.ib_gateway_runtime import get_gateway_trade_block_state
 from app.services.lean_bridge_paths import resolve_bridge_root
@@ -59,6 +61,8 @@ _PRECISE_POSITIONS_SOURCE_DETAILS = {
     "ib_holdings_empty",
     "ib_holdings_ibapi_fallback",
 }
+_IB_COMPLETED_RECONCILE_HOT_PATH_INTERVAL_SECONDS = 60
+_IB_COMPLETED_RECONCILE_MISSING_MIN_AGE_SECONDS = 10
 
 
 @dataclass
@@ -1274,7 +1278,59 @@ def _build_partial_auto_resume_params(run: TradeRun, params: dict[str, Any], *, 
     )
     child_params["auto_resume_attempt"] = int(attempt)
     child_params["auto_resume_reason"] = "partial_remaining"
+    child_params["auto_resume_idempotency_key"] = f"partial:{int(run.id)}:{int(attempt)}"
     return child_params
+
+
+def _coerce_int_or_none(raw: object) -> int | None:
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _find_existing_partial_auto_resume_child(session, run: TradeRun, *, attempt: int) -> TradeRun | None:
+    candidates = (
+        session.query(TradeRun)
+        .filter(
+            TradeRun.project_id == run.project_id,
+            TradeRun.decision_snapshot_id == run.decision_snapshot_id,
+            TradeRun.mode == run.mode,
+            TradeRun.id != run.id,
+        )
+        .order_by(TradeRun.id.asc())
+        .all()
+    )
+    for candidate in candidates:
+        candidate_params = candidate.params if isinstance(candidate.params, dict) else {}
+        if _coerce_int_or_none(candidate_params.get("auto_resume_parent_run_id")) != int(run.id):
+            continue
+        if _coerce_int_or_none(candidate_params.get("auto_resume_attempt")) != int(attempt):
+            continue
+        if str(candidate_params.get("auto_resume_reason") or "") != "partial_remaining":
+            continue
+        return candidate
+    return None
+
+
+def _mark_auto_resume_child_execute_failed(session, child_run_id: int, error: str) -> None:
+    child_run = session.get(TradeRun, int(child_run_id))
+    if child_run is None:
+        return
+    now = datetime.utcnow()
+    error_text = str(error or "auto_resume_execute_failed")
+    params = dict(child_run.params or {})
+    params["auto_resume_execute_error"] = error_text
+    params["auto_resume_execute_error_at"] = now.replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+    child_run.params = params
+    if str(child_run.status or "").lower() == "queued":
+        if error_text == "trade_execution_lock_busy":
+            child_run.status = "blocked"
+        else:
+            child_run.status = "failed"
+        child_run.message = error_text
+        child_run.ended_at = now
+    child_run.updated_at = now
 
 
 def _maybe_auto_resume_partial_run(
@@ -1283,6 +1339,16 @@ def _maybe_auto_resume_partial_run(
     *,
     summary: dict[str, int],
 ) -> int | None:
+    locked_run = (
+        session.query(TradeRun)
+        .filter(TradeRun.id == run.id)
+        .populate_existing()
+        .with_for_update()
+        .one_or_none()
+    )
+    if locked_run is None:
+        return None
+    run = locked_run
     params = dict(run.params or {})
     enabled, max_attempts = _resolve_partial_auto_resume_policy(session, params)
     if not enabled or run.decision_snapshot_id is None:
@@ -1296,13 +1362,40 @@ def _maybe_auto_resume_partial_run(
 
     auto_resume_meta = dict(params.get("auto_resume") or {})
     if auto_resume_meta.get("child_run_id"):
-        return None
+        return _coerce_int_or_none(auto_resume_meta.get("child_run_id"))
 
     try:
         current_attempt = int(params.get("auto_resume_attempt") or 0)
     except (TypeError, ValueError):
         current_attempt = 0
     next_attempt = current_attempt + 1
+    existing_child = _find_existing_partial_auto_resume_child(session, run, attempt=next_attempt)
+    if existing_child is not None:
+        reused_at = datetime.utcnow().replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+        auto_resume_meta.update(
+            {
+                "enabled": True,
+                "reason": "partial_remaining",
+                "child_run_id": int(existing_child.id),
+                "attempt": int(next_attempt),
+                "max_attempts": int(max_attempts),
+                "summary": dict(summary),
+                "reused_existing": True,
+                "reused_at": reused_at,
+            }
+        )
+        params["auto_resume"] = auto_resume_meta
+        run.params = params
+        run.updated_at = datetime.utcnow()
+        record_audit(
+            session,
+            action="trade_run.auto_resume_reused",
+            resource_type="trade_run",
+            resource_id=run.id,
+            detail={"child_run_id": existing_child.id, "attempt": next_attempt, "summary": dict(summary)},
+        )
+        session.commit()
+        return int(existing_child.id)
     if next_attempt > max_attempts:
         auto_resume_meta.update(
             {
@@ -1326,8 +1419,7 @@ def _maybe_auto_resume_partial_run(
         params=_build_partial_auto_resume_params(run, params, attempt=next_attempt),
     )
     session.add(child_run)
-    session.commit()
-    session.refresh(child_run)
+    session.flush()
 
     queued_at = datetime.utcnow().replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
     auto_resume_meta.update(
@@ -1344,8 +1436,6 @@ def _maybe_auto_resume_partial_run(
     params["auto_resume"] = auto_resume_meta
     run.params = params
     run.updated_at = datetime.utcnow()
-    session.commit()
-
     record_audit(
         session,
         action="trade_run.auto_resume_queued",
@@ -1354,29 +1444,48 @@ def _maybe_auto_resume_partial_run(
         detail={"child_run_id": child_run.id, "attempt": next_attempt, "summary": dict(summary)},
     )
     session.commit()
+    session.refresh(child_run)
 
     try:
         result = execute_trade_run(child_run.id, dry_run=False, force=False)
     except Exception as exc:
+        error_text = str(exc)
+        _mark_auto_resume_child_execute_failed(session, int(child_run.id), error_text)
         refreshed_run = session.get(TradeRun, run.id)
         if refreshed_run is not None:
             refreshed_params = dict(refreshed_run.params or {})
             refreshed_auto = dict(refreshed_params.get("auto_resume") or {})
-            refreshed_auto["execute_error"] = str(exc)
+            refreshed_auto["execute_error"] = error_text
             refreshed_auto["executed_at"] = datetime.utcnow().replace(tzinfo=timezone.utc).isoformat().replace(
                 "+00:00", "Z"
             )
+            refreshed_auto["child_status"] = "blocked" if error_text == "trade_execution_lock_busy" else "failed"
             refreshed_params["auto_resume"] = refreshed_auto
             refreshed_run.params = refreshed_params
             refreshed_run.updated_at = datetime.utcnow()
-            session.commit()
+        record_audit(
+            session,
+            action="trade_run.auto_resume_execute_failed",
+            resource_type="trade_run",
+            resource_id=run.id,
+            detail={"child_run_id": child_run.id, "attempt": next_attempt, "error": error_text},
+        )
+        session.commit()
+        notify_trade_alert(
+            session,
+            (
+                "Trade auto-resume failed: "
+                f"parent_run={int(run.id)}, child_run={int(child_run.id)}, "
+                f"attempt={int(next_attempt)}, error={error_text}"
+            ),
+        )
         return int(child_run.id)
 
     refreshed_run = session.get(TradeRun, run.id)
     if refreshed_run is not None:
         refreshed_params = dict(refreshed_run.params or {})
         refreshed_auto = dict(refreshed_params.get("auto_resume") or {})
-        refreshed_auto["execute_status"] = str(result.status or "")
+        refreshed_auto["execute_status"] = str(getattr(result, "status", "") or "")
         refreshed_auto["executed_at"] = datetime.utcnow().replace(tzinfo=timezone.utc).isoformat().replace(
             "+00:00", "Z"
         )
@@ -2147,6 +2256,25 @@ def refresh_trade_run_status(session, run: TradeRun) -> bool:
     reconcile_cancel_requested_orders(session, run_id=run.id)
     positions_payload = read_positions(_resolve_bridge_root())
     reconcile_run_with_positions(session, run, positions_payload, open_tags=open_tags)
+    ib_completed_summary: dict[str, int] = {}
+    if _is_open_orders_payload_fresh(open_orders_payload):
+        ib_completed_summary = reconcile_orders_with_ib_completed_status(
+            session,
+            limit=300,
+            min_query_interval_seconds=_IB_COMPLETED_RECONCILE_HOT_PATH_INTERVAL_SECONDS,
+            lookback_hours=8,
+            run_id=run.id,
+            open_tags=open_tags,
+            missing_min_age_seconds=_IB_COMPLETED_RECONCILE_MISSING_MIN_AGE_SECONDS,
+            leader_submitted_only=True,
+        )
+    if any(int(ib_completed_summary.get(key) or 0) > 0 for key in ("candidates", "terminalized", "errors")):
+        params = dict(run.params or {})
+        params["ib_completed_status_reconcile"] = {
+            **ib_completed_summary,
+            "checked_at": datetime.utcnow().replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+        run.params = params
     now = datetime.utcnow()
     pending_summary = _collect_timed_out_submit_pending_orders(
         session,
@@ -2650,6 +2778,22 @@ def _coerce_non_negative_float(raw: object, *, default: float = 0.0) -> float:
     if not math.isfinite(value):
         value = float(default)
     return max(0.0, value)
+
+
+def _resolve_cash_guard_price_buffer_bps(params: dict[str, Any]) -> float:
+    explicit = params.get("cash_guard_price_buffer_bps")
+    if explicit is not None:
+        return _coerce_non_negative_float(explicit, default=0.0)
+    return max(
+        _coerce_non_negative_float(params.get("slippage_open_bps"), default=0.0),
+        _coerce_non_negative_float(params.get("slippage_close_bps"), default=0.0),
+    )
+
+
+def _resolve_cash_guard_total_cost_buffer_bps(params: dict[str, Any]) -> float:
+    fee_rate = _coerce_non_negative_float(params.get("fee_bps"), default=0.0) / 10_000.0
+    price_rate = _resolve_cash_guard_price_buffer_bps(params) / 10_000.0
+    return ((1.0 + fee_rate) * (1.0 + price_rate) - 1.0) * 10_000.0
 
 
 def _coerce_bool(raw: object, *, default: bool = True) -> bool:
@@ -3172,7 +3316,8 @@ def execute_trade_run(
                         params["portfolio_value"] = portfolio_value
                 cash_available = account_summary.get("cash_available")
                 if cash_available is not None:
-                    params.setdefault("cash_available", cash_available)
+                    params["cash_available"] = cash_available
+                    params["cash_available_source"] = account_summary.get("cash_available_source")
             try:
                 portfolio_value = float(params.get("portfolio_value") or 0.0)
             except (TypeError, ValueError):
@@ -3275,6 +3420,40 @@ def execute_trade_run(
                     order_type=order_type,
                     fallback_prices=price_map,
                 )
+
+            rebalance_orders, cash_guard_meta = apply_cash_budget_to_order_drafts(
+                rebalance_orders,
+                price_map=price_map,
+                limit_price_map=limit_price_map,
+                cash_available=params.get("cash_available"),
+                portfolio_value=portfolio_value,
+                cash_buffer_ratio=cash_buffer_ratio,
+                lot_size=lot_size,
+                min_qty=min_qty,
+                fee_bps=_coerce_non_negative_float(params.get("fee_bps"), default=0.0),
+                price_buffer_bps=_resolve_cash_guard_price_buffer_bps(params),
+            )
+            params["cash_guard"] = cash_guard_meta
+            if cash_guard_meta.get("blocked_no_orders"):
+                run.status = "blocked"
+                run.message = "cash_budget_insufficient"
+                run.params = dict(params)
+                run.ended_at = datetime.utcnow()
+                run.updated_at = datetime.utcnow()
+                session.commit()
+                return TradeExecutionResult(
+                    run_id=run.id,
+                    status=run.status,
+                    filled=0,
+                    cancelled=0,
+                    rejected=0,
+                    skipped=0,
+                    message=run.message,
+                    dry_run=dry_run,
+                )
+
+            trade_symbols = [str(item.get("symbol") or "").strip().upper() for item in rebalance_orders]
+            trade_symbol_set = set(trade_symbols)
             prime_price_map: dict[str, float] | None = None
             if validate_order_type(order_type) == "ADAPTIVE_LMT":
                 # Adaptive LMT itself should not carry explicit limit price to TWS.
@@ -3483,22 +3662,31 @@ def execute_trade_run(
                     run.updated_at = datetime.utcnow()
                     session.commit()
             cash_available = account_summary.get("cash_available")
-            if cash_available is not None and "cash_available" not in risk_params:
+            if cash_available is not None:
                 risk_params["cash_available"] = cash_available
-            params.setdefault("cash_available", cash_available)
+                params["cash_available"] = cash_available
+                params["cash_available_source"] = account_summary.get("cash_available_source")
         params["risk_effective"] = risk_params
         max_order_notional = risk_params.get("max_order_notional")
         max_position_ratio = risk_params.get("max_position_ratio")
         max_total_notional = risk_params.get("max_total_notional")
         max_symbols = risk_params.get("max_symbols")
         min_cash_buffer_ratio = risk_params.get("min_cash_buffer_ratio")
-        cash_available = risk_params.get("cash_available") or params.get("cash_available")
-        portfolio_value = risk_params.get("portfolio_value") or params.get("portfolio_value")
+        cash_available = (
+            risk_params.get("cash_available")
+            if risk_params.get("cash_available") is not None
+            else params.get("cash_available")
+        )
+        portfolio_value = (
+            risk_params.get("portfolio_value")
+            if risk_params.get("portfolio_value") is not None
+            else params.get("portfolio_value")
+        )
 
+        cash_buffer_ratio = float(params.get("cash_buffer_ratio") or 0.0)
         risk_bypass = bool(params.get("risk_bypass"))
         if not risk_bypass:
             intent_path = params.get("order_intent_path")
-            cash_buffer_ratio = float(params.get("cash_buffer_ratio") or 0.0)
             lot_size = int(params.get("lot_size") or 1)
             min_qty = int(params.get("min_qty") or 1)
             notional_limits_enabled = any(
@@ -3612,6 +3800,9 @@ def execute_trade_run(
                 max_symbols=max_symbols,
                 cash_available=cash_available,
                 min_cash_buffer_ratio=min_cash_buffer_ratio,
+                enforce_cash_budget=cash_available is not None,
+                cash_buffer_ratio=cash_buffer_ratio,
+                buy_cost_buffer_bps=_resolve_cash_guard_total_cost_buffer_bps(params),
             )
             if not ok:
                 run.status = "blocked"
@@ -3639,6 +3830,69 @@ def execute_trade_run(
             run.params = dict(params)
             run.updated_at = datetime.utcnow()
             session.commit()
+
+        allow_margin = _as_bool(
+            params.get("allow_margin")
+            if params.get("allow_margin") is not None
+            else risk_params.get("allow_margin"),
+            default=False,
+        )
+        if risk_bypass and cash_available is not None and not allow_margin:
+            cash_guard_orders = []
+            for order in orders:
+                price = None
+                if str(order.side or "").strip().upper() == "BUY" and order.limit_price is not None:
+                    try:
+                        price = float(order.limit_price)
+                    except (TypeError, ValueError):
+                        price = None
+                if price is None:
+                    price = price_map.get(order.symbol)
+                cash_guard_orders.append(
+                    {
+                        "symbol": order.symbol,
+                        "side": order.side,
+                        "quantity": order.quantity,
+                        "price": price or 0.0,
+                    }
+                )
+            ok, blocked_orders, reasons = evaluate_orders(
+                cash_guard_orders,
+                max_order_notional=None,
+                max_position_ratio=None,
+                portfolio_value=portfolio_value,
+                max_total_notional=None,
+                max_symbols=None,
+                cash_available=cash_available,
+                min_cash_buffer_ratio=None,
+                enforce_cash_budget=True,
+                cash_buffer_ratio=cash_buffer_ratio,
+                buy_cost_buffer_bps=_resolve_cash_guard_total_cost_buffer_bps(params),
+            )
+            if not ok:
+                run.status = "blocked"
+                run.message = reasons[0] if reasons else "cash_budget"
+                params["cash_guard_submit_blocked"] = {
+                    "reasons": reasons,
+                    "count": len(blocked_orders),
+                    "cash_available": cash_available,
+                    "portfolio_value": portfolio_value,
+                    "cash_buffer_ratio": cash_buffer_ratio,
+                }
+                run.params = dict(params)
+                run.ended_at = datetime.utcnow()
+                run.updated_at = datetime.utcnow()
+                session.commit()
+                return TradeExecutionResult(
+                    run_id=run.id,
+                    status=run.status,
+                    filled=0,
+                    cancelled=0,
+                    rejected=0,
+                    skipped=0,
+                    message=run.message,
+                    dry_run=dry_run,
+                )
 
         run.status = "running"
         run.started_at = datetime.utcnow()

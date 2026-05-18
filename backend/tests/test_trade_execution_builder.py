@@ -2,6 +2,7 @@ from pathlib import Path
 import sys
 import csv
 import json
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -13,6 +14,16 @@ if str(BACKEND_ROOT) not in sys.path:
 from app.models import Base, Project, TradeRun, DecisionSnapshot, TradeOrder, TradeSettings
 import app.services.trade_executor as trade_executor
 from app.services.trade_order_builder import build_orders
+
+
+@pytest.fixture(autouse=True)
+def _isolate_gateway_trade_block(monkeypatch):
+    monkeypatch.setattr(
+        trade_executor,
+        "get_gateway_trade_block_state",
+        lambda *_a, **_k: None,
+        raising=False,
+    )
 
 
 def _make_session_factory():
@@ -84,6 +95,12 @@ def test_execute_builds_orders_from_snapshot(tmp_path, monkeypatch):
             "source_detail": "ib_holdings_ibapi_fallback",
             "refreshed_at": "2026-02-14T00:00:00Z",
         },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        trade_executor,
+        "fetch_account_summary",
+        lambda _session: {"NetLiquidation": 10000.0, "cash_available": 10000.0},
         raising=False,
     )
     session = Session()

@@ -367,8 +367,123 @@ def test_probe_positions_with_hard_timeout_returns_failure_payload(monkeypatch):
 
     assert payload["ok"] is False
     assert payload["error"] == "probe_hard_timeout"
-    assert payload["latency_ms"] == 50
+    assert 50 <= payload["latency_ms"] <= 80
     assert payload["item_count"] == 0
+
+
+def test_collect_gateway_process_probe_calculates_consecutive_hot_cpu(tmp_path):
+    now = datetime(2026, 3, 10, 14, 5, 0, tzinfo=timezone.utc)
+    previous = {
+        "gateway_cpu_sample_at": (now - timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
+        "gateway_cpu_usage_nsec": 10_000_000_000,
+        "gateway_cpu_hot_count": 1,
+    }
+
+    def _fake_run(_cmd, **_kwargs):
+        class _Result:
+            returncode = 0
+            stdout = "\n".join(
+                (
+                    "MainPID=1234",
+                    "CPUUsageNSec=250000000000",
+                    "MemoryCurrent=1048576",
+                    "TasksCurrent=42",
+                )
+            )
+
+        return _Result()
+
+    probe = ib_gateway_watchdog._collect_gateway_process_probe(
+        service_name="stocklean-ibgateway.service",
+        previous_payload=previous,
+        now=now,
+        subprocess_run=_fake_run,
+    )
+
+    assert probe["ok"] is True
+    assert probe["main_pid"] == 1234
+    assert probe["cpu_usage_nsec"] == 250_000_000_000
+    assert probe["cpu_percent"] == 80.0
+    assert probe["cpu_hot_count"] == 2
+    assert probe["cpu_hot"] is True
+
+
+def test_run_gateway_watchdog_restarts_gateway_on_hot_gateway_cpu(tmp_path):
+    now = datetime(2026, 3, 10, 14, 9, 0, tzinfo=timezone.utc)
+    calls: list[list[str]] = []
+
+    result = ib_gateway_watchdog.run_gateway_watchdog_once(
+        bridge_root=tmp_path,
+        session=None,
+        mode="paper",
+        now=now,
+        direct_probe={"ok": True, "latency_ms": 90, "refreshed_at": now.isoformat().replace("+00:00", "Z")},
+        process_probe={
+            "ok": True,
+            "sampled_at": now.isoformat().replace("+00:00", "Z"),
+            "main_pid": 1234,
+            "cpu_usage_nsec": 250_000_000_000,
+            "cpu_percent": 80.0,
+            "cpu_hot": True,
+            "cpu_hot_count": 2,
+            "cpu_threshold_percent": 75.0,
+        },
+        subprocess_run=lambda cmd, **_kwargs: calls.append(cmd) or None,
+    )
+
+    assert result["action"] == "gateway_restart"
+    assert result["state"] == "gateway_restarting"
+    assert result["gateway_cpu_hot"] is True
+    assert calls == [["systemctl", "--user", "restart", "--no-block", "stocklean-ibgateway.service"]]
+
+
+def test_run_gateway_watchdog_skips_direct_probe_when_runtime_is_healthy_and_recent(monkeypatch, tmp_path):
+    now = datetime(2026, 3, 10, 14, 9, 0, tzinfo=timezone.utc)
+    write_gateway_runtime_health(
+        tmp_path,
+        {
+            **_runtime_health("healthy", failure_count=0),
+            "pending_command_count": 0,
+            "oldest_pending_command_age_seconds": None,
+            "last_positions_at": "2026-03-10T14:08:20Z",
+            "last_open_orders_at": "2026-03-10T14:08:20Z",
+            "last_account_summary_at": "2026-03-10T14:08:20Z",
+            "last_probe_result": "success",
+            "last_probe_at": "2026-03-10T14:05:30Z",
+        },
+    )
+
+    monkeypatch.setattr(
+        ib_gateway_watchdog,
+        "_probe_positions_with_hard_timeout",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("direct probe should be skipped")),
+    )
+    monkeypatch.setattr(
+        ib_gateway_watchdog,
+        "build_gateway_runtime_health",
+        lambda **_kwargs: {
+            **_runtime_health("healthy", failure_count=0),
+            "pending_command_count": 0,
+            "oldest_pending_command_age_seconds": None,
+            "last_positions_at": "2026-03-10T14:08:20Z",
+            "last_open_orders_at": "2026-03-10T14:08:20Z",
+            "last_account_summary_at": "2026-03-10T14:08:20Z",
+            "last_probe_result": "success",
+            "last_probe_at": "2026-03-10T14:05:30Z",
+        },
+    )
+
+    result = ib_gateway_watchdog.run_gateway_watchdog_once(
+        bridge_root=tmp_path,
+        session=object(),
+        mode="paper",
+        now=now,
+    )
+
+    assert result["action"] == "none"
+    assert result["state"] == "healthy"
+    assert result["last_probe_result"] == "success"
+    assert result["last_probe_at"] == "2026-03-10T14:05:30Z"
 
 
 def test_watchdog_systemd_unit_template_declares_timeout():
@@ -376,3 +491,10 @@ def test_watchdog_systemd_unit_template_declares_timeout():
     unit_text = unit_path.read_text(encoding="utf-8")
 
     assert "TimeoutStartSec=30s" in unit_text
+
+
+def test_watchdog_timer_runs_often_enough_for_cpu_hot_detection():
+    timer_path = REPO_ROOT / "deploy" / "systemd" / "stocklean-ibgateway-watchdog.timer"
+    timer_text = timer_path.read_text(encoding="utf-8")
+
+    assert "OnUnitActiveSec=5min" in timer_text

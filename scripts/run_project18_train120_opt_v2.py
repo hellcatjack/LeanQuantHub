@@ -9,6 +9,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from app.services.backtest_opt_train120_v2 import build_grid, build_contrast
+from app.services.defensive_policy import DEFAULT_BENCHMARK, DEFAULT_DEFENSIVE_BASKET
 
 API = "http://127.0.0.1:8021"
 PROJECT_ID = 18
@@ -18,7 +19,7 @@ START = "2020-01-01"
 END = "2026-01-13"
 MAX_INFLIGHT = 8
 OUT = Path("/app/stocklean/artifacts/train120_opt_v2_manifest.jsonl")
-RISK_OFF = "VGSH,IEF,GLD,TLT"
+RISK_OFF = DEFAULT_DEFENSIVE_BASKET
 
 
 def _request_json(method: str, url: str, payload: dict | None = None, *, timeout: float = 30) -> dict:
@@ -106,6 +107,7 @@ def build_payload(overrides: dict, baseline_algo: dict, scores_path: str) -> dic
         {
             "backtest_start": START,
             "backtest_end": END,
+            "benchmark": DEFAULT_BENCHMARK,
             "risk_off_symbols": RISK_OFF,
             "score_csv_path": scores_path,
         }
@@ -114,6 +116,7 @@ def build_payload(overrides: dict, baseline_algo: dict, scores_path: str) -> dic
         "project_id": PROJECT_ID,
         "params": {
             "pipeline_train_job_id": TRAIN_JOB_ID,
+            "benchmark": DEFAULT_BENCHMARK,
             "algorithm_parameters": algo,
         },
     }

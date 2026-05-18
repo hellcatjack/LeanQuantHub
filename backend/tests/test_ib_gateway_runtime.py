@@ -74,7 +74,39 @@ def test_runtime_health_marks_command_stuck_when_pending_command_too_old(tmp_pat
     assert payload["last_command_result_at"] == refreshed_at
 
 
-def test_runtime_health_escalates_to_bridge_degraded_after_consecutive_probe_failures(tmp_path):
+def test_runtime_health_marks_gateway_hot_when_process_probe_is_hot(tmp_path):
+    now = datetime(2026, 3, 10, 14, 5, 0, tzinfo=timezone.utc)
+    refreshed_at = _iso(now - timedelta(seconds=3))
+
+    payload = build_gateway_runtime_health(
+        bridge_root=tmp_path,
+        bridge_status={"status": "ok", "stale": False, "last_heartbeat": _iso(now - timedelta(seconds=1))},
+        positions_payload={"stale": False, "refreshed_at": refreshed_at},
+        open_orders_payload={"stale": False, "refreshed_at": refreshed_at},
+        account_payload={"stale": False, "refreshed_at": refreshed_at},
+        direct_probe={"ok": True, "latency_ms": 80},
+        process_probe={
+            "ok": True,
+            "sampled_at": _iso(now),
+            "main_pid": 1234,
+            "cpu_usage_nsec": 300_000_000_000,
+            "cpu_percent": 91.5,
+            "cpu_hot": True,
+            "cpu_hot_count": 2,
+            "cpu_threshold_percent": 75.0,
+        },
+        now=now,
+    )
+
+    assert payload["state"] == "gateway_hot"
+    assert payload["gateway_cpu_percent"] == 91.5
+    assert payload["gateway_cpu_hot"] is True
+    assert payload["gateway_cpu_hot_count"] == 2
+    assert payload["gateway_cpu_main_pid"] == 1234
+    assert is_gateway_trade_blocked(payload) is True
+
+
+def test_runtime_health_keeps_healthy_when_probe_fails_but_snapshots_are_fresh(tmp_path):
     now = datetime(2026, 3, 10, 14, 5, 0, tzinfo=timezone.utc)
     refreshed_at = _iso(now - timedelta(seconds=3))
 
@@ -100,10 +132,40 @@ def test_runtime_health_escalates_to_bridge_degraded_after_consecutive_probe_fai
 
     assert first["state"] == "healthy"
     assert first["failure_count"] == 1
-    assert second["state"] == "bridge_degraded"
+    assert second["state"] == "healthy"
     assert second["failure_count"] == 2
     assert second["last_probe_result"] == "failure"
     assert second["last_probe_latency_ms"] == 1500
+    assert is_gateway_trade_blocked(second) is False
+
+
+def test_runtime_health_escalates_to_bridge_degraded_when_probe_fails_and_snapshots_are_stale(tmp_path):
+    now = datetime(2026, 3, 10, 14, 5, 0, tzinfo=timezone.utc)
+    stale_at = _iso(now - timedelta(minutes=5))
+
+    first = build_gateway_runtime_health(
+        bridge_root=tmp_path,
+        bridge_status={"status": "ok", "stale": False, "last_heartbeat": _iso(now - timedelta(seconds=1))},
+        positions_payload={"stale": False, "refreshed_at": stale_at},
+        open_orders_payload={"stale": False, "refreshed_at": stale_at},
+        account_payload={"stale": False, "refreshed_at": stale_at},
+        direct_probe={"ok": False, "latency_ms": 1500, "error": "timeout"},
+        now=now,
+    )
+    second = build_gateway_runtime_health(
+        bridge_root=tmp_path,
+        bridge_status={"status": "ok", "stale": False, "last_heartbeat": _iso(now + timedelta(seconds=5))},
+        positions_payload={"stale": False, "refreshed_at": stale_at},
+        open_orders_payload={"stale": False, "refreshed_at": stale_at},
+        account_payload={"stale": False, "refreshed_at": stale_at},
+        direct_probe={"ok": False, "latency_ms": 1500, "error": "timeout"},
+        previous_payload=first,
+        now=now + timedelta(seconds=5),
+    )
+
+    assert first["state"] == "snapshot_stale"
+    assert second["state"] == "bridge_degraded"
+    assert second["failure_count"] == 2
     assert is_gateway_trade_blocked(second) is True
 
 
@@ -132,6 +194,7 @@ def test_runtime_health_recovers_to_healthy_when_probe_succeeds(tmp_path):
     assert payload["state"] == "healthy"
     assert payload["failure_count"] == 0
     assert payload["last_probe_result"] == "success"
+    assert payload["last_probe_at"] == _iso(now)
     assert payload["last_probe_latency_ms"] == 85
     assert payload["last_recovery_action"] == "gateway_restart"
     assert payload["last_recovery_at"] == previous["last_recovery_at"]
@@ -144,6 +207,7 @@ def test_runtime_health_round_trip_persists_payload(tmp_path):
         "state": "command_stuck",
         "failure_count": 1,
         "pending_command_count": 2,
+        "last_probe_at": "2026-03-10T14:00:00Z",
         "oldest_pending_command_age_seconds": 180,
         "last_probe_result": "success",
     }
@@ -153,9 +217,11 @@ def test_runtime_health_round_trip_persists_payload(tmp_path):
 
     assert written["state"] == "command_stuck"
     assert written["pending_command_count"] == 2
+    assert written["last_probe_at"] == "2026-03-10T14:00:00Z"
     assert written["last_positions_at"] is None
     assert loaded["state"] == "command_stuck"
     assert loaded["pending_command_count"] == 2
+    assert loaded["last_probe_at"] == "2026-03-10T14:00:00Z"
     assert loaded["last_positions_at"] is None
 
     stored = json.loads((tmp_path / "gateway_runtime_health.json").read_text(encoding="utf-8"))

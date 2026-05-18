@@ -28,7 +28,7 @@ _PROBE_FAILURE_THRESHOLD = max(
     int(getattr(settings, "ib_gateway_runtime_probe_failure_threshold", 2) or 2),
     1,
 )
-_TRADE_BLOCK_STATES = {"bridge_degraded", "gateway_degraded", "gateway_restarting"}
+_TRADE_BLOCK_STATES = {"bridge_degraded", "gateway_degraded", "gateway_restarting", "gateway_hot"}
 _TIMESTAMP_KEYS = ("refreshed_at", "updated_at", "timestamp", "last_heartbeat")
 _COMMAND_RESULT_TIMESTAMP_KEYS = ("processed_at", "completed_at", "updated_at", "refreshed_at")
 
@@ -128,8 +128,17 @@ def _default_runtime_health() -> dict[str, object]:
         "last_open_orders_at": None,
         "last_account_summary_at": None,
         "last_command_result_at": None,
+        "last_probe_at": None,
         "last_probe_result": "unknown",
         "last_probe_latency_ms": None,
+        "gateway_cpu_sample_at": None,
+        "gateway_cpu_main_pid": None,
+        "gateway_cpu_usage_nsec": None,
+        "gateway_cpu_elapsed_seconds": None,
+        "gateway_cpu_percent": None,
+        "gateway_cpu_hot": False,
+        "gateway_cpu_hot_count": 0,
+        "gateway_cpu_threshold_percent": None,
         "last_recovery_action": None,
         "last_recovery_at": None,
         "next_allowed_action_at": None,
@@ -169,6 +178,7 @@ def build_gateway_runtime_health(
     open_orders_payload: dict[str, object] | None = None,
     account_payload: dict[str, object] | None = None,
     direct_probe: dict[str, object] | None = None,
+    process_probe: dict[str, object] | None = None,
     previous_payload: dict[str, object] | None = None,
     now: datetime | None = None,
 ) -> dict[str, object]:
@@ -183,10 +193,13 @@ def build_gateway_runtime_health(
     last_command_result_at = _scan_last_command_result_at(root)
 
     probe_ok = None
+    probe_at = previous.get("last_probe_at")
     probe_latency_ms = previous.get("last_probe_latency_ms")
     probe_result = "unknown"
     if isinstance(direct_probe, dict):
         probe_ok = direct_probe.get("ok")
+        parsed_probe_at = _parse_iso(direct_probe.get("refreshed_at")) or current_time
+        probe_at = _iso_z(parsed_probe_at)
         probe_latency_ms = direct_probe.get("latency_ms", probe_latency_ms)
         if probe_ok is True:
             probe_result = "success"
@@ -203,6 +216,27 @@ def build_gateway_runtime_health(
     else:
         failure_count = previous_failures
 
+    gateway_cpu_sample_at = previous.get("gateway_cpu_sample_at")
+    gateway_cpu_main_pid = previous.get("gateway_cpu_main_pid")
+    gateway_cpu_usage_nsec = previous.get("gateway_cpu_usage_nsec")
+    gateway_cpu_elapsed_seconds = previous.get("gateway_cpu_elapsed_seconds")
+    gateway_cpu_percent = previous.get("gateway_cpu_percent")
+    gateway_cpu_hot = bool(previous.get("gateway_cpu_hot") or False)
+    gateway_cpu_hot_count = int(previous.get("gateway_cpu_hot_count") or 0)
+    gateway_cpu_threshold_percent = previous.get("gateway_cpu_threshold_percent")
+    if isinstance(process_probe, dict):
+        gateway_cpu_sample_at = process_probe.get("sampled_at", gateway_cpu_sample_at)
+        gateway_cpu_main_pid = process_probe.get("main_pid", gateway_cpu_main_pid)
+        gateway_cpu_usage_nsec = process_probe.get("cpu_usage_nsec", gateway_cpu_usage_nsec)
+        gateway_cpu_elapsed_seconds = process_probe.get("elapsed_seconds", gateway_cpu_elapsed_seconds)
+        gateway_cpu_percent = process_probe.get("cpu_percent", gateway_cpu_percent)
+        gateway_cpu_hot = bool(process_probe.get("cpu_hot") or False)
+        gateway_cpu_hot_count = int(process_probe.get("cpu_hot_count") or 0)
+        gateway_cpu_threshold_percent = process_probe.get(
+            "cpu_threshold_percent",
+            gateway_cpu_threshold_percent,
+        )
+
     snapshot_stale = any(
         (
             _snapshot_is_stale(positions, now=current_time),
@@ -216,10 +250,14 @@ def build_gateway_runtime_health(
         and oldest_pending_command_age_seconds >= _PENDING_COMMAND_STALE_SECONDS
     )
     bridge_degraded = bool(bridge.get("stale")) or (
-        probe_ok is False and failure_count >= _PROBE_FAILURE_THRESHOLD
+        probe_ok is False
+        and failure_count >= _PROBE_FAILURE_THRESHOLD
+        and (snapshot_stale or command_stuck)
     )
 
-    if bridge_degraded:
+    if gateway_cpu_hot:
+        state = "gateway_hot"
+    elif bridge_degraded:
         state = "bridge_degraded"
     elif command_stuck:
         state = "command_stuck"
@@ -237,8 +275,17 @@ def build_gateway_runtime_health(
         "last_open_orders_at": _iso_z(_timestamp_from_payload(open_orders)),
         "last_account_summary_at": _iso_z(_timestamp_from_payload(account)),
         "last_command_result_at": _iso_z(last_command_result_at),
+        "last_probe_at": probe_at,
         "last_probe_result": probe_result,
         "last_probe_latency_ms": probe_latency_ms,
+        "gateway_cpu_sample_at": gateway_cpu_sample_at,
+        "gateway_cpu_main_pid": gateway_cpu_main_pid,
+        "gateway_cpu_usage_nsec": gateway_cpu_usage_nsec,
+        "gateway_cpu_elapsed_seconds": gateway_cpu_elapsed_seconds,
+        "gateway_cpu_percent": gateway_cpu_percent,
+        "gateway_cpu_hot": gateway_cpu_hot,
+        "gateway_cpu_hot_count": gateway_cpu_hot_count,
+        "gateway_cpu_threshold_percent": gateway_cpu_threshold_percent,
         "last_recovery_action": previous.get("last_recovery_action"),
         "last_recovery_at": previous.get("last_recovery_at"),
         "next_allowed_action_at": previous.get("next_allowed_action_at"),

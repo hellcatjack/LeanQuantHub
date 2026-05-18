@@ -616,6 +616,10 @@ def reconcile_orders_with_ib_completed_status(
     limit: int = 1200,
     min_query_interval_seconds: int = 8,
     lookback_hours: int = 8,
+    run_id: int | None = None,
+    open_tags: set[str] | None = None,
+    missing_min_age_seconds: int = 0,
+    leader_submitted_only: bool = False,
 ) -> dict[str, int]:
     summary = {
         "candidates": 0,
@@ -635,6 +639,35 @@ def reconcile_orders_with_ib_completed_status(
         lookback_hours=lookback_hours,
         statuses=_COMPLETED_CANDIDATE_STATUSES,
     )
+    if run_id is not None:
+        try:
+            run_id_value = int(run_id)
+        except (TypeError, ValueError):
+            run_id_value = 0
+        candidates = [candidate for candidate in candidates if int(candidate.run_id or 0) == run_id_value]
+    if leader_submitted_only:
+        candidates = [
+            candidate
+            for candidate in candidates
+            if candidate.submit_source == "leader_command" and candidate.submit_status == "submitted"
+        ]
+    if open_tags is not None:
+        open_tag_set = {str(tag or "").strip() for tag in open_tags if str(tag or "").strip()}
+        candidates = [candidate for candidate in candidates if not candidate.tag or candidate.tag not in open_tag_set]
+    min_age = max(0, int(missing_min_age_seconds or 0))
+    if min_age > 0:
+        now = datetime.now(timezone.utc)
+        aged_candidates: list[_CandidateOrder] = []
+        for candidate in candidates:
+            ref_dt = candidate.updated_at or candidate.created_at
+            if ref_dt is None:
+                continue
+            try:
+                if (now - ref_dt).total_seconds() >= float(min_age):
+                    aged_candidates.append(candidate)
+            except Exception:
+                continue
+        candidates = aged_candidates
     summary["candidates"] = len(candidates)
     if not candidates:
         return summary

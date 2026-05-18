@@ -432,6 +432,62 @@ def test_reconcile_orders_with_ib_completed_status_terminalizes_run_cancel(monke
         session.close()
 
 
+def test_reconcile_completed_orders_skips_open_leader_order_without_ib_probe(monkeypatch):
+    engine = _make_engine()
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    session = Session()
+    try:
+        run = TradeRun(project_id=1, mode="paper", status="running", params={"mode": "paper"})
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        order = create_trade_order(
+            session,
+            {
+                "client_order_id": "oi_hot_1",
+                "symbol": "SATS",
+                "side": "SELL",
+                "quantity": 1,
+                "order_type": "LMT",
+                "limit_price": 119.72,
+                "params": {
+                    "mode": "paper",
+                    "submit_command": {
+                        "source": "leader_command",
+                        "status": "submitted",
+                    },
+                },
+            },
+            run_id=run.id,
+        ).order
+        session.commit()
+        update_trade_order_status(session, order, {"status": "SUBMITTED"})
+        order.ib_order_id = 379
+        session.commit()
+
+        monkeypatch.setattr(
+            ib_execution_backfill,
+            "get_or_create_ib_settings",
+            lambda _session: (_ for _ in ()).throw(AssertionError("ib_probe_should_not_run")),
+        )
+
+        summary = ib_execution_backfill.reconcile_orders_with_ib_completed_status(
+            session,
+            limit=200,
+            min_query_interval_seconds=0,
+            lookback_hours=12,
+            open_tags={"oi_hot_1"},
+            leader_submitted_only=True,
+        )
+
+        assert summary["candidates"] == 0
+        assert summary["completed_rows_fetched"] == 0
+        assert summary["terminalized"] == 0
+    finally:
+        session.close()
+
+
 def test_reconcile_orders_with_ib_completed_status_skips_when_fill_exists(monkeypatch):
     engine = _make_engine()
     Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)

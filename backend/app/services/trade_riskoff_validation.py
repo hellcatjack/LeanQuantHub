@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from datetime import datetime
-from pathlib import Path
 import csv
-import json
+from pathlib import Path
 from typing import Any
 
 from app.models import DecisionSnapshot, TradeOrder, TradeRun
+from app.services.trade_execution_targets import (
+    load_snapshot_summary,
+    parse_symbol_list,
+    resolve_snapshot_execution_targets,
+)
 
 
 def _coerce_bool(raw: object) -> bool:
@@ -18,61 +22,23 @@ def _coerce_bool(raw: object) -> bool:
     return text in {"1", "true", "yes", "y", "on"}
 
 
-def _parse_symbol_list(raw: object) -> list[str]:
-    text = str(raw or "").strip()
-    if not text:
-        return []
-    out: list[str] = []
-    seen: set[str] = set()
-    for token in text.split(","):
-        symbol = token.strip().upper()
-        if not symbol or symbol in seen:
-            continue
-        out.append(symbol)
-        seen.add(symbol)
-    return out
-
-
-def _load_json(path: Path | None) -> dict[str, Any]:
-    if path is None or not path.exists():
-        return {}
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return raw if isinstance(raw, dict) else {}
-
-
-def _load_snapshot_summary(snapshot: DecisionSnapshot | None) -> dict[str, Any]:
-    if snapshot is None:
-        return {}
-    summary = snapshot.summary if isinstance(snapshot.summary, dict) else {}
-    if snapshot.summary_path:
-        override = _load_json(Path(snapshot.summary_path))
-        if override:
-            summary = override
-    return summary
-
-
-def _load_target_symbols(items_path: str | None) -> list[str]:
+def _load_target_items(items_path: str | None) -> list[dict[str, Any]]:
     if not items_path:
         return []
     path = Path(items_path)
     if not path.exists():
         return []
-    symbols: list[str] = []
-    seen: set[str] = set()
+    items: list[dict[str, Any]] = []
     try:
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
             for row in csv.DictReader(handle):
                 symbol = str(row.get("symbol") or "").strip().upper()
-                if not symbol or symbol in seen:
+                if not symbol:
                     continue
-                seen.add(symbol)
-                symbols.append(symbol)
+                items.append({"symbol": symbol, "weight": row.get("weight")})
     except OSError:
         return []
-    return symbols
+    return items
 
 
 def _resolve_trade_run(
@@ -98,7 +64,7 @@ def _resolve_trade_run(
             continue
         if snapshot_id not in snapshots:
             snapshots[snapshot_id] = session.get(DecisionSnapshot, snapshot_id)
-        summary = _load_snapshot_summary(snapshots.get(snapshot_id))
+            summary = load_snapshot_summary(snapshots.get(snapshot_id))
         if _coerce_bool(summary.get("risk_off")):
             return run
     return None
@@ -135,7 +101,7 @@ def validate_trade_run_riskoff_alignment(
             "project_id": run.project_id,
         }
 
-    summary = _load_snapshot_summary(snapshot)
+    summary = load_snapshot_summary(snapshot)
     risk_off = _coerce_bool(summary.get("risk_off"))
     risk_off_mode = str(summary.get("risk_off_mode") or "").strip().lower()
     risk_off_symbol = str(summary.get("risk_off_symbol") or "").strip().upper()
@@ -143,7 +109,7 @@ def validate_trade_run_riskoff_alignment(
 
     defensive_symbols = []
     seen: set[str] = set()
-    for symbol in [risk_off_symbol, *_parse_symbol_list(algo_params.get("risk_off_symbols"))]:
+    for symbol in [risk_off_symbol, *parse_symbol_list(algo_params.get("risk_off_symbols"))]:
         symbol_norm = str(symbol or "").strip().upper()
         if not symbol_norm or symbol_norm in seen:
             continue
@@ -170,7 +136,9 @@ def validate_trade_run_riskoff_alignment(
             if str(order.side or "").strip().upper() == "SELL" and float(order.quantity or 0.0) > 0
         }
     )
-    target_symbols = _load_target_symbols(snapshot.items_path)
+    target_items = _load_target_items(snapshot.items_path)
+    effective_target_weights, effective_target_meta = resolve_snapshot_execution_targets(snapshot, target_items)
+    target_symbols = sorted(effective_target_weights.keys())
 
     payload: dict[str, Any] = {
         "status": "pass",
@@ -183,6 +151,7 @@ def validate_trade_run_riskoff_alignment(
         "target_symbols": target_symbols,
         "buy_symbols": buy_symbols,
         "sell_symbols": sell_symbols,
+        "effective_target_source": effective_target_meta.get("source"),
         "checked_at": datetime.utcnow().isoformat(timespec="seconds"),
         "violations": [],
         "warnings": [],
@@ -197,8 +166,10 @@ def validate_trade_run_riskoff_alignment(
     warnings: list[str] = []
     if not orders:
         warnings.append("no_trade_orders")
-    if not target_symbols:
+    if not target_symbols and effective_target_meta.get("source") == "decision_items":
         warnings.append("decision_items_missing")
+    if bool(effective_target_meta.get("fallback_to_cash")):
+        warnings.append("risk_off_fallback_to_cash")
 
     target_set = set(target_symbols)
     defensive_set = set(defensive_symbols)

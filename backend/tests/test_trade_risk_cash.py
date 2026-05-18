@@ -1,6 +1,7 @@
 from pathlib import Path
 import sys
 import csv
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -11,6 +12,16 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from app.models import Base, Project, TradeRun, DecisionSnapshot
 import app.services.trade_executor as trade_executor
+
+
+@pytest.fixture(autouse=True)
+def _isolate_gateway_trade_block(monkeypatch):
+    monkeypatch.setattr(
+        trade_executor,
+        "get_gateway_trade_block_state",
+        lambda *_a, **_k: None,
+        raising=False,
+    )
 
 
 def _make_session_factory():
@@ -40,6 +51,23 @@ def test_trade_executor_injects_cash_available(tmp_path, monkeypatch):
         trade_executor,
         "read_quotes",
         lambda _root: {"items": [{"symbol": "AAA", "last": 50}], "stale": False},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        trade_executor,
+        "read_positions",
+        lambda _root: {"items": [], "stale": False, "source_detail": "ib_holdings"},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        trade_executor,
+        "get_account_positions",
+        lambda _session, *, mode, force_refresh=False: {
+            "items": [],
+            "stale": False,
+            "source_detail": "ib_holdings_ibapi_fallback",
+            "refreshed_at": "2026-04-24T00:00:00Z",
+        },
         raising=False,
     )
     monkeypatch.setattr(

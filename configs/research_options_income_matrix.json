@@ -1,0 +1,17 @@
+{
+  "baseline": {
+    "risk_off_symbol": "SGOV",
+    "risk_off_symbols": ["SGOV", "VGSH"],
+    "benchmark": "SPY"
+  },
+  "proxy_assets": ["JEPI", "JEPQ", "XYLD", "QYLD", "DIVO"],
+  "integration_modes": ["defensive_replacement", "idle_replacement"],
+  "sleeve_weights": [0.2, 0.3],
+  "thresholds": {
+    "max_drawdown_delta_pp": 1.5,
+    "recovery_time_delta_ratio": 0.2,
+    "ulcer_index_delta_ratio": 0.1,
+    "min_cagr_delta_pp": 0.5,
+    "min_sharpe_delta": 0.05
+  }
+}

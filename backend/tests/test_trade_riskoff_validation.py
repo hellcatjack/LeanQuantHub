@@ -169,6 +169,127 @@ def test_validate_trade_run_riskoff_alignment_skipped_when_risk_off_false(tmp_pa
         session.close()
 
 
+def test_validate_trade_run_riskoff_alignment_passes_when_effective_target_comes_from_summary(tmp_path):
+    session = _make_session()
+    try:
+        project = Project(name="p", description="")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        items_path = tmp_path / "decision_items.csv"
+        _write_items(items_path, ["AAA"])
+        snapshot = DecisionSnapshot(
+            project_id=project.id,
+            status="success",
+            items_path=str(items_path),
+            summary={
+                "risk_off": True,
+                "risk_off_mode": "defensive",
+                "risk_off_symbol": "SGOV",
+                "effective_exposure_cap": 0.4,
+                "algorithm_parameters": {"risk_off_symbols": "SGOV,VGSH", "risk_off_symbol": "SGOV"},
+            },
+        )
+        session.add(snapshot)
+        session.commit()
+        session.refresh(snapshot)
+
+        run = TradeRun(project_id=project.id, decision_snapshot_id=snapshot.id, status="done", mode="paper", params={})
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        session.add(
+            TradeOrder(
+                run_id=run.id,
+                client_order_id="sell-risk-on",
+                symbol="AAA",
+                side="SELL",
+                quantity=5,
+                status="FILLED",
+            )
+        )
+        session.add(
+            TradeOrder(
+                run_id=run.id,
+                client_order_id="buy-risk-off",
+                symbol="SGOV",
+                side="BUY",
+                quantity=40,
+                status="FILLED",
+            )
+        )
+        session.commit()
+
+        result = validate_trade_run_riskoff_alignment(session, run_id=run.id)
+        assert result["status"] == "pass"
+        assert result["message"] == "risk_off_trade_alignment_ok"
+        assert result["target_symbols"] == ["SGOV"]
+    finally:
+        session.close()
+
+
+def test_validate_trade_run_riskoff_alignment_passes_for_benchmark_summary_target(tmp_path):
+    session = _make_session()
+    try:
+        project = Project(name="p", description="")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        items_path = tmp_path / "decision_items.csv"
+        _write_items(items_path, ["AAA"])
+        snapshot = DecisionSnapshot(
+            project_id=project.id,
+            status="success",
+            items_path=str(items_path),
+            summary={
+                "risk_off": True,
+                "risk_off_mode": "benchmark",
+                "effective_exposure_cap": 0.3,
+                "algorithm_parameters": {"benchmark": "QQQ"},
+            },
+        )
+        session.add(snapshot)
+        session.commit()
+        session.refresh(snapshot)
+
+        run = TradeRun(project_id=project.id, decision_snapshot_id=snapshot.id, status="done", mode="paper", params={})
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        session.add(
+            TradeOrder(
+                run_id=run.id,
+                client_order_id="sell-risk-on",
+                symbol="AAA",
+                side="SELL",
+                quantity=5,
+                status="FILLED",
+            )
+        )
+        session.add(
+            TradeOrder(
+                run_id=run.id,
+                client_order_id="buy-benchmark",
+                symbol="QQQ",
+                side="BUY",
+                quantity=30,
+                status="FILLED",
+            )
+        )
+        session.commit()
+
+        result = validate_trade_run_riskoff_alignment(session, run_id=run.id)
+        assert result["status"] == "pass"
+        assert result["message"] == "risk_off_trade_alignment_ok"
+        assert result["target_symbols"] == ["QQQ"]
+    finally:
+        session.close()
+
+
 def test_validate_trade_run_riskoff_alignment_risk_off_only_picks_latest_risk_off_run(tmp_path):
     session = _make_session()
     try:

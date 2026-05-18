@@ -127,6 +127,18 @@ def test_execute_trade_run_can_submit_via_leader_commands(monkeypatch, tmp_path)
         monkeypatch.setattr(trade_executor, "_should_use_leader_submit", lambda _p, _o: True, raising=False)
         monkeypatch.setattr(trade_executor, "_is_bridge_ready_for_submit", lambda _r: True, raising=False)
         monkeypatch.setattr(trade_executor, "_bridge_connection_ok", lambda: True, raising=False)
+        monkeypatch.setattr(
+            trade_executor,
+            "get_gateway_trade_block_state",
+            lambda *_a, **_k: None,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            trade_executor,
+            "fetch_account_summary",
+            lambda _session: {"NetLiquidation": 10000.0, "cash_available": 10000.0},
+            raising=False,
+        )
         monkeypatch.setattr(trade_executor, "write_submit_order_command", _fake_submit_command, raising=False)
         monkeypatch.setattr(
             trade_executor,
@@ -150,6 +162,132 @@ def test_execute_trade_run_can_submit_via_leader_commands(monkeypatch, tmp_path)
         assert refreshed_order is not None
         submit_meta = dict((refreshed_order.params or {}).get("submit_command") or {})
         assert submit_meta.get("pending") is True
+    finally:
+        session.close()
+
+
+def test_refresh_trade_run_uses_ib_completed_status_for_missing_leader_order(monkeypatch, tmp_path):
+    Session = _make_session()
+    session = Session()
+    try:
+        session.add(Project(name="p18", description=""))
+        session.commit()
+
+        run = TradeRun(
+            project_id=1,
+            decision_snapshot_id=1,
+            mode="paper",
+            status="running",
+            message="submitted_leader",
+            params={
+                "lean_execution": {
+                    "source": "leader_command",
+                    "submitted_at": "2026-04-24T16:57:10Z",
+                }
+            },
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        order = TradeOrder(
+            run_id=run.id,
+            client_order_id="oi_1179_1",
+            symbol="SATS",
+            side="SELL",
+            quantity=1,
+            order_type="ADAPTIVE_LMT",
+            status="SUBMITTED",
+            ib_order_id=379,
+            params={
+                "submit_command": {
+                    "source": "leader_command",
+                    "status": "submitted",
+                    "pending": False,
+                }
+            },
+        )
+        session.add(order)
+        session.commit()
+        session.refresh(order)
+
+        bridge_root = tmp_path / "lean_bridge"
+        monkeypatch.setattr(trade_executor, "_resolve_bridge_root", lambda: bridge_root, raising=False)
+        refreshed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        monkeypatch.setattr(
+            trade_executor,
+            "read_open_orders",
+            lambda _root: {
+                "items": [],
+                "refreshed_at": refreshed_at,
+                "source_detail": "ib_open_orders_empty",
+                "stale": False,
+            },
+            raising=False,
+        )
+        monkeypatch.setattr(
+            trade_executor,
+            "read_positions",
+            lambda _root: {
+                "items": [{"symbol": "SATS", "quantity": 12.0}],
+                "refreshed_at": refreshed_at,
+                "source_detail": "ib_holdings",
+                "stale": False,
+            },
+            raising=False,
+        )
+
+        completed_kwargs = {}
+
+        def _completed_status_reconcile(session_arg, **_kwargs):
+            completed_kwargs.update(_kwargs)
+            target = session_arg.get(TradeOrder, order.id)
+            assert target is not None
+            trade_executor.update_trade_order_status(
+                session_arg,
+                target,
+                {
+                    "status": "CANCELED",
+                    "params": {
+                        "event_source": "ib_completed_orders",
+                        "event_status": "CANCELED",
+                        "sync_reason": "ib_completed_order_canceled",
+                    },
+                },
+            )
+            return {
+                "candidates": 1,
+                "completed_rows_fetched": 1,
+                "completed_rows_matched": 1,
+                "terminalized": 1,
+                "skipped_filled_hint": 0,
+                "throttled": 0,
+                "errors": 0,
+            }
+
+        monkeypatch.setattr(
+            trade_executor,
+            "reconcile_orders_with_ib_completed_status",
+            _completed_status_reconcile,
+            raising=False,
+        )
+
+        assert trade_executor.refresh_trade_run_status(session, run) is True
+
+        session.expire_all()
+        refreshed_run = session.get(TradeRun, run.id)
+        refreshed_order = session.get(TradeOrder, order.id)
+        assert refreshed_order is not None
+        assert refreshed_order.status == "CANCELED"
+        assert refreshed_run is not None
+        assert refreshed_run.status == "failed"
+        params = refreshed_run.params if isinstance(refreshed_run.params, dict) else {}
+        assert params["ib_completed_status_reconcile"]["terminalized"] == 1
+        assert params["completion_summary"]["cancelled"] == 1
+        assert completed_kwargs["run_id"] == run.id
+        assert completed_kwargs["open_tags"] == set()
+        assert completed_kwargs["leader_submitted_only"] is True
+        assert completed_kwargs["min_query_interval_seconds"] >= 60
     finally:
         session.close()
 

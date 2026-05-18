@@ -39,6 +39,12 @@ def test_lean_mode_sizes_intent_orders_before_risk_gate(tmp_path, monkeypatch):
     monkeypatch.setattr(trade_executor, "_bridge_connection_ok", lambda *_a, **_k: True, raising=False)
     monkeypatch.setattr(
         trade_executor,
+        "get_gateway_trade_block_state",
+        lambda *_a, **_k: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        trade_executor,
         "read_quotes",
         lambda _root: {"items": [{"symbol": "AAA", "last": 50}], "stale": False},
         raising=False,

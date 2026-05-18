@@ -9,6 +9,10 @@ from typing import Dict, List
 from pathlib import Path
 
 from AlgorithmImports import *
+try:
+    from options_income_overlay import apply_income_sleeve
+except ImportError:
+    from algorithms.options_income_overlay import apply_income_sleeve
 
 
 class MLOverlayScores(QCAlgorithm):
@@ -253,7 +257,7 @@ class MLOverlayScores(QCAlgorithm):
         risk_off_symbol_raw = (
             self.get_parameter("risk_off_symbol")
             or self.get_parameter("defensive_symbol")
-            or "VGSH"
+            or "SGOV"
         )
         self.risk_off_symbol = risk_off_symbol_raw.strip().upper()
         risk_off_symbols_raw = self.get_parameter("risk_off_symbols")
@@ -324,6 +328,18 @@ class MLOverlayScores(QCAlgorithm):
             self.idle_allocation_mode = "benchmark"
         else:
             self.idle_allocation_mode = "none"
+        self.income_sleeve_symbol = (
+            self.get_parameter("income_sleeve_symbol") or ""
+        ).strip().upper()
+        self.income_sleeve_weight = max(
+            self._coerce_float_param("income_sleeve_weight", 0.0),
+            0.0,
+        )
+        self.income_sleeve_mode = (
+            self.get_parameter("income_sleeve_mode") or "none"
+        ).strip().lower()
+        if self.income_sleeve_symbol and self.income_sleeve_symbol not in self.symbols:
+            self.symbols.append(self.income_sleeve_symbol)
         dynamic_raw = (self.get_parameter("dynamic_exposure") or "false").strip().lower()
         self.dynamic_exposure = dynamic_raw in ("1", "true", "yes", "y")
         tiers_raw = self.get_parameter("drawdown_tiers")
@@ -697,6 +713,32 @@ class MLOverlayScores(QCAlgorithm):
                         weights[idle_symbol] = weights.get(idle_symbol, 0.0) + idle_weight
                         self._set_runtime_stat("Idle_Allocation", f"{idle_weight:.2%}")
                         self._set_runtime_stat("Idle_Symbol", idle_symbol)
+        if self.income_sleeve_mode in {"idle_replacement", "defensive_replacement"}:
+            sleeve_symbol = self.income_sleeve_symbol
+            if (
+                sleeve_symbol
+                and sleeve_symbol in self.securities
+                and self.securities[sleeve_symbol].IsTradable
+                and self.securities[sleeve_symbol].HasData
+                and self.securities[sleeve_symbol].Price > 0
+            ):
+                weights = apply_income_sleeve(
+                    weights=weights,
+                    idle_symbol=idle_symbol,
+                    income_symbol=sleeve_symbol,
+                    sleeve_weight=self.income_sleeve_weight,
+                    mode=self.income_sleeve_mode,
+                )
+                if sleeve_symbol in weights:
+                    self._set_runtime_stat("IncomeSleeve_Symbol", sleeve_symbol)
+                    self._set_runtime_stat(
+                        "IncomeSleeve_Weight",
+                        f"{weights[sleeve_symbol]:.2%}",
+                    )
+                    self._set_runtime_stat(
+                        "IncomeSleeve_Mode",
+                        self.income_sleeve_mode,
+                    )
         if self.max_turnover_week > 0:
             total_value = self._portfolio_total_value()
             current_weights: Dict[str, float] = {}

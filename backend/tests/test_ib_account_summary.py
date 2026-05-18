@@ -27,6 +27,69 @@ def test_build_summary_tags_uses_core_tags():
         assert tag in parts
 
 
+def test_fetch_account_summary_prefers_true_cash_over_available_funds(monkeypatch):
+    from app.services import ib_account as ib_account_module
+
+    class _Settings:
+        mode = "paper"
+
+    monkeypatch.setattr(
+        ib_account_module,
+        "get_or_create_ib_settings",
+        lambda _session: _Settings(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        ib_account_module,
+        "get_account_summary",
+        lambda _session, *, mode, full, force_refresh: {
+            "items": {
+                "NetLiquidation": 34003.48,
+                "AvailableFunds": 23653.76,
+                "TotalCashValue": -4423.6,
+                "CashBalance": -4423.602,
+            }
+        },
+        raising=False,
+    )
+
+    payload = ib_account_module.fetch_account_summary(object())
+
+    assert payload["cash_available"] == -4423.602
+    assert payload["cash_available_source"] == "CashBalance"
+
+
+def test_fetch_account_summary_preserves_zero_cash_balance(monkeypatch):
+    from app.services import ib_account as ib_account_module
+
+    class _Settings:
+        mode = "paper"
+
+    monkeypatch.setattr(
+        ib_account_module,
+        "get_or_create_ib_settings",
+        lambda _session: _Settings(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        ib_account_module,
+        "get_account_summary",
+        lambda _session, *, mode, full, force_refresh: {
+            "items": {
+                "AvailableFunds": 5000.0,
+                "TotalCashValue": 0.0,
+                "CashBalance": 0.0,
+            }
+        },
+        raising=False,
+    )
+
+    payload = ib_account_module.fetch_account_summary(object())
+
+    assert payload["cash_available"] == 0.0
+    assert payload["cash_available_source"] == "CashBalance"
+
+
 def test_resolve_ib_account_settings_skips_probe(monkeypatch):
     from app.services import ib_account as ib_account_module
 

@@ -9,6 +9,7 @@ import LiveTradePage, {
   resolveAccountPositionsErrorState,
   resolveAccountPositionsResponseState,
   resolveGatewayTradeBlockState,
+  resolvePositionChartFloatingLayout,
   TradeIntentMismatchCard,
   WeeklyRebalancePanel,
   type WeeklyRebalanceStatus,
@@ -25,7 +26,7 @@ const TradeStatusLabel = () => {
   return React.createElement(
     "span",
     null,
-    t("trade.statusLabel", { system: t("data.ib.workstationTypeTws") })
+    t("trade.statusLabel", { system: t("data.ib.workstationTypeTws") }),
   );
 };
 
@@ -34,17 +35,27 @@ const GatewayRecoveryLabel = () => {
   return React.createElement(
     "span",
     null,
-    `${t("trade.gatewayRuntimeLabel")} ${t("trade.accountPositionsTrustedFallbackHint")}`
+    `${t("trade.gatewayRuntimeLabel")} ${t("trade.accountPositionsTrustedFallbackHint")}`,
   );
 };
 
 describe("LiveTradePage", () => {
   it("infers eastern trading session from clock", () => {
-    expect(resolveSessionByEasternTime(new Date("2026-01-15T15:00:00Z"))).toBe("rth");
-    expect(resolveSessionByEasternTime(new Date("2026-01-15T11:00:00Z"))).toBe("pre");
-    expect(resolveSessionByEasternTime(new Date("2026-01-15T22:00:00Z"))).toBe("post");
-    expect(resolveSessionByEasternTime(new Date("2026-01-15T02:00:00Z"))).toBe("night");
-    expect(resolveSessionByEasternTime(new Date("2026-01-17T16:00:00Z"))).toBe("night");
+    expect(resolveSessionByEasternTime(new Date("2026-01-15T15:00:00Z"))).toBe(
+      "rth",
+    );
+    expect(resolveSessionByEasternTime(new Date("2026-01-15T11:00:00Z"))).toBe(
+      "pre",
+    );
+    expect(resolveSessionByEasternTime(new Date("2026-01-15T22:00:00Z"))).toBe(
+      "post",
+    );
+    expect(resolveSessionByEasternTime(new Date("2026-01-15T02:00:00Z"))).toBe(
+      "night",
+    );
+    expect(resolveSessionByEasternTime(new Date("2026-01-17T16:00:00Z"))).toBe(
+      "night",
+    );
   });
 
   it("marks zero positions as non-actionable for liquidation", () => {
@@ -69,7 +80,9 @@ describe("LiveTradePage", () => {
   it("keeps last trusted positions when stale refresh returns empty", () => {
     const fresh = resolveAccountPositionsResponseState({
       response: {
-        items: [{ symbol: "AAPL", position: 10, account: "DU1", currency: "USD" }],
+        items: [
+          { symbol: "AAPL", position: 10, account: "DU1", currency: "USD" },
+        ],
         refreshed_at: "2026-03-10T14:00:00Z",
         stale: false,
       },
@@ -91,7 +104,9 @@ describe("LiveTradePage", () => {
   it("keeps last trusted positions when refresh request fails", () => {
     const fresh = resolveAccountPositionsResponseState({
       response: {
-        items: [{ symbol: "MSFT", position: 3, account: "DU1", currency: "USD" }],
+        items: [
+          { symbol: "MSFT", position: 3, account: "DU1", currency: "USD" },
+        ],
         refreshed_at: "2026-03-10T14:00:00Z",
         stale: false,
       },
@@ -108,10 +123,10 @@ describe("LiveTradePage", () => {
 
   it("marks gateway degraded states as blocked and recovering", () => {
     expect(resolveGatewayTradeBlockState({ state: "gateway_degraded" })).toBe(
-      "gateway_degraded"
+      "gateway_degraded",
     );
     expect(resolveGatewayTradeBlockState({ state: "gateway_restarting" })).toBe(
-      "gateway_restarting"
+      "gateway_restarting",
     );
     expect(resolveGatewayTradeBlockState({ state: "recovering" })).toBeNull();
     expect(isGatewayRuntimeRecovering({ state: "recovering" })).toBe(true);
@@ -167,8 +182,8 @@ describe("LiveTradePage", () => {
           onTrigger: () => undefined,
           formatStatus: (value) => String(value || "-"),
           formatDateTime: (value) => String(value || "-"),
-        })
-      )
+        }),
+      ),
     );
 
     expect(html).toContain("周度自动调仓");
@@ -179,42 +194,181 @@ describe("LiveTradePage", () => {
     expect(html).toContain("#22");
   });
 
+  it("resolves floating chart below selected row on wide viewports", () => {
+    expect(
+      resolvePositionChartFloatingLayout({
+        viewportWidth: 1600,
+        cardWidth: 1480,
+        cardHeight: 1100,
+        selectedRowTop: 220,
+        selectedRowHeight: 42,
+      }),
+    ).toMatchObject({
+      floating: true,
+      placement: "below-row",
+    });
+  });
+
+  it("resolves floating chart above selected row when lower space is tight", () => {
+    expect(
+      resolvePositionChartFloatingLayout({
+        viewportWidth: 1600,
+        cardWidth: 1480,
+        cardHeight: 1100,
+        selectedRowTop: 860,
+        selectedRowHeight: 42,
+      }),
+    ).toMatchObject({
+      floating: true,
+      placement: "above-row",
+    });
+  });
+
+  it("resolves snapped floating chart layout from persisted top-right anchor", () => {
+    expect(
+      resolvePositionChartFloatingLayout({
+        viewportWidth: 1600,
+        cardWidth: 1480,
+        cardHeight: 1100,
+        selectedRowTop: 220,
+        selectedRowHeight: 42,
+        persistedWindow: {
+          anchor: "top-right",
+          minimized: false,
+          offsetX: 18,
+          offsetY: 24,
+          width: 460,
+          height: 520,
+        },
+      }),
+    ).toMatchObject({
+      floating: true,
+      placement: "top-right",
+      left: 1002,
+      top: 272,
+      width: 460,
+      height: 520,
+      minimized: false,
+      userAnchored: true,
+    });
+  });
+
+  it("sanitizes invalid persisted floating chart layout back to automatic placement", () => {
+    expect(
+      resolvePositionChartFloatingLayout({
+        viewportWidth: 1600,
+        cardWidth: 1480,
+        cardHeight: 1100,
+        selectedRowTop: 220,
+        selectedRowHeight: 42,
+        persistedWindow: {
+          anchor: "sideways",
+          minimized: false,
+          offsetX: -20,
+          offsetY: -5,
+          width: 9999,
+          height: 100,
+        } as any,
+      }),
+    ).toMatchObject({
+      floating: true,
+      placement: "below-row",
+      minimized: false,
+      userAnchored: false,
+    });
+  });
+
+  it("keeps minimized floating chart as a compact snapped strip", () => {
+    expect(
+      resolvePositionChartFloatingLayout({
+        viewportWidth: 1600,
+        cardWidth: 1480,
+        cardHeight: 1100,
+        selectedRowTop: 220,
+        selectedRowHeight: 42,
+        persistedWindow: {
+          anchor: "bottom-right",
+          minimized: true,
+          offsetX: 18,
+          offsetY: 20,
+          width: 520,
+          height: 560,
+        },
+      }),
+    ).toMatchObject({
+      floating: true,
+      placement: "bottom-right",
+      minimized: true,
+      userAnchored: true,
+      height: 68,
+    });
+  });
+
+  it("stacks chart on narrower viewports", () => {
+    expect(
+      resolvePositionChartFloatingLayout({
+        viewportWidth: 1180,
+        cardWidth: 1080,
+        cardHeight: 900,
+        selectedRowTop: 240,
+        selectedRowHeight: 42,
+      }),
+    ).toMatchObject({
+      floating: false,
+      placement: "stacked",
+    });
+  });
+
   it("renders market snapshot card", () => {
-    const html = ReactDOMServer.renderToString(React.createElement(LiveTradePage));
+    const html = ReactDOMServer.renderToString(
+      React.createElement(LiveTradePage),
+    );
     expect(html).toContain("trade.snapshotTitle");
   });
 
   it("renders execute trade run form", () => {
-    const html = ReactDOMServer.renderToString(React.createElement(LiveTradePage));
+    const html = ReactDOMServer.renderToString(
+      React.createElement(LiveTradePage),
+    );
     expect(html).toContain("trade.executeRunId");
     expect(html).toContain("trade.executeSubmit");
   });
 
   it("renders account summary section", () => {
-    const html = ReactDOMServer.renderToString(React.createElement(LiveTradePage));
+    const html = ReactDOMServer.renderToString(
+      React.createElement(LiveTradePage),
+    );
     expect(html).toContain("trade.accountSummaryTitle");
   });
 
   it("renders symbol summary and fills table", () => {
-    const html = ReactDOMServer.renderToString(React.createElement(LiveTradePage));
+    const html = ReactDOMServer.renderToString(
+      React.createElement(LiveTradePage),
+    );
     expect(html).toContain("trade.symbolSummaryTitle");
     expect(html).toContain("trade.fillsTitle");
   });
 
   it("renders decision basis markers in execution view", () => {
-    const html = ReactDOMServer.renderToString(React.createElement(LiveTradePage));
+    const html = ReactDOMServer.renderToString(
+      React.createElement(LiveTradePage),
+    );
     expect(html).toContain("trade.decisionBasisTitle");
     expect(html).toContain("trade.decisionBasisEffectivePitDate");
     expect(html).toContain("trade.decisionBasisSummaryLine");
   });
 
   it("renders client order id column", () => {
-    const html = ReactDOMServer.renderToString(React.createElement(LiveTradePage));
+    const html = ReactDOMServer.renderToString(
+      React.createElement(LiveTradePage),
+    );
     expect(html).toContain("trade.orderTable.clientOrderId");
   });
 
   it("renders orders pagination controls", () => {
-    const html = ReactDOMServer.renderToString(React.createElement(LiveTradePage));
+    const html = ReactDOMServer.renderToString(
+      React.createElement(LiveTradePage),
+    );
     expect(html).toContain("pagination.pageSize");
   });
 
@@ -223,8 +377,8 @@ describe("LiveTradePage", () => {
       React.createElement(
         I18nProvider,
         null,
-        React.createElement(LiveTradePage)
-      )
+        React.createElement(LiveTradePage),
+      ),
     );
     expect(html).toContain("净清算值");
   });
@@ -234,8 +388,8 @@ describe("LiveTradePage", () => {
       React.createElement(
         I18nProvider,
         null,
-        React.createElement(GatewayRecoveryLabel)
-      )
+        React.createElement(GatewayRecoveryLabel),
+      ),
     );
     expect(html).toContain("Gateway 运行状态");
     expect(html).toContain("最后一次可信持仓");
@@ -246,8 +400,8 @@ describe("LiveTradePage", () => {
       React.createElement(
         I18nProvider,
         null,
-        React.createElement(PipelineLabel)
-      )
+        React.createElement(PipelineLabel),
+      ),
     );
     expect(html).toContain("Pipeline");
   });
@@ -257,35 +411,45 @@ describe("LiveTradePage", () => {
       React.createElement(
         I18nProvider,
         null,
-        React.createElement(TradeStatusLabel)
-      )
+        React.createElement(TradeStatusLabel),
+      ),
     );
     expect(html).toContain("TWS 状态");
   });
 
   it("renders pipeline view container", () => {
-    const html = ReactDOMServer.renderToString(React.createElement(LiveTradePage));
+    const html = ReactDOMServer.renderToString(
+      React.createElement(LiveTradePage),
+    );
     expect(html).toContain("pipeline-view");
   });
 
   it("renders pipeline filters labels", () => {
-    const html = ReactDOMServer.renderToString(React.createElement(LiveTradePage));
+    const html = ReactDOMServer.renderToString(
+      React.createElement(LiveTradePage),
+    );
     expect(html).toContain("trade.pipeline.filters.project");
   });
 
   it("renders pipeline event list", () => {
-    const html = ReactDOMServer.renderToString(React.createElement(LiveTradePage));
+    const html = ReactDOMServer.renderToString(
+      React.createElement(LiveTradePage),
+    );
     expect(html).toContain("pipeline-events");
   });
 
   it("renders pipeline stage lanes and event drawer", () => {
-    const html = ReactDOMServer.renderToString(React.createElement(LiveTradePage));
+    const html = ReactDOMServer.renderToString(
+      React.createElement(LiveTradePage),
+    );
     expect(html).toContain("pipeline-stage-lanes");
     expect(html).toContain("pipeline-event-drawer");
   });
 
   it("filters pipeline runs by keyword and highlights events", () => {
-    const html = ReactDOMServer.renderToString(React.createElement(LiveTradePage));
+    const html = ReactDOMServer.renderToString(
+      React.createElement(LiveTradePage),
+    );
     expect(html).toContain("pipeline-keyword-input");
     expect(html).toContain("pipeline-event-highlight");
   });
@@ -303,13 +467,25 @@ describe("LiveTradePage", () => {
             extra_count: 1,
             intent_path: "/tmp/intent_orders.json",
           },
-        })
-      )
+        }),
+      ),
     );
     expect(html).toContain("订单意图与创建订单不一致");
     expect(html).toContain("AXON");
     expect(html).toContain("TSLA");
     expect(html).toContain("意图文件");
     expect(html).toContain("intent_orders.json");
+  });
+
+  it("renders covered call read-only panel shell with i18n provider", () => {
+    const html = ReactDOMServer.renderToString(
+      React.createElement(
+        I18nProvider,
+        null,
+        React.createElement(LiveTradePage),
+      ),
+    );
+    expect(html).toContain("Covered Call Pilot");
+    expect(html).toContain("Paper Only");
   });
 });

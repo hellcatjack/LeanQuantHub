@@ -16,6 +16,17 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from app.models import Base, DecisionSnapshot, Project, TradeOrder, TradeRun, TradeSettings
 import app.services.trade_executor as trade_executor
+import app.services.trade_execution_targets as trade_execution_targets
+
+
+@pytest.fixture(autouse=True)
+def _isolate_gateway_trade_block(monkeypatch):
+    monkeypatch.setattr(
+        trade_executor,
+        "get_gateway_trade_block_state",
+        lambda *_a, **_k: None,
+        raising=False,
+    )
 
 
 def _make_session_factory():
@@ -35,6 +46,37 @@ def _write_items(path: Path, *, symbol: str, weight: float) -> None:
         writer = csv.DictWriter(handle, fieldnames=["symbol", "weight", "score", "rank"])
         writer.writeheader()
         writer.writerow({"symbol": symbol, "weight": str(weight), "score": "1.0", "rank": "1"})
+
+
+def _write_adjusted_series(root: Path, *, symbol: str, closes: list[float]) -> None:
+    path = root / f"999_Alpha_{symbol}_Daily.csv"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    dates = [
+        "2026-03-24",
+        "2026-03-25",
+        "2026-03-26",
+        "2026-03-27",
+        "2026-03-30",
+        "2026-03-31",
+    ]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["date", "open", "high", "low", "close", "volume", "symbol"],
+        )
+        writer.writeheader()
+        for idx, close in enumerate(closes):
+            writer.writerow(
+                {
+                    "date": dates[idx],
+                    "open": f"{close:.6f}",
+                    "high": f"{close:.6f}",
+                    "low": f"{close:.6f}",
+                    "close": f"{close:.6f}",
+                    "volume": "1000",
+                    "symbol": symbol,
+                }
+            )
 
 
 def test_execute_trade_run_builds_delta_intent_using_latest_net_liq(tmp_path, monkeypatch):
@@ -86,7 +128,7 @@ def test_execute_trade_run_builds_delta_intent_using_latest_net_liq(tmp_path, mo
     monkeypatch.setattr(
         trade_executor,
         "fetch_account_summary",
-        lambda _session: {"NetLiquidation": 20000.0, "cash_available": 1000.0},
+        lambda _session: {"NetLiquidation": 20000.0, "cash_available": 10000.0},
         raising=False,
     )
     monkeypatch.setattr(trade_executor, "ARTIFACT_ROOT", tmp_path, raising=False)
@@ -632,3 +674,502 @@ def test_execute_trade_run_risk_off_drill_requires_dry_run(monkeypatch):
 
     with pytest.raises(RuntimeError, match="risk_off_drill_requires_dry_run"):
         trade_executor.execute_trade_run(1, dry_run=False, force=False, risk_off_drill=True)
+
+
+def test_execute_trade_run_risk_off_defensive_buys_single_selected_symbol(tmp_path, monkeypatch):
+    Session = _make_session_factory()
+    monkeypatch.setattr(trade_executor, "SessionLocal", Session)
+    monkeypatch.setattr(trade_executor, "_bridge_connection_ok", lambda *_a, **_k: True, raising=False)
+    monkeypatch.setattr(
+        trade_executor,
+        "read_quotes",
+        lambda _root: {
+            "items": [
+                {"symbol": "AAA", "last": 100.0},
+                {"symbol": "SGOV", "last": 100.0},
+                {"symbol": "VGSH", "last": 100.0},
+            ],
+            "stale": False,
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        trade_executor,
+        "get_account_positions",
+        lambda _session, *, mode, force_refresh=False: {
+            "items": [{"symbol": "AAA", "quantity": 5.0}],
+            "stale": False,
+            "source_detail": "ib_holdings_ibapi_fallback",
+            "refreshed_at": "2026-02-14T00:00:00Z",
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        trade_executor,
+        "fetch_account_summary",
+        lambda _session: {"NetLiquidation": 10000.0, "cash_available": 10000.0},
+        raising=False,
+    )
+    monkeypatch.setattr(trade_executor, "ARTIFACT_ROOT", tmp_path, raising=False)
+
+    session = Session()
+    try:
+        session.add(TradeSettings(risk_defaults={}, execution_data_source="lean", auto_recovery={}))
+        session.commit()
+
+        project = Project(name="p", description="")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        items_path = tmp_path / "decision_items.csv"
+        _write_items(items_path, symbol="AAA", weight=0.6)
+        snapshot = DecisionSnapshot(
+            project_id=project.id,
+            status="success",
+            items_path=str(items_path),
+            summary={
+                "risk_off": True,
+                "risk_off_mode": "defensive",
+                "risk_off_symbol": "SGOV",
+                "effective_exposure_cap": 0.4,
+                "algorithm_parameters": {
+                    "risk_off_symbols": "SGOV,VGSH",
+                    "risk_off_symbol": "SGOV",
+                    "max_exposure": 1.0,
+                },
+            },
+        )
+        session.add(snapshot)
+        session.commit()
+        session.refresh(snapshot)
+
+        run = TradeRun(
+            project_id=project.id,
+            decision_snapshot_id=snapshot.id,
+            status="queued",
+            mode="paper",
+            params={"order_type": "MKT", "risk_bypass": True},
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        result = trade_executor.execute_trade_run(run.id, dry_run=True, force=False)
+        assert result.status == "done"
+
+        session.expire_all()
+        orders = (
+            session.query(TradeOrder)
+            .filter(TradeOrder.run_id == run.id)
+            .order_by(TradeOrder.id.asc())
+            .all()
+        )
+        assert [(order.symbol, order.side, float(order.quantity or 0.0)) for order in orders] == [
+            ("AAA", "SELL", 5.0),
+            ("SGOV", "BUY", 40.0),
+        ]
+
+        refreshed_run = session.get(TradeRun, run.id)
+        params = refreshed_run.params if isinstance(refreshed_run.params, dict) else {}
+        assert params.get("effective_target_source") == "snapshot_risk_off"
+        meta = params.get("effective_target_meta") if isinstance(params.get("effective_target_meta"), dict) else {}
+        assert meta.get("risk_off_mode") == "defensive"
+        assert meta.get("risk_off_symbol") == "SGOV"
+        assert float(meta.get("exposure_cap") or 0.0) == 0.4
+    finally:
+        session.close()
+
+
+def test_execute_trade_run_risk_on_defensive_idle_adds_idle_buy(tmp_path, monkeypatch):
+    Session = _make_session_factory()
+    monkeypatch.setattr(trade_executor, "SessionLocal", Session)
+    monkeypatch.setattr(trade_executor, "_bridge_connection_ok", lambda *_a, **_k: True, raising=False)
+    monkeypatch.setattr(
+        trade_executor,
+        "read_quotes",
+        lambda _root: {
+            "items": [
+                {"symbol": "AAA", "last": 100.0},
+                {"symbol": "VGSH", "last": 100.0},
+            ],
+            "stale": False,
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        trade_executor,
+        "get_account_positions",
+        lambda _session, *, mode, force_refresh=False: {
+            "items": [],
+            "stale": False,
+            "source_detail": "ib_holdings_ibapi_fallback",
+            "refreshed_at": "2026-02-14T00:00:00Z",
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        trade_executor,
+        "fetch_account_summary",
+        lambda _session: {"NetLiquidation": 10000.0, "cash_available": 10000.0},
+        raising=False,
+    )
+    monkeypatch.setattr(trade_executor, "ARTIFACT_ROOT", tmp_path, raising=False)
+
+    session = Session()
+    try:
+        session.add(TradeSettings(risk_defaults={}, execution_data_source="lean", auto_recovery={}))
+        session.commit()
+
+        project = Project(name="p", description="")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        items_path = tmp_path / "decision_items.csv"
+        _write_items(items_path, symbol="AAA", weight=0.3)
+        snapshot = DecisionSnapshot(
+            project_id=project.id,
+            status="success",
+            items_path=str(items_path),
+            summary={
+                "risk_off": False,
+                "idle_allocation_mode": "defensive",
+                "idle_symbol": "VGSH",
+                "algorithm_parameters": {
+                    "max_exposure": 0.3,
+                    "risk_off_symbols": "SGOV,VGSH",
+                },
+            },
+        )
+        session.add(snapshot)
+        session.commit()
+        session.refresh(snapshot)
+
+        run = TradeRun(
+            project_id=project.id,
+            decision_snapshot_id=snapshot.id,
+            status="queued",
+            mode="paper",
+            params={"order_type": "MKT", "risk_bypass": True},
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        result = trade_executor.execute_trade_run(run.id, dry_run=True, force=False)
+        assert result.status == "done"
+
+        session.expire_all()
+        orders = (
+            session.query(TradeOrder)
+            .filter(TradeOrder.run_id == run.id)
+            .order_by(TradeOrder.id.asc())
+            .all()
+        )
+        assert [(order.symbol, order.side, float(order.quantity or 0.0)) for order in orders] == [
+            ("AAA", "BUY", 30.0),
+            ("VGSH", "BUY", 70.0),
+        ]
+
+        refreshed_run = session.get(TradeRun, run.id)
+        params = refreshed_run.params if isinstance(refreshed_run.params, dict) else {}
+        meta = params.get("effective_target_meta") if isinstance(params.get("effective_target_meta"), dict) else {}
+        assert meta.get("idle_allocation_mode") == "defensive"
+        assert meta.get("idle_symbol") == "VGSH"
+    finally:
+        session.close()
+
+
+def test_execute_trade_run_risk_off_defensive_compat_fallback_uses_basket_pick(tmp_path, monkeypatch):
+    adjusted_root = tmp_path / "curated_adjusted"
+    _write_adjusted_series(adjusted_root, symbol="SGOV", closes=[100, 100, 100, 100, 100, 100])
+    _write_adjusted_series(adjusted_root, symbol="VGSH", closes=[100, 101, 102, 103, 104, 105])
+    monkeypatch.setattr(
+        trade_execution_targets,
+        "_resolve_adjusted_data_root",
+        lambda: adjusted_root,
+        raising=False,
+    )
+    Session = _make_session_factory()
+    monkeypatch.setattr(trade_executor, "SessionLocal", Session)
+    monkeypatch.setattr(trade_executor, "_bridge_connection_ok", lambda *_a, **_k: True, raising=False)
+    monkeypatch.setattr(
+        trade_executor,
+        "read_quotes",
+        lambda _root: {
+            "items": [
+                {"symbol": "AAA", "last": 100.0},
+                {"symbol": "SGOV", "last": 100.0},
+                {"symbol": "VGSH", "last": 100.0},
+            ],
+            "stale": False,
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        trade_executor,
+        "get_account_positions",
+        lambda _session, *, mode, force_refresh=False: {
+            "items": [{"symbol": "AAA", "quantity": 5.0}],
+            "stale": False,
+            "source_detail": "ib_holdings_ibapi_fallback",
+            "refreshed_at": "2026-02-14T00:00:00Z",
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        trade_executor,
+        "fetch_account_summary",
+        lambda _session: {"NetLiquidation": 10000.0, "cash_available": 10000.0},
+        raising=False,
+    )
+    monkeypatch.setattr(trade_executor, "ARTIFACT_ROOT", tmp_path, raising=False)
+
+    session = Session()
+    try:
+        session.add(TradeSettings(risk_defaults={}, execution_data_source="lean", auto_recovery={}))
+        session.commit()
+
+        project = Project(name="p", description="")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        items_path = tmp_path / "decision_items.csv"
+        _write_items(items_path, symbol="AAA", weight=0.6)
+        snapshot = DecisionSnapshot(
+            project_id=project.id,
+            status="success",
+            items_path=str(items_path),
+            summary={
+                "snapshot_date": "2026-03-31",
+                "rebalance_date": "2026-03-31",
+                "risk_off": True,
+                "risk_off_mode": "defensive",
+                "risk_off_symbol": "",
+                "effective_exposure_cap": 0.4,
+                "algorithm_parameters": {
+                    "risk_off_symbols": "SGOV,VGSH",
+                    "risk_off_symbol": "SGOV",
+                    "risk_off_pick": "best_momentum",
+                    "risk_off_lookback_days": 5,
+                    "max_exposure": 1.0,
+                },
+            },
+        )
+        session.add(snapshot)
+        session.commit()
+        session.refresh(snapshot)
+
+        run = TradeRun(
+            project_id=project.id,
+            decision_snapshot_id=snapshot.id,
+            status="queued",
+            mode="paper",
+            params={"order_type": "MKT", "risk_bypass": True},
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        result = trade_executor.execute_trade_run(run.id, dry_run=True, force=False)
+        assert result.status == "done"
+
+        session.expire_all()
+        orders = (
+            session.query(TradeOrder)
+            .filter(TradeOrder.run_id == run.id)
+            .order_by(TradeOrder.id.asc())
+            .all()
+        )
+        assert [(order.symbol, order.side, float(order.quantity or 0.0)) for order in orders] == [
+            ("AAA", "SELL", 5.0),
+            ("VGSH", "BUY", 40.0),
+        ]
+
+        refreshed_run = session.get(TradeRun, run.id)
+        params = refreshed_run.params if isinstance(refreshed_run.params, dict) else {}
+        meta = params.get("effective_target_meta") if isinstance(params.get("effective_target_meta"), dict) else {}
+        assert meta.get("risk_off_symbol") == "VGSH"
+        assert meta.get("compat_fallback_used") is True
+    finally:
+        session.close()
+
+
+def test_execute_trade_run_risk_off_benchmark_buys_benchmark_symbol(tmp_path, monkeypatch):
+    Session = _make_session_factory()
+    monkeypatch.setattr(trade_executor, "SessionLocal", Session)
+    monkeypatch.setattr(trade_executor, "_bridge_connection_ok", lambda *_a, **_k: True, raising=False)
+    monkeypatch.setattr(
+        trade_executor,
+        "read_quotes",
+        lambda _root: {
+            "items": [
+                {"symbol": "AAA", "last": 100.0},
+                {"symbol": "QQQ", "last": 100.0},
+            ],
+            "stale": False,
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        trade_executor,
+        "get_account_positions",
+        lambda _session, *, mode, force_refresh=False: {
+            "items": [{"symbol": "AAA", "quantity": 5.0}],
+            "stale": False,
+            "source_detail": "ib_holdings_ibapi_fallback",
+            "refreshed_at": "2026-02-14T00:00:00Z",
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        trade_executor,
+        "fetch_account_summary",
+        lambda _session: {"NetLiquidation": 10000.0, "cash_available": 10000.0},
+        raising=False,
+    )
+    monkeypatch.setattr(trade_executor, "ARTIFACT_ROOT", tmp_path, raising=False)
+
+    session = Session()
+    try:
+        session.add(TradeSettings(risk_defaults={}, execution_data_source="lean", auto_recovery={}))
+        session.commit()
+
+        project = Project(name="p", description="")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        items_path = tmp_path / "decision_items.csv"
+        _write_items(items_path, symbol="AAA", weight=0.6)
+        snapshot = DecisionSnapshot(
+            project_id=project.id,
+            status="success",
+            items_path=str(items_path),
+            summary={
+                "risk_off": True,
+                "risk_off_mode": "benchmark",
+                "effective_exposure_cap": 0.3,
+                "algorithm_parameters": {
+                    "benchmark": "QQQ",
+                    "max_exposure": 1.0,
+                },
+            },
+        )
+        session.add(snapshot)
+        session.commit()
+        session.refresh(snapshot)
+
+        run = TradeRun(
+            project_id=project.id,
+            decision_snapshot_id=snapshot.id,
+            status="queued",
+            mode="paper",
+            params={"order_type": "MKT", "risk_bypass": True},
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        result = trade_executor.execute_trade_run(run.id, dry_run=True, force=False)
+        assert result.status == "done"
+
+        session.expire_all()
+        orders = (
+            session.query(TradeOrder)
+            .filter(TradeOrder.run_id == run.id)
+            .order_by(TradeOrder.id.asc())
+            .all()
+        )
+        assert [(order.symbol, order.side, float(order.quantity or 0.0)) for order in orders] == [
+            ("AAA", "SELL", 5.0),
+            ("QQQ", "BUY", 30.0),
+        ]
+    finally:
+        session.close()
+
+
+def test_execute_trade_run_risk_off_cash_liquidates_without_new_buys(tmp_path, monkeypatch):
+    Session = _make_session_factory()
+    monkeypatch.setattr(trade_executor, "SessionLocal", Session)
+    monkeypatch.setattr(trade_executor, "_bridge_connection_ok", lambda *_a, **_k: True, raising=False)
+    monkeypatch.setattr(
+        trade_executor,
+        "read_quotes",
+        lambda _root: {"items": [{"symbol": "AAA", "last": 100.0}], "stale": False},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        trade_executor,
+        "get_account_positions",
+        lambda _session, *, mode, force_refresh=False: {
+            "items": [{"symbol": "AAA", "quantity": 5.0}],
+            "stale": False,
+            "source_detail": "ib_holdings_ibapi_fallback",
+            "refreshed_at": "2026-02-14T00:00:00Z",
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        trade_executor,
+        "fetch_account_summary",
+        lambda _session: {"NetLiquidation": 10000.0, "cash_available": 10000.0},
+        raising=False,
+    )
+    monkeypatch.setattr(trade_executor, "ARTIFACT_ROOT", tmp_path, raising=False)
+
+    session = Session()
+    try:
+        session.add(TradeSettings(risk_defaults={}, execution_data_source="lean", auto_recovery={}))
+        session.commit()
+
+        project = Project(name="p", description="")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+        items_path = tmp_path / "decision_items.csv"
+        _write_items(items_path, symbol="AAA", weight=0.6)
+        snapshot = DecisionSnapshot(
+            project_id=project.id,
+            status="success",
+            items_path=str(items_path),
+            summary={
+                "risk_off": True,
+                "risk_off_mode": "cash",
+                "effective_exposure_cap": 0.0,
+                "algorithm_parameters": {"max_exposure": 1.0},
+            },
+        )
+        session.add(snapshot)
+        session.commit()
+        session.refresh(snapshot)
+
+        run = TradeRun(
+            project_id=project.id,
+            decision_snapshot_id=snapshot.id,
+            status="queued",
+            mode="paper",
+            params={"order_type": "MKT", "risk_bypass": True},
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        result = trade_executor.execute_trade_run(run.id, dry_run=True, force=False)
+        assert result.status == "done"
+
+        session.expire_all()
+        orders = (
+            session.query(TradeOrder)
+            .filter(TradeOrder.run_id == run.id)
+            .order_by(TradeOrder.id.asc())
+            .all()
+        )
+        assert [(order.symbol, order.side, float(order.quantity or 0.0)) for order in orders] == [
+            ("AAA", "SELL", 5.0),
+        ]
+    finally:
+        session.close()

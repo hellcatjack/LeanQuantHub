@@ -4,6 +4,7 @@ import difflib
 import hashlib
 import json
 from pathlib import Path
+from typing import Any
 
 import math
 
@@ -27,12 +28,17 @@ from app.schemas import (
     ProjectOut,
 )
 from app.services.audit_log import record_audit
+from app.services.defensive_policy import (
+    DEFAULT_BENCHMARK,
+    DEFAULT_DEFENSIVE_BASKET,
+    DEFAULT_DEFENSIVE_SYMBOL,
+    DEFAULT_DEFENSIVE_SYMBOLS,
+)
 from app.services.lean_runner import run_backtest
 
 router = APIRouter(prefix="/api/algorithms", tags=["algorithms"])
 
 MAX_PAGE_SIZE = 200
-
 
 def _coerce_pagination(page: int, page_size: int, total: int) -> tuple[int, int, int]:
     safe_page = max(page, 1)
@@ -42,6 +48,24 @@ def _coerce_pagination(page: int, page_size: int, total: int) -> tuple[int, int,
         safe_page = total_pages
     offset = (safe_page - 1) * safe_page_size
     return safe_page, safe_page_size, offset
+
+
+def _normalize_algorithm_version_params(params: dict[str, Any] | None) -> dict[str, Any]:
+    normalized = dict(params or {})
+    has_defensive_fields = any(
+        key in normalized for key in ("risk_off_symbols", "risk_off_symbol", "defensive")
+    )
+    if not has_defensive_fields:
+        return normalized
+    normalized["risk_off_symbols"] = DEFAULT_DEFENSIVE_BASKET
+    normalized["risk_off_symbol"] = DEFAULT_DEFENSIVE_SYMBOL
+    normalized["benchmark"] = str(normalized.get("benchmark") or DEFAULT_BENCHMARK).strip().upper() or DEFAULT_BENCHMARK
+    defensive = (
+        normalized.get("defensive") if isinstance(normalized.get("defensive"), dict) else {}
+    )
+    defensive["symbols"] = list(DEFAULT_DEFENSIVE_SYMBOLS)
+    normalized["defensive"] = defensive
+    return normalized
 
 
 @router.get("", response_model=list[AlgorithmOut])
@@ -211,7 +235,7 @@ def create_version(algorithm_id: int, payload: AlgorithmVersionCreate):
 
         content = _resolve_content(payload)
         content_hash = None
-        params = payload.params if payload.params else None
+        params = _normalize_algorithm_version_params(payload.params) if payload.params else None
         if content:
             content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
         elif params:

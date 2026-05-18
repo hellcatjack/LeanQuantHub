@@ -1597,8 +1597,17 @@ class IBGatewayRuntimeHealthOut(BaseModel):
     last_open_orders_at: str | None = None
     last_account_summary_at: str | None = None
     last_command_result_at: str | None = None
+    last_probe_at: str | None = None
     last_probe_result: str = "unknown"
     last_probe_latency_ms: int | None = None
+    gateway_cpu_sample_at: str | None = None
+    gateway_cpu_main_pid: int | None = None
+    gateway_cpu_usage_nsec: int | None = None
+    gateway_cpu_elapsed_seconds: float | None = None
+    gateway_cpu_percent: float | None = None
+    gateway_cpu_hot: bool = False
+    gateway_cpu_hot_count: int = 0
+    gateway_cpu_threshold_percent: float | None = None
     last_recovery_action: str | None = None
     last_recovery_at: str | None = None
     next_allowed_action_at: str | None = None
@@ -1989,6 +1998,258 @@ class TradeManualRunCreate(BaseModel):
     mode: str = "paper"
     orders: list[TradeManualOrderCreate] = []
     live_confirm_token: str | None = None
+
+
+class CoveredCallPilotRequest(BaseModel):
+    mode: str = "paper"
+    symbols: list[str] = Field(default_factory=list)
+    max_candidates_per_symbol: int = 5
+    dte_min: int = 21
+    dte_max: int = 45
+    max_spread_ratio: float = 0.15
+    dry_run: bool = True
+
+
+class CoveredCallRecommendationOut(BaseModel):
+    symbol: str
+    shares: int
+    coverable_contracts: int
+    expiry: str
+    strike: float
+    right: str
+    contracts: int
+    bid: float
+    ask: float
+    mid: float
+    underlying_price: float = 0.0
+    dte: int = 0
+    spread_ratio: float = 0.0
+    moneyness_pct: float = 0.0
+    risk_tags: list[str] = Field(default_factory=list)
+
+
+class CoveredCallEligibleUnderlyingOut(BaseModel):
+    symbol: str
+    shares: int
+    coverable_contracts: int
+    candidate_count: int = 0
+    recommended: CoveredCallRecommendationOut
+
+
+class CoveredCallRejectedUnderlyingOut(BaseModel):
+    symbol: str
+    reason: str
+
+
+class CoveredCallPilotArtifactsOut(BaseModel):
+    summary: str | None = None
+    candidates: str | None = None
+    orders: str | None = None
+
+
+class CoveredCallPilotOut(BaseModel):
+    mode: str
+    status: str
+    eligible: list[CoveredCallEligibleUnderlyingOut] = Field(default_factory=list)
+    rejected: list[CoveredCallRejectedUnderlyingOut] = Field(default_factory=list)
+    artifacts: CoveredCallPilotArtifactsOut | None = None
+
+
+class CoveredCallExecutionPrepareRequest(BaseModel):
+    mode: str = "paper"
+    symbol: str
+    max_candidates_per_symbol: int = 5
+    dte_min: int = 21
+    dte_max: int = 45
+    max_spread_ratio: float = 0.15
+    dry_run: bool = True
+
+
+class OptionOrderPlanOut(BaseModel):
+    underlying_symbol: str
+    sec_type: str = "OPT"
+    side: str
+    expiry: str
+    strike: float
+    right: str
+    contracts: int
+    quantity: int
+    multiplier: int = 100
+    order_type: str = "LMT"
+    limit_price: float
+    dry_run: bool = True
+    risk_tags: list[str] = Field(default_factory=list)
+
+
+class CoveredCallExecutionArtifactsOut(BaseModel):
+    summary: str | None = None
+    plan: str | None = None
+    pilot_summary: str | None = None
+
+
+class CoveredCallExecutionPrepareOut(BaseModel):
+    mode: str
+    status: str
+    gate_reason: str | None = None
+    eligible: CoveredCallEligibleUnderlyingOut | None = None
+    order_plan: OptionOrderPlanOut | None = None
+    artifacts: CoveredCallExecutionArtifactsOut | None = None
+
+
+class CoveredCallReviewRequest(BaseModel):
+    mode: str = "paper"
+    symbol: str
+    max_candidates_per_symbol: int = 5
+    dte_min: int = 21
+    dte_max: int = 45
+    max_spread_ratio: float = 0.15
+    dry_run: bool = True
+
+
+class CoveredCallReviewArtifactsOut(BaseModel):
+    summary: str | None = None
+    bundle: str | None = None
+    prepare_summary: str | None = None
+
+
+class CoveredCallReviewOut(BaseModel):
+    mode: str
+    status: str
+    gate_reason: str | None = None
+    review_id: str | None = None
+    approval_token: str | None = None
+    approval_expires_at: str | None = None
+    eligible: CoveredCallEligibleUnderlyingOut | None = None
+    order_plan: OptionOrderPlanOut | None = None
+    runtime_summary: dict[str, Any] = Field(default_factory=dict)
+    position_summary: dict[str, Any] = Field(default_factory=dict)
+    open_orders_summary: dict[str, Any] = Field(default_factory=dict)
+    artifacts: CoveredCallReviewArtifactsOut | None = None
+
+
+class CoveredCallSubmitRequest(BaseModel):
+    mode: str = "paper"
+    symbol: str
+    review_id: str
+    approval_token: str
+    dry_run: bool = False
+
+
+class CoveredCallSubmitArtifactsOut(BaseModel):
+    summary: str | None = None
+    submit_request: str | None = None
+    command_result: str | None = None
+    review_bundle: str | None = None
+
+
+class CoveredCallSubmitOut(BaseModel):
+    mode: str
+    status: str
+    gate_reason: str | None = None
+    review_id: str
+    command_id: str | None = None
+    command_result_status: str | None = None
+    order_plan: OptionOrderPlanOut | None = None
+    runtime_summary: dict[str, Any] = Field(default_factory=dict)
+    position_summary: dict[str, Any] = Field(default_factory=dict)
+    open_orders_summary: dict[str, Any] = Field(default_factory=dict)
+    artifacts: CoveredCallSubmitArtifactsOut | None = None
+
+
+class CoveredCallReceiptRequest(BaseModel):
+    mode: str = "paper"
+    review_id: str
+    command_id: str
+
+
+class CoveredCallReceiptArtifactsOut(BaseModel):
+    summary: str | None = None
+    command_result: str | None = None
+    review_bundle: str | None = None
+
+
+class CoveredCallReceiptOut(BaseModel):
+    mode: str
+    status: str
+    receipt_state: str
+    gate_reason: str | None = None
+    review_id: str
+    command_id: str
+    command_result_status: str | None = None
+    runtime_summary: dict[str, Any] = Field(default_factory=dict)
+    open_orders_summary: dict[str, Any] = Field(default_factory=dict)
+    artifacts: CoveredCallReceiptArtifactsOut | None = None
+
+
+class CoveredCallTimelineRequest(BaseModel):
+    mode: str = "paper"
+    review_id: str
+
+
+class CoveredCallTimelineArtifactsOut(BaseModel):
+    summary: str | None = None
+    review_bundle: str | None = None
+    latest_submit_summary: str | None = None
+    latest_receipt_summary: str | None = None
+
+
+class CoveredCallTimelineOut(BaseModel):
+    mode: str
+    status: str
+    timeline_state: str
+    review_id: str
+    latest_submit: dict[str, Any] | None = None
+    latest_receipt: dict[str, Any] | None = None
+    stages: list[dict[str, Any]] = Field(default_factory=list)
+    artifacts: CoveredCallTimelineArtifactsOut | None = None
+
+
+class CoveredCallAuditRequest(BaseModel):
+    mode: str = "paper"
+    review_id: str
+
+
+class CoveredCallAuditArtifactsOut(BaseModel):
+    summary: str | None = None
+    review_bundle: str | None = None
+    timeline_summary: str | None = None
+    latest_submit_summary: str | None = None
+    latest_receipt_summary: str | None = None
+
+
+class CoveredCallAuditOut(BaseModel):
+    mode: str
+    status: str
+    timeline_state: str
+    review_id: str
+    review: dict[str, Any] | None = None
+    submit: dict[str, Any] | None = None
+    receipt: dict[str, Any] | None = None
+    timeline: dict[str, Any] | None = None
+    artifacts: CoveredCallAuditArtifactsOut | None = None
+
+
+class CoveredCallAuditRecentRequest(BaseModel):
+    mode: str = "paper"
+    limit: int = Field(default=10, ge=1, le=50)
+    offset: int = Field(default=0, ge=0)
+    query: str = ""
+
+
+class CoveredCallAuditRecentItemOut(BaseModel):
+    review_id: str
+    created_at: str | None = None
+    symbol: str | None = None
+    status: str
+    timeline_state: str
+    latest_command_id: str | None = None
+
+
+class CoveredCallAuditRecentOut(BaseModel):
+    mode: str
+    total: int = 0
+    has_more: bool = False
+    items: list[CoveredCallAuditRecentItemOut] = Field(default_factory=list)
 
 
 class TradeOrderStatusUpdate(BaseModel):

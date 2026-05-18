@@ -1,7 +1,11 @@
 import React, { createContext, useContext, useMemo, useState } from "react";
 
 export type Locale = "zh" | "en";
-export type TimeZone = "America/New_York" | "UTC" | "Asia/Shanghai" | "Asia/Hong_Kong";
+export type TimeZone =
+  | "America/New_York"
+  | "UTC"
+  | "Asia/Shanghai"
+  | "Asia/Hong_Kong";
 
 type MessageTree = Record<string, MessageTree | string>;
 
@@ -317,7 +321,8 @@ const messages: Record<Locale, MessageTree> = {
         themeCompareError: "主题对比加载失败",
         includeHistory: "包含历史成分",
         assetTypes: "资产类型过滤",
-        assetTypesHint: "为空表示不限制；建议仅保留 Stock 以避免 ETF/ADR 混入。",
+        assetTypesHint:
+          "为空表示不限制；建议仅保留 Stock 以避免 ETF/ADR 混入。",
         assetTypesLockedHint: "已锁定为 Stock，仅普通股参与训练与回测。",
         pitUniverseOnly: "仅使用 PIT 周度快照股票池",
         pitUniverseOnlyHint: "只从 PIT 周度快照中选股，避免 not_in_pit 过滤。",
@@ -385,9 +390,9 @@ const messages: Record<Locale, MessageTree> = {
         error: "算法绑定失败",
         errorSelect: "请选择算法与版本",
       },
-    strategy: {
-      title: "策略来源",
-      meta: "选择主题权重 / 基线因子 / ML 分数作为评分来源",
+      strategy: {
+        title: "策略来源",
+        meta: "选择主题权重 / 基线因子 / ML 分数作为评分来源",
         source: "评分来源",
         sourceTheme: "主题权重",
         sourceFactor: "基线因子",
@@ -467,7 +472,8 @@ const messages: Record<Locale, MessageTree> = {
         trainYears: "训练年限",
         trainStartYear: "训练起始年份",
         trainStartYearPlaceholder: "例如 2010",
-        trainStartYearHint: "可为空，最早建议 2000（基于 1999-11 数据 + 252 日暖机）。",
+        trainStartYearHint:
+          "可为空，最早建议 2000（基于 1999-11 数据 + 252 日暖机）。",
         validMonths: "验证月份",
         walkForward: "滚动训练",
         walkForwardHint: "启用后按训练/验证/测试窗口滚动生成评分。",
@@ -508,7 +514,8 @@ const messages: Record<Locale, MessageTree> = {
         pitMinCoverage: "PIT 最低覆盖率",
         pitMinCoverageHint: "低于阈值将触发警告或失败（见后端策略）。",
         modelParams: "高级参数(JSON)",
-        modelParamsPlaceholder: "例如 {\"learning_rate\": 0.04, \"num_leaves\": 63}",
+        modelParamsPlaceholder:
+          '例如 {"learning_rate": 0.04, "num_leaves": 63}',
         modelParamsHint: "可选，覆盖上方显式参数。",
         modelParamsError: "模型参数 JSON 无法解析",
         train: "重新训练",
@@ -1140,7 +1147,7 @@ const messages: Record<Locale, MessageTree> = {
         modeJson: "JSON 参数",
         modeHint: "若算法参数与表单不匹配，可切换到 JSON 模式进行通用配置",
         jsonTitle: "参数 JSON",
-        jsonPlaceholder: "{\n  \"selection\": {\n    \"top_n\": 20\n  }\n}",
+        jsonPlaceholder: '{\n  "selection": {\n    "top_n": 20\n  }\n}',
         jsonHint: "保存版本时将以此 JSON 为准",
         jsonError: "参数 JSON 无效，请检查格式",
         notes: "备注",
@@ -1249,8 +1256,7 @@ const messages: Record<Locale, MessageTree> = {
       },
       risk: {
         title: "公司行为风险提示",
-        meta:
-          "复权与更名映射依赖 map_files/factor_files。缺失时可能导致历史价格断裂或回测误差。",
+        meta: "复权与更名映射依赖 map_files/factor_files。缺失时可能导致历史价格断裂或回测误差。",
       },
       compare: {
         title: "回测对比",
@@ -1266,28 +1272,28 @@ const messages: Record<Locale, MessageTree> = {
         errorNotFound: "未找到结果文件，请确认回测已完成",
         errorLoad: "读取图表失败",
       },
-        trades: {
-          title: "交易图表",
-          meta: "叠加买卖点与行情走势，快速查看交易细节",
-          placeholder: "回测 ID",
-          symbolPlaceholder: "股票代码",
-          load: "加载交易图表",
-          loading: "交易数据加载中...",
-          error: "交易图表加载失败",
-          empty: "暂无交易数据或缺少行情数据",
-          buy: "买入",
-          buyShort: "买",
-          sell: "卖出",
-          sellShort: "卖",
-          tradesCount: "{count} 笔",
-          summary: "买 {buys} / 卖 {sells} · 胜 {wins} / 负 {losses}",
-          table: {
-            time: "时间",
-            side: "方向",
-            qty: "数量",
-            price: "价格",
-          },
+      trades: {
+        title: "交易图表",
+        meta: "叠加买卖点与行情走势，快速查看交易细节",
+        placeholder: "回测 ID",
+        symbolPlaceholder: "股票代码",
+        load: "加载交易图表",
+        loading: "交易数据加载中...",
+        error: "交易图表加载失败",
+        empty: "暂无交易数据或缺少行情数据",
+        buy: "买入",
+        buyShort: "买",
+        sell: "卖出",
+        sellShort: "卖",
+        tradesCount: "{count} 笔",
+        summary: "买 {buys} / 卖 {sells} · 胜 {wins} / 负 {losses}",
+        table: {
+          time: "时间",
+          side: "方向",
+          qty: "数量",
+          price: "价格",
         },
+      },
       table: {
         id: "ID",
         runId: "回测 ID",
@@ -1600,7 +1606,8 @@ const messages: Record<Locale, MessageTree> = {
           deadlineTime: "最后完成时间(HH:MM)",
           deadlineTimezone: "时区",
           projectOnly: "仅更新项目相关标的",
-          projectOnlyHint: "开启后仅处理激活且未归档项目的成分（含历史行情与基本面）",
+          projectOnlyHint:
+            "开启后仅处理激活且未归档项目的成分（含历史行情与基本面）",
           autoDecision: "Checklist 完成后自动生成模型决策快照",
           autoDecisionHint: "开启后在 Checklist 末尾生成当日模型决策快照",
           note: "留空 token/chat_id 不会覆盖已有配置",
@@ -1656,7 +1663,8 @@ const messages: Record<Locale, MessageTree> = {
         autoHint: "会先刷新全美股 listing，再自动分批建档并启动队列",
         autoNote: "后台可自动续跑，刷新页面可查看进度",
         autoStatus: "任务 #{id} · 状态 {status} · 阶段 {phase}",
-        autoCounts: "已建档 {created} · 复用 {reused} · 入队 {queued} · 运行 {running} · 待处理 {pending}",
+        autoCounts:
+          "已建档 {created} · 复用 {reused} · 入队 {queued} · 运行 {running} · 待处理 {pending}",
         auto: {
           batch: "自动批次大小（如 200）",
           delay: "抓取间隔秒（如 0.1）",
@@ -1754,7 +1762,8 @@ const messages: Record<Locale, MessageTree> = {
         action: "创建并入队",
         loading: "处理中",
         hint: "建议分批执行，完成后用下方队列启动抓取",
-        result: "已创建 {created} · 复用 {reused} · 入队 {queued} · 总量 {total} · 下一批 {next}",
+        result:
+          "已创建 {created} · 复用 {reused} · 入队 {queued} · 总量 {total} · 下一批 {next}",
         progress: "进度 {processed}/{total}（{percent}%）",
         applyNext: "填入下一批偏移（{next}）",
         error: "全量抓取任务创建失败",
@@ -1827,7 +1836,8 @@ const messages: Record<Locale, MessageTree> = {
         delay: "披露延迟（日）",
         delayHint: "快照日期向前回退的交易日数量",
         missingDelay: "缺失披露延迟（日）",
-        missingDelayHint: "reportedDate 缺失时使用 fiscalDate + 默认延迟（如 45 天）",
+        missingDelayHint:
+          "reportedDate 缺失时使用 fiscalDate + 默认延迟（如 45 天）",
         sharesDelay: "股本可用延迟（日）",
         sharesDelayHint: "SHARES_OUTSTANDING 无披露日时的保守延迟",
         sharesPreference: "股本口径",
@@ -2112,7 +2122,8 @@ const messages: Record<Locale, MessageTree> = {
         apiModeIb: "Lean Bridge",
         apiModeMock: "Mock 模拟",
         regulatorySnapshot: "监管快照",
-        regulatorySnapshotHint: "启用后使用 NBBO 监管快照（每次请求可能产生费用）",
+        regulatorySnapshotHint:
+          "启用后使用 NBBO 监管快照（每次请求可能产生费用）",
         mode: "账户模式",
         modeHint: "Paper 或 Live 模式",
         modePaper: "模拟盘",
@@ -2130,7 +2141,8 @@ const messages: Record<Locale, MessageTree> = {
         contractsProjectOnlyHint: "使用所有激活项目的标的刷新缓存",
         contractsRefresh: "刷新合约缓存",
         contractsSync: "执行合约更新",
-        contractsResult: "已刷新 {updated}/{total}，跳过 {skipped}，耗时 {duration}s",
+        contractsResult:
+          "已刷新 {updated}/{total}，跳过 {skipped}，耗时 {duration}s",
         contractsError: "合约缓存刷新失败",
         healthTitle: "行情健康检查",
         healthSymbols: "检查标的",
@@ -2370,7 +2382,8 @@ const messages: Record<Locale, MessageTree> = {
       gatewayTradeBlockLabel: "交易阻断",
       bridgeRefreshError: "桥接刷新失败",
       bridgeOrderWarningStale: "Lean Bridge 状态过期，订单回执可能延迟。",
-      bridgeOrderWarningRefresh: "Lean Bridge 刷新结果：{result}（原因：{reason}）。",
+      bridgeOrderWarningRefresh:
+        "Lean Bridge 刷新结果：{result}（原因：{reason}）。",
       gatewayRuntimeState: {
         healthy: "健康",
         snapshot_stale: "快照停滞",
@@ -2544,17 +2557,22 @@ const messages: Record<Locale, MessageTree> = {
       positionChartLoading: "正在加载图表数据",
       positionChartLoadError: "图表加载失败",
       positionChartEmpty: "当前没有可展示的历史 K 线数据。",
-      positionChartIntradayUnavailable: "该盘中周期需要 IB 历史数据，当前不可用。",
+      positionChartIntradayUnavailable:
+        "该盘中周期需要 IB 历史数据，当前不可用。",
       positionChartLocalMissing: "本地回退日线缺失，无法展示该标的图表。",
       positionChartSourceIb: "IB 历史",
       positionChartSourceLocal: "本地日线",
       positionChartSourceUnavailable: "暂不可用",
       positionChartFallbackBadge: "回退",
       positionChartFallbackHint: "当前为本地日线回退数据。",
-      positionChartGatewayFallbackHint: "Gateway 正在恢复，图表已自动切到本地日线回退。",
+      positionChartGatewayFallbackHint:
+        "Gateway 正在恢复，图表已自动切到本地日线回退。",
       positionChartRangeLabel: "时间范围",
       positionChartLastBarAt: "最后 K 线时间",
       positionChartPositionLabel: "净持仓 {qty}",
+      positionChartWindowDrag: "拖动",
+      positionChartWindowMinimize: "最小化",
+      positionChartWindowRestore: "还原",
       positionChartInterval: {
         "1m": "1 分钟",
         "5m": "5 分钟",
@@ -2613,7 +2631,8 @@ const messages: Record<Locale, MessageTree> = {
       },
       positionLimitPricePlaceholder: "限价（默认使用最新价）",
       positionOrderConfirm: "确认以市价 {side} {qty} 股 {symbol}？",
-      positionOrderConfirmLimit: "确认以限价 {price} 在{session} {side} {qty} 股 {symbol}？",
+      positionOrderConfirmLimit:
+        "确认以限价 {price} 在{session} {side} {qty} 股 {symbol}？",
       positionBatchCloseConfirm: "确认对 {count} 个持仓执行批量平仓？",
       positionLiquidateAllConfirm: "确认对全部 {count} 个持仓执行全仓清空？",
       positionActionErrorNoSelection: "请先勾选需要平仓的持仓。",
@@ -2684,8 +2703,10 @@ const messages: Record<Locale, MessageTree> = {
         "链路：请求 {requested} → 采用 {effective}（最新 {latest}）；回退：{fallback}；时效：{age}",
       decisionBasisFallbackReasonCode: {
         pit_snapshot_unavailable: "无可用 PIT 快照",
-        requested_snapshot_unavailable_use_previous: "请求日期无快照，已回退到最近可用 PIT",
-        requested_snapshot_before_first_available: "请求日期早于最早可用快照，已使用首个可用 PIT",
+        requested_snapshot_unavailable_use_previous:
+          "请求日期无快照，已回退到最近可用 PIT",
+        requested_snapshot_before_first_available:
+          "请求日期早于最早可用快照，已使用首个可用 PIT",
       },
       executeContext: "执行上下文",
       executeBlockedProject: "请选择项目后执行。",
@@ -2736,6 +2757,31 @@ const messages: Record<Locale, MessageTree> = {
           empty: "暂无周度调仓执行记录",
         },
       },
+      coveredCall: {
+        title: "Covered Call Pilot",
+        meta: "仅限模拟盘的只读审核与时间线视图",
+        paperOnly: "Paper Only · Read Only",
+        refreshRecent: "刷新最近记录",
+        refreshAudit: "刷新当前审计",
+        recentTitle: "最近审核",
+        detailTitle: "审计详情",
+        searchPlaceholder: "搜索审核记录",
+        pageSummary: "{from}-{to} / {total}",
+        previousPage: "上一页",
+        nextPage: "下一页",
+        emptyRecent: "暂无 covered call 审核记录",
+        emptyAudit: "请选择一条审核记录以查看聚合审计。",
+        reviewId: "审核 ID",
+        timelineState: "时间线状态",
+        latestCommandId: "最近命令 ID",
+        recentLoadError: "最近 covered call 审核记录加载失败",
+        auditLoadError: "covered call 审计详情加载失败",
+        artifactsTitle: "Artifacts",
+        reviewPayloadTitle: "Review Payload",
+        submitPayloadTitle: "Submit Payload",
+        receiptPayloadTitle: "Receipt Payload",
+        timelinePayloadTitle: "Timeline Payload",
+      },
       executionDataSource: "执行数据源",
       signalDataSource: "信号数据源",
       signalDataSourceValue: "Alpha（训练/回测）",
@@ -2744,9 +2790,11 @@ const messages: Record<Locale, MessageTree> = {
       tradeSettingsSaved: "交易设置已保存",
       tradeSettingsSaveError: "保存交易设置失败",
       deadbandGlobalNotional: "全局 deadband 最小名义金额",
-      deadbandGlobalNotionalHint: "金额低于该阈值的调仓单将被过滤（0 表示关闭）。",
+      deadbandGlobalNotionalHint:
+        "金额低于该阈值的调仓单将被过滤（0 表示关闭）。",
       deadbandGlobalWeight: "全局 deadband 最小权重偏离",
-      deadbandGlobalWeightHint: "偏离权重低于该阈值的调仓单将被过滤（0 表示关闭）。",
+      deadbandGlobalWeightHint:
+        "偏离权重低于该阈值的调仓单将被过滤（0 表示关闭）。",
       deadbandRunNotional: "批次覆盖：最小名义金额",
       deadbandRunNotionalHint: "留空继承全局默认；填写后仅作用于本批次。",
       deadbandRunWeight: "批次覆盖：最小权重偏离",
@@ -3103,8 +3151,9 @@ const messages: Record<Locale, MessageTree> = {
         archivedLabel: "Archived",
         archive: "Archive Project",
         restore: "Restore Project",
-        archiveConfirm: "Archive project \"{name}\"? It will be hidden from the list.",
-        restoreConfirm: "Restore project \"{name}\"?",
+        archiveConfirm:
+          'Archive project "{name}"? It will be hidden from the list.',
+        restoreConfirm: 'Restore project "{name}"?',
         archiveSuccess: "Project archived",
         restoreSuccess: "Project restored",
         archiveError: "Failed to archive project",
@@ -3167,7 +3216,8 @@ const messages: Record<Locale, MessageTree> = {
           "Keywords drive Yahoo search; manual constituents are forced; exclusions override auto/manual; overlaps follow priority.",
         themeSystem: "System Theme",
         systemThemeTitle: "System Theme Library",
-        systemThemeMeta: "Authoritative theme baskets ready for project import.",
+        systemThemeMeta:
+          "Authoritative theme baskets ready for project import.",
         systemThemeLabel: "Theme",
         systemThemeSource: "Source",
         systemThemeVersion: "Latest Version",
@@ -3225,7 +3275,8 @@ const messages: Record<Locale, MessageTree> = {
         themeSearchError: "Symbol filter failed.",
         themeSearchMatches: "{count} themes matched",
         themeDetailTitle: "Theme Detail · {name}",
-        themeDetailMeta: "{total} constituents (manual {manual} · excluded {excluded})",
+        themeDetailMeta:
+          "{total} constituents (manual {manual} · excluded {excluded})",
         themeDetailFilter: "Filter constituents in theme",
         themeDetailClear: "Clear",
         themeDetailExport: "Export",
@@ -3249,10 +3300,13 @@ const messages: Record<Locale, MessageTree> = {
         themeCompareError: "Failed to load comparison data.",
         includeHistory: "Include historical constituents",
         assetTypes: "Asset type filter",
-        assetTypesHint: "Leave empty for no filter. Prefer Stock to exclude ETFs/ADRs.",
-        assetTypesLockedHint: "Locked to Stock only for training and backtests.",
+        assetTypesHint:
+          "Leave empty for no filter. Prefer Stock to exclude ETFs/ADRs.",
+        assetTypesLockedHint:
+          "Locked to Stock only for training and backtests.",
         pitUniverseOnly: "Use PIT weekly universe only",
-        pitUniverseOnlyHint: "Limit candidates to PIT weekly snapshots to avoid not_in_pit drops.",
+        pitUniverseOnlyHint:
+          "Limit candidates to PIT weekly snapshots to avoid not_in_pit drops.",
         riskFreeRate: "Risk-free rate",
         initialCash: "Backtest Initial Cash",
         initialCashHint: "Leave blank to inherit global default",
@@ -3317,9 +3371,9 @@ const messages: Record<Locale, MessageTree> = {
         error: "Binding failed",
         errorSelect: "Select algorithm and version",
       },
-    strategy: {
-      title: "Strategy Source",
-      meta: "Choose theme weights / factor baseline / ML scores as the signal source",
+      strategy: {
+        title: "Strategy Source",
+        meta: "Choose theme weights / factor baseline / ML scores as the signal source",
         source: "Signal Source",
         sourceTheme: "Theme Weights",
         sourceFactor: "Factor Baseline",
@@ -3387,7 +3441,8 @@ const messages: Record<Locale, MessageTree> = {
         modelTypeLgbm: "LightGBM Rank",
         modelTypeHint: "LightGBM requires extra dependencies.",
         symbolSource: "Training Universe",
-        symbolSourceHint: "Choose project themes or system themes for training symbols.",
+        symbolSourceHint:
+          "Choose project themes or system themes for training symbols.",
         symbolSourceProject: "Project themes",
         symbolSourceProjectShort: "Project",
         symbolSourceSystem: "System theme",
@@ -3403,7 +3458,8 @@ const messages: Record<Locale, MessageTree> = {
           "Optional; earliest recommended is 2000 (1999-11 data + 252-day warmup).",
         validMonths: "Validation Months",
         walkForward: "Walk-Forward",
-        walkForwardHint: "Enable rolling train/valid/test windows to generate scores.",
+        walkForwardHint:
+          "Enable rolling train/valid/test windows to generate scores.",
         testMonths: "Test Months",
         stepMonths: "Step Months",
         horizonDays: "Horizon (days)",
@@ -3441,7 +3497,8 @@ const messages: Record<Locale, MessageTree> = {
         pitMinCoverage: "PIT min coverage",
         pitMinCoverageHint: "Skip training if coverage is below this ratio.",
         modelParams: "Advanced Params (JSON)",
-        modelParamsPlaceholder: 'e.g. {"learning_rate": 0.04, "num_leaves": 63}',
+        modelParamsPlaceholder:
+          'e.g. {"learning_rate": 0.04, "num_leaves": 63}',
         modelParamsHint: "Optional; overrides explicit params above.",
         modelParamsError: "Model params JSON is invalid",
         train: "Retrain",
@@ -3762,7 +3819,8 @@ const messages: Record<Locale, MessageTree> = {
             marketMa: "MA window for market filter",
             riskOffMode: "Risk-off allocation mode",
             riskOffPick: "Selection method for defensive assets",
-            riskOffLookbackDays: "Lookback window for defensive momentum (days)",
+            riskOffLookbackDays:
+              "Lookback window for defensive momentum (days)",
             riskOffSymbols: "Assets used to pick defensive holdings",
             riskOffSymbol: "Defensive asset when risk-off",
             maxDrawdown: "Hard drawdown gate",
@@ -4072,7 +4130,7 @@ const messages: Record<Locale, MessageTree> = {
         modeJson: "JSON",
         modeHint: "Use JSON mode for algorithms that don't match the form",
         jsonTitle: "Parameters JSON",
-        jsonPlaceholder: "{\n  \"selection\": {\n    \"top_n\": 20\n  }\n}",
+        jsonPlaceholder: '{\n  "selection": {\n    "top_n": 20\n  }\n}',
         jsonHint: "Version will be saved with the JSON above",
         jsonError: "Invalid JSON parameters",
         notes: "Notes",
@@ -4121,12 +4179,12 @@ const messages: Record<Locale, MessageTree> = {
         empty: "No differences",
         none: "No diff generated yet",
         unnamed: "Unnamed",
-      
-      actions: {
-        viewCharts: "Charts",
-        viewTrades: "Trades",
+
+        actions: {
+          viewCharts: "Charts",
+          viewTrades: "Trades",
+        },
       },
-},
       versionsTable: {
         id: "Version ID",
         version: "Version",
@@ -4186,8 +4244,7 @@ const messages: Record<Locale, MessageTree> = {
       },
       risk: {
         title: "Corporate Actions Risk",
-        meta:
-          "Adjustments and ticker mapping rely on map_files/factor_files. Missing data can break price history and distort backtests.",
+        meta: "Adjustments and ticker mapping rely on map_files/factor_files. Missing data can break price history and distort backtests.",
       },
       compare: {
         title: "Backtest Comparison",
@@ -4203,28 +4260,28 @@ const messages: Record<Locale, MessageTree> = {
         errorNotFound: "Result file not found. Ensure the backtest finished.",
         errorLoad: "Failed to load chart data",
       },
-        trades: {
-          title: "Trade Chart",
-          meta: "Overlay fills and price action for quick trade review.",
-          placeholder: "Backtest ID",
-          symbolPlaceholder: "Symbol",
-          load: "Load Trade Chart",
-          loading: "Loading trade data...",
-          error: "Failed to load trade chart",
-          empty: "No trades or missing price data.",
-          buy: "Buy",
-          buyShort: "B",
-          sell: "Sell",
-          sellShort: "S",
-          tradesCount: "{count} trades",
-          summary: "Buy {buys} / Sell {sells} · Win {wins} / Loss {losses}",
-          table: {
-            time: "Time",
-            side: "Side",
-            qty: "Qty",
-            price: "Price",
-          },
+      trades: {
+        title: "Trade Chart",
+        meta: "Overlay fills and price action for quick trade review.",
+        placeholder: "Backtest ID",
+        symbolPlaceholder: "Symbol",
+        load: "Load Trade Chart",
+        loading: "Loading trade data...",
+        error: "Failed to load trade chart",
+        empty: "No trades or missing price data.",
+        buy: "Buy",
+        buyShort: "B",
+        sell: "Sell",
+        sellShort: "S",
+        tradesCount: "{count} trades",
+        summary: "Buy {buys} / Sell {sells} · Win {wins} / Loss {losses}",
+        table: {
+          time: "Time",
+          side: "Side",
+          qty: "Qty",
+          price: "Price",
         },
+      },
       table: {
         id: "ID",
         runId: "Backtest ID",
@@ -4354,7 +4411,8 @@ const messages: Record<Locale, MessageTree> = {
           syncAll: "Sync All",
           syncingAll: "Syncing",
           reset: "Full rerun (clear & refetch)",
-          resetConfirm: "This will clear local history and refetch all data. Continue?",
+          resetConfirm:
+            "This will clear local history and refetch all data. Continue?",
         },
         chart: {
           show: "Chart",
@@ -4453,8 +4511,10 @@ const messages: Record<Locale, MessageTree> = {
           title: "Start Checklist",
           action: "Start Run",
           note: "Only one run at a time",
-          activeConflict: "A checklist run is already active (#{id}). Please wait.",
-          activeConflictGeneric: "A checklist run is already active. Please wait.",
+          activeConflict:
+            "A checklist run is already active (#{id}). Please wait.",
+          activeConflictGeneric:
+            "A checklist run is already active. Please wait.",
         },
         history: {
           title: "Run History",
@@ -4540,7 +4600,8 @@ const messages: Record<Locale, MessageTree> = {
           projectOnlyHint:
             "When enabled, update symbols from active, non-archived projects only (prices & fundamentals).",
           autoDecision: "Auto-generate decision snapshot after checklist",
-          autoDecisionHint: "Create a model decision snapshot at the end of checklist runs.",
+          autoDecisionHint:
+            "Create a model decision snapshot at the end of checklist runs.",
           note: "Leave token/chat_id empty to keep current config",
         },
         telegram: {
@@ -4568,7 +4629,8 @@ const messages: Record<Locale, MessageTree> = {
           clearAll: "Clear all",
           reset: "Reset default",
           useAdvanced: "Use advanced JSON to override steps",
-          advancedHint: "When enabled, advanced JSON takes precedence over the checklist",
+          advancedHint:
+            "When enabled, advanced JSON takes precedence over the checklist",
           preview: "Preview",
           update: "Save update",
           cancelEdit: "Cancel edit",
@@ -4594,7 +4656,8 @@ const messages: Record<Locale, MessageTree> = {
         autoHint: "Refreshes listing, batches datasets, then starts the queue",
         autoNote: "Runs in background; refresh to see progress",
         autoStatus: "Job #{id} · status {status} · phase {phase}",
-        autoCounts: "Created {created} · Reused {reused} · Queued {queued} · Running {running} · Pending {pending}",
+        autoCounts:
+          "Created {created} · Reused {reused} · Queued {queued} · Running {running} · Pending {pending}",
         auto: {
           batch: "Auto batch size (e.g., 200)",
           delay: "Fetch delay seconds (e.g., 0.1)",
@@ -4687,12 +4750,14 @@ const messages: Record<Locale, MessageTree> = {
         offsetHint: "Use the next offset to avoid duplicates",
         onlyMissing: "Only create missing datasets",
         projectOnly: "Project symbols only",
-        projectOnlyHint: "When enabled, only active, non-archived project symbols are fetched.",
+        projectOnlyHint:
+          "When enabled, only active, non-archived project symbols are fetched.",
         autoSync: "Auto enqueue sync jobs",
         action: "Create & Enqueue",
         loading: "Working",
         hint: "Run in batches, then start the queue below",
-        result: "Created {created} · Reused {reused} · Queued {queued} · Total {total} · Next {next}",
+        result:
+          "Created {created} · Reused {reused} · Queued {queued} · Total {total} · Next {next}",
         progress: "Progress {processed}/{total} ({percent}%)",
         applyNext: "Apply next offset ({next})",
         error: "Failed to create bulk fetch jobs",
@@ -4761,13 +4826,16 @@ const messages: Record<Locale, MessageTree> = {
         startHint: "Only process PIT weekly snapshots after this date",
         endHint: "Only process PIT weekly snapshots before this date",
         cacheSectionTitle: "Fundamentals cache fetch",
-        cacheSectionHint: "Refresh Alpha fundamentals cache only (no PIT snapshots).",
+        cacheSectionHint:
+          "Refresh Alpha fundamentals cache only (no PIT snapshots).",
         delay: "Report delay (days)",
         delayHint: "Trading-day lookback for report availability",
         missingDelay: "Missing report delay (days)",
-        missingDelayHint: "Use fiscalDate + default delay when reportedDate is missing",
+        missingDelayHint:
+          "Use fiscalDate + default delay when reportedDate is missing",
         sharesDelay: "Shares delay (days)",
-        sharesDelayHint: "Conservative delay for SHARES_OUTSTANDING availability",
+        sharesDelayHint:
+          "Conservative delay for SHARES_OUTSTANDING availability",
         sharesPreference: "Shares preference",
         sharesPreferenceHint: "Choose diluted or basic",
         sharesPreferenceDiluted: "Diluted",
@@ -4781,14 +4849,16 @@ const messages: Record<Locale, MessageTree> = {
         refreshDays: "Cache refresh days (0=force refresh)",
         refreshDaysHint: "0 forces refresh regardless of cache age",
         assetTypes: "Asset type filter",
-        assetTypesHint: "Comma-separated, e.g. STOCK; leave blank or ALL to disable",
+        assetTypesHint:
+          "Comma-separated, e.g. STOCK; leave blank or ALL to disable",
         cacheAction: "Refresh fundamentals cache",
         cacheLoading: "Refreshing",
         cacheNote: "Outputs to fundamentals/alpha",
         snapshotSectionTitle: "PIT fundamentals snapshots",
         snapshotSectionHint: "Build weekly snapshots from cached fundamentals",
         projectOnly: "Project symbols only",
-        projectOnlyHint: "When enabled, only active, non-archived project symbols are fetched.",
+        projectOnlyHint:
+          "When enabled, only active, non-archived project symbols are fetched.",
         resume: "Resume",
         resumeHint: "Skip symbols with complete cached fundamentals",
         action: "Generate fundamental snapshots",
@@ -4809,7 +4879,8 @@ const messages: Record<Locale, MessageTree> = {
           ok: "OK {count}",
           partial: "Partial {count}",
           rate: "Rate-limited {count}",
-          speed: "Speed {rate}/min · Target {target}/min · Interval {interval}s",
+          speed:
+            "Speed {rate}/min · Target {target}/min · Interval {interval}s",
           tune: "Auto tune {reason} → {delay}s",
           current: "Current {symbol}",
           missing: "Missing {count}",
@@ -4919,7 +4990,8 @@ const messages: Record<Locale, MessageTree> = {
         dateColumn: "Date column",
         errorCreate: "Failed to create sync job",
         errorBatch: "Failed to sync all",
-        incrementalHint: "Alpha sync mode: {mode} · compact threshold {days} days",
+        incrementalHint:
+          "Alpha sync mode: {mode} · compact threshold {days} days",
         incremental: {
           enabled: "Incremental",
           disabled: "Full",
@@ -5034,7 +5106,8 @@ const messages: Record<Locale, MessageTree> = {
         maxRpm: "Max RPM",
         maxRpmHint: "Target requests per minute (max_rpm)",
         minDelay: "Min delay (s)",
-        minDelayHint: "Base delay; effective delay is max(min_delay, 60/max_rpm)",
+        minDelayHint:
+          "Base delay; effective delay is max(min_delay, 60/max_rpm)",
         rateLimitSleep: "Rate-limit sleep (s)",
         rateLimitSleepHint: "Sleep duration after rate-limit responses",
         rateLimitRetries: "Rate-limit retries",
@@ -5101,7 +5174,8 @@ const messages: Record<Locale, MessageTree> = {
         apiModeIb: "Lean Bridge",
         apiModeMock: "Mock",
         regulatorySnapshot: "Regulatory snapshot",
-        regulatorySnapshotHint: "Enable NBBO regulatory snapshots (may incur per-request fees)",
+        regulatorySnapshotHint:
+          "Enable NBBO regulatory snapshots (may incur per-request fees)",
         mode: "Account mode",
         modeHint: "Paper or Live mode",
         modePaper: "Paper",
@@ -5113,18 +5187,21 @@ const messages: Record<Locale, MessageTree> = {
         marketDataDelayed: "Delayed",
         contractsTitle: "Contract cache",
         contractsSymbols: "Symbols",
-        contractsSymbolsPlaceholder: "Comma or space separated symbols, e.g. SPY AAPL",
+        contractsSymbolsPlaceholder:
+          "Comma or space separated symbols, e.g. SPY AAPL",
         contractsSymbolsHint: "Refresh symbol→conId contract cache",
         contractsProjectOnly: "Project only",
         contractsProjectOnlyHint: "Use symbols from all active projects",
         contractsRefresh: "Refresh contracts",
         contractsSync: "Run contract sync",
-        contractsResult: "Refreshed {updated}/{total}, skipped {skipped}, took {duration}s",
+        contractsResult:
+          "Refreshed {updated}/{total}, skipped {skipped}, took {duration}s",
         contractsError: "Failed to refresh contract cache",
         healthTitle: "Market health",
         healthSymbols: "Symbols",
         healthSymbolsPlaceholder: "Comma or space separated symbols",
-        healthSymbolsHint: "Check market availability (fallback to history if needed)",
+        healthSymbolsHint:
+          "Check market availability (fallback to history if needed)",
         healthProjectOnly: "Project only",
         healthProjectOnlyHint: "Use symbols from all active projects",
         healthMinRatio: "Min success ratio",
@@ -5176,7 +5253,8 @@ const messages: Record<Locale, MessageTree> = {
         historySuccess: "Success/Fail",
         historyEmpty: "No history jobs",
         streamTitle: "Market Stream",
-        streamMeta: "Subscribe Lean Bridge L1 stream and write ticks to stream files",
+        streamMeta:
+          "Subscribe Lean Bridge L1 stream and write ticks to stream files",
         streamStatus: "Stream status",
         streamLastHeartbeat: "Stream heartbeat",
         streamSubscribed: "Subscribed symbols",
@@ -5307,8 +5385,10 @@ const messages: Record<Locale, MessageTree> = {
       gatewayNextRecoveryLabel: "Next Allowed Recovery",
       gatewayTradeBlockLabel: "Trade Block",
       bridgeRefreshError: "Failed to refresh bridge",
-      bridgeOrderWarningStale: "Lean Bridge is stale; order receipts may be delayed.",
-      bridgeOrderWarningRefresh: "Lean Bridge refresh result: {result} (reason: {reason}).",
+      bridgeOrderWarningStale:
+        "Lean Bridge is stale; order receipts may be delayed.",
+      bridgeOrderWarningRefresh:
+        "Lean Bridge refresh result: {result} (reason: {reason}).",
       gatewayRuntimeState: {
         healthy: "Healthy",
         snapshot_stale: "Snapshot Stale",
@@ -5332,8 +5412,10 @@ const messages: Record<Locale, MessageTree> = {
         gateway_degraded: "Enter degraded mode",
       },
       gatewayTradeBlock: {
-        gateway_restarting: "IB Gateway is restarting automatically. New runs and new orders are blocked.",
-        gateway_degraded: "IB Gateway is still degraded. New runs and new orders are blocked.",
+        gateway_restarting:
+          "IB Gateway is restarting automatically. New runs and new orders are blocked.",
+        gateway_degraded:
+          "IB Gateway is still degraded. New runs and new orders are blocked.",
       },
       bridgeRefreshResult: {
         success: "Success",
@@ -5418,8 +5500,10 @@ const messages: Record<Locale, MessageTree> = {
       statusTitle: "{system} Status",
       statusMeta: "{system}/IB connection and configuration status",
       statusLabel: "{system} Status",
-      statusHint: "Brokerage settings are not configured. Please update settings in Data page.",
-      liveWarning: "Live mode is enabled. Confirm account and risk settings before execution.",
+      statusHint:
+        "Brokerage settings are not configured. Please update settings in Data page.",
+      liveWarning:
+        "Live mode is enabled. Confirm account and risk settings before execution.",
       status: {
         unconfigured: "Not configured",
         unknown: "Unknown",
@@ -5478,12 +5562,15 @@ const messages: Record<Locale, MessageTree> = {
       accountPositionsTrustedAt: "Last trusted time",
       accountPositionsRefresh: "Refresh positions",
       positionChartTitle: "Pro Chart",
-      positionChartSelectPrompt: "Select a position symbol on the left to view its history.",
+      positionChartSelectPrompt:
+        "Select a position symbol on the left to view its history.",
       positionChartLoading: "Loading chart data",
       positionChartLoadError: "Failed to load chart",
       positionChartEmpty: "No historical bars available for this symbol.",
-      positionChartIntradayUnavailable: "This intraday interval requires IB historical data.",
-      positionChartLocalMissing: "Local fallback daily bars are missing for this symbol.",
+      positionChartIntradayUnavailable:
+        "This intraday interval requires IB historical data.",
+      positionChartLocalMissing:
+        "Local fallback daily bars are missing for this symbol.",
       positionChartSourceIb: "IB History",
       positionChartSourceLocal: "Local Daily",
       positionChartSourceUnavailable: "Unavailable",
@@ -5494,6 +5581,9 @@ const messages: Record<Locale, MessageTree> = {
       positionChartRangeLabel: "Range",
       positionChartLastBarAt: "Last bar",
       positionChartPositionLabel: "Net position {qty}",
+      positionChartWindowDrag: "Drag",
+      positionChartWindowMinimize: "Minimize",
+      positionChartWindowRestore: "Restore",
       positionChartInterval: {
         "1m": "1m",
         "5m": "5m",
@@ -5558,8 +5648,10 @@ const messages: Record<Locale, MessageTree> = {
       positionLiquidateAllConfirm: "Confirm liquidate all {count} positions?",
       positionActionErrorNoSelection: "Select positions to close first.",
       positionActionErrorInvalidQty: "Enter a valid quantity.",
-      positionActionErrorInvalidLimitPrice: "Enter a valid limit price or refresh quotes first.",
-      directOrderProjectRequired: "Select a project before sending direct orders.",
+      positionActionErrorInvalidLimitPrice:
+        "Enter a valid limit price or refresh quotes first.",
+      directOrderProjectRequired:
+        "Select a project before sending direct orders.",
       positionActionResult: "{count} orders submitted.",
       openData: "Open Data Settings",
       refresh: "Refresh Status",
@@ -5601,12 +5693,14 @@ const messages: Record<Locale, MessageTree> = {
       snapshotStatus: "Snapshot Status",
       snapshotReady: "Ready",
       snapshotMissing: "Snapshot not generated. Execution blocked.",
-      snapshotNotReady: "Snapshot not ready ({status}). Wait for it to succeed before executing.",
+      snapshotNotReady:
+        "Snapshot not ready ({status}). Wait for it to succeed before executing.",
       snapshotDate: "Snapshot Date",
       snapshotId: "Snapshot ID",
       snapshotLoadError: "Failed to load snapshot",
       decisionBasisTitle: "Decision Data Basis",
-      decisionBasisMeta: "Show PIT dates and fallback details used by the current decision.",
+      decisionBasisMeta:
+        "Show PIT dates and fallback details used by the current decision.",
       decisionBasisSnapshotId: "Decision Snapshot ID",
       decisionBasisSnapshotDate: "Decision Snapshot Date",
       decisionBasisRequestedPitDate: "Requested PIT Date",
@@ -5679,6 +5773,31 @@ const messages: Record<Locale, MessageTree> = {
           empty: "No weekly rebalance executions",
         },
       },
+      coveredCall: {
+        title: "Covered Call Pilot",
+        meta: "Paper-only read-only review and timeline view",
+        paperOnly: "Paper Only · Read Only",
+        refreshRecent: "Refresh Recent",
+        refreshAudit: "Refresh Audit",
+        recentTitle: "Recent Reviews",
+        detailTitle: "Audit Detail",
+        searchPlaceholder: "Search reviews",
+        pageSummary: "{from}-{to} / {total}",
+        previousPage: "Previous",
+        nextPage: "Next",
+        emptyRecent: "No covered call reviews yet.",
+        emptyAudit: "Select a review to inspect aggregated audit data.",
+        reviewId: "Review ID",
+        timelineState: "Timeline State",
+        latestCommandId: "Latest Command ID",
+        recentLoadError: "Failed to load recent covered call reviews",
+        auditLoadError: "Failed to load covered call audit detail",
+        artifactsTitle: "Artifacts",
+        reviewPayloadTitle: "Review Payload",
+        submitPayloadTitle: "Submit Payload",
+        receiptPayloadTitle: "Receipt Payload",
+        timelinePayloadTitle: "Timeline Payload",
+      },
       executionDataSource: "Execution Data Source",
       signalDataSource: "Signal Data Source",
       signalDataSourceValue: "Alpha (training/backtest)",
@@ -5693,9 +5812,11 @@ const messages: Record<Locale, MessageTree> = {
       deadbandGlobalWeightHint:
         "Rebalance orders below this weight delta will be filtered (0 disables).",
       deadbandRunNotional: "Run override: min notional",
-      deadbandRunNotionalHint: "Leave blank to inherit global default; applies to this run only.",
+      deadbandRunNotionalHint:
+        "Leave blank to inherit global default; applies to this run only.",
       deadbandRunWeight: "Run override: min weight delta",
-      deadbandRunWeightHint: "Leave blank to inherit global default; applies to this run only.",
+      deadbandRunWeightHint:
+        "Leave blank to inherit global default; applies to this run only.",
       deadbandRunPlaceholder: "Blank = use global default",
       deadbandInvalid: "Enter a valid deadband value (>= 0).",
       tradeError: "Failed to load trade execution data",
@@ -5790,7 +5911,8 @@ const messages: Record<Locale, MessageTree> = {
         time: "Time",
       },
       executeRunId: "Run ID to Execute",
-      executeRunIdHint: "Enter the trade run ID to execute (defaults to latest)",
+      executeRunIdHint:
+        "Enter the trade run ID to execute (defaults to latest)",
       executeToken: "Live Confirmation Token",
       executeTokenHint: "Required for live execution only",
       executeSubmit: "Execute Trade Run",
@@ -5907,7 +6029,7 @@ const I18nContext = createContext<I18nContextValue>({
 
 const resolveMessageNode = (
   obj: MessageTree,
-  key: string
+  key: string,
 ): MessageTree | string | undefined => {
   const parts = key.split(".");
   let current: MessageTree | string | undefined = obj;
@@ -5925,7 +6047,10 @@ const resolveMessage = (obj: MessageTree, key: string): string | undefined => {
   return typeof resolved === "string" ? resolved : undefined;
 };
 
-const applyVars = (text: string, vars?: Record<string, string | number>): string => {
+const applyVars = (
+  text: string,
+  vars?: Record<string, string | number>,
+): string => {
   if (!vars) {
     return text;
   }
@@ -5990,7 +6115,8 @@ export const I18nProvider = ({ children }: { children: React.ReactNode }) => {
       const text = resolveMessage(messages[locale], key) || key;
       return applyVars(text, vars);
     };
-    const getMessage = (key: string) => resolveMessageNode(messages[locale], key);
+    const getMessage = (key: string) =>
+      resolveMessageNode(messages[locale], key);
     const formatDateTime = (value?: string | number | Date | null) => {
       if (!value) {
         return t("common.none");
@@ -6035,7 +6161,15 @@ export const I18nProvider = ({ children }: { children: React.ReactNode }) => {
         return date.toLocaleString(localeTag, { timeZone });
       }
     };
-    return { locale, setLocale, timeZone, setTimeZone, t, getMessage, formatDateTime };
+    return {
+      locale,
+      setLocale,
+      timeZone,
+      setTimeZone,
+      t,
+      getMessage,
+      formatDateTime,
+    };
   }, [locale, timeZone]);
 
   return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;

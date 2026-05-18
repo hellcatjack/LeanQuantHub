@@ -22,8 +22,17 @@ def _runtime_health(state: str) -> dict[str, object]:
         "last_open_orders_at": "2026-03-10T14:00:00Z",
         "last_account_summary_at": "2026-03-10T14:00:00Z",
         "last_command_result_at": "2026-03-10T14:01:00Z",
+        "last_probe_at": "2026-03-10T14:01:30Z",
         "last_probe_result": "failure",
         "last_probe_latency_ms": 1500,
+        "gateway_cpu_sample_at": "2026-03-10T14:01:45Z",
+        "gateway_cpu_main_pid": 1234,
+        "gateway_cpu_usage_nsec": 250_000_000_000,
+        "gateway_cpu_elapsed_seconds": 300.0,
+        "gateway_cpu_percent": 80.0,
+        "gateway_cpu_hot": True,
+        "gateway_cpu_hot_count": 2,
+        "gateway_cpu_threshold_percent": 75.0,
         "last_recovery_action": "leader_restart",
         "last_recovery_at": "2026-03-10T14:02:00Z",
         "next_allowed_action_at": "2026-03-10T14:05:00Z",
@@ -52,6 +61,10 @@ def test_get_bridge_status_exposes_runtime_health(monkeypatch):
     assert payload.runtime_health is not None
     assert payload.runtime_health.state == "command_stuck"
     assert payload.runtime_health.failure_count == 2
+    assert payload.runtime_health.last_probe_at == "2026-03-10T14:01:30Z"
+    assert payload.runtime_health.gateway_cpu_percent == 80.0
+    assert payload.runtime_health.gateway_cpu_hot is True
+    assert payload.runtime_health.gateway_cpu_hot_count == 2
 
 
 def test_build_ib_status_overview_includes_gateway_runtime(monkeypatch):
@@ -110,3 +123,5 @@ def test_get_ib_status_overview_route_exposes_gateway_runtime(monkeypatch):
     assert payload.gateway_runtime is not None
     assert payload.gateway_runtime.state == "snapshot_stale"
     assert payload.gateway_runtime.pending_command_count == 1
+    assert payload.gateway_runtime.gateway_cpu_sample_at == "2026-03-10T14:01:45Z"
+    assert payload.gateway_runtime.gateway_cpu_threshold_percent == 75.0

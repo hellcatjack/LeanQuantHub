@@ -32,6 +32,8 @@ _TRANSIENT_PURPOSE_OFFSETS = {
     "executions": 1004,
     "completed_orders": 1005,
     "historical": 1006,
+    "option_contracts": 1007,
+    "option_snapshot": 1008,
 }
 
 
@@ -194,6 +196,8 @@ def _create_ibapi_app():
             self._completed_event: Event | None = None
             self._completed_rows: list[dict[str, object]] = []
             self._historical_requests: dict[int, dict[str, Any]] = {}
+            self._contract_details_requests: dict[int, dict[str, Any]] = {}
+            self._market_snapshot_requests: dict[int, dict[str, Any]] = {}
 
         def nextValidId(self, _order_id: int):
             self.ready.set()
@@ -304,6 +308,41 @@ def _create_ibapi_app():
                     return []
                 return list(state.get("rows") or [])
 
+        def begin_contract_details_request(self) -> tuple[int, Event]:
+            req_id = self._alloc_req_id()
+            with self._request_lock:
+                event = Event()
+                self._contract_details_requests[req_id] = {
+                    "event": event,
+                    "rows": [],
+                }
+                return req_id, event
+
+        def end_contract_details_request(self, req_id: int) -> list[dict[str, object]]:
+            with self._request_lock:
+                state = self._contract_details_requests.pop(int(req_id), None)
+                if not isinstance(state, dict):
+                    return []
+                return list(state.get("rows") or [])
+
+        def begin_market_snapshot_request(self) -> tuple[int, Event]:
+            req_id = self._alloc_req_id()
+            with self._request_lock:
+                event = Event()
+                self._market_snapshot_requests[req_id] = {
+                    "event": event,
+                    "payload": {},
+                }
+                return req_id, event
+
+        def end_market_snapshot_request(self, req_id: int) -> dict[str, object]:
+            with self._request_lock:
+                state = self._market_snapshot_requests.pop(int(req_id), None)
+                if not isinstance(state, dict):
+                    return {}
+                payload = state.get("payload")
+                return dict(payload) if isinstance(payload, dict) else {}
+
         def _signal_on_error(self, req_id: int, error_code: int):
             if int(error_code) in _INFO_ERROR_CODES:
                 return
@@ -326,6 +365,16 @@ def _create_ibapi_app():
                 historical_state = self._historical_requests.get(int(req_id))
                 if isinstance(historical_state, dict):
                     event = historical_state.get("event")
+                    if isinstance(event, Event):
+                        event.set()
+                contract_state = self._contract_details_requests.get(int(req_id))
+                if isinstance(contract_state, dict):
+                    event = contract_state.get("event")
+                    if isinstance(event, Event):
+                        event.set()
+                snapshot_state = self._market_snapshot_requests.get(int(req_id))
+                if isinstance(snapshot_state, dict):
+                    event = snapshot_state.get("event")
                     if isinstance(event, Event):
                         event.set()
 
@@ -519,6 +568,87 @@ def _create_ibapi_app():
             req_id = int(reqId)
             with self._request_lock:
                 state = self._historical_requests.get(req_id)
+                if not isinstance(state, dict):
+                    return
+                event = state.get("event")
+                if isinstance(event, Event):
+                    event.set()
+
+        def contractDetails(self, reqId, contractDetails):
+            req_id = int(reqId)
+            with self._request_lock:
+                state = self._contract_details_requests.get(req_id)
+                if not isinstance(state, dict):
+                    return
+                rows = state.get("rows")
+                if not isinstance(rows, list):
+                    return
+                contract = getattr(contractDetails, "contract", None)
+                if contract is None:
+                    return
+                expiry = str(getattr(contract, "lastTradeDateOrContractMonth", "") or "").strip()
+                right = str(getattr(contract, "right", "") or "").strip().upper()
+                symbol = str(getattr(contract, "symbol", "") or "").strip().upper()
+                if not symbol or not expiry or right not in {"C", "P"}:
+                    return
+                try:
+                    strike = float(getattr(contract, "strike", 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    strike = 0.0
+                rows.append(
+                    {
+                        "symbol": symbol,
+                        "expiry": expiry,
+                        "strike": strike,
+                        "right": right,
+                        "exchange": str(getattr(contract, "exchange", "") or "").strip() or None,
+                        "currency": str(getattr(contract, "currency", "") or "").strip().upper() or None,
+                        "local_symbol": str(getattr(contract, "localSymbol", "") or "").strip() or None,
+                        "trading_class": str(getattr(contract, "tradingClass", "") or "").strip() or None,
+                        "multiplier": str(getattr(contract, "multiplier", "") or "").strip() or None,
+                        "con_id": int(getattr(contract, "conId", 0) or 0),
+                    }
+                )
+
+        def contractDetailsEnd(self, reqId):
+            req_id = int(reqId)
+            with self._request_lock:
+                state = self._contract_details_requests.get(req_id)
+                if not isinstance(state, dict):
+                    return
+                event = state.get("event")
+                if isinstance(event, Event):
+                    event.set()
+
+        def tickPrice(self, reqId, tickType, price, attrib):
+            _ = attrib
+            req_id = int(reqId)
+            with self._request_lock:
+                state = self._market_snapshot_requests.get(req_id)
+                if not isinstance(state, dict):
+                    return
+                payload = state.get("payload")
+                if not isinstance(payload, dict):
+                    payload = {}
+                    state["payload"] = payload
+                try:
+                    price_value = float(price)
+                except (TypeError, ValueError):
+                    return
+                tick_type = int(tickType)
+                if tick_type == 1:
+                    payload["bid"] = price_value
+                elif tick_type == 2:
+                    payload["ask"] = price_value
+                elif tick_type == 4:
+                    payload["last"] = price_value
+                elif tick_type == 9:
+                    payload["close"] = price_value
+
+        def tickSnapshotEnd(self, reqId):
+            req_id = int(reqId)
+            with self._request_lock:
+                state = self._market_snapshot_requests.get(req_id)
                 if not isinstance(state, dict):
                     return
                 event = state.get("event")
@@ -801,6 +931,118 @@ class IBReadSession:
                     app.end_historical_request(req_id)
                 try:
                     app.cancelHistoricalData(req_id)
+                except Exception:
+                    pass
+
+        return self._run_request(_callback, timeout_seconds=timeout_seconds)
+
+    def fetch_option_contract_details(
+        self,
+        *,
+        symbol: str,
+        expiry: str | None = None,
+        strike: float | None = None,
+        right: str | None = None,
+        exchange: str = "SMART",
+        timeout_seconds: float = 8.0,
+    ) -> list[dict[str, object]] | None:
+        try:
+            from ibapi.contract import Contract
+        except Exception:
+            return None
+
+        symbol_text = str(symbol or "").strip().upper()
+        if not symbol_text:
+            return None
+        expiry_text = str(expiry or "").strip()
+        right_text = str(right or "").strip().upper()
+        if right_text and right_text not in {"C", "P"}:
+            return None
+
+        def _callback(app, timeout):
+            req_id, event = app.begin_contract_details_request()
+            rows: list[dict[str, object]] | None = None
+            try:
+                contract = Contract()
+                contract.symbol = symbol_text
+                contract.secType = "OPT"
+                contract.exchange = str(exchange or "SMART").strip() or "SMART"
+                contract.currency = "USD"
+                if expiry_text:
+                    contract.lastTradeDateOrContractMonth = expiry_text
+                if strike is not None:
+                    contract.strike = float(strike)
+                if right_text:
+                    contract.right = right_text
+                app.reqContractDetails(req_id, contract)
+                if not event.wait(timeout):
+                    return None
+                rows = app.end_contract_details_request(req_id)
+                rows.sort(
+                    key=lambda item: (
+                        str(item.get("expiry") or ""),
+                        float(item.get("strike") or 0.0),
+                        str(item.get("right") or ""),
+                    )
+                )
+                return rows
+            finally:
+                if rows is None:
+                    app.end_contract_details_request(req_id)
+
+        return self._run_request(_callback, timeout_seconds=timeout_seconds)
+
+    def fetch_option_market_snapshot(
+        self,
+        *,
+        symbol: str,
+        expiry: str,
+        strike: float,
+        right: str,
+        exchange: str = "SMART",
+        timeout_seconds: float = 8.0,
+    ) -> dict[str, object] | None:
+        try:
+            from ibapi.contract import Contract
+        except Exception:
+            return None
+
+        symbol_text = str(symbol or "").strip().upper()
+        expiry_text = str(expiry or "").strip()
+        right_text = str(right or "").strip().upper()
+        if not symbol_text or not expiry_text or right_text not in {"C", "P"}:
+            return None
+
+        def _callback(app, timeout):
+            req_id, event = app.begin_market_snapshot_request()
+            payload: dict[str, object] | None = None
+            try:
+                contract = Contract()
+                contract.symbol = symbol_text
+                contract.secType = "OPT"
+                contract.exchange = str(exchange or "SMART").strip() or "SMART"
+                contract.currency = "USD"
+                contract.lastTradeDateOrContractMonth = expiry_text
+                contract.strike = float(strike)
+                contract.right = right_text
+                app.reqMktData(req_id, contract, "", True, False, [])
+                if not event.wait(timeout):
+                    return None
+                payload = app.end_market_snapshot_request(req_id)
+                payload.update(
+                    {
+                        "symbol": symbol_text,
+                        "expiry": expiry_text,
+                        "strike": float(strike),
+                        "right": right_text,
+                    }
+                )
+                return payload
+            finally:
+                if payload is None:
+                    app.end_market_snapshot_request(req_id)
+                try:
+                    app.cancelMktData(req_id)
                 except Exception:
                     pass
 

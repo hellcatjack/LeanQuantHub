@@ -46,6 +46,8 @@ Lean_export/
 Thumbs.db
 .idea/
 .vscode/
+.codex
+.playwright-mcp/
 
 # Temp & packages
 *.tgz

@@ -5,18 +5,27 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
 import TopBar from "../components/TopBar";
 import IdChip from "../components/IdChip";
 import PaginationBar from "../components/PaginationBar";
 import PositionChartWorkspace from "../components/trade/PositionChartWorkspace";
+import CoveredCallAuditPanel, {
+  type CoveredCallAuditPayload,
+  type CoveredCallAuditRecentItem,
+} from "../components/trade/CoveredCallAuditPanel";
 import { resolveSelectedChartSymbol } from "../components/trade/positionChartUtils";
 import { api, apiLong, getBackendBackoffUntilMs } from "../api";
 import { useI18n } from "../i18n";
 import { resolveAccountSummaryLabel } from "../utils/accountSummary";
 import { buildManualOrderTag } from "../utils/orderTag";
-import { getLiveTradeSections, type LiveTradeSectionKey } from "../utils/liveTradeLayout";
+import {
+  getLiveTradeSections,
+  type LiveTradeSectionKey,
+} from "../utils/liveTradeLayout";
 import {
   REFRESH_INTERVALS,
   MANUAL_REFRESH_KEYS,
@@ -284,6 +293,15 @@ interface WeeklyRebalanceActionOut {
   notification_sent: boolean;
 }
 
+interface CoveredCallAuditRecentOut {
+  mode: string;
+  total: number;
+  has_more: boolean;
+  items: CoveredCallAuditRecentItem[];
+}
+
+const COVERED_CALL_RECENT_LIMIT = 8;
+
 interface TradeOrder {
   id: number;
   run_id?: number | null;
@@ -479,22 +497,413 @@ type AccountPositionsResolvedState = {
   trustedUpdatedAt: string | null;
 };
 
-const GATEWAY_TRADE_BLOCK_STATES = new Set(["gateway_restarting", "gateway_degraded"]);
+type PositionChartFloatingPlacement =
+  | "stacked"
+  | "below-row"
+  | "above-row"
+  | "dock-right"
+  | "top-right"
+  | "bottom-right"
+  | "top-left"
+  | "bottom-left";
+
+type PositionChartFloatingAnchor =
+  | "top-right"
+  | "bottom-right"
+  | "top-left"
+  | "bottom-left";
+
+type PositionChartPersistedWindow = {
+  anchor: PositionChartFloatingAnchor;
+  offsetX: number;
+  offsetY: number;
+  width: number;
+  height: number;
+  minimized: boolean;
+};
+
+type PositionChartInteractionState =
+  | {
+      type: "drag";
+      pointerId: number;
+      cardWidth: number;
+      cardHeight: number;
+      safeLeft: number;
+      maxLeft: number;
+      minTop: number;
+      maxTop: number;
+      startX: number;
+      startY: number;
+      startLeft: number;
+      startTop: number;
+      width: number;
+      height: number;
+      minimized: boolean;
+    }
+  | {
+      type: "resize";
+      pointerId: number;
+      cardWidth: number;
+      cardHeight: number;
+      safeLeft: number;
+      maxLeft: number;
+      minTop: number;
+      maxTop: number;
+      startX: number;
+      startY: number;
+      startLeft: number;
+      startTop: number;
+      startWidth: number;
+      startHeight: number;
+      minimized: boolean;
+    };
+
+type PositionChartFloatingLayout = {
+  floating: boolean;
+  placement: PositionChartFloatingPlacement;
+  top: number;
+  left: number;
+  width: number;
+  height: number;
+  minimized: boolean;
+  userAnchored: boolean;
+  safeLeft: number;
+};
+
+const GATEWAY_TRADE_BLOCK_STATES = new Set([
+  "gateway_restarting",
+  "gateway_degraded",
+]);
 const GATEWAY_RECOVERY_STATES = new Set([
   "gateway_restarting",
   "gateway_degraded",
   "recovering",
 ]);
+const MIN_FLOATING_POSITION_CHART_VIEWPORT = 1360;
+const POSITION_CHART_FLOATING_HEIGHT = 560;
+const POSITION_CHART_FLOATING_MIN_WIDTH = 400;
+const POSITION_CHART_FLOATING_MAX_WIDTH = 760;
+const POSITION_CHART_FLOATING_MIN_HEIGHT = 360;
+const POSITION_CHART_FLOATING_MAX_HEIGHT = 820;
+const POSITION_CHART_FLOATING_MINIMIZED_HEIGHT = 68;
+const POSITION_CHART_FLOATING_PADDING = 16;
+const POSITION_CHART_FLOATING_GAP = 10;
+const POSITION_CHART_FLOATING_HEADER_OFFSET = 96;
+const POSITION_CHART_SAFE_LEFT_RATIO = 0.42;
+const POSITION_CHART_STORAGE_KEY = "stocklean.liveTrade.positionChartWindow";
+
+const POSITION_CHART_FLOATING_ANCHORS = new Set<PositionChartFloatingAnchor>([
+  "top-right",
+  "bottom-right",
+  "top-left",
+  "bottom-left",
+]);
+
+const clampNumber = (value: number, min: number, max: number) =>
+  Math.min(Math.max(value, min), max);
+
+const resolvePositionChartSafeLeft = (cardWidth: number, width: number) =>
+  Math.max(
+    POSITION_CHART_FLOATING_PADDING,
+    Math.min(
+      cardWidth - width - POSITION_CHART_FLOATING_PADDING,
+      Math.round(cardWidth * POSITION_CHART_SAFE_LEFT_RATIO),
+    ),
+  );
+
+const resolvePositionChartSizeBounds = ({
+  cardWidth,
+  cardHeight,
+}: {
+  cardWidth: number;
+  cardHeight: number;
+}) => {
+  const maxWidth = Math.max(
+    POSITION_CHART_FLOATING_MIN_WIDTH,
+    Math.min(
+      POSITION_CHART_FLOATING_MAX_WIDTH,
+      cardWidth - POSITION_CHART_FLOATING_PADDING * 2,
+    ),
+  );
+  const maxHeight = Math.max(
+    POSITION_CHART_FLOATING_MIN_HEIGHT,
+    Math.min(
+      POSITION_CHART_FLOATING_MAX_HEIGHT,
+      cardHeight -
+        POSITION_CHART_FLOATING_HEADER_OFFSET -
+        POSITION_CHART_FLOATING_PADDING,
+    ),
+  );
+  return {
+    minWidth: POSITION_CHART_FLOATING_MIN_WIDTH,
+    maxWidth,
+    minHeight: POSITION_CHART_FLOATING_MIN_HEIGHT,
+    maxHeight,
+  };
+};
+
+const normalizePositionChartPersistedWindow = ({
+  cardWidth,
+  cardHeight,
+  persistedWindow,
+}: {
+  cardWidth: number;
+  cardHeight: number;
+  persistedWindow?: PositionChartPersistedWindow | null;
+}): PositionChartPersistedWindow | null => {
+  if (
+    !persistedWindow ||
+    !POSITION_CHART_FLOATING_ANCHORS.has(persistedWindow.anchor)
+  ) {
+    return null;
+  }
+  const { minWidth, maxWidth, minHeight, maxHeight } =
+    resolvePositionChartSizeBounds({
+      cardWidth,
+      cardHeight,
+    });
+  const width = Number(persistedWindow.width);
+  const height = Number(persistedWindow.height);
+  const offsetX = Number(persistedWindow.offsetX);
+  const offsetY = Number(persistedWindow.offsetY);
+  if (
+    !Number.isFinite(width) ||
+    !Number.isFinite(height) ||
+    !Number.isFinite(offsetX) ||
+    !Number.isFinite(offsetY)
+  ) {
+    return null;
+  }
+  const normalizedWidth = clampNumber(width, minWidth, maxWidth);
+  const normalizedHeight = persistedWindow.minimized
+    ? POSITION_CHART_FLOATING_MINIMIZED_HEIGHT
+    : clampNumber(height, minHeight, maxHeight);
+  const safeLeft = resolvePositionChartSafeLeft(cardWidth, normalizedWidth);
+  const maxLeft = Math.max(
+    safeLeft,
+    cardWidth - normalizedWidth - POSITION_CHART_FLOATING_PADDING,
+  );
+  const minTop = POSITION_CHART_FLOATING_PADDING;
+  const maxTop = Math.max(
+    minTop,
+    cardHeight - normalizedHeight - POSITION_CHART_FLOATING_PADDING,
+  );
+  const maxOffsetX = String(persistedWindow.anchor).includes("left")
+    ? Math.max(0, maxLeft - safeLeft)
+    : Math.max(POSITION_CHART_FLOATING_PADDING, cardWidth - normalizedWidth);
+  const maxOffsetY = String(persistedWindow.anchor).includes("top")
+    ? Math.max(POSITION_CHART_FLOATING_PADDING, maxTop)
+    : Math.max(POSITION_CHART_FLOATING_PADDING, cardHeight - normalizedHeight);
+  return {
+    anchor: persistedWindow.anchor,
+    minimized: Boolean(persistedWindow.minimized),
+    width: normalizedWidth,
+    height: normalizedHeight,
+    offsetX: clampNumber(offsetX, POSITION_CHART_FLOATING_PADDING, maxOffsetX),
+    offsetY: clampNumber(offsetY, POSITION_CHART_FLOATING_PADDING, maxOffsetY),
+  };
+};
+
+const buildPositionChartAnchoredLayout = ({
+  cardWidth,
+  cardHeight,
+  selectedRowTop,
+  selectedRowHeight,
+  persistedWindow,
+}: {
+  cardWidth: number;
+  cardHeight: number;
+  selectedRowTop: number;
+  selectedRowHeight: number;
+  persistedWindow: PositionChartPersistedWindow;
+}): PositionChartFloatingLayout => {
+  const normalized = normalizePositionChartPersistedWindow({
+    cardWidth,
+    cardHeight,
+    persistedWindow,
+  });
+  if (!normalized) {
+    return {
+      floating: false,
+      placement: "stacked",
+      top: 0,
+      left: 0,
+      width: 0,
+      height: POSITION_CHART_FLOATING_HEIGHT,
+      minimized: false,
+      userAnchored: false,
+      safeLeft: 0,
+    };
+  }
+
+  const safeLeft = resolvePositionChartSafeLeft(cardWidth, normalized.width);
+  const minTop = POSITION_CHART_FLOATING_PADDING;
+  const maxTop = Math.max(
+    minTop,
+    cardHeight - normalized.height - POSITION_CHART_FLOATING_PADDING,
+  );
+
+  const left = normalized.anchor.includes("left")
+    ? clampNumber(
+        safeLeft + normalized.offsetX,
+        safeLeft,
+        Math.max(
+          safeLeft,
+          cardWidth - normalized.width - POSITION_CHART_FLOATING_PADDING,
+        ),
+      )
+    : clampNumber(
+        cardWidth - normalized.width - normalized.offsetX,
+        safeLeft,
+        Math.max(
+          safeLeft,
+          cardWidth - normalized.width - POSITION_CHART_FLOATING_PADDING,
+        ),
+      );
+
+  let top = normalized.anchor.includes("top")
+    ? clampNumber(normalized.offsetY, minTop, maxTop)
+    : clampNumber(
+        cardHeight - normalized.height - normalized.offsetY,
+        minTop,
+        maxTop,
+      );
+
+  if (!normalized.minimized) {
+    const rowTop = selectedRowTop;
+    const rowBottom = selectedRowTop + selectedRowHeight;
+    const chartBottom = top + normalized.height;
+    const overlapsSelectedRow = chartBottom > rowTop && top < rowBottom;
+    if (overlapsSelectedRow) {
+      const aboveTop = rowTop - normalized.height - POSITION_CHART_FLOATING_GAP;
+      const belowTop = rowBottom + POSITION_CHART_FLOATING_GAP;
+      if (belowTop <= maxTop) {
+        top = belowTop;
+      } else if (aboveTop >= minTop) {
+        top = aboveTop;
+      } else {
+        top = clampNumber(top, minTop, maxTop);
+      }
+    }
+  }
+
+  return {
+    floating: true,
+    placement: normalized.anchor,
+    top,
+    left,
+    width: normalized.width,
+    height: normalized.height,
+    minimized: normalized.minimized,
+    userAnchored: true,
+    safeLeft,
+  };
+};
+
+const resolvePositionChartSnapAnchor = ({
+  cardWidth,
+  cardHeight,
+  safeLeft,
+  width,
+  height,
+  left,
+  top,
+}: {
+  cardWidth: number;
+  cardHeight: number;
+  safeLeft: number;
+  width: number;
+  height: number;
+  left: number;
+  top: number;
+}): PositionChartFloatingAnchor => {
+  const maxLeft = Math.max(
+    safeLeft,
+    cardWidth - width - POSITION_CHART_FLOATING_PADDING,
+  );
+  const minTop = POSITION_CHART_FLOATING_PADDING;
+  const maxTop = Math.max(
+    minTop,
+    cardHeight - height - POSITION_CHART_FLOATING_PADDING,
+  );
+  const horizontal = left - safeLeft <= maxLeft - left ? "left" : "right";
+  const vertical = top - minTop <= maxTop - top ? "top" : "bottom";
+  return `${vertical}-${horizontal}` as PositionChartFloatingAnchor;
+};
+
+const buildPositionChartPersistedWindowFromLayout = ({
+  cardWidth,
+  cardHeight,
+  left,
+  top,
+  width,
+  layoutHeight,
+  storedHeight,
+  minimized,
+}: {
+  cardWidth: number;
+  cardHeight: number;
+  left: number;
+  top: number;
+  width: number;
+  layoutHeight: number;
+  storedHeight?: number;
+  minimized: boolean;
+}): PositionChartPersistedWindow => {
+  const safeLeft = resolvePositionChartSafeLeft(cardWidth, width);
+  const anchor = resolvePositionChartSnapAnchor({
+    cardWidth,
+    cardHeight,
+    safeLeft,
+    width,
+    height: layoutHeight,
+    left,
+    top,
+  });
+  const offsetX = anchor.includes("left")
+    ? clampNumber(
+        left - safeLeft,
+        POSITION_CHART_FLOATING_PADDING,
+        Math.max(POSITION_CHART_FLOATING_PADDING, cardWidth),
+      )
+    : clampNumber(
+        cardWidth - width - left,
+        POSITION_CHART_FLOATING_PADDING,
+        Math.max(POSITION_CHART_FLOATING_PADDING, cardWidth),
+      );
+  const offsetY = anchor.includes("top")
+    ? clampNumber(
+        top,
+        POSITION_CHART_FLOATING_PADDING,
+        Math.max(POSITION_CHART_FLOATING_PADDING, cardHeight),
+      )
+    : clampNumber(
+        cardHeight - layoutHeight - top,
+        POSITION_CHART_FLOATING_PADDING,
+        Math.max(POSITION_CHART_FLOATING_PADDING, cardHeight),
+      );
+  return {
+    anchor,
+    minimized,
+    offsetX,
+    offsetY,
+    width,
+    height: storedHeight ?? layoutHeight,
+  };
+};
 
 export const isPositionActionable = (row: PositionLike): boolean => {
   const qty = Number(row?.position ?? 0);
   return Number.isFinite(qty) && Math.abs(qty) > 1e-9;
 };
 
-export const filterActionablePositions = <T extends PositionLike>(rows: T[]): T[] =>
-  rows.filter((row) => isPositionActionable(row));
+export const filterActionablePositions = <T extends PositionLike>(
+  rows: T[],
+): T[] => rows.filter((row) => isPositionActionable(row));
 
-export const resolveSessionByEasternTime = (date: Date = new Date()): TradeSessionValue => {
+export const resolveSessionByEasternTime = (
+  date: Date = new Date(),
+): TradeSessionValue => {
   try {
     const formatter = new Intl.DateTimeFormat("en-US", {
       timeZone: "America/New_York",
@@ -536,20 +945,127 @@ export const resolveSessionByEasternTime = (date: Date = new Date()): TradeSessi
 };
 
 const normalizeGatewayRuntimeState = (value?: string | null): string => {
-  const normalized = String(value || "").trim().toLowerCase();
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase();
   return normalized || "unknown";
 };
 
 export const resolveGatewayTradeBlockState = (
-  runtimeHealth?: IBGatewayRuntimeHealth | null
+  runtimeHealth?: IBGatewayRuntimeHealth | null,
 ): string | null => {
   const normalized = normalizeGatewayRuntimeState(runtimeHealth?.state);
   return GATEWAY_TRADE_BLOCK_STATES.has(normalized) ? normalized : null;
 };
 
 export const isGatewayRuntimeRecovering = (
-  runtimeHealth?: IBGatewayRuntimeHealth | null
-): boolean => GATEWAY_RECOVERY_STATES.has(normalizeGatewayRuntimeState(runtimeHealth?.state));
+  runtimeHealth?: IBGatewayRuntimeHealth | null,
+): boolean =>
+  GATEWAY_RECOVERY_STATES.has(
+    normalizeGatewayRuntimeState(runtimeHealth?.state),
+  );
+
+export const resolvePositionChartFloatingLayout = ({
+  viewportWidth,
+  cardWidth,
+  cardHeight,
+  selectedRowTop,
+  selectedRowHeight,
+  persistedWindow,
+}: {
+  viewportWidth: number;
+  cardWidth: number;
+  cardHeight: number;
+  selectedRowTop: number;
+  selectedRowHeight: number;
+  persistedWindow?: PositionChartPersistedWindow | null;
+}): PositionChartFloatingLayout => {
+  if (
+    viewportWidth < MIN_FLOATING_POSITION_CHART_VIEWPORT ||
+    cardWidth <= 0 ||
+    cardHeight <= 0 ||
+    selectedRowTop < 0 ||
+    selectedRowHeight <= 0
+  ) {
+    return {
+      floating: false,
+      placement: "stacked",
+      top: 0,
+      left: 0,
+      width: 0,
+      height: POSITION_CHART_FLOATING_HEIGHT,
+      minimized: false,
+      userAnchored: false,
+      safeLeft: 0,
+    };
+  }
+
+  if (persistedWindow) {
+    const anchoredLayout = buildPositionChartAnchoredLayout({
+      cardWidth,
+      cardHeight,
+      selectedRowTop,
+      selectedRowHeight,
+      persistedWindow,
+    });
+    if (anchoredLayout.floating) {
+      return anchoredLayout;
+    }
+  }
+
+  const { maxWidth } = resolvePositionChartSizeBounds({
+    cardWidth,
+    cardHeight,
+  });
+  const width = Math.max(
+    POSITION_CHART_FLOATING_MIN_WIDTH,
+    Math.min(maxWidth, cardWidth - 760),
+  );
+  const safeLeft = resolvePositionChartSafeLeft(cardWidth, width);
+  const left = Math.max(
+    safeLeft,
+    cardWidth - width - POSITION_CHART_FLOATING_PADDING,
+  );
+  const minTop = POSITION_CHART_FLOATING_HEADER_OFFSET;
+  const maxTop = Math.max(
+    minTop,
+    cardHeight -
+      POSITION_CHART_FLOATING_HEIGHT -
+      POSITION_CHART_FLOATING_PADDING,
+  );
+  const belowTop =
+    selectedRowTop + selectedRowHeight + POSITION_CHART_FLOATING_GAP;
+  const aboveTop =
+    selectedRowTop -
+    POSITION_CHART_FLOATING_HEIGHT -
+    POSITION_CHART_FLOATING_GAP;
+
+  let placement: PositionChartFloatingPlacement = "dock-right";
+  let top = maxTop;
+
+  if (belowTop <= maxTop) {
+    placement = "below-row";
+    top = belowTop;
+  } else if (aboveTop >= minTop) {
+    placement = "above-row";
+    top = aboveTop;
+  } else if (selectedRowTop > cardHeight / 2) {
+    placement = "above-row";
+    top = minTop;
+  }
+
+  return {
+    floating: true,
+    placement,
+    top,
+    left,
+    width,
+    height: POSITION_CHART_FLOATING_HEIGHT,
+    minimized: false,
+    userAnchored: false,
+    safeLeft,
+  };
+};
 
 export const resolveAccountPositionsResponseState = ({
   response,
@@ -624,7 +1140,11 @@ export const resolveAccountPositionsErrorState = ({
 };
 
 const resolveDefaultOrderTypeBySession = (session: string) =>
-  String(session || "").trim().toLowerCase() === "rth" ? "ADAPTIVE_LMT" : "LMT";
+  String(session || "")
+    .trim()
+    .toLowerCase() === "rth"
+    ? "ADAPTIVE_LMT"
+    : "LMT";
 
 const maskAccount = (value?: string | null) => {
   if (!value) {
@@ -647,7 +1167,11 @@ const normalizeSymbolList = (raw: unknown) => {
     return [];
   }
   return raw
-    .map((item) => String(item ?? "").trim().toUpperCase())
+    .map((item) =>
+      String(item ?? "")
+        .trim()
+        .toUpperCase(),
+    )
     .filter((item) => item.length > 0);
 };
 
@@ -695,7 +1219,7 @@ const normalizeWarningCodes = (raw: unknown): string[] => {
 
 const normalizeDecisionBasis = (
   raw: unknown,
-  defaults?: Partial<DecisionBasis>
+  defaults?: Partial<DecisionBasis>,
 ): DecisionBasis | null => {
   const base = defaults || {};
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -712,7 +1236,9 @@ const normalizeDecisionBasis = (
     };
   }
   const payload = raw as Record<string, unknown>;
-  const pitWarningCodes = normalizeWarningCodes(payload.pit_warning_codes || payload.warnings);
+  const pitWarningCodes = normalizeWarningCodes(
+    payload.pit_warning_codes || payload.warnings,
+  );
   return {
     decision_snapshot_id:
       toNullableNumber(payload.decision_snapshot_id) ??
@@ -751,13 +1277,21 @@ const normalizeDecisionBasis = (
       toNullableNumber(payload.snapshot_stale_days_threshold),
     pit_warning_codes: pitWarningCodes,
     pit_warning_message:
-      toNullableString(payload.pit_warning_message) ?? toNullableString(payload.message),
-    decision_as_of_time: toNullableString(payload.decision_as_of_time) ?? toNullableString(payload.as_of_time),
-    algorithm_parameters_source: toNullableString(payload.algorithm_parameters_source),
+      toNullableString(payload.pit_warning_message) ??
+      toNullableString(payload.message),
+    decision_as_of_time:
+      toNullableString(payload.decision_as_of_time) ??
+      toNullableString(payload.as_of_time),
+    algorithm_parameters_source: toNullableString(
+      payload.algorithm_parameters_source,
+    ),
   };
 };
 
-const resolveWorkstationType = (value: unknown, portValue?: unknown): "tws" | "gateway" => {
+const resolveWorkstationType = (
+  value: unknown,
+  portValue?: unknown,
+): "tws" | "gateway" => {
   const normalized = String(value ?? "")
     .trim()
     .toLowerCase();
@@ -793,7 +1327,9 @@ export const TradeIntentMismatchCard = ({
       ? mismatch.missing_count
       : missingSymbols.length;
   const extraCount =
-    typeof mismatch?.extra_count === "number" ? mismatch.extra_count : extraSymbols.length;
+    typeof mismatch?.extra_count === "number"
+      ? mismatch.extra_count
+      : extraSymbols.length;
   const intentPath = mismatch?.intent_path ? String(mismatch.intent_path) : "";
   return (
     <div
@@ -822,7 +1358,9 @@ export const TradeIntentMismatchCard = ({
       </div>
       {missingSymbols.length ? (
         <div style={{ marginTop: "10px" }}>
-          <div style={{ marginBottom: "6px" }}>{t("trade.runIntentMismatchMissing")}</div>
+          <div style={{ marginBottom: "6px" }}>
+            {t("trade.runIntentMismatchMissing")}
+          </div>
           <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
             {missingSymbols.map((symbol) => (
               <span key={`missing-${symbol}`} className="pill danger">
@@ -834,7 +1372,9 @@ export const TradeIntentMismatchCard = ({
       ) : null}
       {extraSymbols.length ? (
         <div style={{ marginTop: "10px" }}>
-          <div style={{ marginBottom: "6px" }}>{t("trade.runIntentMismatchExtra")}</div>
+          <div style={{ marginBottom: "6px" }}>
+            {t("trade.runIntentMismatchExtra")}
+          </div>
           <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
             {extraSymbols.map((symbol) => (
               <span key={`extra-${symbol}`} className="pill warn">
@@ -845,7 +1385,9 @@ export const TradeIntentMismatchCard = ({
         </div>
       ) : null}
       {!missingSymbols.length && !extraSymbols.length ? (
-        <div style={{ marginTop: "8px" }}>{t("trade.runIntentMismatchEmpty")}</div>
+        <div style={{ marginTop: "8px" }}>
+          {t("trade.runIntentMismatchEmpty")}
+        </div>
       ) : null}
     </div>
   );
@@ -1055,8 +1597,12 @@ export const WeeklyRebalancePanel = ({
                 >
                   <td>{item.week_key || t("common.none")}</td>
                   <td>
-                    <div>{formatPhase(item.attempt_phase || item.phase)}</div>
-                    <div className="muted">{formatHistoryStatus(item.attempt_status)}</div>
+                    <div>
+                      {formatPhase(item.attempt_phase || item.phase)}
+                    </div>
+                    <div className="muted">
+                      {formatHistoryStatus(item.attempt_status)}
+                    </div>
                   </td>
                   <td>
                     {item.pretrade_run_id ? (
@@ -1067,21 +1613,32 @@ export const WeeklyRebalancePanel = ({
                     ) : (
                       t("common.none")
                     )}
-                    <div className="muted">{formatHistoryStatus(item.pretrade_status)}</div>
+                    <div className="muted">
+                      {formatHistoryStatus(item.pretrade_status)}
+                    </div>
                   </td>
                   <td>
                     {item.trade_run_id ? (
-                      <IdChip label={t("trade.id.run")} value={item.trade_run_id} />
+                      <IdChip
+                        label={t("trade.id.run")}
+                        value={item.trade_run_id}
+                      />
                     ) : (
                       t("common.none")
                     )}
-                    <div className="muted">{formatHistoryStatus(item.trade_status)}</div>
+                    <div className="muted">
+                      {formatHistoryStatus(item.trade_status)}
+                    </div>
                   </td>
                   <td>
                     <div>
-                      {formatMaybeDateTime(item.attempt_created_at || item.pretrade_created_at)}
+                      {formatMaybeDateTime(
+                        item.attempt_created_at || item.pretrade_created_at,
+                      )}
                     </div>
-                    <div className="muted">{formatMaybeDateTime(item.trade_created_at)}</div>
+                    <div className="muted">
+                      {formatMaybeDateTime(item.trade_created_at)}
+                    </div>
                   </td>
                   <td>
                     {item.attempt_message ||
@@ -1103,7 +1660,9 @@ export const WeeklyRebalancePanel = ({
       </div>
       <div className="form-hint" style={{ marginTop: "8px" }}>
         {t("trade.weeklyRebalance.updatedAt", {
-          at: status?.generated_at ? formatMaybeDateTime(status.generated_at) : t("common.none"),
+          at: status?.generated_at
+            ? formatMaybeDateTime(status.generated_at)
+            : t("common.none"),
         })}
       </div>
     </div>
@@ -1134,37 +1693,88 @@ export default function LiveTradePage() {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [projectError, setProjectError] = useState("");
   const [selectedProjectId, setSelectedProjectId] = useState("");
-  const [snapshot, setSnapshot] = useState<DecisionSnapshotSummary | null>(null);
+  const [snapshot, setSnapshot] = useState<DecisionSnapshotSummary | null>(
+    null,
+  );
   const [snapshotLoading, setSnapshotLoading] = useState(false);
   const [snapshotError, setSnapshotError] = useState("");
-  const [accountSummary, setAccountSummary] = useState<IBAccountSummary | null>(null);
-  const [accountSummaryFull, setAccountSummaryFull] = useState<IBAccountSummary | null>(null);
+  const [accountSummary, setAccountSummary] = useState<IBAccountSummary | null>(
+    null,
+  );
+  const [accountSummaryFull, setAccountSummaryFull] =
+    useState<IBAccountSummary | null>(null);
   const [accountSummaryLoading, setAccountSummaryLoading] = useState(false);
-  const [accountSummaryFullLoading, setAccountSummaryFullLoading] = useState(false);
+  const [accountSummaryFullLoading, setAccountSummaryFullLoading] =
+    useState(false);
   const [accountSummaryError, setAccountSummaryError] = useState("");
   const [accountSummaryFullError, setAccountSummaryFullError] = useState("");
-  const [accountPositions, setAccountPositions] = useState<IBAccountPosition[]>([]);
-  const [accountPositionsUpdatedAt, setAccountPositionsUpdatedAt] = useState<string | null>(null);
+  const [accountPositions, setAccountPositions] = useState<IBAccountPosition[]>(
+    [],
+  );
+  const [accountPositionsUpdatedAt, setAccountPositionsUpdatedAt] = useState<
+    string | null
+  >(null);
   const [accountPositionsStale, setAccountPositionsStale] = useState(false);
-  const [selectedPositionChartSymbol, setSelectedPositionChartSymbol] = useState<string | null>(null);
-  const [trustedAccountPositions, setTrustedAccountPositions] = useState<IBAccountPosition[]>([]);
-  const [trustedAccountPositionsUpdatedAt, setTrustedAccountPositionsUpdatedAt] =
+  const [selectedPositionChartSymbol, setSelectedPositionChartSymbol] =
     useState<string | null>(null);
-  const [accountPositionsUsingTrustedFallback, setAccountPositionsUsingTrustedFallback] =
-    useState(false);
+  const [trustedAccountPositions, setTrustedAccountPositions] = useState<
+    IBAccountPosition[]
+  >([]);
+  const [
+    trustedAccountPositionsUpdatedAt,
+    setTrustedAccountPositionsUpdatedAt,
+  ] = useState<string | null>(null);
+  const [
+    accountPositionsUsingTrustedFallback,
+    setAccountPositionsUsingTrustedFallback,
+  ] = useState(false);
   const trustedAccountPositionsRef = useRef<IBAccountPosition[]>([]);
   const trustedAccountPositionsUpdatedAtRef = useRef<string | null>(null);
   const [accountPositionsLoading, setAccountPositionsLoading] = useState(false);
   const [accountPositionsError, setAccountPositionsError] = useState("");
-  const [positionSelections, setPositionSelections] = useState<Record<string, boolean>>({});
-  const [positionQuantities, setPositionQuantities] = useState<Record<string, string>>({});
-  const [positionSessions, setPositionSessions] = useState<Record<string, string>>({});
-  const [positionOrderTypes, setPositionOrderTypes] = useState<Record<string, string>>({});
-  const [positionLimitPrices, setPositionLimitPrices] = useState<Record<string, string>>({});
+  const [positionSelections, setPositionSelections] = useState<
+    Record<string, boolean>
+  >({});
+  const [positionQuantities, setPositionQuantities] = useState<
+    Record<string, string>
+  >({});
+  const [positionSessions, setPositionSessions] = useState<
+    Record<string, string>
+  >({});
+  const [positionOrderTypes, setPositionOrderTypes] = useState<
+    Record<string, string>
+  >({});
+  const [positionLimitPrices, setPositionLimitPrices] = useState<
+    Record<string, string>
+  >({});
   const [positionActionLoading, setPositionActionLoading] = useState(false);
   const [positionActionError, setPositionActionError] = useState("");
   const [positionActionResult, setPositionActionResult] = useState("");
   const [positionActionWarning, setPositionActionWarning] = useState("");
+  const [positionChartLayout, setPositionChartLayout] =
+    useState<PositionChartFloatingLayout>({
+      floating: false,
+      placement: "stacked",
+      top: 0,
+      left: 0,
+      width: 0,
+      height: POSITION_CHART_FLOATING_HEIGHT,
+      minimized: false,
+      userAnchored: false,
+      safeLeft: 0,
+    });
+  const [positionChartStoredWindow, setPositionChartStoredWindow] =
+    useState<PositionChartPersistedWindow | null>(null);
+  const [positionChartPreviewLayout, setPositionChartPreviewLayout] =
+    useState<PositionChartFloatingLayout | null>(null);
+  const [positionChartInteraction, setPositionChartInteraction] =
+    useState<PositionChartInteractionState | null>(null);
+  const positionsCardRef = useRef<HTMLDivElement | null>(null);
+  const positionsWorkspaceRef = useRef<HTMLDivElement | null>(null);
+  const positionsTablePaneRef = useRef<HTMLDivElement | null>(null);
+  const positionRowRefs = useRef<Record<string, HTMLTableRowElement | null>>(
+    {},
+  );
   const [ibContractForm, setIbContractForm] = useState({
     symbols: "SPY",
     use_project_symbols: false,
@@ -1186,7 +1796,9 @@ export default function LiveTradePage() {
   const [ibMarketHealthResult, setIbMarketHealthResult] =
     useState<IBMarketHealthResult | null>(null);
   const [ibMarketHealthError, setIbMarketHealthError] = useState("");
-  const [marketHealthUpdatedAt, setMarketHealthUpdatedAt] = useState<string | null>(null);
+  const [marketHealthUpdatedAt, setMarketHealthUpdatedAt] = useState<
+    string | null
+  >(null);
   const [ibHistoryForm, setIbHistoryForm] = useState({
     symbols: "SPY",
     use_project_symbols: false,
@@ -1200,7 +1812,9 @@ export default function LiveTradePage() {
   const [ibHistoryLoading, setIbHistoryLoading] = useState(false);
   const [ibHistoryError, setIbHistoryError] = useState("");
   const [ibHistoryActionLoading, setIbHistoryActionLoading] = useState(false);
-  const [ibStreamStatus, setIbStreamStatus] = useState<IBStreamStatus | null>(null);
+  const [ibStreamStatus, setIbStreamStatus] = useState<IBStreamStatus | null>(
+    null,
+  );
   const [ibStreamForm, setIbStreamForm] = useState({
     project_id: "",
     decision_snapshot_id: "",
@@ -1210,32 +1824,43 @@ export default function LiveTradePage() {
   const [ibStreamLoading, setIbStreamLoading] = useState(false);
   const [ibStreamActionLoading, setIbStreamActionLoading] = useState(false);
   const [ibStreamError, setIbStreamError] = useState("");
-  const [bridgeStatus, setBridgeStatus] = useState<IBBridgeStatusOut | null>(null);
+  const [bridgeStatus, setBridgeStatus] = useState<IBBridgeStatusOut | null>(
+    null,
+  );
   const [bridgeStatusLoading, setBridgeStatusLoading] = useState(false);
   const [bridgeStatusError, setBridgeStatusError] = useState("");
-  const [marketSnapshot, setMarketSnapshot] = useState<IBMarketSnapshotItem | null>(null);
+  const [marketSnapshot, setMarketSnapshot] =
+    useState<IBMarketSnapshotItem | null>(null);
   const [marketSnapshotSymbol, setMarketSnapshotSymbol] = useState("");
   const [marketSnapshotLoading, setMarketSnapshotLoading] = useState(false);
   const [marketSnapshotError, setMarketSnapshotError] = useState("");
   const [tradeRuns, setTradeRuns] = useState<TradeRun[]>([]);
   const [tradeOrders, setTradeOrders] = useState<TradeOrder[]>([]);
-  const [orderCancelLoading, setOrderCancelLoading] = useState<Record<number, boolean>>({});
+  const [orderCancelLoading, setOrderCancelLoading] = useState<
+    Record<number, boolean>
+  >({});
   const [orderCancelError, setOrderCancelError] = useState("");
   const [orderCancelResult, setOrderCancelResult] = useState("");
   const [ordersPage, setOrdersPage] = useState(1);
   const [ordersPageSize, setOrdersPageSize] = useState(20);
   const [ordersTotal, setOrdersTotal] = useState(0);
-  const [tradeActivityUpdatedAt, setTradeActivityUpdatedAt] = useState<string | null>(null);
+  const [tradeActivityUpdatedAt, setTradeActivityUpdatedAt] = useState<
+    string | null
+  >(null);
   const [tradeReceipts, setTradeReceipts] = useState<TradeReceipt[]>([]);
   const [receiptsPage, setReceiptsPage] = useState(1);
   const [receiptsPageSize, setReceiptsPageSize] = useState(20);
   const [receiptsTotal, setReceiptsTotal] = useState(0);
-  const [receiptsUpdatedAt, setReceiptsUpdatedAt] = useState<string | null>(null);
+  const [receiptsUpdatedAt, setReceiptsUpdatedAt] = useState<string | null>(
+    null,
+  );
   const [receiptsWarnings, setReceiptsWarnings] = useState<string[]>([]);
   const [receiptsLoading, setReceiptsLoading] = useState(false);
   const [receiptsError, setReceiptsError] = useState("");
   const [guardState, setGuardState] = useState<TradeGuardState | null>(null);
-  const [tradeSettings, setTradeSettings] = useState<TradeSettings | null>(null);
+  const [tradeSettings, setTradeSettings] = useState<TradeSettings | null>(
+    null,
+  );
   const [tradeSettingsError, setTradeSettingsError] = useState("");
   const [tradeSettingsForm, setTradeSettingsForm] = useState({
     deadband_min_notional: "0",
@@ -1251,8 +1876,12 @@ export default function LiveTradePage() {
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
   const [runDetail, setRunDetail] = useState<TradeRunDetail | null>(null);
   const [symbolSummary, setSymbolSummary] = useState<TradeSymbolSummary[]>([]);
-  const [symbolSummaryUpdatedAt, setSymbolSummaryUpdatedAt] = useState<string | null>(null);
-  const [detailTab, setDetailTab] = useState<"orders" | "fills" | "receipts">("orders");
+  const [symbolSummaryUpdatedAt, setSymbolSummaryUpdatedAt] = useState<
+    string | null
+  >(null);
+  const [detailTab, setDetailTab] = useState<"orders" | "fills" | "receipts">(
+    "orders",
+  );
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState("");
   const [executeForm, setExecuteForm] = useState({
@@ -1262,6 +1891,24 @@ export default function LiveTradePage() {
   const [executeLoading, setExecuteLoading] = useState(false);
   const [executeError, setExecuteError] = useState("");
   const [executeResult, setExecuteResult] = useState("");
+  const [coveredCallRecentItems, setCoveredCallRecentItems] = useState<
+    CoveredCallAuditRecentItem[]
+  >([]);
+  const [coveredCallSelectedReviewId, setCoveredCallSelectedReviewId] =
+    useState<string | null>(null);
+  const [coveredCallRecentQuery, setCoveredCallRecentQuery] = useState("");
+  const [coveredCallRecentOffset, setCoveredCallRecentOffset] = useState(0);
+  const [coveredCallRecentTotal, setCoveredCallRecentTotal] = useState(0);
+  const [coveredCallRecentHasMore, setCoveredCallRecentHasMore] =
+    useState(false);
+  const [coveredCallRecentLoading, setCoveredCallRecentLoading] =
+    useState(false);
+  const [coveredCallAuditLoading, setCoveredCallAuditLoading] =
+    useState(false);
+  const [coveredCallRecentError, setCoveredCallRecentError] = useState("");
+  const [coveredCallAuditError, setCoveredCallAuditError] = useState("");
+  const [coveredCallAudit, setCoveredCallAudit] =
+    useState<CoveredCallAuditPayload | null>(null);
   const [runActionReason, setRunActionReason] = useState("");
   const [runActionLoading, setRunActionLoading] = useState(false);
   const [runActionError, setRunActionError] = useState("");
@@ -1288,12 +1935,13 @@ export default function LiveTradePage() {
   const [pipelineRunsLoading, setPipelineRunsLoading] = useState(false);
   const [pipelineRunsError, setPipelineRunsError] = useState("");
   const [pipelineTraceId, setPipelineTraceId] = useState<string | null>(null);
-  const [pipelineDetail, setPipelineDetail] = useState<PipelineTraceDetail | null>(null);
+  const [pipelineDetail, setPipelineDetail] =
+    useState<PipelineTraceDetail | null>(null);
   const [pipelineDetailLoading, setPipelineDetailLoading] = useState(false);
   const [pipelineDetailError, setPipelineDetailError] = useState("");
-  const [pipelineActionLoading, setPipelineActionLoading] = useState<Record<string, boolean>>(
-    {}
-  );
+  const [pipelineActionLoading, setPipelineActionLoading] = useState<
+    Record<string, boolean>
+  >({});
   const [pipelineActionError, setPipelineActionError] = useState("");
   const [pipelineActionResult, setPipelineActionResult] = useState("");
   const [pipelineStatusFilter, setPipelineStatusFilter] = useState("");
@@ -1302,13 +1950,16 @@ export default function LiveTradePage() {
   const [pipelineDateFrom, setPipelineDateFrom] = useState("");
   const [pipelineDateTo, setPipelineDateTo] = useState("");
   const [pipelineKeyword, setPipelineKeyword] = useState("");
-  const [pipelineSelectedEvent, setPipelineSelectedEvent] = useState<PipelineEvent | null>(
-    null
-  );
+  const [pipelineSelectedEvent, setPipelineSelectedEvent] =
+    useState<PipelineEvent | null>(null);
   const defaultSession = resolveSessionByEasternTime();
   const hotExecutionRefresh = useMemo(() => {
-    const hasActiveOrders = tradeOrders.some((order) => hasActiveTradeOrderStatus(order?.status));
-    const hasActiveRuns = tradeRuns.some((run) => hasActiveTradeRunStatus(run?.status));
+    const hasActiveOrders = tradeOrders.some((order) =>
+      hasActiveTradeOrderStatus(order?.status),
+    );
+    const hasActiveRuns = tradeRuns.some((run) =>
+      hasActiveTradeRunStatus(run?.status),
+    );
     const hasPendingCancel = Object.values(orderCancelLoading).some(Boolean);
     return (
       hasActiveOrders ||
@@ -1328,36 +1979,62 @@ export default function LiveTradePage() {
   ]);
   const refreshIntervals = useMemo(
     () => resolveRefreshIntervals({ hotExecution: hotExecutionRefresh }),
-    [hotExecutionRefresh]
+    [hotExecutionRefresh],
   );
   const [refreshMeta, setRefreshMeta] = useState<
-    Record<RefreshKey, { intervalMs: number | null; lastAt: string | null; nextAt: string | null }>
+    Record<
+      RefreshKey,
+      {
+        intervalMs: number | null;
+        lastAt: string | null;
+        nextAt: string | null;
+      }
+    >
   >(() => {
     const now = Date.now();
-    const entries: [RefreshKey, { intervalMs: number | null; lastAt: string | null; nextAt: string | null }][] =
-      (Object.keys(REFRESH_INTERVALS) as AutoRefreshKey[]).map((key) => {
-        const intervalMs = REFRESH_INTERVALS[key];
-        const nextAt = new Date(now + intervalMs).toISOString();
-        return [key, { intervalMs, lastAt: null, nextAt }];
-      });
+    const entries: [
+      RefreshKey,
+      {
+        intervalMs: number | null;
+        lastAt: string | null;
+        nextAt: string | null;
+      },
+    ][] = (Object.keys(REFRESH_INTERVALS) as AutoRefreshKey[]).map((key) => {
+      const intervalMs = REFRESH_INTERVALS[key];
+      const nextAt = new Date(now + intervalMs).toISOString();
+      return [key, { intervalMs, lastAt: null, nextAt }];
+    });
     MANUAL_REFRESH_KEYS.forEach((key) => {
       entries.push([key, { intervalMs: null, lastAt: null, nextAt: null }]);
     });
     return Object.fromEntries(entries) as Record<
       RefreshKey,
-      { intervalMs: number | null; lastAt: string | null; nextAt: string | null }
+      {
+        intervalMs: number | null;
+        lastAt: string | null;
+        nextAt: string | null;
+      }
     >;
   });
 
-  const updateIbSettingsForm = (key: keyof typeof ibSettingsForm, value: string | boolean) => {
+  const updateIbSettingsForm = (
+    key: keyof typeof ibSettingsForm,
+    value: string | boolean,
+  ) => {
     setIbSettingsForm((prev) => ({ ...prev, [key]: value }));
   };
 
-  const updateIbContractForm = (key: keyof typeof ibContractForm, value: any) => {
+  const updateIbContractForm = (
+    key: keyof typeof ibContractForm,
+    value: any,
+  ) => {
     setIbContractForm((prev) => ({ ...prev, [key]: value }));
   };
 
-  const updateIbMarketHealthForm = (key: keyof typeof ibMarketHealthForm, value: any) => {
+  const updateIbMarketHealthForm = (
+    key: keyof typeof ibMarketHealthForm,
+    value: any,
+  ) => {
     setIbMarketHealthForm((prev) => ({ ...prev, [key]: value }));
   };
 
@@ -1375,14 +2052,14 @@ export default function LiveTradePage() {
 
   const updateTradeSettingsForm = (
     key: keyof typeof tradeSettingsForm,
-    value: string
+    value: string,
   ) => {
     setTradeSettingsForm((prev) => ({ ...prev, [key]: value }));
   };
 
   const updateCreateRunForm = (
     key: keyof typeof createRunForm,
-    value: string
+    value: string,
   ) => {
     setCreateRunForm((prev) => ({ ...prev, [key]: value }));
   };
@@ -1415,7 +2092,7 @@ export default function LiveTradePage() {
   const refreshInFlightRef = useRef<Set<RefreshKey>>(new Set());
   const streamSymbolKey = useMemo(
     () => buildSymbolListKey(ibStreamStatus?.subscribed_symbols),
-    [ibStreamStatus?.subscribed_symbols]
+    [ibStreamStatus?.subscribed_symbols],
   );
   const primaryStreamSymbol = useMemo(() => {
     const [first] = streamSymbolKey.split("|");
@@ -1432,14 +2109,18 @@ export default function LiveTradePage() {
       }
       return `${intervalMs / 1000}s`;
     },
-    [t]
+    [t],
   );
 
   const formatNextRefresh = useCallback(
     (
       meta:
-        | { intervalMs: number | null; nextAt: string | null; lastAt?: string | null }
-        | undefined
+        | {
+            intervalMs: number | null;
+            nextAt: string | null;
+            lastAt?: string | null;
+          }
+        | undefined,
     ) => {
       if (!meta) {
         return t("common.none");
@@ -1452,21 +2133,24 @@ export default function LiveTradePage() {
       }
       const computedNextAt =
         meta.lastAt && meta.intervalMs
-          ? new Date(new Date(meta.lastAt).getTime() + meta.intervalMs).toISOString()
+          ? new Date(
+              new Date(meta.lastAt).getTime() + meta.intervalMs,
+            ).toISOString()
           : meta.nextAt;
       if (!computedNextAt) {
         return t("common.none");
       }
       return formatDateTime(computedNextAt);
     },
-    [autoRefreshEnabled, formatDateTime, t]
+    [autoRefreshEnabled, formatDateTime, t],
   );
 
   const markRefreshed = useCallback(
     (key: RefreshKey) => {
       setRefreshMeta((prev) => {
         const intervalMs =
-          prev[key]?.intervalMs ?? (isAutoRefreshKey(key) ? refreshIntervals[key] : null);
+          prev[key]?.intervalMs ??
+          (isAutoRefreshKey(key) ? refreshIntervals[key] : null);
         const lastAt = new Date().toISOString();
         const nextAt =
           isAutoRefreshKey(key) && autoRefreshEnabled && intervalMs
@@ -1482,25 +2166,34 @@ export default function LiveTradePage() {
         };
       });
     },
-    [autoRefreshEnabled, refreshIntervals]
+    [autoRefreshEnabled, refreshIntervals],
   );
 
-  const markRefreshDeferred = useCallback((key: RefreshKey, deferUntilMs: number) => {
-    setRefreshMeta((prev) => {
-      const intervalMs =
-        prev[key]?.intervalMs ?? (isAutoRefreshKey(key) ? refreshIntervals[key] : null);
-      const existingNextAt = prev[key]?.nextAt ? new Date(prev[key].nextAt as string).getTime() : 0;
-      const targetMs = Math.max(existingNextAt, Math.max(Date.now(), Number(deferUntilMs) || 0));
-      return {
-        ...prev,
-        [key]: {
-          intervalMs,
-          lastAt: prev[key]?.lastAt ?? null,
-          nextAt: targetMs > 0 ? new Date(targetMs).toISOString() : null,
-        },
-      };
-    });
-  }, [refreshIntervals]);
+  const markRefreshDeferred = useCallback(
+    (key: RefreshKey, deferUntilMs: number) => {
+      setRefreshMeta((prev) => {
+        const intervalMs =
+          prev[key]?.intervalMs ??
+          (isAutoRefreshKey(key) ? refreshIntervals[key] : null);
+        const existingNextAt = prev[key]?.nextAt
+          ? new Date(prev[key].nextAt as string).getTime()
+          : 0;
+        const targetMs = Math.max(
+          existingNextAt,
+          Math.max(Date.now(), Number(deferUntilMs) || 0),
+        );
+        return {
+          ...prev,
+          [key]: {
+            intervalMs,
+            lastAt: prev[key]?.lastAt ?? null,
+            nextAt: targetMs > 0 ? new Date(targetMs).toISOString() : null,
+          },
+        };
+      });
+    },
+    [refreshIntervals],
+  );
 
   const createTradeRun = async () => {
     setCreateRunError("");
@@ -1518,18 +2211,24 @@ export default function LiveTradePage() {
       const key = raw ? `common.status.${raw}` : "";
       const translated = key ? t(key) : "";
       const normalized =
-        translated && !translated.startsWith("common.status.") ? translated : raw || "unknown";
+        translated && !translated.startsWith("common.status.")
+          ? translated
+          : raw || "unknown";
       setCreateRunError(t("trade.snapshotNotReady", { status: normalized }));
       return;
     }
     setCreateRunLoading(true);
     try {
-      const mode = (ibSettings?.mode || ibSettingsForm.mode || "paper").toLowerCase();
+      const mode = (
+        ibSettings?.mode ||
+        ibSettingsForm.mode ||
+        "paper"
+      ).toLowerCase();
       const deadbandNotionalOverride = parseOptionalNonNegativeNumber(
-        createRunForm.deadband_min_notional
+        createRunForm.deadband_min_notional,
       );
       const deadbandWeightOverride = parseOptionalNonNegativeNumber(
-        createRunForm.deadband_min_weight
+        createRunForm.deadband_min_weight,
       );
       if (!deadbandNotionalOverride.valid || !deadbandWeightOverride.valid) {
         setCreateRunError(t("trade.deadbandInvalid"));
@@ -1541,7 +2240,9 @@ export default function LiveTradePage() {
         decision_snapshot_id: snapshot?.id ?? undefined,
         mode,
         live_confirm_token:
-          mode === "live" ? executeForm.live_confirm_token || undefined : undefined,
+          mode === "live"
+            ? executeForm.live_confirm_token || undefined
+            : undefined,
       };
       if (deadbandNotionalOverride.value !== undefined) {
         payload.deadband_min_notional = deadbandNotionalOverride.value;
@@ -1573,7 +2274,7 @@ export default function LiveTradePage() {
         port: String(res.data.port ?? 7497),
         workstation_type: resolveWorkstationType(
           res.data.workstation_type,
-          res.data.port
+          res.data.port,
         ),
         client_id: String(res.data.client_id ?? 1),
         account_id: "",
@@ -1592,7 +2293,9 @@ export default function LiveTradePage() {
 
   const loadProjects = async () => {
     try {
-      const res = await api.get("/api/projects/page", { params: { page: 1, page_size: 200 } });
+      const res = await api.get("/api/projects/page", {
+        params: { page: 1, page_size: 200 },
+      });
       const items = (res.data?.items || []) as ProjectSummary[];
       setProjects(items);
       setProjectError("");
@@ -1617,9 +2320,12 @@ export default function LiveTradePage() {
     setSnapshotLoading(true);
     setSnapshotError("");
     try {
-      const res = await api.get<DecisionSnapshotSummary>("/api/decisions/latest", {
-        params: { project_id: Number(projectId) },
-      });
+      const res = await api.get<DecisionSnapshotSummary>(
+        "/api/decisions/latest",
+        {
+          params: { project_id: Number(projectId) },
+        },
+      );
       setSnapshot(res.data);
     } catch (err: any) {
       if (err?.response?.status === 404) {
@@ -1643,19 +2349,23 @@ export default function LiveTradePage() {
       setAccountSummaryError("");
     }
     try {
-      const res = await api.get<IBAccountSummary>("/api/brokerage/account/summary", {
-        params: {
-          mode: ibSettings?.mode || ibSettingsForm.mode || "paper",
-          full,
+      const res = await api.get<IBAccountSummary>(
+        "/api/brokerage/account/summary",
+        {
+          params: {
+            mode: ibSettings?.mode || ibSettingsForm.mode || "paper",
+            full,
+          },
         },
-      });
+      );
       if (full) {
         setAccountSummaryFull(res.data);
       } else {
         setAccountSummary(res.data);
       }
     } catch (err: any) {
-      const detail = err?.response?.data?.detail || t("trade.accountSummaryError");
+      const detail =
+        err?.response?.data?.detail || t("trade.accountSummaryError");
       if (full) {
         setAccountSummaryFullError(String(detail));
       } else {
@@ -1674,12 +2384,15 @@ export default function LiveTradePage() {
     setAccountPositionsLoading(true);
     setAccountPositionsError("");
     try {
-      const res = await api.get<IBAccountPositionsOut>("/api/brokerage/account/positions", {
-        params: {
-          mode: ibSettings?.mode || ibSettingsForm.mode || "paper",
-          force_refresh: forceRefresh,
+      const res = await api.get<IBAccountPositionsOut>(
+        "/api/brokerage/account/positions",
+        {
+          params: {
+            mode: ibSettings?.mode || ibSettingsForm.mode || "paper",
+            force_refresh: forceRefresh,
+          },
         },
-      });
+      );
       const nextState = resolveAccountPositionsResponseState({
         response: res.data,
         trustedItems: trustedAccountPositionsRef.current,
@@ -1694,7 +2407,8 @@ export default function LiveTradePage() {
       setTrustedAccountPositions(nextState.trustedItems);
       setTrustedAccountPositionsUpdatedAt(nextState.trustedUpdatedAt);
     } catch (err: any) {
-      const detail = err?.response?.data?.detail || t("trade.accountPositionsError");
+      const detail =
+        err?.response?.data?.detail || t("trade.accountPositionsError");
       setAccountPositionsError(String(detail));
       const nextState = resolveAccountPositionsErrorState({
         trustedItems: trustedAccountPositionsRef.current,
@@ -1718,7 +2432,9 @@ export default function LiveTradePage() {
   };
 
   const normalizeTradeSession = (value: string) => {
-    const normalized = String(value || "").trim().toLowerCase();
+    const normalized = String(value || "")
+      .trim()
+      .toLowerCase();
     if (!normalized) {
       return "rth";
     }
@@ -1738,7 +2454,9 @@ export default function LiveTradePage() {
   };
 
   const normalizeOrderType = (value: string) => {
-    const normalized = String(value || "").trim().toUpperCase();
+    const normalized = String(value || "")
+      .trim()
+      .toUpperCase();
     if (!normalized) {
       return "MKT";
     }
@@ -1752,7 +2470,11 @@ export default function LiveTradePage() {
     if (["LMT", "LIMIT", "LIMIT_ORDER"].includes(cleaned)) {
       return "LMT";
     }
-    if (["ADAPTIVE", "ADAPTIVE_LMT", "ADAPTIVELMT", "ADAPTIVE_LIMIT"].includes(cleaned)) {
+    if (
+      ["ADAPTIVE", "ADAPTIVE_LMT", "ADAPTIVELMT", "ADAPTIVE_LIMIT"].includes(
+        cleaned,
+      )
+    ) {
       return "ADAPTIVE_LMT";
     }
     if (["PEG_MID", "PEGMID", "MIDPOINT", "PEG_MIDPOINT"].includes(cleaned)) {
@@ -1783,7 +2505,11 @@ export default function LiveTradePage() {
     return normalized === "LMT" || normalized === "PEG_MID";
   };
 
-  const updatePositionSession = (row: IBAccountPosition, key: string, session: string) => {
+  const updatePositionSession = (
+    row: IBAccountPosition,
+    key: string,
+    session: string,
+  ) => {
     const normalized = normalizeTradeSession(session);
     setPositionSessions((prev) => ({ ...prev, [key]: normalized }));
     if (normalized === "rth") {
@@ -1803,7 +2529,11 @@ export default function LiveTradePage() {
     });
   };
 
-  const updatePositionOrderType = (row: IBAccountPosition, key: string, orderType: string) => {
+  const updatePositionOrderType = (
+    row: IBAccountPosition,
+    key: string,
+    orderType: string,
+  ) => {
     const normalized = normalizeOrderType(orderType);
     setPositionOrderTypes((prev) => ({ ...prev, [key]: normalized }));
     if (!isLimitLikeOrderType(normalized)) {
@@ -1887,12 +2617,17 @@ export default function LiveTradePage() {
       setPositionActionError(gatewayTradeBlockMessage);
       return;
     }
-    const projectId = Number(selectedProjectId) || latestTradeRun?.project_id || 0;
+    const projectId =
+      Number(selectedProjectId) || latestTradeRun?.project_id || 0;
     if (!projectId) {
       setPositionActionError(t("trade.directOrderProjectRequired"));
       return;
     }
-    const mode = (ibSettings?.mode || ibSettingsForm.mode || "paper").toLowerCase();
+    const mode = (
+      ibSettings?.mode ||
+      ibSettingsForm.mode ||
+      "paper"
+    ).toLowerCase();
     const basePayload: Record<string, any> = { project_id: projectId, mode };
     if (mode === "live" && executeForm.live_confirm_token) {
       basePayload.live_confirm_token = executeForm.live_confirm_token;
@@ -1907,8 +2642,8 @@ export default function LiveTradePage() {
           api.post<TradeDirectOrderOut>("/api/trade/orders/direct", {
             ...basePayload,
             ...payload,
-          })
-        )
+          }),
+        ),
       );
       const warnings = new Set<string>();
       responses.forEach((res) => {
@@ -1916,24 +2651,29 @@ export default function LiveTradePage() {
         if (status?.stale) {
           warnings.add(t("trade.bridgeOrderWarningStale"));
         }
-        const refreshResult = status?.last_refresh_result || res.data?.refresh_result;
+        const refreshResult =
+          status?.last_refresh_result || res.data?.refresh_result;
         if (refreshResult && refreshResult !== "success") {
           warnings.add(
             t("trade.bridgeOrderWarningRefresh", {
               result: formatBridgeRefreshResult(t, refreshResult),
               reason: formatBridgeRefreshReason(t, status?.last_refresh_reason),
-            })
+            }),
           );
         }
       });
       if (warnings.size) {
         setPositionActionWarning(Array.from(warnings).join(" "));
       }
-      setPositionActionResult(t("trade.positionActionResult", { count: orders.length }));
+      setPositionActionResult(
+        t("trade.positionActionResult", { count: orders.length }),
+      );
       await Promise.all([loadTradeActivity(), loadAccountPositions(true)]);
     } catch (err: any) {
       const detail = err?.response?.data?.detail;
-      setPositionActionError(translateTradeActionError(detail, "trade.tradeError"));
+      setPositionActionError(
+        translateTradeActionError(detail, "trade.tradeError"),
+      );
     } finally {
       setPositionActionLoading(false);
     }
@@ -1942,7 +2682,7 @@ export default function LiveTradePage() {
   const handlePositionOrder = async (
     row: IBAccountPosition,
     side: "BUY" | "SELL",
-    index: number
+    index: number,
   ) => {
     const key = buildPositionKey(row);
     const quantity = resolvePositionQuantity(row, key);
@@ -1950,10 +2690,12 @@ export default function LiveTradePage() {
       setPositionActionError(t("trade.positionActionErrorInvalidQty"));
       return;
     }
-    const session = normalizeTradeSession(positionSessions[key] ?? defaultSession);
+    const session = normalizeTradeSession(
+      positionSessions[key] ?? defaultSession,
+    );
     const isExtended = session !== "rth";
     const rawOrderType = normalizeOrderType(
-      positionOrderTypes[key] ?? resolveDefaultOrderTypeBySession(session)
+      positionOrderTypes[key] ?? resolveDefaultOrderTypeBySession(session),
     );
     const orderType = isExtended ? "LMT" : rawOrderType;
     const needsLimit = isLimitLikeOrderType(orderType);
@@ -1975,7 +2717,7 @@ export default function LiveTradePage() {
             side,
             symbol: row.symbol,
             qty: formatNumber(quantity ?? null),
-          })
+          }),
     );
     if (!confirmed) {
       return;
@@ -2008,10 +2750,12 @@ export default function LiveTradePage() {
       return;
     }
     const side: "BUY" | "SELL" = (row.position ?? 0) >= 0 ? "SELL" : "BUY";
-    const session = normalizeTradeSession(positionSessions[key] ?? defaultSession);
+    const session = normalizeTradeSession(
+      positionSessions[key] ?? defaultSession,
+    );
     const isExtended = session !== "rth";
     const rawOrderType = normalizeOrderType(
-      positionOrderTypes[key] ?? resolveDefaultOrderTypeBySession(session)
+      positionOrderTypes[key] ?? resolveDefaultOrderTypeBySession(session),
     );
     const orderType = isExtended ? "LMT" : rawOrderType;
     const needsLimit = isLimitLikeOrderType(orderType);
@@ -2033,7 +2777,7 @@ export default function LiveTradePage() {
             side,
             symbol: row.symbol,
             qty: formatNumber(qtyValue ?? null),
-          })
+          }),
     );
     if (!confirmed) {
       return;
@@ -2058,7 +2802,10 @@ export default function LiveTradePage() {
     await submitPositionOrders([payload]);
   };
 
-  const handleClosePositions = async (rows: IBAccountPosition[], skipConfirm = false) => {
+  const handleClosePositions = async (
+    rows: IBAccountPosition[],
+    skipConfirm = false,
+  ) => {
     const positions = filterActionablePositions(rows);
     if (!positions.length) {
       setPositionActionError(t("trade.positionActionErrorNoSelection"));
@@ -2066,7 +2813,7 @@ export default function LiveTradePage() {
     }
     if (!skipConfirm) {
       const confirmed = window.confirm(
-        t("trade.positionBatchCloseConfirm", { count: positions.length })
+        t("trade.positionBatchCloseConfirm", { count: positions.length }),
       );
       if (!confirmed) {
         return;
@@ -2075,14 +2822,18 @@ export default function LiveTradePage() {
     const orders: Array<Record<string, any>> = [];
     for (const [idx, row] of positions.entries()) {
       const key = buildPositionKey(row);
-      const session = normalizeTradeSession(positionSessions[key] ?? defaultSession);
+      const session = normalizeTradeSession(
+        positionSessions[key] ?? defaultSession,
+      );
       const isExtended = session !== "rth";
       const rawOrderType = normalizeOrderType(
-        positionOrderTypes[key] ?? resolveDefaultOrderTypeBySession(session)
+        positionOrderTypes[key] ?? resolveDefaultOrderTypeBySession(session),
       );
       const orderType = isExtended ? "LMT" : rawOrderType;
       const needsLimit = isLimitLikeOrderType(orderType);
-      const limitPrice = needsLimit ? resolvePositionLimitPrice(row, key) : null;
+      const limitPrice = needsLimit
+        ? resolvePositionLimitPrice(row, key)
+        : null;
       if (needsLimit && !limitPrice) {
         setPositionActionError(t("trade.positionActionErrorInvalidLimitPrice"));
         return;
@@ -2114,7 +2865,9 @@ export default function LiveTradePage() {
       return;
     }
     const confirmed = window.confirm(
-      t("trade.positionLiquidateAllConfirm", { count: actionableAccountPositions.length })
+      t("trade.positionLiquidateAllConfirm", {
+        count: actionableAccountPositions.length,
+      }),
     );
     if (!confirmed) {
       return;
@@ -2150,7 +2903,9 @@ export default function LiveTradePage() {
     setIbStateError("");
     setIbStateResult("");
     try {
-      const res = await api.post<IBConnectionState>("/api/brokerage/state/probe");
+      const res = await api.post<IBConnectionState>(
+        "/api/brokerage/state/probe",
+      );
       setIbState(res.data);
       setIbStateResult(t("data.ib.probeOk"));
     } catch (err: any) {
@@ -2177,7 +2932,10 @@ export default function LiveTradePage() {
         api_mode: ibSettingsForm.api_mode,
         use_regulatory_snapshot: ibSettingsForm.use_regulatory_snapshot,
       };
-      const res = await api.post<IBSettings>("/api/brokerage/settings", payload);
+      const res = await api.post<IBSettings>(
+        "/api/brokerage/settings",
+        payload,
+      );
       setIbSettings(res.data);
       setIbSettingsResult(t("data.ib.saved"));
     } catch (err: any) {
@@ -2198,7 +2956,10 @@ export default function LiveTradePage() {
         symbols: symbols.length ? symbols : undefined,
         use_project_symbols: ibContractForm.use_project_symbols,
       };
-      const res = await api.post<IBContractRefreshResult>("/api/brokerage/contracts/refresh", payload);
+      const res = await api.post<IBContractRefreshResult>(
+        "/api/brokerage/contracts/refresh",
+        payload,
+      );
       setIbContractResult(res.data);
     } catch (err: any) {
       const detail = err?.response?.data?.detail || t("data.ib.contractsError");
@@ -2224,7 +2985,10 @@ export default function LiveTradePage() {
         history_bar_size: ibMarketHealthForm.history_bar_size,
         history_use_rth: ibMarketHealthForm.history_use_rth,
       };
-      const res = await api.post<IBMarketHealthResult>("/api/brokerage/market/health", payload);
+      const res = await api.post<IBMarketHealthResult>(
+        "/api/brokerage/market/health",
+        payload,
+      );
       setIbMarketHealthResult(res.data);
     } catch (err: any) {
       const detail = err?.response?.data?.detail || t("data.ib.healthError");
@@ -2245,7 +3009,8 @@ export default function LiveTradePage() {
       setIbHistoryJobs(res.data || []);
       setIbHistoryError("");
     } catch (err: any) {
-      const detail = err?.response?.data?.detail || t("data.ib.historyLoadError");
+      const detail =
+        err?.response?.data?.detail || t("data.ib.historyLoadError");
       setIbHistoryError(String(detail));
     } finally {
       setIbHistoryLoading(false);
@@ -2269,7 +3034,8 @@ export default function LiveTradePage() {
       await api.post("/api/brokerage/history-jobs", payload);
       await loadIbHistoryJobs();
     } catch (err: any) {
-      const detail = err?.response?.data?.detail || t("data.ib.historyStartError");
+      const detail =
+        err?.response?.data?.detail || t("data.ib.historyStartError");
       setIbHistoryError(String(detail));
     } finally {
       setIbHistoryActionLoading(false);
@@ -2283,7 +3049,8 @@ export default function LiveTradePage() {
       await api.post(`/api/brokerage/history-jobs/${jobId}/cancel`);
       await loadIbHistoryJobs();
     } catch (err: any) {
-      const detail = err?.response?.data?.detail || t("data.ib.historyCancelError");
+      const detail =
+        err?.response?.data?.detail || t("data.ib.historyCancelError");
       setIbHistoryError(String(detail));
     } finally {
       setIbHistoryActionLoading(false);
@@ -2299,7 +3066,8 @@ export default function LiveTradePage() {
       const res = await api.get<IBStreamStatus>("/api/brokerage/stream/status");
       setIbStreamStatus(res.data);
     } catch (err: any) {
-      const detail = err?.response?.data?.detail || t("data.ib.streamLoadError");
+      const detail =
+        err?.response?.data?.detail || t("data.ib.streamLoadError");
       setIbStreamError(String(detail));
       setIbStreamStatus(null);
     } finally {
@@ -2315,10 +3083,13 @@ export default function LiveTradePage() {
       setBridgeStatusError("");
     }
     try {
-      const res = await api.get<IBBridgeStatusOut>("/api/brokerage/bridge/status");
+      const res = await api.get<IBBridgeStatusOut>(
+        "/api/brokerage/bridge/status",
+      );
       setBridgeStatus(res.data);
     } catch (err: any) {
-      const detail = err?.response?.data?.detail || t("trade.bridgeStatusLoadError");
+      const detail =
+        err?.response?.data?.detail || t("trade.bridgeStatusLoadError");
       setBridgeStatusError(String(detail));
     } finally {
       if (!silent) {
@@ -2330,24 +3101,32 @@ export default function LiveTradePage() {
   const refreshBridgeStatus = async (reason: string, force: boolean) => {
     setBridgeStatusError("");
     try {
-      const mode = (ibSettings?.mode || ibSettingsForm.mode || "paper").toLowerCase();
+      const mode = (
+        ibSettings?.mode ||
+        ibSettingsForm.mode ||
+        "paper"
+      ).toLowerCase();
       const res = await api.post<IBBridgeRefreshOut>(
         "/api/brokerage/bridge/refresh",
         null,
         {
           params: { mode, reason, force },
-        }
+        },
       );
       setBridgeStatus(res.data?.bridge_status || null);
     } catch (err: any) {
-      const detail = err?.response?.data?.detail || t("trade.bridgeRefreshError");
+      const detail =
+        err?.response?.data?.detail || t("trade.bridgeRefreshError");
       setBridgeStatusError(String(detail));
     }
   };
 
   const loadMarketSnapshot = async (symbol?: string) => {
     const target =
-      symbol || ibStreamStatus?.subscribed_symbols?.[0] || marketSnapshotSymbol || "";
+      symbol ||
+      ibStreamStatus?.subscribed_symbols?.[0] ||
+      marketSnapshotSymbol ||
+      "";
     if (!target) {
       setMarketSnapshot(null);
       setMarketSnapshotSymbol("");
@@ -2356,10 +3135,19 @@ export default function LiveTradePage() {
     setMarketSnapshotLoading(true);
     setMarketSnapshotError("");
     try {
-      const res = await api.get<IBStreamSnapshotOut>("/api/brokerage/stream/snapshot", {
-        params: { symbol: target },
-      });
-      const item = res.data ? { symbol: res.data.symbol, data: res.data.data, error: res.data.error } : null;
+      const res = await api.get<IBStreamSnapshotOut>(
+        "/api/brokerage/stream/snapshot",
+        {
+          params: { symbol: target },
+        },
+      );
+      const item = res.data
+        ? {
+            symbol: res.data.symbol,
+            data: res.data.data,
+            error: res.data.error,
+          }
+        : null;
       setMarketSnapshotSymbol(res.data?.symbol || target);
       setMarketSnapshot(item);
       if (item?.error) {
@@ -2387,15 +3175,21 @@ export default function LiveTradePage() {
     const maxSymbols = Number(ibStreamForm.max_symbols);
     const payload = {
       project_id: projectId,
-      decision_snapshot_id: Number.isNaN(decisionSnapshotId) ? undefined : decisionSnapshotId,
+      decision_snapshot_id: Number.isNaN(decisionSnapshotId)
+        ? undefined
+        : decisionSnapshotId,
       max_symbols: Number.isNaN(maxSymbols) ? undefined : maxSymbols,
       market_data_type: ibStreamForm.market_data_type || undefined,
     };
     try {
-      const res = await api.post<IBStreamStatus>("/api/brokerage/stream/start", payload);
+      const res = await api.post<IBStreamStatus>(
+        "/api/brokerage/stream/start",
+        payload,
+      );
       setIbStreamStatus(res.data);
     } catch (err: any) {
-      const detail = err?.response?.data?.detail || t("data.ib.streamStartError");
+      const detail =
+        err?.response?.data?.detail || t("data.ib.streamStartError");
       setIbStreamError(String(detail));
     } finally {
       setIbStreamActionLoading(false);
@@ -2409,7 +3203,8 @@ export default function LiveTradePage() {
       const res = await api.post<IBStreamStatus>("/api/brokerage/stream/stop");
       setIbStreamStatus(res.data);
     } catch (err: any) {
-      const detail = err?.response?.data?.detail || t("data.ib.streamStopError");
+      const detail =
+        err?.response?.data?.detail || t("data.ib.streamStopError");
       setIbStreamError(String(detail));
     } finally {
       setIbStreamActionLoading(false);
@@ -2435,13 +3230,15 @@ export default function LiveTradePage() {
 
   const loadTradeActivity = async (
     page: number = ordersPage,
-    pageSize: number = ordersPageSize
+    pageSize: number = ordersPageSize,
   ) => {
     setTradeError("");
     setGuardError("");
     let latestRun: TradeRun | null = null;
     const [runsResult, ordersResult] = await Promise.allSettled([
-      apiLong.get<TradeRun[]>("/api/trade/runs", { params: { limit: 5, offset: 0 } }),
+      apiLong.get<TradeRun[]>("/api/trade/runs", {
+        params: { limit: 5, offset: 0 },
+      }),
       apiLong.get<TradeOrder[]>("/api/trade/orders", {
         params: { limit: pageSize, offset: (page - 1) * pageSize },
       }),
@@ -2491,12 +3288,14 @@ export default function LiveTradePage() {
         "/api/automation/weekly-rebalance/status",
         {
           params: { project_id: normalizedProjectId, limit: 20 },
-        }
+        },
       );
       setWeeklyRebalanceStatus(res.data);
       setWeeklyRebalanceError("");
     } catch (err: any) {
-      const detail = err?.response?.data?.detail || t("trade.weeklyRebalance.loadError");
+      const detail =
+        err?.response?.data?.detail ||
+        t("trade.weeklyRebalance.loadError");
       setWeeklyRebalanceError(String(detail));
     } finally {
       setWeeklyRebalanceLoading(false);
@@ -2527,24 +3326,30 @@ export default function LiveTradePage() {
       };
       const res = await apiLong.post<WeeklyRebalanceActionOut>(
         `/api/automation/weekly-rebalance/${phase}`,
-        payload
+        payload,
       );
       const phaseLabel = t(`trade.weeklyRebalance.phase.${phase}`);
       setWeeklyRebalanceResult(
         t("trade.weeklyRebalance.actionResult", {
           phase: phaseLabel,
           status: formatStatus(res.data?.status),
-          pretrade: res.data?.pretrade_run_id ? `#${res.data.pretrade_run_id}` : t("common.none"),
-          trade: res.data?.trade_run_id ? `#${res.data.trade_run_id}` : t("common.none"),
+          pretrade: res.data?.pretrade_run_id
+            ? `#${res.data.pretrade_run_id}`
+            : t("common.none"),
+          trade: res.data?.trade_run_id
+            ? `#${res.data.trade_run_id}`
+            : t("common.none"),
           message: res.data?.message || t("common.none"),
-        })
+        }),
       );
       await Promise.all([
         loadWeeklyRebalanceStatus(String(normalizedProjectId)),
         loadTradeActivity(),
       ]);
     } catch (err: any) {
-      const detail = err?.response?.data?.detail || t("trade.weeklyRebalance.actionError");
+      const detail =
+        err?.response?.data?.detail ||
+        t("trade.weeklyRebalance.actionError");
       setWeeklyRebalanceError(String(detail));
     } finally {
       setWeeklyRebalanceActionLoading(null);
@@ -2552,58 +3357,67 @@ export default function LiveTradePage() {
   };
 
   const cancelTradeOrder = async (order: TradeOrder) => {
-      const orderId = Number(order?.id || 0);
-      if (!Number.isFinite(orderId) || orderId <= 0) {
-        return;
-      }
-      const normalizedStatus = String(order?.status || "").toUpperCase();
-      if (!normalizedStatus || ["FILLED", "CANCELED", "CANCELLED", "REJECTED", "SKIPPED"].includes(normalizedStatus)) {
-        return;
-      }
+    const orderId = Number(order?.id || 0);
+    if (!Number.isFinite(orderId) || orderId <= 0) {
+      return;
+    }
+    const normalizedStatus = String(order?.status || "").toUpperCase();
+    if (
+      !normalizedStatus ||
+      ["FILLED", "CANCELED", "CANCELLED", "REJECTED", "SKIPPED"].includes(
+        normalizedStatus,
+      )
+    ) {
+      return;
+    }
 
-      const symbol = order?.symbol || t("common.none");
-      const side = formatSide(order?.side);
-      const qty = formatNumber(order?.quantity ?? null, 4);
-      const type = formatOrderTypeLabel(order?.order_type);
-      const limit =
-        order?.limit_price != null ? ` @ ${formatNumber(order.limit_price, 4)}` : "";
-      const confirmText = t("trade.orderCancelConfirm", {
-        id: orderId,
-        symbol,
-        side,
-        qty,
-        type: `${type}${limit}`,
+    const symbol = order?.symbol || t("common.none");
+    const side = formatSide(order?.side);
+    const qty = formatNumber(order?.quantity ?? null, 4);
+    const type = formatOrderTypeLabel(order?.order_type);
+    const limit =
+      order?.limit_price != null
+        ? ` @ ${formatNumber(order.limit_price, 4)}`
+        : "";
+    const confirmText = t("trade.orderCancelConfirm", {
+      id: orderId,
+      symbol,
+      side,
+      qty,
+      type: `${type}${limit}`,
+    });
+    if (!window.confirm(confirmText)) {
+      return;
+    }
+
+    setOrderCancelError("");
+    setOrderCancelResult("");
+    setOrderCancelLoading((prev) => ({ ...prev, [orderId]: true }));
+    try {
+      const res = await api.post<TradeOrder>(
+        `/api/trade/orders/${orderId}/cancel`,
+      );
+      const updated = res.data;
+      setTradeOrders((prev) =>
+        prev.map((row) => (row.id === orderId ? { ...row, ...updated } : row)),
+      );
+      setOrderCancelResult(t("trade.orderCancelSuccess", { id: orderId }));
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || t("trade.orderCancelError");
+      setOrderCancelError(String(detail));
+    } finally {
+      setOrderCancelLoading((prev) => {
+        const next = { ...prev };
+        delete next[orderId];
+        return next;
       });
-      if (!window.confirm(confirmText)) {
-        return;
-      }
-
-      setOrderCancelError("");
-      setOrderCancelResult("");
-      setOrderCancelLoading((prev) => ({ ...prev, [orderId]: true }));
-      try {
-        const res = await api.post<TradeOrder>(`/api/trade/orders/${orderId}/cancel`);
-        const updated = res.data;
-        setTradeOrders((prev) =>
-          prev.map((row) => (row.id === orderId ? { ...row, ...updated } : row))
-        );
-        setOrderCancelResult(t("trade.orderCancelSuccess", { id: orderId }));
-      } catch (err: any) {
-        const detail = err?.response?.data?.detail || t("trade.orderCancelError");
-        setOrderCancelError(String(detail));
-      } finally {
-        setOrderCancelLoading((prev) => {
-          const next = { ...prev };
-          delete next[orderId];
-          return next;
-        });
-        loadTradeActivity(ordersPage, ordersPageSize);
-      }
+      loadTradeActivity(ordersPage, ordersPageSize);
+    }
   };
 
   const loadTradeReceipts = async (
     page: number = receiptsPage,
-    pageSize: number = receiptsPageSize
+    pageSize: number = receiptsPageSize,
   ) => {
     setReceiptsLoading(true);
     setReceiptsError("");
@@ -2615,10 +3429,13 @@ export default function LiveTradePage() {
       setTradeReceipts(res.data?.items || []);
       setReceiptsWarnings(res.data?.warnings || []);
       const totalHeader = Number(res.headers?.["x-total-count"]);
-      const total = Number.isFinite(totalHeader) ? totalHeader : Number(res.data?.total || 0);
+      const total = Number.isFinite(totalHeader)
+        ? totalHeader
+        : Number(res.data?.total || 0);
       setReceiptsTotal(total);
     } catch (err: any) {
-      const detail = err?.response?.data?.detail || t("trade.receiptsLoadError");
+      const detail =
+        err?.response?.data?.detail || t("trade.receiptsLoadError");
       setReceiptsError(String(detail));
       setTradeReceipts([]);
       setReceiptsTotal(0);
@@ -2636,12 +3453,12 @@ export default function LiveTradePage() {
       const globalDeadbandNotional = Number(
         res.data?.deadband_min_notional ??
           res.data?.risk_defaults?.deadband_min_notional ??
-          0
+          0,
       );
       const globalDeadbandWeight = Number(
         res.data?.deadband_min_weight ??
           res.data?.risk_defaults?.deadband_min_weight ??
-          0
+          0,
       );
       setTradeSettingsForm({
         deadband_min_notional:
@@ -2655,7 +3472,8 @@ export default function LiveTradePage() {
       });
       setTradeSettingsError("");
     } catch (err: any) {
-      const detail = err?.response?.data?.detail || t("trade.tradeSettingsError");
+      const detail =
+        err?.response?.data?.detail || t("trade.tradeSettingsError");
       setTradeSettingsError(String(detail));
       setTradeSettings(null);
     }
@@ -2663,10 +3481,10 @@ export default function LiveTradePage() {
 
   const saveTradeSettings = async () => {
     const deadbandNotional = parseRequiredNonNegativeNumber(
-      tradeSettingsForm.deadband_min_notional
+      tradeSettingsForm.deadband_min_notional,
     );
     const deadbandWeight = parseRequiredNonNegativeNumber(
-      tradeSettingsForm.deadband_min_weight
+      tradeSettingsForm.deadband_min_weight,
     );
     if (!deadbandNotional.valid || !deadbandWeight.valid) {
       setTradeSettingsSaveError(t("trade.deadbandInvalid"));
@@ -2689,7 +3507,8 @@ export default function LiveTradePage() {
       setTradeSettingsSaveResult(t("trade.tradeSettingsSaved"));
       setTradeSettingsError("");
     } catch (err: any) {
-      const detail = err?.response?.data?.detail || t("trade.tradeSettingsSaveError");
+      const detail =
+        err?.response?.data?.detail || t("trade.tradeSettingsSaveError");
       setTradeSettingsSaveError(String(detail));
     } finally {
       setTradeSettingsSaving(false);
@@ -2754,12 +3573,14 @@ export default function LiveTradePage() {
       setPipelineDetail(null);
       setPipelineSelectedEvent(null);
       const existing =
-        pipelineTraceId && items.some((item) => item.trace_id === pipelineTraceId)
+        pipelineTraceId &&
+        items.some((item) => item.trace_id === pipelineTraceId)
           ? pipelineTraceId
           : null;
       setPipelineTraceId(existing || items[0]?.trace_id || null);
     } catch (err: any) {
-      const detail = err?.response?.data?.detail || t("trade.pipeline.errors.loadRuns");
+      const detail =
+        err?.response?.data?.detail || t("trade.pipeline.errors.loadRuns");
       setPipelineRunsError(String(detail));
       setPipelineRuns([]);
       setPipelineTraceId(null);
@@ -2773,10 +3594,13 @@ export default function LiveTradePage() {
     setPipelineDetailLoading(true);
     setPipelineDetailError("");
     try {
-      const res = await api.get<PipelineTraceDetail>(`/api/pipeline/runs/${traceId}`);
+      const res = await api.get<PipelineTraceDetail>(
+        `/api/pipeline/runs/${traceId}`,
+      );
       setPipelineDetail(res.data);
     } catch (err: any) {
-      const detail = err?.response?.data?.detail || t("trade.pipeline.errors.loadDetail");
+      const detail =
+        err?.response?.data?.detail || t("trade.pipeline.errors.loadDetail");
       setPipelineDetailError(String(detail));
       setPipelineDetail(null);
     } finally {
@@ -2787,7 +3611,7 @@ export default function LiveTradePage() {
   const runPipelineAction = async (
     actionKey: string,
     action: () => Promise<void>,
-    successMessage: string
+    successMessage: string,
   ) => {
     setPipelineActionError("");
     setPipelineActionResult("");
@@ -2802,7 +3626,7 @@ export default function LiveTradePage() {
     } catch (err: any) {
       const detail = err?.response?.data?.detail;
       setPipelineActionError(
-        translateTradeActionError(detail, "trade.pipeline.errors.actionFailed")
+        translateTradeActionError(detail, "trade.pipeline.errors.actionFailed"),
       );
     } finally {
       setPipelineActionLoading((prev) => {
@@ -2820,9 +3644,11 @@ export default function LiveTradePage() {
     await runPipelineAction(
       `pretrade-step-${stepId}`,
       async () => {
-        await api.post(`/api/pretrade/runs/${pipelinePretradeRunId}/steps/${stepId}/retry`);
+        await api.post(
+          `/api/pretrade/runs/${pipelinePretradeRunId}/steps/${stepId}/retry`,
+        );
       },
-      t("trade.pipeline.actions.retryStepSuccess")
+      t("trade.pipeline.actions.retryStepSuccess"),
     );
   };
 
@@ -2835,7 +3661,7 @@ export default function LiveTradePage() {
       async () => {
         await api.post(`/api/pretrade/runs/${pipelinePretradeRunId}/resume`);
       },
-      t("trade.pipeline.actions.resumeSuccess")
+      t("trade.pipeline.actions.resumeSuccess"),
     );
   };
 
@@ -2853,7 +3679,7 @@ export default function LiveTradePage() {
           live_confirm_token: executeForm.live_confirm_token || undefined,
         });
       },
-      t("trade.pipeline.actions.executeSuccess")
+      t("trade.pipeline.actions.executeSuccess"),
     );
   };
 
@@ -2891,7 +3717,11 @@ export default function LiveTradePage() {
       ]);
 
       const extractErrorDetail = (reason: any) =>
-        String(reason?.response?.data?.detail || reason?.message || t("trade.detailError"));
+        String(
+          reason?.response?.data?.detail ||
+            reason?.message ||
+            t("trade.detailError"),
+        );
 
       let detailData: TradeRunDetail | null = null;
       let errorMessage = "";
@@ -2907,11 +3737,13 @@ export default function LiveTradePage() {
         const symbolsData = symbolsResult.value.data;
         setSymbolSummary(symbolsData?.items || []);
         setSymbolSummaryUpdatedAt(
-          symbolsData?.last_update_at || detailData?.last_update_at || null
+          symbolsData?.last_update_at || detailData?.last_update_at || null,
         );
       } else {
         const symbolsError = extractErrorDetail(symbolsResult.reason);
-        errorMessage = errorMessage ? `${errorMessage} | ${symbolsError}` : symbolsError;
+        errorMessage = errorMessage
+          ? `${errorMessage} | ${symbolsError}`
+          : symbolsError;
         setSymbolSummary([]);
         setSymbolSummaryUpdatedAt(detailData?.last_update_at || null);
       }
@@ -2919,6 +3751,69 @@ export default function LiveTradePage() {
       setDetailError(errorMessage);
     } finally {
       setDetailLoading(false);
+    }
+  };
+
+  const loadCoveredCallRecent = async (preserveSelection = true) => {
+    setCoveredCallRecentLoading(true);
+    setCoveredCallRecentError("");
+    try {
+      const res = await api.post<CoveredCallAuditRecentOut>(
+        "/api/trade/options/covered-call/audit/recent",
+        {
+          mode: "paper",
+          limit: COVERED_CALL_RECENT_LIMIT,
+          offset: coveredCallRecentOffset,
+          query: coveredCallRecentQuery,
+        },
+      );
+      const items = Array.isArray(res.data?.items) ? res.data.items : [];
+      const total = Number(res.data?.total || 0);
+      setCoveredCallRecentItems(items);
+      setCoveredCallRecentTotal(total);
+      setCoveredCallRecentHasMore(Boolean(res.data?.has_more));
+      setCoveredCallSelectedReviewId((prev) => {
+        if (
+          preserveSelection &&
+          prev &&
+          items.some((item) => item.review_id === prev)
+        ) {
+          return prev;
+        }
+        return items.length ? items[0].review_id : null;
+      });
+    } catch (err: any) {
+      const detail =
+        err?.response?.data?.detail || t("trade.coveredCall.recentLoadError");
+      setCoveredCallRecentError(String(detail));
+      setCoveredCallRecentItems([]);
+      setCoveredCallRecentTotal(0);
+      setCoveredCallRecentHasMore(false);
+      setCoveredCallSelectedReviewId(null);
+    } finally {
+      setCoveredCallRecentLoading(false);
+    }
+  };
+
+  const loadCoveredCallAudit = async (reviewId: string) => {
+    setCoveredCallAuditLoading(true);
+    setCoveredCallAuditError("");
+    try {
+      const res = await api.post<CoveredCallAuditPayload>(
+        "/api/trade/options/covered-call/audit",
+        {
+          mode: "paper",
+          review_id: reviewId,
+        },
+      );
+      setCoveredCallAudit(res.data);
+    } catch (err: any) {
+      const detail =
+        err?.response?.data?.detail || t("trade.coveredCall.auditLoadError");
+      setCoveredCallAuditError(String(detail));
+      setCoveredCallAudit(null);
+    } finally {
+      setCoveredCallAuditLoading(false);
     }
   };
 
@@ -2946,7 +3841,7 @@ export default function LiveTradePage() {
       // Execution may take longer than 10s (IB checks, order builds, Lean submit), so use long-timeout client.
       const res = await apiLong.post<TradeRunExecuteOut>(
         `/api/trade/runs/${runId}/execute`,
-        payload
+        payload,
       );
       setExecuteResult(t("trade.executeSuccess"));
       setTradeError("");
@@ -2975,7 +3870,9 @@ export default function LiveTradePage() {
       const reason = runActionReason.trim();
       const payload = reason ? { reason } : undefined;
       await api.post(`/api/trade/runs/${runId}/${action}`, payload);
-      setRunActionResult(t("trade.runActionSuccess", { action: t(`trade.runAction.${action}`) }));
+      setRunActionResult(
+        t("trade.runActionSuccess", { action: t(`trade.runAction.${action}`) }),
+      );
       setRunActionReason("");
       await Promise.all([loadTradeActivity(), loadTradeRunData(runId)]);
     } catch (err: any) {
@@ -2986,10 +3883,16 @@ export default function LiveTradePage() {
     }
   };
 
-  const refreshHandlers = useMemo<Partial<Record<RefreshKey, () => Promise<void>>>>(
+  const refreshHandlers = useMemo<
+    Partial<Record<RefreshKey, () => Promise<void>>>
+  >(
     () => ({
       connection: async () => {
-        await Promise.all([loadIbSettings(), loadIbState(true), loadIbStreamStatus(true)]);
+        await Promise.all([
+          loadIbSettings(),
+          loadIbState(true),
+          loadIbStreamStatus(true),
+        ]);
       },
       bridge: async () => {
         await loadBridgeStatus(true);
@@ -3011,7 +3914,9 @@ export default function LiveTradePage() {
           loadTradeActivity(ordersPage, ordersPageSize),
           loadTradeReceipts(receiptsPage, receiptsPageSize),
           loadIbHistoryJobs(),
-          selectedProjectId ? loadWeeklyRebalanceStatus(selectedProjectId) : Promise.resolve(),
+          selectedProjectId
+            ? loadWeeklyRebalanceStatus(selectedProjectId)
+            : Promise.resolve(),
         ]);
       },
       snapshot: async () => {
@@ -3038,7 +3943,7 @@ export default function LiveTradePage() {
       receiptsPageSize,
       selectedProjectId,
       selectedRunId,
-    ]
+    ],
   );
 
   const triggerRefresh = useCallback(
@@ -3066,7 +3971,7 @@ export default function LiveTradePage() {
         markRefreshed(key);
       }
     },
-    [markRefreshed, markRefreshDeferred, refreshHandlers]
+    [markRefreshed, markRefreshDeferred, refreshHandlers],
   );
 
   const refreshAll = async (forceBridge: boolean = false) => {
@@ -3075,7 +3980,9 @@ export default function LiveTradePage() {
       await refreshAllWithBridgeForce({
         refreshHandlers,
         triggerRefresh,
-        forceBridge: forceBridge ? async () => refreshBridgeStatus("manual", true) : undefined,
+        forceBridge: forceBridge
+          ? async () => refreshBridgeStatus("manual", true)
+          : undefined,
       });
     } finally {
       setLoading(false);
@@ -3091,6 +3998,10 @@ export default function LiveTradePage() {
   }, []);
 
   useEffect(() => {
+    void loadCoveredCallRecent();
+  }, [coveredCallRecentOffset, coveredCallRecentQuery]);
+
+  useEffect(() => {
     loadLatestSnapshot(selectedProjectId);
   }, [selectedProjectId]);
 
@@ -3103,6 +4014,15 @@ export default function LiveTradePage() {
     }
     loadWeeklyRebalanceStatus(selectedProjectId);
   }, [selectedProjectId]);
+
+  useEffect(() => {
+    if (!coveredCallSelectedReviewId) {
+      setCoveredCallAudit(null);
+      setCoveredCallAuditError("");
+      return;
+    }
+    loadCoveredCallAudit(coveredCallSelectedReviewId);
+  }, [coveredCallSelectedReviewId]);
 
   useEffect(() => {
     setSelectedRunId(null);
@@ -3204,7 +4124,7 @@ export default function LiveTradePage() {
 
   useEffect(() => {
     setSelectedPositionChartSymbol((current) =>
-      resolveSelectedChartSymbol(accountPositions, current)
+      resolveSelectedChartSymbol(accountPositions, current),
     );
   }, [accountPositions]);
 
@@ -3212,19 +4132,27 @@ export default function LiveTradePage() {
     if (!selectedProjectId) {
       return tradeRuns;
     }
-    return tradeRuns.filter((run) => String(run.project_id) === selectedProjectId);
+    return tradeRuns.filter(
+      (run) => String(run.project_id) === selectedProjectId,
+    );
   }, [selectedProjectId, tradeRuns]);
 
   const pipelineTypeOptions = useMemo(() => {
-    return Array.from(new Set(pipelineRuns.map((item) => item.run_type).filter(Boolean))).sort();
+    return Array.from(
+      new Set(pipelineRuns.map((item) => item.run_type).filter(Boolean)),
+    ).sort();
   }, [pipelineRuns]);
 
   const pipelineStatusOptions = useMemo(() => {
-    return Array.from(new Set(pipelineRuns.map((item) => item.status).filter(Boolean))).sort();
+    return Array.from(
+      new Set(pipelineRuns.map((item) => item.status).filter(Boolean)),
+    ).sort();
   }, [pipelineRuns]);
 
   const pipelineModeOptions = useMemo(() => {
-    return Array.from(new Set(pipelineRuns.map((item) => item.mode).filter(Boolean))).sort();
+    return Array.from(
+      new Set(pipelineRuns.map((item) => item.mode).filter(Boolean)),
+    ).sort();
   }, [pipelineRuns]);
 
   const filteredPipelineRuns = useMemo(() => {
@@ -3239,7 +4167,9 @@ export default function LiveTradePage() {
       items = items.filter((item) => item.mode === pipelineModeFilter);
     }
     if (pipelineDateFrom || pipelineDateTo) {
-      const from = pipelineDateFrom ? new Date(pipelineDateFrom).getTime() : null;
+      const from = pipelineDateFrom
+        ? new Date(pipelineDateFrom).getTime()
+        : null;
       const to = pipelineDateTo ? new Date(pipelineDateTo).getTime() : null;
       items = items.filter((item) => {
         if (!item.created_at) {
@@ -3295,7 +4225,9 @@ export default function LiveTradePage() {
   const latestTradeRun = filteredTradeRuns[0];
   const activeTradeRun = runDetail?.run ?? latestTradeRun ?? null;
   const canResumeRun = activeTradeRun?.status === "stalled";
-  const canTerminateRun = !!activeTradeRun && !["done", "partial", "failed"].includes(activeTradeRun.status);
+  const canTerminateRun =
+    !!activeTradeRun &&
+    !["done", "partial", "failed"].includes(activeTradeRun.status);
   const intentOrderMismatch = useMemo(() => {
     const raw = activeTradeRun?.params?.intent_order_mismatch;
     if (!raw || typeof raw !== "object") {
@@ -3306,13 +4238,19 @@ export default function LiveTradePage() {
 
   useEffect(() => {
     if (latestTradeRun?.project_id && !ibStreamForm.project_id) {
-      setIbStreamForm((prev) => ({ ...prev, project_id: String(latestTradeRun.project_id) }));
+      setIbStreamForm((prev) => ({
+        ...prev,
+        project_id: String(latestTradeRun.project_id),
+      }));
     }
   }, [latestTradeRun?.project_id, ibStreamForm.project_id]);
 
   useEffect(() => {
     if (latestTradeRun?.id && !executeForm.run_id) {
-      setExecuteForm((prev) => ({ ...prev, run_id: String(latestTradeRun.id) }));
+      setExecuteForm((prev) => ({
+        ...prev,
+        run_id: String(latestTradeRun.id),
+      }));
     }
   }, [latestTradeRun?.id, executeForm.run_id]);
 
@@ -3323,7 +4261,10 @@ export default function LiveTradePage() {
       }
       return;
     }
-    if (selectedRunId === null || !filteredTradeRuns.some((run) => run.id === selectedRunId)) {
+    if (
+      selectedRunId === null ||
+      !filteredTradeRuns.some((run) => run.id === selectedRunId)
+    ) {
       setSelectedRunId(filteredTradeRuns[0].id);
     }
   }, [filteredTradeRuns, selectedRunId]);
@@ -3379,7 +4320,9 @@ export default function LiveTradePage() {
     }
     if (
       pipelineSelectedEvent &&
-      pipelineDetail.events.some((event) => event.event_id === pipelineSelectedEvent.event_id)
+      pipelineDetail.events.some(
+        (event) => event.event_id === pipelineSelectedEvent.event_id,
+      )
     ) {
       return;
     }
@@ -3425,31 +4368,46 @@ export default function LiveTradePage() {
       return true;
     }
     return false;
-  }, [accountSummary?.stale, accountPositionsStale, bridgeStatus?.stale, ibStreamStatus?.status]);
+  }, [
+    accountSummary?.stale,
+    accountPositionsStale,
+    bridgeStatus?.stale,
+    ibStreamStatus?.status,
+  ]);
 
   const bridgeStatusLabel = useMemo(() => {
     if (bridgeIsStale) {
       return t("trade.bridgeStatus.stale");
     }
-    if (bridgeStatus?.status || ibStreamStatus?.status || accountSummary?.refreshed_at) {
+    if (
+      bridgeStatus?.status ||
+      ibStreamStatus?.status ||
+      accountSummary?.refreshed_at
+    ) {
       return t("trade.bridgeStatus.ok");
     }
     return t("trade.bridgeStatus.unknown");
-  }, [bridgeIsStale, bridgeStatus?.status, ibStreamStatus?.status, accountSummary?.refreshed_at, t]);
+  }, [
+    bridgeIsStale,
+    bridgeStatus?.status,
+    ibStreamStatus?.status,
+    accountSummary?.refreshed_at,
+    t,
+  ]);
 
   const gatewayRuntime = useMemo(
     () => bridgeStatus?.runtime_health ?? null,
-    [bridgeStatus?.runtime_health]
+    [bridgeStatus?.runtime_health],
   );
 
   const gatewayTradeBlockState = useMemo(
     () => resolveGatewayTradeBlockState(gatewayRuntime),
-    [gatewayRuntime]
+    [gatewayRuntime],
   );
 
   const gatewayRecoveryState = useMemo(
     () => isGatewayRuntimeRecovering(gatewayRuntime),
-    [gatewayRuntime]
+    [gatewayRuntime],
   );
 
   const formatGatewayRuntimeState = useCallback(
@@ -3457,28 +4415,34 @@ export default function LiveTradePage() {
       const normalized = normalizeGatewayRuntimeState(value);
       return t(`trade.gatewayRuntimeState.${normalized}`);
     },
-    [t]
+    [t],
   );
 
   const formatGatewayProbeResult = useCallback(
     (value?: string | null) => {
-      const normalized = String(value || "").trim().toLowerCase() || "unknown";
+      const normalized =
+        String(value || "")
+          .trim()
+          .toLowerCase() || "unknown";
       return t(`trade.gatewayProbeResult.${normalized}`);
     },
-    [t]
+    [t],
   );
 
   const formatGatewayRecoveryAction = useCallback(
     (value?: string | null) => {
-      const normalized = String(value || "").trim().toLowerCase() || "none";
+      const normalized =
+        String(value || "")
+          .trim()
+          .toLowerCase() || "none";
       return t(`trade.gatewayRecoveryAction.${normalized}`);
     },
-    [t]
+    [t],
   );
 
   const gatewayRuntimeLabel = useMemo(
     () => formatGatewayRuntimeState(gatewayRuntime?.state),
-    [formatGatewayRuntimeState, gatewayRuntime?.state]
+    [formatGatewayRuntimeState, gatewayRuntime?.state],
   );
 
   const gatewayTradeBlockMessage = useMemo(() => {
@@ -3490,14 +4454,19 @@ export default function LiveTradePage() {
 
   const translateTradeActionError = useCallback(
     (detail: unknown, fallbackKey: string) => {
-      const normalized = String(detail || "").trim().toLowerCase();
-      if (normalized === "gateway_restarting" || normalized === "gateway_degraded") {
+      const normalized = String(detail || "")
+        .trim()
+        .toLowerCase();
+      if (
+        normalized === "gateway_restarting" ||
+        normalized === "gateway_degraded"
+      ) {
         return t(`trade.gatewayTradeBlock.${normalized}`);
       }
       const text = String(detail || "").trim();
       return text || t(fallbackKey);
     },
-    [t]
+    [t],
   );
 
   const bridgeSource = useMemo(() => {
@@ -3523,7 +4492,7 @@ export default function LiveTradePage() {
 
   const bridgeHeartbeatAge = useMemo(() => {
     return getHeartbeatAgeSeconds(
-      bridgeStatus?.last_heartbeat || bridgeStatus?.updated_at || null
+      bridgeStatus?.last_heartbeat || bridgeStatus?.updated_at || null,
     );
   }, [bridgeStatus?.last_heartbeat, bridgeStatus?.updated_at]);
 
@@ -3542,13 +4511,9 @@ export default function LiveTradePage() {
     return getBridgeRefreshHint(
       t,
       bridgeStatus?.last_refresh_result || null,
-      bridgeStatus?.last_refresh_reason || null
+      bridgeStatus?.last_refresh_reason || null,
     );
-  }, [
-    bridgeStatus?.last_refresh_result,
-    bridgeStatus?.last_refresh_reason,
-    t,
-  ]);
+  }, [bridgeStatus?.last_refresh_result, bridgeStatus?.last_refresh_reason, t]);
 
   const bridgeRefreshNextAllowedAt = useMemo(() => {
     if (bridgeStatus?.last_refresh_reason !== "rate_limited") {
@@ -3561,14 +4526,24 @@ export default function LiveTradePage() {
     if (accountPositionsStale) {
       return true;
     }
-    return !accountPositionsLoading && accountPositions.length === 0 && bridgeIsStale;
-  }, [accountPositions.length, accountPositionsLoading, accountPositionsStale, bridgeIsStale]);
+    return (
+      !accountPositionsLoading && accountPositions.length === 0 && bridgeIsStale
+    );
+  }, [
+    accountPositions.length,
+    accountPositionsLoading,
+    accountPositionsStale,
+    bridgeIsStale,
+  ]);
 
   const selectedProject = useMemo(() => {
     if (!selectedProjectId) {
       return null;
     }
-    return projects.find((project) => String(project.id) === selectedProjectId) || null;
+    return (
+      projects.find((project) => String(project.id) === selectedProjectId) ||
+      null
+    );
   }, [projects, selectedProjectId]);
 
   const snapshotReady = useMemo(() => {
@@ -3592,13 +4567,21 @@ export default function LiveTradePage() {
     const key = raw ? `common.status.${raw}` : "";
     const translated = key ? t(key) : "";
     const normalized =
-      translated && !translated.startsWith("common.status.") ? translated : raw || "unknown";
+      translated && !translated.startsWith("common.status.")
+        ? translated
+        : raw || "unknown";
     return t("trade.snapshotNotReady", { status: normalized });
   }, [snapshot?.id, snapshot?.status, snapshotLoading, t]);
 
   const canExecute = useMemo(
-    () => Boolean(selectedProjectId && snapshot?.id && snapshotReady && !gatewayTradeBlockState),
-    [gatewayTradeBlockState, selectedProjectId, snapshot?.id, snapshotReady]
+    () =>
+      Boolean(
+        selectedProjectId &&
+        snapshot?.id &&
+        snapshotReady &&
+        !gatewayTradeBlockState,
+      ),
+    [gatewayTradeBlockState, selectedProjectId, snapshot?.id, snapshotReady],
   );
 
   const statusLabel = useMemo(() => {
@@ -3618,8 +4601,9 @@ export default function LiveTradePage() {
   }, [ibState?.status, isConfigured, t]);
 
   const workstationType = useMemo(
-    () => resolveWorkstationType(ibSettings?.workstation_type, ibSettings?.port),
-    [ibSettings?.port, ibSettings?.workstation_type]
+    () =>
+      resolveWorkstationType(ibSettings?.workstation_type, ibSettings?.port),
+    [ibSettings?.port, ibSettings?.workstation_type],
   );
 
   const workstationSystemName = useMemo(
@@ -3627,7 +4611,7 @@ export default function LiveTradePage() {
       workstationType === "gateway"
         ? t("data.ib.workstationTypeGateway")
         : t("data.ib.workstationTypeTws"),
-    [t, workstationType]
+    [t, workstationType],
   );
 
   const modeLabel = useMemo(() => {
@@ -3698,14 +4682,20 @@ export default function LiveTradePage() {
   };
 
   const renderRefreshSchedule = useCallback(
-    (key: RefreshKey, testIdSuffix?: string, variant: "stack" | "inline" = "stack") => {
+    (
+      key: RefreshKey,
+      testIdSuffix?: string,
+      variant: "stack" | "inline" = "stack",
+    ) => {
       const meta = refreshMeta[key];
       if (!meta) {
         return null;
       }
       const suffix = testIdSuffix || key;
       const intervalLabel = formatIntervalLabel(meta.intervalMs);
-      const lastLabel = meta.lastAt ? formatDateTime(meta.lastAt) : t("common.none");
+      const lastLabel = meta.lastAt
+        ? formatDateTime(meta.lastAt)
+        : t("common.none");
       const nextLabel = formatNextRefresh({
         intervalMs: meta.intervalMs,
         nextAt: meta.nextAt,
@@ -3738,20 +4728,26 @@ export default function LiveTradePage() {
         <div className="meta-list" style={{ marginTop: "8px" }}>
           <div className="meta-row">
             <span>{t("trade.refreshInterval")}</span>
-            <strong data-testid={`card-refresh-interval-${suffix}`}>{intervalLabel}</strong>
+            <strong data-testid={`card-refresh-interval-${suffix}`}>
+              {intervalLabel}
+            </strong>
           </div>
           <div className="meta-row">
             <span>{t("trade.refreshNext")}</span>
-            <strong data-testid={`card-refresh-next-${suffix}`}>{nextLabel}</strong>
+            <strong data-testid={`card-refresh-next-${suffix}`}>
+              {nextLabel}
+            </strong>
           </div>
           <div className="meta-row">
             <span>{t("trade.refreshLast")}</span>
-            <strong data-testid={`card-refresh-last-${suffix}`}>{lastLabel}</strong>
+            <strong data-testid={`card-refresh-last-${suffix}`}>
+              {lastLabel}
+            </strong>
           </div>
         </div>
       );
     },
-    [formatIntervalLabel, formatNextRefresh, formatDateTime, refreshMeta, t]
+    [formatIntervalLabel, formatNextRefresh, formatDateTime, refreshMeta, t],
   );
 
   const marketHealthStatusLabel = useMemo(() => {
@@ -3771,7 +4767,11 @@ export default function LiveTradePage() {
       marketSnapshot?.data?.timestamp ||
       null
     );
-  }, [marketHealthUpdatedAt, ibStreamStatus?.last_heartbeat, marketSnapshot?.data?.timestamp]);
+  }, [
+    marketHealthUpdatedAt,
+    ibStreamStatus?.last_heartbeat,
+    marketSnapshot?.data?.timestamp,
+  ]);
 
   const receiptWarningLabels = useMemo(() => {
     if (!receiptsWarnings.length) {
@@ -3840,18 +4840,419 @@ export default function LiveTradePage() {
 
   const actionableAccountPositions = useMemo(
     () => filterActionablePositions(accountPositions),
-    [accountPositions]
+    [accountPositions],
   );
+  const normalizedSelectedPositionChartSymbol = useMemo(
+    () =>
+      String(selectedPositionChartSymbol || "")
+        .trim()
+        .toUpperCase(),
+    [selectedPositionChartSymbol],
+  );
+  const activePositionChartLayout =
+    positionChartPreviewLayout || positionChartLayout;
 
   const selectedPositions = useMemo(
     () =>
-      actionableAccountPositions.filter((row) => positionSelections[buildPositionKey(row)]),
-    [actionableAccountPositions, positionSelections]
+      actionableAccountPositions.filter(
+        (row) => positionSelections[buildPositionKey(row)],
+      ),
+    [actionableAccountPositions, positionSelections],
   );
 
   const allPositionsSelected =
     actionableAccountPositions.length > 0 &&
     selectedPositions.length === actionableAccountPositions.length;
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    try {
+      const raw = window.localStorage.getItem(POSITION_CHART_STORAGE_KEY);
+      if (!raw) {
+        return;
+      }
+      const parsed = JSON.parse(raw) as PositionChartPersistedWindow;
+      setPositionChartStoredWindow(parsed);
+    } catch {
+      window.localStorage.removeItem(POSITION_CHART_STORAGE_KEY);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    try {
+      if (!positionChartStoredWindow) {
+        window.localStorage.removeItem(POSITION_CHART_STORAGE_KEY);
+        return;
+      }
+      window.localStorage.setItem(
+        POSITION_CHART_STORAGE_KEY,
+        JSON.stringify(positionChartStoredWindow),
+      );
+    } catch {
+      // Ignore localStorage write failures.
+    }
+  }, [positionChartStoredWindow]);
+
+  useEffect(() => {
+    const updateLayout = () => {
+      if (typeof window === "undefined") {
+        return;
+      }
+      const card = positionsCardRef.current;
+      const row = normalizedSelectedPositionChartSymbol
+        ? positionRowRefs.current[normalizedSelectedPositionChartSymbol] || null
+        : null;
+      if (!card || !row) {
+        setPositionChartLayout({
+          floating: false,
+          placement: "stacked",
+          top: 0,
+          left: 0,
+          width: 0,
+          height: POSITION_CHART_FLOATING_HEIGHT,
+          minimized: false,
+          userAnchored: false,
+          safeLeft: 0,
+        });
+        return;
+      }
+      const cardRect = card.getBoundingClientRect();
+      const rowRect = row.getBoundingClientRect();
+      setPositionChartLayout(
+        resolvePositionChartFloatingLayout({
+          viewportWidth: window.innerWidth,
+          cardWidth: cardRect.width,
+          cardHeight: cardRect.height,
+          selectedRowTop: rowRect.top - cardRect.top,
+          selectedRowHeight: rowRect.height,
+          persistedWindow: positionChartStoredWindow,
+        }),
+      );
+    };
+
+    updateLayout();
+    if (typeof window === "undefined") {
+      return undefined;
+    }
+    window.addEventListener("resize", updateLayout);
+    window.addEventListener("scroll", updateLayout, true);
+    return () => {
+      window.removeEventListener("resize", updateLayout);
+      window.removeEventListener("scroll", updateLayout, true);
+    };
+  }, [
+    normalizedSelectedPositionChartSymbol,
+    accountPositions.length,
+    positionChartStoredWindow,
+  ]);
+
+  const positionChartFloatingStyle = useMemo<CSSProperties | undefined>(() => {
+    if (!activePositionChartLayout.floating) {
+      return undefined;
+    }
+    return {
+      top: `${activePositionChartLayout.top}px`,
+      left: `${activePositionChartLayout.left}px`,
+      width: `${activePositionChartLayout.width}px`,
+      height: `${activePositionChartLayout.height}px`,
+    };
+  }, [activePositionChartLayout]);
+
+  const positionsWorkspaceStyle = useMemo<CSSProperties | undefined>(() => {
+    if (!activePositionChartLayout.floating) {
+      return undefined;
+    }
+    return {
+      minHeight: `${Math.max(
+        720,
+        activePositionChartLayout.top + activePositionChartLayout.height + 24,
+      )}px`,
+    };
+  }, [activePositionChartLayout]);
+
+  const handlePositionChartDragStart = useCallback(
+    (event: ReactPointerEvent<HTMLElement>) => {
+      if (
+        !activePositionChartLayout.floating ||
+        activePositionChartLayout.placement === "stacked"
+      ) {
+        return;
+      }
+      const card = positionsCardRef.current;
+      if (!card) {
+        return;
+      }
+      event.preventDefault();
+      const cardRect = card.getBoundingClientRect();
+      const maxLeft = Math.max(
+        activePositionChartLayout.safeLeft,
+        cardRect.width -
+          activePositionChartLayout.width -
+          POSITION_CHART_FLOATING_PADDING,
+      );
+      const minTop = POSITION_CHART_FLOATING_PADDING;
+      const maxTop = Math.max(
+        minTop,
+        cardRect.height -
+          activePositionChartLayout.height -
+          POSITION_CHART_FLOATING_PADDING,
+      );
+      setPositionChartInteraction({
+        type: "drag",
+        pointerId: event.pointerId,
+        cardWidth: cardRect.width,
+        cardHeight: cardRect.height,
+        safeLeft: activePositionChartLayout.safeLeft,
+        maxLeft,
+        minTop,
+        maxTop,
+        startX: event.clientX,
+        startY: event.clientY,
+        startLeft: activePositionChartLayout.left,
+        startTop: activePositionChartLayout.top,
+        width: activePositionChartLayout.width,
+        height: activePositionChartLayout.height,
+        minimized: activePositionChartLayout.minimized,
+      });
+    },
+    [activePositionChartLayout],
+  );
+
+  const handlePositionChartResizeStart = useCallback(
+    (event: ReactPointerEvent<HTMLElement>) => {
+      if (
+        !activePositionChartLayout.floating ||
+        activePositionChartLayout.minimized
+      ) {
+        return;
+      }
+      const card = positionsCardRef.current;
+      if (!card) {
+        return;
+      }
+      event.preventDefault();
+      const cardRect = card.getBoundingClientRect();
+      const maxLeft = Math.max(
+        activePositionChartLayout.safeLeft,
+        cardRect.width -
+          activePositionChartLayout.width -
+          POSITION_CHART_FLOATING_PADDING,
+      );
+      const minTop = POSITION_CHART_FLOATING_PADDING;
+      const maxTop = Math.max(
+        minTop,
+        cardRect.height -
+          activePositionChartLayout.height -
+          POSITION_CHART_FLOATING_PADDING,
+      );
+      setPositionChartInteraction({
+        type: "resize",
+        pointerId: event.pointerId,
+        cardWidth: cardRect.width,
+        cardHeight: cardRect.height,
+        safeLeft: activePositionChartLayout.safeLeft,
+        maxLeft,
+        minTop,
+        maxTop,
+        startX: event.clientX,
+        startY: event.clientY,
+        startLeft: activePositionChartLayout.left,
+        startTop: activePositionChartLayout.top,
+        startWidth: activePositionChartLayout.width,
+        startHeight: activePositionChartLayout.height,
+        minimized: false,
+      });
+    },
+    [activePositionChartLayout],
+  );
+
+  const handlePositionChartMinimizeToggle = useCallback(() => {
+    const card = positionsCardRef.current;
+    if (!card || !activePositionChartLayout.floating) {
+      return;
+    }
+    setPositionChartPreviewLayout(null);
+    setPositionChartInteraction(null);
+    setPositionChartStoredWindow((current) => {
+      const cardWidth = card.getBoundingClientRect().width || card.clientWidth;
+      const cardHeight =
+        card.getBoundingClientRect().height || card.clientHeight;
+      const storedHeight =
+        current?.height ??
+        (activePositionChartLayout.minimized
+          ? POSITION_CHART_FLOATING_HEIGHT
+          : activePositionChartLayout.height);
+      const baseWindow =
+        normalizePositionChartPersistedWindow({
+          cardWidth,
+          cardHeight,
+          persistedWindow: current,
+        }) ||
+        buildPositionChartPersistedWindowFromLayout({
+          cardWidth,
+          cardHeight,
+          left: activePositionChartLayout.left,
+          top: activePositionChartLayout.top,
+          width: activePositionChartLayout.width,
+          layoutHeight: activePositionChartLayout.minimized
+            ? POSITION_CHART_FLOATING_MINIMIZED_HEIGHT
+            : activePositionChartLayout.height,
+          storedHeight,
+          minimized: activePositionChartLayout.minimized,
+        });
+      return {
+        ...baseWindow,
+        minimized: !baseWindow.minimized,
+        height: storedHeight,
+      };
+    });
+  }, [activePositionChartLayout]);
+
+  useEffect(() => {
+    if (!positionChartInteraction) {
+      return undefined;
+    }
+
+    const updatePreviewLayout = (clientX: number, clientY: number) => {
+      if (positionChartInteraction.type === "drag") {
+        const deltaX = clientX - positionChartInteraction.startX;
+        const deltaY = clientY - positionChartInteraction.startY;
+        const nextLeft = clampNumber(
+          positionChartInteraction.startLeft + deltaX,
+          positionChartInteraction.safeLeft,
+          positionChartInteraction.maxLeft,
+        );
+        const nextTop = clampNumber(
+          positionChartInteraction.startTop + deltaY,
+          positionChartInteraction.minTop,
+          positionChartInteraction.maxTop,
+        );
+        const nextLayout: PositionChartFloatingLayout = {
+          floating: true,
+          placement: activePositionChartLayout.placement,
+          top: nextTop,
+          left: nextLeft,
+          width: positionChartInteraction.width,
+          height: positionChartInteraction.height,
+          minimized: positionChartInteraction.minimized,
+          userAnchored: true,
+          safeLeft: positionChartInteraction.safeLeft,
+        };
+        setPositionChartPreviewLayout(nextLayout);
+        return nextLayout;
+      }
+
+      const deltaX = clientX - positionChartInteraction.startX;
+      const deltaY = clientY - positionChartInteraction.startY;
+      const bounds = resolvePositionChartSizeBounds({
+        cardWidth: positionChartInteraction.cardWidth,
+        cardHeight: positionChartInteraction.cardHeight,
+      });
+      const nextWidth = clampNumber(
+        positionChartInteraction.startWidth + deltaX,
+        bounds.minWidth,
+        bounds.maxWidth,
+      );
+      const nextHeight = clampNumber(
+        positionChartInteraction.startHeight + deltaY,
+        bounds.minHeight,
+        bounds.maxHeight,
+      );
+      const nextSafeLeft = resolvePositionChartSafeLeft(
+        positionChartInteraction.cardWidth,
+        nextWidth,
+      );
+      const nextLeft = clampNumber(
+        positionChartInteraction.startLeft,
+        nextSafeLeft,
+        Math.max(
+          nextSafeLeft,
+          positionChartInteraction.cardWidth -
+            nextWidth -
+            POSITION_CHART_FLOATING_PADDING,
+        ),
+      );
+      const nextTop = clampNumber(
+        positionChartInteraction.startTop,
+        POSITION_CHART_FLOATING_PADDING,
+        Math.max(
+          POSITION_CHART_FLOATING_PADDING,
+          positionChartInteraction.cardHeight -
+            nextHeight -
+            POSITION_CHART_FLOATING_PADDING,
+        ),
+      );
+      const nextLayout: PositionChartFloatingLayout = {
+        floating: true,
+        placement: activePositionChartLayout.placement,
+        top: nextTop,
+        left: nextLeft,
+        width: nextWidth,
+        height: nextHeight,
+        minimized: false,
+        userAnchored: true,
+        safeLeft: nextSafeLeft,
+      };
+      setPositionChartPreviewLayout(nextLayout);
+      return nextLayout;
+    };
+
+    const handlePointerMove = (event: PointerEvent) => {
+      if (event.pointerId !== positionChartInteraction.pointerId) {
+        return;
+      }
+      event.preventDefault();
+      updatePreviewLayout(event.clientX, event.clientY);
+    };
+
+    const handlePointerUp = (event: PointerEvent) => {
+      if (event.pointerId !== positionChartInteraction.pointerId) {
+        return;
+      }
+      event.preventDefault();
+      const finalLayout =
+        positionChartPreviewLayout ||
+        updatePreviewLayout(event.clientX, event.clientY);
+      if (finalLayout) {
+        const storedHeight =
+          positionChartStoredWindow?.height ??
+          (finalLayout.minimized
+            ? POSITION_CHART_FLOATING_HEIGHT
+            : finalLayout.height);
+        setPositionChartStoredWindow(
+          buildPositionChartPersistedWindowFromLayout({
+            cardWidth: positionChartInteraction.cardWidth,
+            cardHeight: positionChartInteraction.cardHeight,
+            left: finalLayout.left,
+            top: finalLayout.top,
+            width: finalLayout.width,
+            layoutHeight: finalLayout.height,
+            storedHeight,
+            minimized: finalLayout.minimized,
+          }),
+        );
+      }
+      setPositionChartPreviewLayout(null);
+      setPositionChartInteraction(null);
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+    };
+  }, [
+    activePositionChartLayout.placement,
+    positionChartInteraction,
+    positionChartPreviewLayout,
+    positionChartStoredWindow?.height,
+  ]);
 
   const accountSummaryOrder = [
     "NetLiquidation",
@@ -3907,7 +5308,10 @@ export default function LiveTradePage() {
   };
 
   const formatRealizedPnl = (value?: number | null) => {
-    return formatRealizedPnlValue(value ?? null, t("trade.positionTable.realizedMissing"));
+    return formatRealizedPnlValue(
+      value ?? null,
+      t("trade.positionTable.realizedMissing"),
+    );
   };
 
   const formatPercent = (value?: number | null, digits = 2) => {
@@ -3924,26 +5328,41 @@ export default function LiveTradePage() {
     if (!guardState) {
       return null;
     }
-    if (guardState.last_equity !== null && guardState.last_equity !== undefined) {
+    if (
+      guardState.last_equity !== null &&
+      guardState.last_equity !== undefined
+    ) {
       return guardState.last_equity;
     }
-    if (guardState.day_start_equity !== null && guardState.day_start_equity !== undefined) {
+    if (
+      guardState.day_start_equity !== null &&
+      guardState.day_start_equity !== undefined
+    ) {
       return guardState.day_start_equity;
     }
     return null;
   }, [guardState]);
 
   const guardDrawdown = useMemo(() => {
-    if (!guardState || guardState.equity_peak === null || guardState.equity_peak === undefined) {
+    if (
+      !guardState ||
+      guardState.equity_peak === null ||
+      guardState.equity_peak === undefined
+    ) {
       return null;
     }
-    if (guardState.last_equity === null || guardState.last_equity === undefined) {
+    if (
+      guardState.last_equity === null ||
+      guardState.last_equity === undefined
+    ) {
       return null;
     }
     if (!guardState.equity_peak) {
       return null;
     }
-    return (guardState.last_equity - guardState.equity_peak) / guardState.equity_peak;
+    return (
+      (guardState.last_equity - guardState.equity_peak) / guardState.equity_peak
+    );
   }, [guardState]);
 
   const accountSummaryItems = useMemo(() => {
@@ -3956,7 +5375,7 @@ export default function LiveTradePage() {
 
   const accountSummaryTagMap = useMemo(
     () => getMessage("trade.accountSummaryTags"),
-    [getMessage]
+    [getMessage],
   );
 
   const accountSummaryFullItems = useMemo(() => {
@@ -3999,11 +5418,16 @@ export default function LiveTradePage() {
       pit_effective_date: snapshot?.snapshot_date ?? null,
     };
     return normalizeDecisionBasis(snapshot?.summary, defaults);
-  }, [snapshot?.id, snapshot?.status, snapshot?.summary, snapshot?.snapshot_date]);
+  }, [
+    snapshot?.id,
+    snapshot?.status,
+    snapshot?.summary,
+    snapshot?.snapshot_date,
+  ]);
 
   const executionDecisionBasis = useMemo(
     () => activeRunDecisionBasis || latestSnapshotDecisionBasis,
-    [activeRunDecisionBasis, latestSnapshotDecisionBasis]
+    [activeRunDecisionBasis, latestSnapshotDecisionBasis],
   );
 
   const formatDecisionBasisFallbackReason = useCallback(
@@ -4016,7 +5440,7 @@ export default function LiveTradePage() {
       const translated = t(key);
       return translated === key ? normalized : translated;
     },
-    [t]
+    [t],
   );
 
   const runRiskAuditCurrencyPnl = useMemo(() => {
@@ -4034,25 +5458,31 @@ export default function LiveTradePage() {
 
   const runRiskAuditReason = useMemo(
     () => formatJsonText(runRiskAudit?.reason),
-    [runRiskAudit?.reason, t]
+    [runRiskAudit?.reason, t],
   );
   const runRiskAuditThresholds = useMemo(
     () => formatJsonText(runRiskAudit?.thresholds),
-    [runRiskAudit?.thresholds, t]
+    [runRiskAudit?.thresholds, t],
   );
   const runRiskAuditTriggers = useMemo(
     () => formatJsonText(runRiskAudit?.trigger_details),
-    [runRiskAudit?.trigger_details, t]
+    [runRiskAudit?.trigger_details, t],
   );
   const runRiskAuditGuardState = useMemo(
     () => formatJsonText(runRiskAudit?.guard_state),
-    [runRiskAudit?.guard_state, t]
+    [runRiskAudit?.guard_state, t],
   );
   const runRiskAuditLockState = useMemo(() => {
-    if (!runRiskAudit || runRiskAudit.dd_lock_state === null || runRiskAudit.dd_lock_state === undefined) {
+    if (
+      !runRiskAudit ||
+      runRiskAudit.dd_lock_state === null ||
+      runRiskAudit.dd_lock_state === undefined
+    ) {
       return t("common.none");
     }
-    return runRiskAudit.dd_lock_state ? t("trade.riskAuditLockOn") : t("trade.riskAuditLockOff");
+    return runRiskAudit.dd_lock_state
+      ? t("trade.riskAuditLockOn")
+      : t("trade.riskAuditLockOff");
   }, [runRiskAudit, t]);
 
   const streamStatusLabel = useMemo(() => {
@@ -4070,12 +5500,21 @@ export default function LiveTradePage() {
   }, [ibStreamStatus?.subscribed_symbols]);
 
   const streamMarketDataType = useMemo(() => {
-    return ibStreamStatus?.market_data_type || ibSettings?.market_data_type || t("common.none");
+    return (
+      ibStreamStatus?.market_data_type ||
+      ibSettings?.market_data_type ||
+      t("common.none")
+    );
   }, [ibSettings?.market_data_type, ibStreamStatus?.market_data_type, t]);
 
   const snapshotData = marketSnapshot?.data || {};
   const snapshotPrice = useMemo(() => {
-    const last = Number(snapshotData.last ?? snapshotData.close ?? snapshotData.bid ?? snapshotData.ask);
+    const last = Number(
+      snapshotData.last ??
+        snapshotData.close ??
+        snapshotData.bid ??
+        snapshotData.ask,
+    );
     return Number.isFinite(last) ? last : null;
   }, [snapshotData]);
   const snapshotPrevClose = useMemo(() => {
@@ -4089,13 +5528,19 @@ export default function LiveTradePage() {
     return snapshotPrice - snapshotPrevClose;
   }, [snapshotPrice, snapshotPrevClose]);
   const snapshotChangePct = useMemo(() => {
-    if (snapshotChange == null || snapshotPrevClose == null || snapshotPrevClose === 0) {
+    if (
+      snapshotChange == null ||
+      snapshotPrevClose == null ||
+      snapshotPrevClose === 0
+    ) {
       return null;
     }
     return (snapshotChange / snapshotPrevClose) * 100;
   }, [snapshotChange, snapshotPrevClose]);
   const snapshotVolume = useMemo(() => {
-    const volume = Number(snapshotData.volume ?? snapshotData.last_size ?? snapshotData.ask_size);
+    const volume = Number(
+      snapshotData.volume ?? snapshotData.last_size ?? snapshotData.ask_size,
+    );
     return Number.isFinite(volume) ? volume : null;
   }, [snapshotData]);
 
@@ -4103,7 +5548,8 @@ export default function LiveTradePage() {
     (basis: DecisionBasis | null, options: { testIdPrefix: string }) => {
       const testIdPrefix = options.testIdPrefix;
       const requestedDate = basis?.pit_requested_date || null;
-      const effectiveDate = basis?.pit_effective_date || basis?.decision_snapshot_date || null;
+      const effectiveDate =
+        basis?.pit_effective_date || basis?.decision_snapshot_date || null;
       const latestDate = basis?.pit_latest_available_date || null;
       const fallbackUsed = basis?.pit_fallback_used;
       const staleWarning = basis?.pit_stale_warning;
@@ -4132,10 +5578,17 @@ export default function LiveTradePage() {
       });
 
       return (
-        <div className="card-subsection decision-basis-block" style={{ marginTop: "12px" }}>
+        <div
+          className="card-subsection decision-basis-block"
+          style={{ marginTop: "12px" }}
+        >
           <div className="form-label">{t("trade.decisionBasisTitle")}</div>
           <div className="form-hint">{t("trade.decisionBasisMeta")}</div>
-          <div className="form-hint" data-testid={`${testIdPrefix}-summary-line`} style={{ marginTop: "8px" }}>
+          <div
+            className="form-hint"
+            data-testid={`${testIdPrefix}-summary-line`}
+            style={{ marginTop: "8px" }}
+          >
             {summaryLine}
           </div>
           <div className="meta-list" style={{ marginTop: "8px" }}>
@@ -4198,7 +5651,9 @@ export default function LiveTradePage() {
             <div className="meta-row">
               <span>{t("trade.decisionBasisAgeDays")}</span>
               <strong data-testid={`${testIdPrefix}-age-days`}>
-                {pitAgeDays === null || pitAgeDays === undefined ? t("common.none") : `${pitAgeDays}`}
+                {pitAgeDays === null || pitAgeDays === undefined
+                  ? t("common.none")
+                  : `${pitAgeDays}`}
                 {staleThreshold === null || staleThreshold === undefined
                   ? ""
                   : ` / ${t("trade.decisionBasisStaleThreshold", { days: staleThreshold })}`}
@@ -4219,7 +5674,7 @@ export default function LiveTradePage() {
         </div>
       );
     },
-    [formatDecisionBasisFallbackReason, t]
+    [formatDecisionBasisFallbackReason, t],
   );
 
   const sections = getLiveTradeSections();
@@ -4246,7 +5701,8 @@ export default function LiveTradePage() {
             </div>
             <div className="overview-value">{statusLabel}</div>
             <div className="overview-sub">
-              {t("trade.connectionUpdatedAt")} {formatDateTime(ibState?.updated_at)}
+              {t("trade.connectionUpdatedAt")}{" "}
+              {formatDateTime(ibState?.updated_at)}
             </div>
           </div>
           <div className="overview-card">
@@ -4260,7 +5716,8 @@ export default function LiveTradePage() {
             <div className="overview-label">{t("trade.marketHealthTitle")}</div>
             <div className="overview-value">{marketHealthStatusLabel}</div>
             <div className="overview-sub">
-              {t("trade.marketHealthUpdatedAt")} {formatDateTime(marketHealthUpdatedLabel)}
+              {t("trade.marketHealthUpdatedAt")}{" "}
+              {formatDateTime(marketHealthUpdatedLabel)}
             </div>
           </div>
         </div>
@@ -4278,7 +5735,9 @@ export default function LiveTradePage() {
             <strong>{bridgeSource || t("common.none")}</strong>
           </div>
           {gatewayRuntime && (
-            <div className={`meta-row${gatewayRecoveryState ? " meta-warn" : ""}`}>
+            <div
+              className={`meta-row${gatewayRecoveryState ? " meta-warn" : ""}`}
+            >
               <span>{t("trade.gatewayRuntimeLabel")}</span>
               <strong>{gatewayRuntimeLabel}</strong>
             </div>
@@ -4296,12 +5755,16 @@ export default function LiveTradePage() {
           <div className="meta-row">
             <span>{t("data.ib.lastHeartbeat")}</span>
             <strong>
-              {ibState?.last_heartbeat ? formatDateTime(ibState.last_heartbeat) : "-"}
+              {ibState?.last_heartbeat
+                ? formatDateTime(ibState.last_heartbeat)
+                : "-"}
             </strong>
           </div>
           <div className="meta-row">
             <span>{t("data.ib.stateUpdated")}</span>
-            <strong>{ibState?.updated_at ? formatDateTime(ibState.updated_at) : "-"}</strong>
+            <strong>
+              {ibState?.updated_at ? formatDateTime(ibState.updated_at) : "-"}
+            </strong>
           </div>
           {ibState?.message && (
             <div className="meta-row meta-row-stack">
@@ -4325,7 +5788,9 @@ export default function LiveTradePage() {
             <div className="form-hint">
               {bridgeHeartbeatAge === null
                 ? t("common.none")
-                : t("trade.statusExplainHeartbeatAge", { seconds: bridgeHeartbeatAge })}
+                : t("trade.statusExplainHeartbeatAge", {
+                    seconds: bridgeHeartbeatAge,
+                  })}
               {bridgeStatus?.last_heartbeat && (
                 <span style={{ marginLeft: "8px" }}>
                   {t("trade.statusExplainLastHeartbeat", {
@@ -4337,7 +5802,10 @@ export default function LiveTradePage() {
             <div className="meta-row" style={{ marginTop: "10px" }}>
               <span>{t("trade.statusExplainRefresh")}</span>
               <strong>
-                {formatBridgeRefreshResult(t, bridgeStatus?.last_refresh_result)}
+                {formatBridgeRefreshResult(
+                  t,
+                  bridgeStatus?.last_refresh_result,
+                )}
               </strong>
             </div>
             <div className="form-hint">
@@ -4378,13 +5846,19 @@ export default function LiveTradePage() {
           <div className="card-subsection">
             <div className="form-label">{t("trade.bridgeStatusTitle")}</div>
             {renderRefreshSchedule("bridge", "bridge")}
-            {bridgeStatusLoading && <div className="form-hint">{t("common.actions.loading")}</div>}
-            {bridgeStatusError && <div className="form-hint">{bridgeStatusError}</div>}
+            {bridgeStatusLoading && (
+              <div className="form-hint">{t("common.actions.loading")}</div>
+            )}
+            {bridgeStatusError && (
+              <div className="form-hint">{bridgeStatusError}</div>
+            )}
             <div className="meta-list" style={{ marginTop: "12px" }}>
               <div className="meta-row">
                 <span>{t("trade.bridgeStatusLabel")}</span>
                 <strong>
-                  {bridgeStatus?.status ? formatStatus(bridgeStatus.status) : t("common.none")}
+                  {bridgeStatus?.status
+                    ? formatStatus(bridgeStatus.status)
+                    : t("common.none")}
                 </strong>
               </div>
               <div className="meta-row">
@@ -4408,13 +5882,19 @@ export default function LiveTradePage() {
               <div className="meta-row">
                 <span>{t("trade.bridgeRefreshResultLabel")}</span>
                 <strong>
-                  {formatBridgeRefreshResult(t, bridgeStatus?.last_refresh_result)}
+                  {formatBridgeRefreshResult(
+                    t,
+                    bridgeStatus?.last_refresh_result,
+                  )}
                 </strong>
               </div>
               <div className="meta-row">
                 <span>{t("trade.bridgeRefreshReasonLabel")}</span>
                 <strong>
-                  {formatBridgeRefreshReason(t, bridgeStatus?.last_refresh_reason)}
+                  {formatBridgeRefreshReason(
+                    t,
+                    bridgeStatus?.last_refresh_reason,
+                  )}
                 </strong>
               </div>
               <div
@@ -4426,14 +5906,18 @@ export default function LiveTradePage() {
               </div>
               <div className="meta-row">
                 <span>{t("trade.gatewayProbeResultLabel")}</span>
-                <strong>{formatGatewayProbeResult(gatewayRuntime?.last_probe_result)}</strong>
+                <strong>
+                  {formatGatewayProbeResult(gatewayRuntime?.last_probe_result)}
+                </strong>
               </div>
               <div className="meta-row">
                 <span>{t("trade.gatewayProbeLatencyLabel")}</span>
                 <strong>
                   {gatewayRuntime?.last_probe_latency_ms != null
                     ? t("trade.gatewayProbeLatencyValue", {
-                        value: Number(gatewayRuntime.last_probe_latency_ms).toFixed(0),
+                        value: Number(
+                          gatewayRuntime.last_probe_latency_ms,
+                        ).toFixed(0),
                       })
                     : t("common.none")}
                 </strong>
@@ -4441,17 +5925,23 @@ export default function LiveTradePage() {
               <div className="meta-row">
                 <span>{t("trade.gatewayRecoveryActionLabel")}</span>
                 <strong>
-                  {formatGatewayRecoveryAction(gatewayRuntime?.last_recovery_action)}
+                  {formatGatewayRecoveryAction(
+                    gatewayRuntime?.last_recovery_action,
+                  )}
                 </strong>
               </div>
               <div className="meta-row">
                 <span>{t("trade.gatewayRecoveryAtLabel")}</span>
-                <strong>{formatDateTime(gatewayRuntime?.last_recovery_at)}</strong>
+                <strong>
+                  {formatDateTime(gatewayRuntime?.last_recovery_at)}
+                </strong>
               </div>
               {gatewayRuntime?.next_allowed_action_at && (
                 <div className="meta-row">
                   <span>{t("trade.gatewayNextRecoveryLabel")}</span>
-                  <strong>{formatDateTime(gatewayRuntime.next_allowed_action_at)}</strong>
+                  <strong>
+                    {formatDateTime(gatewayRuntime.next_allowed_action_at)}
+                  </strong>
                 </div>
               )}
               {gatewayTradeBlockState && (
@@ -4487,7 +5977,9 @@ export default function LiveTradePage() {
                   onChange={(event) => setSelectedProjectId(event.target.value)}
                   data-testid="live-trade-project-select"
                 >
-                  <option value="">{t("trade.projectSelectPlaceholder")}</option>
+                  <option value="">
+                    {t("trade.projectSelectPlaceholder")}
+                  </option>
                   {projects.map((project) => (
                     <option key={project.id} value={project.id}>
                       #{project.id} · {project.name}
@@ -4496,11 +5988,15 @@ export default function LiveTradePage() {
                 </select>
               </div>
             </div>
-            {!selectedProjectId && <div className="form-hint">{t("trade.projectSelectHint")}</div>}
+            {!selectedProjectId && (
+              <div className="form-hint">{t("trade.projectSelectHint")}</div>
+            )}
             <div className="meta-list" style={{ marginTop: "12px" }}>
               <div className="meta-row">
                 <span>{t("trade.snapshotStatus")}</span>
-                <strong data-testid="live-trade-snapshot-status">{snapshotStatusText}</strong>
+                <strong data-testid="live-trade-snapshot-status">
+                  {snapshotStatusText}
+                </strong>
               </div>
               <div className="meta-row">
                 <span>{t("trade.snapshotDate")}</span>
@@ -4533,7 +6029,9 @@ export default function LiveTradePage() {
         <div className="card-title">{t("trade.accountSummaryTitle")}</div>
         <div className="card-meta">{t("trade.accountSummaryMeta")}</div>
         {renderRefreshSchedule("account", "account")}
-        {accountSummaryError && <div className="form-hint">{accountSummaryError}</div>}
+        {accountSummaryError && (
+          <div className="form-hint">{accountSummaryError}</div>
+        )}
         <div className="overview-grid" style={{ marginTop: "12px" }}>
           {accountSummaryItems.map((item) => (
             <div
@@ -4544,7 +6042,10 @@ export default function LiveTradePage() {
               <div className="overview-label">
                 {resolveAccountSummaryLabel(item.key, accountSummaryTagMap)}
               </div>
-              <div className="overview-value" data-testid={`account-summary-${item.key}-value`}>
+              <div
+                className="overview-value"
+                data-testid={`account-summary-${item.key}-value`}
+              >
                 {formatAccountValue(item.value)}
               </div>
             </div>
@@ -4570,7 +6071,9 @@ export default function LiveTradePage() {
             </div>
           )}
         </div>
-        {accountSummaryFullError && <div className="form-hint">{accountSummaryFullError}</div>}
+        {accountSummaryFullError && (
+          <div className="form-hint">{accountSummaryFullError}</div>
+        )}
         <details
           style={{ marginTop: "12px" }}
           onToggle={(event) => {
@@ -4593,7 +6096,9 @@ export default function LiveTradePage() {
                 {accountSummaryFullItems.length ? (
                   accountSummaryFullItems.map(([key, value]) => (
                     <tr key={key}>
-                      <td>{resolveAccountSummaryLabel(key, accountSummaryTagMap)}</td>
+                      <td>
+                        {resolveAccountSummaryLabel(key, accountSummaryTagMap)}
+                      </td>
                       <td>{formatAccountValue(value)}</td>
                     </tr>
                   ))
@@ -4613,18 +6118,34 @@ export default function LiveTradePage() {
       </div>
     ),
     positions: (
-      <div className="card live-trade-positions" data-testid="account-positions-card">
+      <div
+        ref={positionsCardRef}
+        className="card live-trade-positions"
+        data-testid="account-positions-card"
+      >
         <div className="card-title">{t("trade.accountPositionsTitle")}</div>
         <div className="card-meta">{t("trade.accountPositionsMeta")}</div>
-        <div className="positions-workspace">
-          <div className="positions-table-pane">
+        <div
+          ref={positionsWorkspaceRef}
+          className={`positions-workspace${
+            activePositionChartLayout.floating
+              ? " is-floating-chart"
+              : " is-stacked-chart"
+          }`}
+          style={positionsWorkspaceStyle}
+        >
+          <div ref={positionsTablePaneRef} className="positions-table-pane">
             {renderRefreshSchedule("positions", "positions", "inline")}
             {positionsStale && (
               <div className="form-hint warn" style={{ marginTop: "8px" }}>
                 <div>{t("trade.accountPositionsStaleHint")}</div>
                 <div className="meta-row" style={{ marginTop: "6px" }}>
                   <span>{t("trade.accountPositionsStaleUpdatedAt")}</span>
-                  <strong>{bridgeUpdatedAt ? formatDateTime(bridgeUpdatedAt) : t("common.none")}</strong>
+                  <strong>
+                    {bridgeUpdatedAt
+                      ? formatDateTime(bridgeUpdatedAt)
+                      : t("common.none")}
+                  </strong>
                 </div>
               </div>
             )}
@@ -4654,7 +6175,9 @@ export default function LiveTradePage() {
                 {gatewayTradeBlockMessage}
               </div>
             )}
-            {accountPositionsError && <div className="form-hint">{accountPositionsError}</div>}
+            {accountPositionsError && (
+              <div className="form-hint">{accountPositionsError}</div>
+            )}
             <div className="meta-list" style={{ marginTop: "12px" }}>
               <div className="meta-row">
                 <span>{t("trade.accountPositionsUpdatedAt")}</span>
@@ -4690,13 +6213,19 @@ export default function LiveTradePage() {
               }}
             >
               <div className="meta-row">
-                <span>{t("trade.positionActionSelected", { count: selectedPositions.length })}</span>
+                <span>
+                  {t("trade.positionActionSelected", {
+                    count: selectedPositions.length,
+                  })}
+                </span>
               </div>
               <button
                 className="button-secondary"
                 data-testid="positions-batch-close"
                 disabled={
-                  positionActionLoading || selectedPositions.length === 0 || Boolean(gatewayTradeBlockState)
+                  positionActionLoading ||
+                  selectedPositions.length === 0 ||
+                  Boolean(gatewayTradeBlockState)
                 }
                 onClick={() => handleClosePositions(selectedPositions)}
               >
@@ -4718,7 +6247,10 @@ export default function LiveTradePage() {
               </button>
             </div>
             <div className="table-scroll" style={{ marginTop: "12px" }}>
-              <table className="table positions-table" data-testid="account-positions-table">
+              <table
+                className="table positions-table"
+                data-testid="account-positions-table"
+              >
                 <thead>
                   <tr>
                     <th>
@@ -4727,7 +6259,8 @@ export default function LiveTradePage() {
                         aria-label={t("trade.positionActionSelectAll")}
                         checked={allPositionsSelected}
                         disabled={
-                          actionableAccountPositions.length === 0 || Boolean(gatewayTradeBlockState)
+                          actionableAccountPositions.length === 0 ||
+                          Boolean(gatewayTradeBlockState)
                         }
                         onChange={toggleSelectAllPositions}
                       />
@@ -4749,40 +6282,69 @@ export default function LiveTradePage() {
                     accountPositions.map((row, index) => {
                       const key = buildPositionKey(row);
                       const positionActionable = isPositionActionable(row);
-                      const absolutePosition = Math.abs(Number(row.position ?? 0));
+                      const absolutePosition = Math.abs(
+                        Number(row.position ?? 0),
+                      );
                       const qtyValue =
                         positionQuantities[key] ??
                         String(
-                          Number.isFinite(absolutePosition) && absolutePosition > 0
+                          Number.isFinite(absolutePosition) &&
+                            absolutePosition > 0
                             ? absolutePosition
-                            : 0
+                            : 0,
                         );
-                      const sessionValue = normalizeTradeSession(positionSessions[key] ?? defaultSession);
-                      const rawOrderType = normalizeOrderType(
-                        positionOrderTypes[key] ?? resolveDefaultOrderTypeBySession(sessionValue)
+                      const sessionValue = normalizeTradeSession(
+                        positionSessions[key] ?? defaultSession,
                       );
-                      const orderTypeValue = sessionValue === "rth" ? rawOrderType : "LMT";
-                      const limitOrderType = isLimitLikeOrderType(orderTypeValue);
+                      const rawOrderType = normalizeOrderType(
+                        positionOrderTypes[key] ??
+                          resolveDefaultOrderTypeBySession(sessionValue),
+                      );
+                      const orderTypeValue =
+                        sessionValue === "rth" ? rawOrderType : "LMT";
+                      const limitOrderType =
+                        isLimitLikeOrderType(orderTypeValue);
                       const fallbackLimit = Number(row.market_price ?? null);
                       const limitValue =
                         positionLimitPrices[key] ??
-                        (Number.isFinite(fallbackLimit) && fallbackLimit > 0 ? String(fallbackLimit) : "");
+                        (Number.isFinite(fallbackLimit) && fallbackLimit > 0
+                          ? String(fallbackLimit)
+                          : "");
                       const isChartSelected =
-                        String(selectedPositionChartSymbol || "").trim().toUpperCase() === row.symbol;
+                        String(selectedPositionChartSymbol || "")
+                          .trim()
+                          .toUpperCase() === row.symbol;
                       return (
                         <tr
                           key={key}
-                          className={isChartSelected ? "is-chart-selected" : undefined}
+                          ref={(element) => {
+                            positionRowRefs.current[row.symbol] = element;
+                          }}
+                          data-testid={`position-row-${row.symbol}`}
+                          className={
+                            isChartSelected ? "is-chart-selected" : undefined
+                          }
                         >
                           <td>
                             <input
                               type="checkbox"
-                              aria-label={t("trade.positionActionSelectSymbol", {
-                                symbol: row.symbol,
-                              })}
+                              aria-label={t(
+                                "trade.positionActionSelectSymbol",
+                                {
+                                  symbol: row.symbol,
+                                },
+                              )}
                               checked={!!positionSelections[key]}
-                              disabled={!positionActionable || Boolean(gatewayTradeBlockState)}
-                              onChange={(event) => updatePositionSelection(key, event.target.checked)}
+                              disabled={
+                                !positionActionable ||
+                                Boolean(gatewayTradeBlockState)
+                              }
+                              onChange={(event) =>
+                                updatePositionSelection(
+                                  key,
+                                  event.target.checked,
+                                )
+                              }
                             />
                           </td>
                           <td>
@@ -4790,7 +6352,9 @@ export default function LiveTradePage() {
                               type="button"
                               className="position-symbol-button"
                               data-testid={`position-chart-symbol-${row.symbol}`}
-                              onClick={() => setSelectedPositionChartSymbol(row.symbol)}
+                              onClick={() =>
+                                setSelectedPositionChartSymbol(row.symbol)
+                              }
                             >
                               {row.symbol}
                             </button>
@@ -4805,127 +6369,148 @@ export default function LiveTradePage() {
                           <td>{row.currency || t("common.none")}</td>
                           <td className="positions-action-cell">
                             <div
-                              className="positions-action-panel"
-                              data-testid={`positions-action-panel-${row.symbol}`}
+                              className="positions-action-toolbar"
+                              data-testid={`positions-action-toolbar-${row.symbol}`}
                             >
-                              <div
-                                className="positions-action-controls"
-                                data-testid={`positions-action-controls-${row.symbol}`}
+                              <input
+                                className="form-input positions-action-input"
+                                type="number"
+                                min="0"
+                                step="1"
+                                value={qtyValue}
+                                aria-label={`${row.symbol} ${t("trade.positionActionQtyShort")}`}
+                                title={t("trade.positionActionQtyShort")}
+                                disabled={Boolean(gatewayTradeBlockState)}
+                                onChange={(event) =>
+                                  updatePositionQuantity(
+                                    key,
+                                    event.target.value,
+                                  )
+                                }
+                              />
+                              <select
+                                className="form-select positions-action-select"
+                                value={sessionValue}
+                                data-testid="positions-action-session"
+                                aria-label={`${row.symbol} ${t("trade.positionActionSessionShort")}`}
+                                title={t("trade.positionActionSessionShort")}
+                                disabled={Boolean(gatewayTradeBlockState)}
+                                onChange={(event) =>
+                                  updatePositionSession(
+                                    row,
+                                    key,
+                                    event.target.value,
+                                  )
+                                }
                               >
-                                <label className="positions-action-field">
-                                  <span className="positions-action-field-label">
-                                    {t("trade.positionActionQtyShort")}
-                                  </span>
-                                  <input
-                                    className="form-input positions-action-input"
-                                    type="number"
-                                    min="0"
-                                    step="1"
-                                    value={qtyValue}
-                                    disabled={Boolean(gatewayTradeBlockState)}
-                                    onChange={(event) =>
-                                      updatePositionQuantity(key, event.target.value)
-                                    }
-                                  />
-                                </label>
-                                <label className="positions-action-field">
-                                  <span className="positions-action-field-label">
-                                    {t("trade.positionActionSessionShort")}
-                                  </span>
-                                  <select
-                                    className="form-select positions-action-select"
-                                    value={sessionValue}
-                                    data-testid="positions-action-session"
-                                    disabled={Boolean(gatewayTradeBlockState)}
-                                    onChange={(event) =>
-                                      updatePositionSession(row, key, event.target.value)
-                                    }
-                                  >
-                                    <option value="rth">{t("trade.manualSession.rth")}</option>
-                                    <option value="pre">{t("trade.manualSession.pre")}</option>
-                                    <option value="post">{t("trade.manualSession.post")}</option>
-                                    <option value="night">{t("trade.manualSession.night")}</option>
-                                  </select>
-                                </label>
-                                <label className="positions-action-field">
-                                  <span className="positions-action-field-label">
-                                    {t("trade.positionActionTypeShort")}
-                                  </span>
-                                  <select
-                                    className="form-select positions-action-select"
-                                    value={orderTypeValue}
-                                    data-testid="positions-action-order-type"
-                                    disabled={sessionValue !== "rth" || Boolean(gatewayTradeBlockState)}
-                                    onChange={(event) =>
-                                      updatePositionOrderType(row, key, event.target.value)
-                                    }
-                                  >
-                                    <option value="MKT">{formatOrderTypeLabel("MKT")}</option>
-                                    <option value="LMT">{formatOrderTypeLabel("LMT")}</option>
-                                    <option value="ADAPTIVE_LMT">
-                                      {formatOrderTypeLabel("ADAPTIVE_LMT")}
-                                    </option>
-                                    <option value="PEG_MID">{formatOrderTypeLabel("PEG_MID")}</option>
-                                  </select>
-                                </label>
-                                <label
-                                  className={`positions-action-field${
-                                    limitOrderType ? "" : " is-disabled"
-                                  }`}
-                                  title={
-                                    limitOrderType
-                                      ? undefined
-                                      : t("trade.positionActionLimitDisabledTitle")
-                                  }
-                                >
-                                  <span className="positions-action-field-label">
-                                    {t("trade.positionActionLimitShort")}
-                                  </span>
-                                  <input
-                                    className="form-input positions-action-limit"
-                                    type="number"
-                                    min="0"
-                                    step="0.01"
-                                    placeholder={t("trade.positionActionLimitShortPlaceholder")}
-                                    value={limitOrderType ? limitValue : ""}
-                                    data-testid="positions-action-limit-price"
-                                    disabled={!limitOrderType || Boolean(gatewayTradeBlockState)}
-                                    onChange={(event) =>
-                                      updatePositionLimitPrice(key, event.target.value)
-                                    }
-                                  />
-                                </label>
-                              </div>
-                              <div
-                                className="positions-action-buttons"
-                                data-testid={`positions-action-buttons-${row.symbol}`}
+                                <option value="rth">
+                                  {t("trade.manualSession.rth")}
+                                </option>
+                                <option value="pre">
+                                  {t("trade.manualSession.pre")}
+                                </option>
+                                <option value="post">
+                                  {t("trade.manualSession.post")}
+                                </option>
+                                <option value="night">
+                                  {t("trade.manualSession.night")}
+                                </option>
+                              </select>
+                              <select
+                                className="form-select positions-action-select positions-action-select-order"
+                                value={orderTypeValue}
+                                data-testid="positions-action-order-type"
+                                aria-label={`${row.symbol} ${t("trade.positionActionTypeShort")}`}
+                                title={t("trade.positionActionTypeShort")}
+                                disabled={
+                                  sessionValue !== "rth" ||
+                                  Boolean(gatewayTradeBlockState)
+                                }
+                                onChange={(event) =>
+                                  updatePositionOrderType(
+                                    row,
+                                    key,
+                                    event.target.value,
+                                  )
+                                }
                               >
-                                <button
-                                  className="button-compact positions-action-button"
-                                  onClick={() => handlePositionOrder(row, "BUY", index)}
-                                  disabled={positionActionLoading || Boolean(gatewayTradeBlockState)}
-                                >
-                                  {t("trade.positionActionBuy")}
-                                </button>
-                                <button
-                                  className="button-compact positions-action-button"
-                                  onClick={() => handlePositionOrder(row, "SELL", index)}
-                                  disabled={positionActionLoading || Boolean(gatewayTradeBlockState)}
-                                >
-                                  {t("trade.positionActionSell")}
-                                </button>
-                                <button
-                                  className="button-compact positions-action-button"
-                                  onClick={() => handleClosePosition(row, index)}
-                                  disabled={
-                                    positionActionLoading ||
-                                    !positionActionable ||
-                                    Boolean(gatewayTradeBlockState)
-                                  }
-                                >
-                                  {t("trade.positionActionClose")}
-                                </button>
-                              </div>
+                                <option value="MKT">
+                                  {formatOrderTypeLabel("MKT")}
+                                </option>
+                                <option value="LMT">
+                                  {formatOrderTypeLabel("LMT")}
+                                </option>
+                                <option value="ADAPTIVE_LMT">
+                                  {formatOrderTypeLabel("ADAPTIVE_LMT")}
+                                </option>
+                                <option value="PEG_MID">
+                                  {formatOrderTypeLabel("PEG_MID")}
+                                </option>
+                              </select>
+                              <input
+                                className="form-input positions-action-limit"
+                                type="number"
+                                min="0"
+                                step="0.01"
+                                placeholder={t(
+                                  "trade.positionActionLimitShortPlaceholder",
+                                )}
+                                value={limitOrderType ? limitValue : ""}
+                                data-testid="positions-action-limit-price"
+                                aria-label={`${row.symbol} ${t("trade.positionActionLimitShort")}`}
+                                title={
+                                  limitOrderType
+                                    ? t("trade.positionActionLimitShort")
+                                    : t(
+                                        "trade.positionActionLimitDisabledTitle",
+                                      )
+                                }
+                                disabled={
+                                  !limitOrderType ||
+                                  Boolean(gatewayTradeBlockState)
+                                }
+                                onChange={(event) =>
+                                  updatePositionLimitPrice(
+                                    key,
+                                    event.target.value,
+                                  )
+                                }
+                              />
+                              <button
+                                className="button-compact positions-action-button"
+                                onClick={() =>
+                                  handlePositionOrder(row, "BUY", index)
+                                }
+                                disabled={
+                                  positionActionLoading ||
+                                  Boolean(gatewayTradeBlockState)
+                                }
+                              >
+                                {t("trade.positionActionBuy")}
+                              </button>
+                              <button
+                                className="button-compact positions-action-button"
+                                onClick={() =>
+                                  handlePositionOrder(row, "SELL", index)
+                                }
+                                disabled={
+                                  positionActionLoading ||
+                                  Boolean(gatewayTradeBlockState)
+                                }
+                              >
+                                {t("trade.positionActionSell")}
+                              </button>
+                              <button
+                                className="button-compact positions-action-button"
+                                onClick={() => handleClosePosition(row, index)}
+                                disabled={
+                                  positionActionLoading ||
+                                  !positionActionable ||
+                                  Boolean(gatewayTradeBlockState)
+                                }
+                              >
+                                {t("trade.positionActionClose")}
+                              </button>
                             </div>
                           </td>
                         </tr>
@@ -4950,6 +6535,14 @@ export default function LiveTradePage() {
             mode={ibSettings?.mode || ibSettingsForm.mode || "paper"}
             gatewayRuntimeState={gatewayRuntime?.state}
             positionsLoading={accountPositionsLoading}
+            floating={activePositionChartLayout.floating}
+            floatingPlacement={activePositionChartLayout.placement}
+            floatingStyle={positionChartFloatingStyle}
+            minimized={activePositionChartLayout.minimized}
+            dragging={Boolean(positionChartInteraction)}
+            onDragPointerDown={handlePositionChartDragStart}
+            onResizePointerDown={handlePositionChartResizeStart}
+            onToggleMinimize={handlePositionChartMinimizeToggle}
           />
         </div>
       </div>
@@ -4978,21 +6571,27 @@ export default function LiveTradePage() {
         </div>
         <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
           <button
-            className={detailTab === "orders" ? "button-primary" : "button-secondary"}
+            className={
+              detailTab === "orders" ? "button-primary" : "button-secondary"
+            }
             onClick={() => setDetailTab("orders")}
             data-testid="trade-tab-orders"
           >
             {t("trade.ordersTitle")}
           </button>
           <button
-            className={detailTab === "fills" ? "button-primary" : "button-secondary"}
+            className={
+              detailTab === "fills" ? "button-primary" : "button-secondary"
+            }
             onClick={() => setDetailTab("fills")}
             data-testid="trade-tab-fills"
           >
             {t("trade.fillsTitle")}
           </button>
           <button
-            className={detailTab === "receipts" ? "button-primary" : "button-secondary"}
+            className={
+              detailTab === "receipts" ? "button-primary" : "button-secondary"
+            }
             onClick={() => {
               setDetailTab("receipts");
               loadTradeReceipts();
@@ -5043,12 +6642,23 @@ export default function LiveTradePage() {
                         <td>{formatDateTime(order.created_at)}</td>
                         <td>
                           {(() => {
-                            const status = String(order.status || "").toUpperCase();
-                            const cancelable = ["NEW", "SUBMITTED", "PARTIAL", "CANCEL_REQUESTED"].includes(status);
+                            const status = String(
+                              order.status || "",
+                            ).toUpperCase();
+                            const cancelable = [
+                              "NEW",
+                              "SUBMITTED",
+                              "PARTIAL",
+                              "CANCEL_REQUESTED",
+                            ].includes(status);
                             const pending = status === "CANCEL_REQUESTED";
                             const isLoading = !!orderCancelLoading[order.id];
                             if (!cancelable) {
-                              return <span style={{ opacity: 0.6 }}>{t("common.none")}</span>;
+                              return (
+                                <span style={{ opacity: 0.6 }}>
+                                  {t("common.none")}
+                                </span>
+                              );
                             }
                             return (
                               <button
@@ -5104,7 +6714,7 @@ export default function LiveTradePage() {
                   <th>{t("trade.fillTable.time")}</th>
                 </tr>
               </thead>
-                  <tbody>
+              <tbody>
                 {sortedTradeFills.length ? (
                   sortedTradeFills.map((fill) => (
                     <tr key={fill.id}>
@@ -5117,7 +6727,11 @@ export default function LiveTradePage() {
                       <td>{formatNumber(fill.commission ?? null, 4)}</td>
                       <td>{formatNumber(fill.realized_pnl ?? null)}</td>
                       <td>{fill.exchange || t("common.none")}</td>
-                      <td>{fill.fill_time ? formatDateTime(fill.fill_time) : t("common.none")}</td>
+                      <td>
+                        {fill.fill_time
+                          ? formatDateTime(fill.fill_time)
+                          : t("common.none")}
+                      </td>
                     </tr>
                   ))
                 ) : (
@@ -5157,13 +6771,23 @@ export default function LiveTradePage() {
                     <th>{t("trade.receiptTable.source")}</th>
                   </tr>
                 </thead>
-                  <tbody>
+                <tbody>
                   {sortedTradeReceipts.length ? (
                     sortedTradeReceipts.map((receipt, index) => (
-                      <tr key={`${receipt.source}-${receipt.order_id || "na"}-${index}`}>
-                        <td>{receipt.time ? formatDateTime(receipt.time) : t("common.none")}</td>
+                      <tr
+                        key={`${receipt.source}-${receipt.order_id || "na"}-${index}`}
+                      >
+                        <td>
+                          {receipt.time
+                            ? formatDateTime(receipt.time)
+                            : t("common.none")}
+                        </td>
                         <td>{formatReceiptKind(receipt.kind)}</td>
-                        <td>{receipt.order_id ? `#${receipt.order_id}` : t("common.none")}</td>
+                        <td>
+                          {receipt.order_id
+                            ? `#${receipt.order_id}`
+                            : t("common.none")}
+                        </td>
                         <td>{receipt.client_order_id || t("common.none")}</td>
                         <td>{receipt.symbol || t("common.none")}</td>
                         <td>{formatSide(receipt.side)}</td>
@@ -5172,14 +6796,20 @@ export default function LiveTradePage() {
                         <td>{formatNumber(receipt.fill_price ?? null)}</td>
                         <td>{formatNumber(receipt.commission ?? null)}</td>
                         <td>{formatNumber(receipt.realized_pnl ?? null)}</td>
-                        <td>{receipt.status ? formatStatus(receipt.status) : t("common.none")}</td>
+                        <td>
+                          {receipt.status
+                            ? formatStatus(receipt.status)
+                            : t("common.none")}
+                        </td>
                         <td>{formatReceiptSource(receipt.source)}</td>
                       </tr>
                     ))
                   ) : (
                     <tr>
                       <td colSpan={13} className="empty-state">
-                        {receiptsLoading ? t("common.actions.loading") : t("trade.receiptsEmpty")}
+                        {receiptsLoading
+                          ? t("common.actions.loading")
+                          : t("trade.receiptsEmpty")}
                       </td>
                     </tr>
                   )}
@@ -5206,31 +6836,37 @@ export default function LiveTradePage() {
         <div className="overview-grid" style={{ marginTop: "12px" }}>
           <div className="overview-card">
             <div className="overview-label">{t("trade.host")}</div>
-            <div className="overview-value">{ibSettings?.host || t("common.none")}</div>
+            <div className="overview-value">
+              {ibSettings?.host || t("common.none")}
+            </div>
             <div className="overview-sub">
               {t("trade.port")}: {ibSettings?.port ?? t("common.none")}
             </div>
             <div className="overview-sub">
-              {t("data.ib.workstationType")}:{" "}
-              {workstationSystemName}
+              {t("data.ib.workstationType")}: {workstationSystemName}
             </div>
           </div>
           <div className="overview-card">
             <div className="overview-label">{t("trade.account")}</div>
-            <div className="overview-value">{maskAccount(ibSettings?.account_id) || t("common.none")}</div>
+            <div className="overview-value">
+              {maskAccount(ibSettings?.account_id) || t("common.none")}
+            </div>
             <div className="overview-sub">
               {t("trade.apiMode")}: {ibSettings?.api_mode || t("common.none")}
             </div>
           </div>
           <div className="overview-card">
-            <div className="overview-label">{t("trade.regulatorySnapshot")}</div>
+            <div className="overview-label">
+              {t("trade.regulatorySnapshot")}
+            </div>
             <div className="overview-value">
               {ibSettings?.use_regulatory_snapshot
                 ? t("common.boolean.true")
                 : t("common.boolean.false")}
             </div>
             <div className="overview-sub">
-              {t("common.labels.updatedAt")} {formatDateTime(ibSettings?.updated_at)}
+              {t("common.labels.updatedAt")}{" "}
+              {formatDateTime(ibSettings?.updated_at)}
             </div>
           </div>
         </div>
@@ -5266,10 +6902,14 @@ export default function LiveTradePage() {
             <select
               className="form-select"
               value={ibSettingsForm.workstation_type}
-              onChange={(e) => updateIbSettingsForm("workstation_type", e.target.value)}
+              onChange={(e) =>
+                updateIbSettingsForm("workstation_type", e.target.value)
+              }
             >
               <option value="tws">{t("data.ib.workstationTypeTws")}</option>
-              <option value="gateway">{t("data.ib.workstationTypeGateway")}</option>
+              <option value="gateway">
+                {t("data.ib.workstationTypeGateway")}
+              </option>
             </select>
             <div className="form-hint">{t("data.ib.workstationTypeHint")}</div>
           </div>
@@ -5279,7 +6919,9 @@ export default function LiveTradePage() {
               type="number"
               className="form-input"
               value={ibSettingsForm.client_id}
-              onChange={(e) => updateIbSettingsForm("client_id", e.target.value)}
+              onChange={(e) =>
+                updateIbSettingsForm("client_id", e.target.value)
+              }
             />
             <div className="form-hint">{t("data.ib.clientIdHint")}</div>
           </div>
@@ -5289,7 +6931,9 @@ export default function LiveTradePage() {
               type="text"
               className="form-input"
               value={ibSettingsForm.account_id}
-              onChange={(e) => updateIbSettingsForm("account_id", e.target.value)}
+              onChange={(e) =>
+                updateIbSettingsForm("account_id", e.target.value)
+              }
               placeholder={t("data.ib.accountIdPlaceholder")}
             />
             {ibSettings?.account_id && (
@@ -5327,31 +6971,52 @@ export default function LiveTradePage() {
             <select
               className="form-select"
               value={ibSettingsForm.market_data_type}
-              onChange={(e) => updateIbSettingsForm("market_data_type", e.target.value)}
+              onChange={(e) =>
+                updateIbSettingsForm("market_data_type", e.target.value)
+              }
             >
-              <option value="realtime">{t("data.ib.marketDataRealtime")}</option>
+              <option value="realtime">
+                {t("data.ib.marketDataRealtime")}
+              </option>
               <option value="frozen">{t("data.ib.marketDataFrozen")}</option>
               <option value="delayed">{t("data.ib.marketDataDelayed")}</option>
             </select>
             <div className="form-hint">{t("data.ib.marketDataTypeHint")}</div>
           </div>
           <div className="form-row">
-            <label className="form-label">{t("data.ib.regulatorySnapshot")}</label>
+            <label className="form-label">
+              {t("data.ib.regulatorySnapshot")}
+            </label>
             <label className="switch">
               <input
                 type="checkbox"
                 checked={ibSettingsForm.use_regulatory_snapshot}
-                onChange={(e) => updateIbSettingsForm("use_regulatory_snapshot", e.target.checked)}
+                onChange={(e) =>
+                  updateIbSettingsForm(
+                    "use_regulatory_snapshot",
+                    e.target.checked,
+                  )
+                }
               />
               <span className="slider" />
             </label>
-            <div className="form-hint">{t("data.ib.regulatorySnapshotHint")}</div>
+            <div className="form-hint">
+              {t("data.ib.regulatorySnapshotHint")}
+            </div>
           </div>
         </div>
-        {ibSettingsResult && <div className="form-success">{ibSettingsResult}</div>}
+        {ibSettingsResult && (
+          <div className="form-success">{ibSettingsResult}</div>
+        )}
         {ibSettingsError && <div className="form-error">{ibSettingsError}</div>}
-        <button className="button-secondary" onClick={saveIbSettings} disabled={ibSettingsSaving}>
-          {ibSettingsSaving ? t("common.actions.loading") : t("common.actions.save")}
+        <button
+          className="button-secondary"
+          onClick={saveIbSettings}
+          disabled={ibSettingsSaving}
+        >
+          {ibSettingsSaving
+            ? t("common.actions.loading")
+            : t("common.actions.save")}
         </button>
       </div>
     ),
@@ -5373,18 +7038,24 @@ export default function LiveTradePage() {
               </div>
             </div>
             <div className="overview-card">
-              <div className="overview-label">{t("data.ib.streamSubscribed")}</div>
+              <div className="overview-label">
+                {t("data.ib.streamSubscribed")}
+              </div>
               <div className="overview-value">{streamSymbolCount}</div>
               <div className="overview-sub">
-                {(ibStreamStatus?.subscribed_symbols || []).slice(0, 6).join(", ") ||
-                  t("common.none")}
+                {(ibStreamStatus?.subscribed_symbols || [])
+                  .slice(0, 6)
+                  .join(", ") || t("common.none")}
               </div>
             </div>
             <div className="overview-card">
-              <div className="overview-label">{t("data.ib.streamMarketDataType")}</div>
+              <div className="overview-label">
+                {t("data.ib.streamMarketDataType")}
+              </div>
               <div className="overview-value">{streamMarketDataType}</div>
               <div className="overview-sub">
-                {t("data.ib.streamErrorCount")}: {ibStreamStatus?.ib_error_count ?? 0}
+                {t("data.ib.streamErrorCount")}:{" "}
+                {ibStreamStatus?.ib_error_count ?? 0}
               </div>
             </div>
           </div>
@@ -5396,47 +7067,75 @@ export default function LiveTradePage() {
           </div>
           <div className="form-grid" style={{ marginTop: "12px" }}>
             <div className="form-row">
-              <label className="form-label">{t("data.ib.streamProjectId")}</label>
+              <label className="form-label">
+                {t("data.ib.streamProjectId")}
+              </label>
               <input
                 type="number"
                 className="form-input"
                 value={ibStreamForm.project_id}
-                onChange={(e) => updateIbStreamForm("project_id", e.target.value)}
+                onChange={(e) =>
+                  updateIbStreamForm("project_id", e.target.value)
+                }
               />
-              <div className="form-hint">{t("data.ib.streamProjectIdHint")}</div>
+              <div className="form-hint">
+                {t("data.ib.streamProjectIdHint")}
+              </div>
             </div>
             <div className="form-row">
-              <label className="form-label">{t("data.ib.streamDecisionSnapshotId")}</label>
+              <label className="form-label">
+                {t("data.ib.streamDecisionSnapshotId")}
+              </label>
               <input
                 type="number"
                 className="form-input"
                 value={ibStreamForm.decision_snapshot_id}
-                onChange={(e) => updateIbStreamForm("decision_snapshot_id", e.target.value)}
+                onChange={(e) =>
+                  updateIbStreamForm("decision_snapshot_id", e.target.value)
+                }
               />
-              <div className="form-hint">{t("data.ib.streamDecisionSnapshotIdHint")}</div>
+              <div className="form-hint">
+                {t("data.ib.streamDecisionSnapshotIdHint")}
+              </div>
             </div>
             <div className="form-row">
-              <label className="form-label">{t("data.ib.streamMaxSymbols")}</label>
+              <label className="form-label">
+                {t("data.ib.streamMaxSymbols")}
+              </label>
               <input
                 type="number"
                 className="form-input"
                 value={ibStreamForm.max_symbols}
-                onChange={(e) => updateIbStreamForm("max_symbols", e.target.value)}
+                onChange={(e) =>
+                  updateIbStreamForm("max_symbols", e.target.value)
+                }
               />
-              <div className="form-hint">{t("data.ib.streamMaxSymbolsHint")}</div>
+              <div className="form-hint">
+                {t("data.ib.streamMaxSymbolsHint")}
+              </div>
             </div>
             <div className="form-row">
-              <label className="form-label">{t("data.ib.streamMarketDataType")}</label>
+              <label className="form-label">
+                {t("data.ib.streamMarketDataType")}
+              </label>
               <select
                 className="form-select"
                 value={ibStreamForm.market_data_type}
-                onChange={(e) => updateIbStreamForm("market_data_type", e.target.value)}
+                onChange={(e) =>
+                  updateIbStreamForm("market_data_type", e.target.value)
+                }
               >
-                <option value="realtime">{t("data.ib.marketDataRealtime")}</option>
+                <option value="realtime">
+                  {t("data.ib.marketDataRealtime")}
+                </option>
                 <option value="frozen">{t("data.ib.marketDataFrozen")}</option>
-                <option value="delayed">{t("data.ib.marketDataDelayed")}</option>
+                <option value="delayed">
+                  {t("data.ib.marketDataDelayed")}
+                </option>
               </select>
-              <div className="form-hint">{t("data.ib.streamMarketDataTypeHint")}</div>
+              <div className="form-hint">
+                {t("data.ib.streamMarketDataTypeHint")}
+              </div>
             </div>
           </div>
           {ibStreamError && <div className="form-error">{ibStreamError}</div>}
@@ -5446,14 +7145,18 @@ export default function LiveTradePage() {
               onClick={startIbStream}
               disabled={ibStreamActionLoading}
             >
-              {ibStreamActionLoading ? t("common.actions.loading") : t("data.ib.streamStart")}
+              {ibStreamActionLoading
+                ? t("common.actions.loading")
+                : t("data.ib.streamStart")}
             </button>
             <button
               className="button-secondary"
               onClick={stopIbStream}
               disabled={ibStreamActionLoading}
             >
-              {ibStreamActionLoading ? t("common.actions.loading") : t("data.ib.streamStop")}
+              {ibStreamActionLoading
+                ? t("common.actions.loading")
+                : t("data.ib.streamStop")}
             </button>
           </div>
         </div>
@@ -5462,7 +7165,9 @@ export default function LiveTradePage() {
           <div className="card-meta">{t("trade.snapshotMeta")}</div>
           {renderRefreshSchedule("snapshot", "snapshot")}
           <div className="snapshot-hero" style={{ marginTop: "12px" }}>
-            <div className="snapshot-symbol">{marketSnapshotSymbol || t("trade.snapshotEmpty")}</div>
+            <div className="snapshot-symbol">
+              {marketSnapshotSymbol || t("trade.snapshotEmpty")}
+            </div>
             <div className="snapshot-price">
               {snapshotPrice == null ? "--" : snapshotPrice.toFixed(2)}
             </div>
@@ -5479,14 +7184,18 @@ export default function LiveTradePage() {
           <div className="meta-list" style={{ marginTop: "12px" }}>
             <div className="meta-row">
               <span>{t("trade.snapshotVolume")}</span>
-              <strong>{snapshotVolume == null ? "-" : snapshotVolume.toLocaleString()}</strong>
+              <strong>
+                {snapshotVolume == null ? "-" : snapshotVolume.toLocaleString()}
+              </strong>
             </div>
             <div className="meta-row">
               <span>{t("trade.snapshotUpdatedAt")}</span>
               <strong>{formatDateTime(snapshotData.timestamp)}</strong>
             </div>
           </div>
-          {marketSnapshotError && <div className="form-error">{marketSnapshotError}</div>}
+          {marketSnapshotError && (
+            <div className="form-error">{marketSnapshotError}</div>
+          )}
         </div>
         <div className="card">
           <div className="card-title">{t("data.ib.healthTitle")}</div>
@@ -5498,25 +7207,38 @@ export default function LiveTradePage() {
                 type="text"
                 className="form-input"
                 value={ibMarketHealthForm.symbols}
-                onChange={(e) => updateIbMarketHealthForm("symbols", e.target.value)}
+                onChange={(e) =>
+                  updateIbMarketHealthForm("symbols", e.target.value)
+                }
                 placeholder={t("data.ib.healthSymbolsPlaceholder")}
               />
               <div className="form-hint">{t("data.ib.healthSymbolsHint")}</div>
             </div>
             <div className="form-row">
-              <label className="form-label">{t("data.ib.healthProjectOnly")}</label>
+              <label className="form-label">
+                {t("data.ib.healthProjectOnly")}
+              </label>
               <label className="switch">
                 <input
                   type="checkbox"
                   checked={ibMarketHealthForm.use_project_symbols}
-                  onChange={(e) => updateIbMarketHealthForm("use_project_symbols", e.target.checked)}
+                  onChange={(e) =>
+                    updateIbMarketHealthForm(
+                      "use_project_symbols",
+                      e.target.checked,
+                    )
+                  }
                 />
                 <span className="slider" />
               </label>
-              <div className="form-hint">{t("data.ib.healthProjectOnlyHint")}</div>
+              <div className="form-hint">
+                {t("data.ib.healthProjectOnlyHint")}
+              </div>
             </div>
             <div className="form-row">
-              <label className="form-label">{t("data.ib.healthMinRatio")}</label>
+              <label className="form-label">
+                {t("data.ib.healthMinRatio")}
+              </label>
               <input
                 type="number"
                 step="0.05"
@@ -5524,28 +7246,41 @@ export default function LiveTradePage() {
                 max="1"
                 className="form-input"
                 value={ibMarketHealthForm.min_success_ratio}
-                onChange={(e) => updateIbMarketHealthForm("min_success_ratio", e.target.value)}
+                onChange={(e) =>
+                  updateIbMarketHealthForm("min_success_ratio", e.target.value)
+                }
               />
               <div className="form-hint">{t("data.ib.healthMinRatioHint")}</div>
             </div>
             <div className="form-row">
-              <label className="form-label">{t("data.ib.healthFallback")}</label>
+              <label className="form-label">
+                {t("data.ib.healthFallback")}
+              </label>
               <label className="switch">
                 <input
                   type="checkbox"
                   checked={ibMarketHealthForm.fallback_history}
-                  onChange={(e) => updateIbMarketHealthForm("fallback_history", e.target.checked)}
+                  onChange={(e) =>
+                    updateIbMarketHealthForm(
+                      "fallback_history",
+                      e.target.checked,
+                    )
+                  }
                 />
                 <span className="slider" />
               </label>
               <div className="form-hint">{t("data.ib.healthFallbackHint")}</div>
             </div>
             <div className="form-row">
-              <label className="form-label">{t("data.ib.healthDuration")}</label>
+              <label className="form-label">
+                {t("data.ib.healthDuration")}
+              </label>
               <select
                 className="form-select"
                 value={ibMarketHealthForm.history_duration}
-                onChange={(e) => updateIbMarketHealthForm("history_duration", e.target.value)}
+                onChange={(e) =>
+                  updateIbMarketHealthForm("history_duration", e.target.value)
+                }
               >
                 <option value="5 D">{t("data.ib.healthDuration5d")}</option>
                 <option value="30 D">{t("data.ib.healthDuration30d")}</option>
@@ -5558,7 +7293,9 @@ export default function LiveTradePage() {
               <select
                 className="form-select"
                 value={ibMarketHealthForm.history_bar_size}
-                onChange={(e) => updateIbMarketHealthForm("history_bar_size", e.target.value)}
+                onChange={(e) =>
+                  updateIbMarketHealthForm("history_bar_size", e.target.value)
+                }
               >
                 <option value="1 day">{t("data.ib.healthBarDay")}</option>
                 <option value="1 hour">{t("data.ib.healthBarHour")}</option>
@@ -5571,7 +7308,12 @@ export default function LiveTradePage() {
                 <input
                   type="checkbox"
                   checked={ibMarketHealthForm.history_use_rth}
-                  onChange={(e) => updateIbMarketHealthForm("history_use_rth", e.target.checked)}
+                  onChange={(e) =>
+                    updateIbMarketHealthForm(
+                      "history_use_rth",
+                      e.target.checked,
+                    )
+                  }
                 />
                 <span className="slider" />
               </label>
@@ -5592,13 +7334,17 @@ export default function LiveTradePage() {
               )}
             </div>
           )}
-          {ibMarketHealthError && <div className="form-error">{ibMarketHealthError}</div>}
+          {ibMarketHealthError && (
+            <div className="form-error">{ibMarketHealthError}</div>
+          )}
           <button
             className="button-secondary"
             onClick={checkIbMarketHealth}
             disabled={ibMarketHealthLoading}
           >
-            {ibMarketHealthLoading ? t("common.actions.loading") : t("data.ib.healthCheck")}
+            {ibMarketHealthLoading
+              ? t("common.actions.loading")
+              : t("data.ib.healthCheck")}
           </button>
         </div>
       </>
@@ -5609,7 +7355,9 @@ export default function LiveTradePage() {
         {renderRefreshSchedule("contracts", "contracts")}
         <div className="form-grid">
           <div className="form-row full">
-            <label className="form-label">{t("data.ib.contractsSymbols")}</label>
+            <label className="form-label">
+              {t("data.ib.contractsSymbols")}
+            </label>
             <input
               type="text"
               className="form-input"
@@ -5620,16 +7368,22 @@ export default function LiveTradePage() {
             <div className="form-hint">{t("data.ib.contractsSymbolsHint")}</div>
           </div>
           <div className="form-row">
-            <label className="form-label">{t("data.ib.contractsProjectOnly")}</label>
+            <label className="form-label">
+              {t("data.ib.contractsProjectOnly")}
+            </label>
             <label className="switch">
               <input
                 type="checkbox"
                 checked={ibContractForm.use_project_symbols}
-                onChange={(e) => updateIbContractForm("use_project_symbols", e.target.checked)}
+                onChange={(e) =>
+                  updateIbContractForm("use_project_symbols", e.target.checked)
+                }
               />
               <span className="slider" />
             </label>
-            <div className="form-hint">{t("data.ib.contractsProjectOnlyHint")}</div>
+            <div className="form-hint">
+              {t("data.ib.contractsProjectOnlyHint")}
+            </div>
           </div>
         </div>
         {ibContractResult && (
@@ -5648,7 +7402,9 @@ export default function LiveTradePage() {
           onClick={refreshIbContracts}
           disabled={ibContractLoading}
         >
-          {ibContractLoading ? t("common.actions.loading") : t("data.ib.contractsSync")}
+          {ibContractLoading
+            ? t("common.actions.loading")
+            : t("data.ib.contractsSync")}
         </button>
       </div>
     ),
@@ -5669,16 +7425,22 @@ export default function LiveTradePage() {
             <div className="form-hint">{t("data.ib.historySymbolsHint")}</div>
           </div>
           <div className="form-row">
-            <label className="form-label">{t("data.ib.historyProjectOnly")}</label>
+            <label className="form-label">
+              {t("data.ib.historyProjectOnly")}
+            </label>
             <label className="switch">
               <input
                 type="checkbox"
                 checked={ibHistoryForm.use_project_symbols}
-                onChange={(e) => updateIbHistoryForm("use_project_symbols", e.target.checked)}
+                onChange={(e) =>
+                  updateIbHistoryForm("use_project_symbols", e.target.checked)
+                }
               />
               <span className="slider" />
             </label>
-            <div className="form-hint">{t("data.ib.historyProjectOnlyHint")}</div>
+            <div className="form-hint">
+              {t("data.ib.historyProjectOnlyHint")}
+            </div>
           </div>
           <div className="form-row">
             <label className="form-label">{t("data.ib.historyDuration")}</label>
@@ -5712,7 +7474,9 @@ export default function LiveTradePage() {
               <input
                 type="checkbox"
                 checked={ibHistoryForm.use_rth}
-                onChange={(e) => updateIbHistoryForm("use_rth", e.target.checked)}
+                onChange={(e) =>
+                  updateIbHistoryForm("use_rth", e.target.checked)
+                }
               />
               <span className="slider" />
             </label>
@@ -5738,7 +7502,9 @@ export default function LiveTradePage() {
               step="0.05"
               className="form-input"
               value={ibHistoryForm.min_delay_seconds}
-              onChange={(e) => updateIbHistoryForm("min_delay_seconds", e.target.value)}
+              onChange={(e) =>
+                updateIbHistoryForm("min_delay_seconds", e.target.value)
+              }
             />
             <div className="form-hint">{t("data.ib.historyDelayHint")}</div>
           </div>
@@ -5750,7 +7516,9 @@ export default function LiveTradePage() {
             onClick={createIbHistoryJob}
             disabled={ibHistoryActionLoading}
           >
-            {ibHistoryActionLoading ? t("common.actions.loading") : t("data.ib.historyStart")}
+            {ibHistoryActionLoading
+              ? t("common.actions.loading")
+              : t("data.ib.historyStart")}
           </button>
         </div>
         {ibHistoryJobs.length > 0 ? (
@@ -5837,21 +7605,27 @@ export default function LiveTradePage() {
           <div className="overview-card">
             <div className="overview-label">{t("trade.guardEquity")}</div>
             <div className="overview-value">
-              {guardEquity !== null ? formatNumber(guardEquity) : t("common.none")}
+              {guardEquity !== null
+                ? formatNumber(guardEquity)
+                : t("common.none")}
             </div>
             <div className="overview-sub">
-              {t("trade.guardDrawdown")}: {
-                guardDrawdown !== null ? `${(guardDrawdown * 100).toFixed(2)}%` : t("common.none")
-              }
+              {t("trade.guardDrawdown")}:{" "}
+              {guardDrawdown !== null
+                ? `${(guardDrawdown * 100).toFixed(2)}%`
+                : t("common.none")}
             </div>
           </div>
           <div className="overview-card">
-            <div className="overview-label">{t("trade.guardOrderFailures")}</div>
+            <div className="overview-label">
+              {t("trade.guardOrderFailures")}
+            </div>
             <div className="overview-value">
               {guardState ? guardState.order_failures : t("common.none")}
             </div>
             <div className="overview-sub">
-              {t("trade.guardMarketErrors")}: {guardState ? guardState.market_data_errors : t("common.none")}
+              {t("trade.guardMarketErrors")}:{" "}
+              {guardState ? guardState.market_data_errors : t("common.none")}
             </div>
           </div>
           <div className="overview-card">
@@ -5860,9 +7634,10 @@ export default function LiveTradePage() {
               {guardState ? guardState.risk_triggers : t("common.none")}
             </div>
             <div className="overview-sub">
-              {t("trade.guardCooldown")}: {
-                guardState?.cooldown_until ? formatDateTime(guardState.cooldown_until) : t("common.none")
-              }
+              {t("trade.guardCooldown")}:{" "}
+              {guardState?.cooldown_until
+                ? formatDateTime(guardState.cooldown_until)
+                : t("common.none")}
             </div>
           </div>
         </div>
@@ -5889,10 +7664,13 @@ export default function LiveTradePage() {
               )}
             </div>
             <div className="overview-sub">
-              <span data-testid="paper-trade-status" data-status={latestTradeRun?.status || ""}>
+              <span
+                data-testid="paper-trade-status"
+                data-status={latestTradeRun?.status || ""}
+              >
                 {latestTradeRun
                   ? `${formatStatus(latestTradeRun.status)} · ${formatDateTime(
-                      latestTradeRun.created_at
+                      latestTradeRun.created_at,
                     )}`
                   : t("trade.runEmpty")}
               </span>
@@ -5901,15 +7679,21 @@ export default function LiveTradePage() {
           <div className="overview-card">
             <div className="overview-label">{t("trade.runMode")}</div>
             <div className="overview-value">
-              {latestTradeRun ? formatRunMode(latestTradeRun.mode) : t("common.none")}
+              {latestTradeRun
+                ? formatRunMode(latestTradeRun.mode)
+                : t("common.none")}
             </div>
             <div className="overview-sub">
               {t("trade.runProject")}
-              {latestTradeRun ? ` #${latestTradeRun.project_id}` : ` ${t("common.none")}`}
+              {latestTradeRun
+                ? ` #${latestTradeRun.project_id}`
+                : ` ${t("common.none")}`}
             </div>
           </div>
           <div className="overview-card">
-            <div className="overview-label">{t("trade.executionDataSource")}</div>
+            <div className="overview-label">
+              {t("trade.executionDataSource")}
+            </div>
             <div className="overview-value">
               {tradeSettings?.execution_data_source
                 ? tradeSettings.execution_data_source.toUpperCase()
@@ -5939,11 +7723,55 @@ export default function LiveTradePage() {
         {renderDecisionBasisBlock(executionDecisionBasis, {
           testIdPrefix: "trade-decision-basis-execution",
         })}
-        {tradeSettingsError && <div className="form-hint">{tradeSettingsError}</div>}
+        <div style={{ marginTop: "12px" }}>
+          <CoveredCallAuditPanel
+            recentItems={coveredCallRecentItems}
+            selectedReviewId={coveredCallSelectedReviewId}
+            recentQuery={coveredCallRecentQuery}
+            recentOffset={coveredCallRecentOffset}
+            recentLimit={COVERED_CALL_RECENT_LIMIT}
+            recentTotal={coveredCallRecentTotal}
+            recentHasMore={coveredCallRecentHasMore}
+            recentLoading={coveredCallRecentLoading}
+            auditLoading={coveredCallAuditLoading}
+            recentError={coveredCallRecentError}
+            auditError={coveredCallAuditError}
+            audit={coveredCallAudit}
+            onSelectReview={setCoveredCallSelectedReviewId}
+            onRecentQueryChange={(value) => {
+              setCoveredCallRecentOffset(0);
+              setCoveredCallRecentQuery(value);
+            }}
+            onPreviousPage={() => {
+              setCoveredCallRecentOffset((prev) =>
+                Math.max(0, prev - COVERED_CALL_RECENT_LIMIT),
+              );
+            }}
+            onNextPage={() => {
+              if (!coveredCallRecentHasMore) {
+                return;
+              }
+              setCoveredCallRecentOffset((prev) => prev + COVERED_CALL_RECENT_LIMIT);
+            }}
+            onRefreshRecent={() => {
+              void loadCoveredCallRecent(false);
+            }}
+            onRefreshAudit={() => {
+              if (coveredCallSelectedReviewId) {
+                void loadCoveredCallAudit(coveredCallSelectedReviewId);
+              }
+            }}
+          />
+        </div>
+        {tradeSettingsError && (
+          <div className="form-hint">{tradeSettingsError}</div>
+        )}
         {tradeError && <div className="form-hint">{tradeError}</div>}
         <div className="form-grid" style={{ marginTop: "12px" }}>
           <div className="form-row">
-            <label className="form-label">{t("trade.deadbandGlobalNotional")}</label>
+            <label className="form-label">
+              {t("trade.deadbandGlobalNotional")}
+            </label>
             <input
               className="form-input"
               type="number"
@@ -5951,13 +7779,20 @@ export default function LiveTradePage() {
               step="0.01"
               value={tradeSettingsForm.deadband_min_notional}
               onChange={(event) =>
-                updateTradeSettingsForm("deadband_min_notional", event.target.value)
+                updateTradeSettingsForm(
+                  "deadband_min_notional",
+                  event.target.value,
+                )
               }
             />
-            <div className="form-hint">{t("trade.deadbandGlobalNotionalHint")}</div>
+            <div className="form-hint">
+              {t("trade.deadbandGlobalNotionalHint")}
+            </div>
           </div>
           <div className="form-row">
-            <label className="form-label">{t("trade.deadbandGlobalWeight")}</label>
+            <label className="form-label">
+              {t("trade.deadbandGlobalWeight")}
+            </label>
             <input
               className="form-input"
               type="number"
@@ -5965,19 +7800,41 @@ export default function LiveTradePage() {
               step="0.0001"
               value={tradeSettingsForm.deadband_min_weight}
               onChange={(event) =>
-                updateTradeSettingsForm("deadband_min_weight", event.target.value)
+                updateTradeSettingsForm(
+                  "deadband_min_weight",
+                  event.target.value,
+                )
               }
             />
-            <div className="form-hint">{t("trade.deadbandGlobalWeightHint")}</div>
+            <div className="form-hint">
+              {t("trade.deadbandGlobalWeightHint")}
+            </div>
           </div>
         </div>
-        <div style={{ display: "flex", gap: "10px", flexWrap: "wrap", marginTop: "12px" }}>
-          <button className="button-secondary" onClick={saveTradeSettings} disabled={tradeSettingsSaving}>
-            {tradeSettingsSaving ? t("common.actions.loading") : t("trade.tradeSettingsSave")}
+        <div
+          style={{
+            display: "flex",
+            gap: "10px",
+            flexWrap: "wrap",
+            marginTop: "12px",
+          }}
+        >
+          <button
+            className="button-secondary"
+            onClick={saveTradeSettings}
+            disabled={tradeSettingsSaving}
+          >
+            {tradeSettingsSaving
+              ? t("common.actions.loading")
+              : t("trade.tradeSettingsSave")}
           </button>
         </div>
-        {tradeSettingsSaveError && <div className="form-hint">{tradeSettingsSaveError}</div>}
-        {tradeSettingsSaveResult && <div className="form-hint">{tradeSettingsSaveResult}</div>}
+        {tradeSettingsSaveError && (
+          <div className="form-hint">{tradeSettingsSaveError}</div>
+        )}
+        {tradeSettingsSaveResult && (
+          <div className="form-hint">{tradeSettingsSaveResult}</div>
+        )}
         <div className="table-scroll" style={{ marginTop: "12px" }}>
           <table className="table" data-testid="trade-runs-table">
             <thead>
@@ -6000,7 +7857,10 @@ export default function LiveTradePage() {
                     <td>{formatRunMode(run.mode)}</td>
                     <td>
                       {run.decision_snapshot_id ? (
-                        <IdChip label={t("trade.id.snapshot")} value={run.decision_snapshot_id} />
+                        <IdChip
+                          label={t("trade.id.snapshot")}
+                          value={run.decision_snapshot_id}
+                        />
                       ) : (
                         t("common.none")
                       )}
@@ -6020,7 +7880,9 @@ export default function LiveTradePage() {
         </div>
         <div className="form-grid" style={{ marginTop: "12px" }}>
           <div className="form-row">
-            <label className="form-label">{t("trade.deadbandRunNotional")}</label>
+            <label className="form-label">
+              {t("trade.deadbandRunNotional")}
+            </label>
             <input
               className="form-input"
               type="number"
@@ -6032,7 +7894,9 @@ export default function LiveTradePage() {
               }
               placeholder={t("trade.deadbandRunPlaceholder")}
             />
-            <div className="form-hint">{t("trade.deadbandRunNotionalHint")}</div>
+            <div className="form-hint">
+              {t("trade.deadbandRunNotionalHint")}
+            </div>
           </div>
           <div className="form-row">
             <label className="form-label">{t("trade.deadbandRunWeight")}</label>
@@ -6050,14 +7914,23 @@ export default function LiveTradePage() {
             <div className="form-hint">{t("trade.deadbandRunWeightHint")}</div>
           </div>
         </div>
-        <div style={{ display: "flex", gap: "10px", flexWrap: "wrap", marginTop: "12px" }}>
+        <div
+          style={{
+            display: "flex",
+            gap: "10px",
+            flexWrap: "wrap",
+            marginTop: "12px",
+          }}
+        >
           <button
             className="button-secondary"
             onClick={createTradeRun}
             disabled={createRunLoading || !selectedProjectId}
             data-testid="paper-trade-create"
           >
-            {createRunLoading ? t("common.actions.loading") : t("trade.createRun")}
+            {createRunLoading
+              ? t("common.actions.loading")
+              : t("trade.createRun")}
           </button>
         </div>
         {createRunError && <div className="form-hint">{createRunError}</div>}
@@ -6095,11 +7968,15 @@ export default function LiveTradePage() {
             </div>
             <div className="meta-row">
               <span>{t("trade.runProgressStage")}</span>
-              <strong>{activeTradeRun.progress_stage || t("common.none")}</strong>
+              <strong>
+                {activeTradeRun.progress_stage || t("common.none")}
+              </strong>
             </div>
             <div className="meta-row">
               <span>{t("trade.runProgressReason")}</span>
-              <strong>{activeTradeRun.progress_reason || t("common.none")}</strong>
+              <strong>
+                {activeTradeRun.progress_reason || t("common.none")}
+              </strong>
             </div>
             {activeTradeRun.status === "stalled" ? (
               <>
@@ -6113,7 +7990,9 @@ export default function LiveTradePage() {
                 </div>
                 <div className="meta-row">
                   <span>{t("trade.runStalledReason")}</span>
-                  <strong>{activeTradeRun.stalled_reason || t("common.none")}</strong>
+                  <strong>
+                    {activeTradeRun.stalled_reason || t("common.none")}
+                  </strong>
                 </div>
               </>
             ) : null}
@@ -6147,21 +8026,27 @@ export default function LiveTradePage() {
             onClick={() => handleRunAction("sync")}
             disabled={runActionLoading || !activeTradeRun}
           >
-            {runActionLoading ? t("common.actions.loading") : t("trade.runAction.sync")}
+            {runActionLoading
+              ? t("common.actions.loading")
+              : t("trade.runAction.sync")}
           </button>
           <button
             className="button-secondary"
             onClick={() => handleRunAction("resume")}
             disabled={runActionLoading || !canResumeRun}
           >
-            {runActionLoading ? t("common.actions.loading") : t("trade.runAction.resume")}
+            {runActionLoading
+              ? t("common.actions.loading")
+              : t("trade.runAction.resume")}
           </button>
           <button
             className="danger-button"
             onClick={() => handleRunAction("terminate")}
             disabled={runActionLoading || !canTerminateRun}
           >
-            {runActionLoading ? t("common.actions.loading") : t("trade.runAction.terminate")}
+            {runActionLoading
+              ? t("common.actions.loading")
+              : t("trade.runAction.terminate")}
           </button>
         </div>
         {runActionError && (
@@ -6178,7 +8063,10 @@ export default function LiveTradePage() {
           <div className="meta-row" style={{ alignItems: "flex-start" }}>
             <span>{t("trade.executeContext")}</span>
             <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-              <IdChip label={t("trade.id.project")} value={selectedProjectId || null} />
+              <IdChip
+                label={t("trade.id.project")}
+                value={selectedProjectId || null}
+              />
               <IdChip label={t("trade.id.snapshot")} value={snapshot?.id} />
               <IdChip label={t("trade.id.run")} value={latestTradeRun?.id} />
             </div>
@@ -6191,7 +8079,9 @@ export default function LiveTradePage() {
               type="number"
               className="form-input"
               value={executeForm.run_id}
-              onChange={(event) => updateExecuteForm("run_id", event.target.value)}
+              onChange={(event) =>
+                updateExecuteForm("run_id", event.target.value)
+              }
               data-testid="paper-trade-run-id"
             />
             <div className="form-hint">{t("trade.executeRunIdHint")}</div>
@@ -6203,7 +8093,9 @@ export default function LiveTradePage() {
               className="form-input"
               value={executeForm.live_confirm_token}
               placeholder={t("trade.executeTokenHint")}
-              onChange={(event) => updateExecuteForm("live_confirm_token", event.target.value)}
+              onChange={(event) =>
+                updateExecuteForm("live_confirm_token", event.target.value)
+              }
             />
             <div className="form-hint">{t("trade.executeTokenHint")}</div>
           </div>
@@ -6215,7 +8107,9 @@ export default function LiveTradePage() {
             disabled={executeLoading || !canExecute}
             data-testid="paper-trade-execute"
           >
-            {executeLoading ? t("common.actions.loading") : t("trade.executeSubmit")}
+            {executeLoading
+              ? t("common.actions.loading")
+              : t("trade.executeSubmit")}
           </button>
         </div>
         {gatewayTradeBlockState ? (
@@ -6226,9 +8120,9 @@ export default function LiveTradePage() {
           !canExecute &&
           selectedProjectId &&
           !snapshotError && (
-          <div className="form-hint" style={{ marginTop: "8px" }}>
-            {t("trade.executeBlockedSnapshot")}
-          </div>
+            <div className="form-hint" style={{ marginTop: "8px" }}>
+              {t("trade.executeBlockedSnapshot")}
+            </div>
           )
         )}
         {executeError && (
@@ -6253,17 +8147,24 @@ export default function LiveTradePage() {
           <div className="meta-row">
             <span>{t("trade.symbolSummaryUpdatedAt")}</span>
             <strong>
-              {symbolSummaryUpdatedAt ? formatDateTime(symbolSummaryUpdatedAt) : t("common.none")}
+              {symbolSummaryUpdatedAt
+                ? formatDateTime(symbolSummaryUpdatedAt)
+                : t("common.none")}
             </strong>
           </div>
           <div className="meta-row">
             <span>{t("trade.symbolSummaryCount")}</span>
-            <strong data-testid="trade-symbol-summary-count">{symbolSummary.length}</strong>
+            <strong data-testid="trade-symbol-summary-count">
+              {symbolSummary.length}
+            </strong>
           </div>
         </div>
-        {renderDecisionBasisBlock(activeRunDecisionBasis || executionDecisionBasis, {
-          testIdPrefix: "trade-decision-basis-symbol",
-        })}
+        {renderDecisionBasisBlock(
+          activeRunDecisionBasis || executionDecisionBasis,
+          {
+            testIdPrefix: "trade-decision-basis-symbol",
+          },
+        )}
         {runRiskAudit ? (
           <div className="symbol-summary-audit">
             <div className="symbol-summary-audit-grid">
@@ -6281,11 +8182,15 @@ export default function LiveTradePage() {
               </div>
               <div className="symbol-summary-audit-item">
                 <span>{t("trade.riskAuditEquitySource")}</span>
-                <strong>{runRiskAudit.equity_source || t("common.none")}</strong>
+                <strong>
+                  {runRiskAudit.equity_source || t("common.none")}
+                </strong>
               </div>
               <div className="symbol-summary-audit-item">
                 <span>{t("trade.riskAuditCashflow")}</span>
-                <strong>{formatNumber(runRiskAudit.cashflow_adjustment ?? null, 2)}</strong>
+                <strong>
+                  {formatNumber(runRiskAudit.cashflow_adjustment ?? null, 2)}
+                </strong>
               </div>
               <div className="symbol-summary-audit-item">
                 <span>{t("trade.riskAuditDdAll")}</span>
@@ -6304,7 +8209,10 @@ export default function LiveTradePage() {
                 <strong>
                   {runRiskAuditCurrencyPnl.length
                     ? runRiskAuditCurrencyPnl
-                        .map(([currency, value]) => `${currency}: ${formatNumber(value, 2)}`)
+                        .map(
+                          ([currency, value]) =>
+                            `${currency}: ${formatNumber(value, 2)}`,
+                        )
                         .join(" · ")
                     : t("common.none")}
                 </strong>
@@ -6317,15 +8225,21 @@ export default function LiveTradePage() {
               </details>
               <details className="symbol-summary-detail">
                 <summary>{t("trade.riskAuditThresholds")}</summary>
-                <pre className="pipeline-drawer-json">{runRiskAuditThresholds}</pre>
+                <pre className="pipeline-drawer-json">
+                  {runRiskAuditThresholds}
+                </pre>
               </details>
               <details className="symbol-summary-detail">
                 <summary>{t("trade.riskAuditTriggers")}</summary>
-                <pre className="pipeline-drawer-json">{runRiskAuditTriggers}</pre>
+                <pre className="pipeline-drawer-json">
+                  {runRiskAuditTriggers}
+                </pre>
               </details>
               <details className="symbol-summary-detail">
                 <summary>{t("trade.riskAuditGuardState")}</summary>
-                <pre className="pipeline-drawer-json">{runRiskAuditGuardState}</pre>
+                <pre className="pipeline-drawer-json">
+                  {runRiskAuditGuardState}
+                </pre>
               </details>
             </div>
           </div>
@@ -6334,7 +8248,10 @@ export default function LiveTradePage() {
           className="table-scroll symbol-summary-table-scroll"
           data-testid="trade-symbol-summary-scroll"
         >
-          <table className="table table-compact" data-testid="trade-symbol-summary-table">
+          <table
+            className="table table-compact"
+            data-testid="trade-symbol-summary-table"
+          >
             <thead>
               <tr>
                 <th>{t("trade.symbolTable.symbol")}</th>
@@ -6360,13 +8277,22 @@ export default function LiveTradePage() {
                     <td>{formatNumber(row.current_value ?? null)}</td>
                     <td>{formatNumber(row.delta_value ?? null)}</td>
                     <td>{formatNumber(row.current_qty ?? null, 2)}</td>
-                    <td>{row.last_status ? formatStatus(row.last_status) : t("common.none")}</td>
+                    <td>
+                      {row.last_status
+                        ? formatStatus(row.last_status)
+                        : t("common.none")}
+                    </td>
                   </tr>
                 ))
               ) : (
                 <tr>
-                  <td colSpan={9} className="empty-state symbol-summary-table-empty">
-                    {detailLoading ? t("common.actions.loading") : t("trade.symbolSummaryEmpty")}
+                  <td
+                    colSpan={9}
+                    className="empty-state symbol-summary-table-empty"
+                  >
+                    {detailLoading
+                      ? t("common.actions.loading")
+                      : t("trade.symbolSummaryEmpty")}
                   </td>
                 </tr>
               )}
@@ -6382,13 +8308,17 @@ export default function LiveTradePage() {
       <div className="content">
         <div className="project-tabs">
           <button
-            className={mainTab === "overview" ? "tab-button active" : "tab-button"}
+            className={
+              mainTab === "overview" ? "tab-button active" : "tab-button"
+            }
             onClick={() => setMainTab("overview")}
           >
             {t("trade.mainSectionTitle")}
           </button>
           <button
-            className={mainTab === "pipeline" ? "tab-button active" : "tab-button"}
+            className={
+              mainTab === "pipeline" ? "tab-button active" : "tab-button"
+            }
             onClick={() => setMainTab("pipeline")}
           >
             {t("trade.pipelineTab")}
@@ -6403,13 +8333,17 @@ export default function LiveTradePage() {
             <div className="card-meta">{t("trade.pipelineMeta")}</div>
             <div className="form-grid" style={{ marginTop: "12px" }}>
               <div className="form-row">
-                <label className="form-label">{t("trade.pipeline.filters.project")}</label>
+                <label className="form-label">
+                  {t("trade.pipeline.filters.project")}
+                </label>
                 <select
                   className="form-select"
                   value={selectedProjectId}
                   onChange={(event) => setSelectedProjectId(event.target.value)}
                 >
-                  <option value="">{t("trade.projectSelectPlaceholder")}</option>
+                  <option value="">
+                    {t("trade.projectSelectPlaceholder")}
+                  </option>
                   {projects.map((project) => (
                     <option key={project.id} value={project.id}>
                       #{project.id} · {project.name}
@@ -6418,11 +8352,15 @@ export default function LiveTradePage() {
                 </select>
               </div>
               <div className="form-row">
-                <label className="form-label">{t("trade.pipeline.filters.type")}</label>
+                <label className="form-label">
+                  {t("trade.pipeline.filters.type")}
+                </label>
                 <select
                   className="form-select"
                   value={pipelineTypeFilter}
-                  onChange={(event) => setPipelineTypeFilter(event.target.value)}
+                  onChange={(event) =>
+                    setPipelineTypeFilter(event.target.value)
+                  }
                 >
                   <option value="">{t("trade.pipeline.filters.all")}</option>
                   {pipelineTypeOptions.map((item) => (
@@ -6433,11 +8371,15 @@ export default function LiveTradePage() {
                 </select>
               </div>
               <div className="form-row">
-                <label className="form-label">{t("trade.pipeline.filters.status")}</label>
+                <label className="form-label">
+                  {t("trade.pipeline.filters.status")}
+                </label>
                 <select
                   className="form-select"
                   value={pipelineStatusFilter}
-                  onChange={(event) => setPipelineStatusFilter(event.target.value)}
+                  onChange={(event) =>
+                    setPipelineStatusFilter(event.target.value)
+                  }
                 >
                   <option value="">{t("trade.pipeline.filters.all")}</option>
                   {pipelineStatusOptions.map((item) => (
@@ -6448,11 +8390,15 @@ export default function LiveTradePage() {
                 </select>
               </div>
               <div className="form-row">
-                <label className="form-label">{t("trade.pipeline.filters.mode")}</label>
+                <label className="form-label">
+                  {t("trade.pipeline.filters.mode")}
+                </label>
                 <select
                   className="form-select"
                   value={pipelineModeFilter}
-                  onChange={(event) => setPipelineModeFilter(event.target.value)}
+                  onChange={(event) =>
+                    setPipelineModeFilter(event.target.value)
+                  }
                 >
                   <option value="">{t("trade.pipeline.filters.all")}</option>
                   {pipelineModeOptions.map((item) => (
@@ -6463,7 +8409,9 @@ export default function LiveTradePage() {
                 </select>
               </div>
               <div className="form-row">
-                <label className="form-label">{t("trade.pipeline.filters.dateFrom")}</label>
+                <label className="form-label">
+                  {t("trade.pipeline.filters.dateFrom")}
+                </label>
                 <input
                   type="date"
                   className="form-input"
@@ -6472,7 +8420,9 @@ export default function LiveTradePage() {
                 />
               </div>
               <div className="form-row">
-                <label className="form-label">{t("trade.pipeline.filters.dateTo")}</label>
+                <label className="form-label">
+                  {t("trade.pipeline.filters.dateTo")}
+                </label>
                 <input
                   type="date"
                   className="form-input"
@@ -6481,7 +8431,9 @@ export default function LiveTradePage() {
                 />
               </div>
               <div className="form-row">
-                <label className="form-label">{t("trade.pipeline.filters.keyword")}</label>
+                <label className="form-label">
+                  {t("trade.pipeline.filters.keyword")}
+                </label>
                 <input
                   className="form-input pipeline-keyword-input"
                   value={pipelineKeyword}
@@ -6490,13 +8442,17 @@ export default function LiveTradePage() {
                 />
               </div>
             </div>
-            {pipelineRunsError && <div className="form-hint">{pipelineRunsError}</div>}
+            {pipelineRunsError && (
+              <div className="form-hint">{pipelineRunsError}</div>
+            )}
             {pipelineRunsLoading && (
               <div className="form-hint">{t("common.actions.loading")}</div>
             )}
             <div className="pipeline-run-list">
               {!selectedProjectId ? (
-                <div className="empty-state">{t("trade.pipeline.projectRequired")}</div>
+                <div className="empty-state">
+                  {t("trade.pipeline.projectRequired")}
+                </div>
               ) : filteredPipelineRuns.length ? (
                 filteredPipelineRuns.map((item) => (
                   <button
@@ -6511,12 +8467,16 @@ export default function LiveTradePage() {
                   >
                     <div className="pipeline-run-title">
                       <span>{item.run_type}</span>
-                      <span className="pipeline-run-status">{formatStatus(item.status)}</span>
+                      <span className="pipeline-run-status">
+                        {formatStatus(item.status)}
+                      </span>
                     </div>
                     <div className="pipeline-run-meta">
                       <span>{item.trace_id}</span>
                       <span>
-                        {item.created_at ? formatDateTime(item.created_at) : t("common.none")}
+                        {item.created_at
+                          ? formatDateTime(item.created_at)
+                          : t("common.none")}
                       </span>
                     </div>
                   </button>
@@ -6529,31 +8489,49 @@ export default function LiveTradePage() {
           <div className="pipeline-detail">
             <div className="card-title">{t("trade.pipeline.detailTitle")}</div>
             <div className="card-meta">{t("trade.pipeline.detailMeta")}</div>
-            {pipelineDetailError && <div className="form-hint">{pipelineDetailError}</div>}
-            {pipelineActionError && <div className="form-hint">{pipelineActionError}</div>}
-            {pipelineActionResult && <div className="form-success">{pipelineActionResult}</div>}
+            {pipelineDetailError && (
+              <div className="form-hint">{pipelineDetailError}</div>
+            )}
+            {pipelineActionError && (
+              <div className="form-hint">{pipelineActionError}</div>
+            )}
+            {pipelineActionResult && (
+              <div className="form-success">{pipelineActionResult}</div>
+            )}
             {pipelineDetailLoading && (
               <div className="form-hint">{t("common.actions.loading")}</div>
             )}
             <div className="pipeline-stage-lanes">
               <div className="pipeline-stage-lane">
-                <div className="pipeline-stage-title">{t("trade.pipeline.stages.data")}</div>
+                <div className="pipeline-stage-title">
+                  {t("trade.pipeline.stages.data")}
+                </div>
               </div>
               <div className="pipeline-stage-lane">
-                <div className="pipeline-stage-title">{t("trade.pipeline.stages.snapshot")}</div>
+                <div className="pipeline-stage-title">
+                  {t("trade.pipeline.stages.snapshot")}
+                </div>
               </div>
               <div className="pipeline-stage-lane">
-                <div className="pipeline-stage-title">{t("trade.pipeline.stages.pretrade")}</div>
+                <div className="pipeline-stage-title">
+                  {t("trade.pipeline.stages.pretrade")}
+                </div>
               </div>
               <div className="pipeline-stage-lane">
-                <div className="pipeline-stage-title">{t("trade.pipeline.stages.trade")}</div>
+                <div className="pipeline-stage-title">
+                  {t("trade.pipeline.stages.trade")}
+                </div>
               </div>
               <div className="pipeline-stage-lane">
-                <div className="pipeline-stage-title">{t("trade.pipeline.stages.audit")}</div>
+                <div className="pipeline-stage-title">
+                  {t("trade.pipeline.stages.audit")}
+                </div>
               </div>
             </div>
             <div className="pipeline-event-drawer">
-              <div className="pipeline-drawer-title">{t("trade.pipeline.drawerTitle")}</div>
+              <div className="pipeline-drawer-title">
+                {t("trade.pipeline.drawerTitle")}
+              </div>
               {pipelineSelectedEvent ? (
                 <div className="pipeline-drawer-body">
                   <div className="meta-list" style={{ marginTop: "8px" }}>
@@ -6563,7 +8541,9 @@ export default function LiveTradePage() {
                     </div>
                     <div className="meta-row">
                       <span>{t("trade.pipeline.drawerLabelId")}</span>
-                      <strong>{pipelineSelectedEvent.task_id ?? t("common.none")}</strong>
+                      <strong>
+                        {pipelineSelectedEvent.task_id ?? t("common.none")}
+                      </strong>
                     </div>
                     <div className="meta-row">
                       <span>{t("trade.pipeline.drawerLabelStatus")}</span>
@@ -6575,11 +8555,15 @@ export default function LiveTradePage() {
                     </div>
                     <div className="meta-row">
                       <span>{t("trade.pipeline.drawerLabelError")}</span>
-                      <strong>{pipelineSelectedEvent.error_code || t("common.none")}</strong>
+                      <strong>
+                        {pipelineSelectedEvent.error_code || t("common.none")}
+                      </strong>
                     </div>
                     <div className="meta-row">
                       <span>{t("trade.pipeline.drawerLabelLog")}</span>
-                      <strong>{pipelineSelectedEvent.log_path || t("common.none")}</strong>
+                      <strong>
+                        {pipelineSelectedEvent.log_path || t("common.none")}
+                      </strong>
                     </div>
                     <div className="meta-row">
                       <span>{t("trade.pipeline.drawerLabelTags")}</span>
@@ -6592,20 +8576,33 @@ export default function LiveTradePage() {
                   </div>
                   {pipelineSelectedEvent.params_snapshot ? (
                     <pre className="pipeline-drawer-json">
-                      {JSON.stringify(pipelineSelectedEvent.params_snapshot, null, 2)}
+                      {JSON.stringify(
+                        pipelineSelectedEvent.params_snapshot,
+                        null,
+                        2,
+                      )}
                     </pre>
                   ) : null}
                   {pipelineSelectedEvent.artifact_paths ? (
                     <pre className="pipeline-drawer-json">
-                      {JSON.stringify(pipelineSelectedEvent.artifact_paths, null, 2)}
+                      {JSON.stringify(
+                        pipelineSelectedEvent.artifact_paths,
+                        null,
+                        2,
+                      )}
                     </pre>
                   ) : null}
                 </div>
               ) : (
-                <div className="pipeline-drawer-empty">{t("trade.pipeline.drawerEmpty")}</div>
+                <div className="pipeline-drawer-empty">
+                  {t("trade.pipeline.drawerEmpty")}
+                </div>
               )}
             </div>
-            <span className="pipeline-event-highlight" style={{ display: "none" }} />
+            <span
+              className="pipeline-event-highlight"
+              style={{ display: "none" }}
+            />
             <div className="pipeline-events">
               {pipelineDetail?.events?.length ? (
                 pipelineDetail.events.map((event) => {
@@ -6613,7 +8610,7 @@ export default function LiveTradePage() {
                   const isHighlighted =
                     pipelineKeywordValue.length > 0 &&
                     eventTags.some((tag) =>
-                      String(tag).toLowerCase().includes(pipelineKeywordValue)
+                      String(tag).toLowerCase().includes(pipelineKeywordValue),
                     );
                   const canRetryStep =
                     event.task_type === "pretrade_step" &&
@@ -6642,7 +8639,9 @@ export default function LiveTradePage() {
                       <div className="pipeline-event-meta">
                         <span>{event.message || t("common.none")}</span>
                         <span>
-                          {event.started_at ? formatDateTime(event.started_at) : t("common.none")}
+                          {event.started_at
+                            ? formatDateTime(event.started_at)
+                            : t("common.none")}
                         </span>
                       </div>
                       {(canRetryStep || canResumeRun || canExecuteTrade) && (
@@ -6651,10 +8650,18 @@ export default function LiveTradePage() {
                             <button
                               type="button"
                               className="button-secondary button-compact"
-                              disabled={pipelineActionLoading[`pretrade-step-${event.task_id}`]}
-                              onClick={() => retryPipelineStep(event.task_id as number)}
+                              disabled={
+                                pipelineActionLoading[
+                                  `pretrade-step-${event.task_id}`
+                                ]
+                              }
+                              onClick={() =>
+                                retryPipelineStep(event.task_id as number)
+                              }
                             >
-                              {pipelineActionLoading[`pretrade-step-${event.task_id}`]
+                              {pipelineActionLoading[
+                                `pretrade-step-${event.task_id}`
+                              ]
                                 ? t("common.actions.loading")
                                 : t("trade.pipeline.actions.retryStep")}
                             </button>
@@ -6665,13 +8672,17 @@ export default function LiveTradePage() {
                               className="button-secondary button-compact"
                               disabled={
                                 pipelinePretradeRunId
-                                  ? pipelineActionLoading[`pretrade-run-${pipelinePretradeRunId}`]
+                                  ? pipelineActionLoading[
+                                      `pretrade-run-${pipelinePretradeRunId}`
+                                    ]
                                   : false
                               }
                               onClick={resumePipelineRun}
                             >
                               {pipelinePretradeRunId &&
-                              pipelineActionLoading[`pretrade-run-${pipelinePretradeRunId}`]
+                              pipelineActionLoading[
+                                `pretrade-run-${pipelinePretradeRunId}`
+                              ]
                                 ? t("common.actions.loading")
                                 : t("trade.pipeline.actions.resumeRun")}
                             </button>
@@ -6681,12 +8692,17 @@ export default function LiveTradePage() {
                               type="button"
                               className="button-secondary button-compact"
                               disabled={
-                                pipelineActionLoading[`trade-run-${event.task_id}`] ||
-                                Boolean(gatewayTradeBlockState)
+                                pipelineActionLoading[
+                                  `trade-run-${event.task_id}`
+                                ] || Boolean(gatewayTradeBlockState)
                               }
-                              onClick={() => executePipelineTrade(event.task_id as number)}
+                              onClick={() =>
+                                executePipelineTrade(event.task_id as number)
+                              }
                             >
-                              {pipelineActionLoading[`trade-run-${event.task_id}`]
+                              {pipelineActionLoading[
+                                `trade-run-${event.task_id}`
+                              ]
                                 ? t("common.actions.loading")
                                 : t("trade.pipeline.actions.executeTrade")}
                             </button>
@@ -6697,14 +8713,23 @@ export default function LiveTradePage() {
                   );
                 })
               ) : (
-                <div className="empty-state">{t("trade.pipeline.detailEmpty")}</div>
+                <div className="empty-state">
+                  {t("trade.pipeline.detailEmpty")}
+                </div>
               )}
             </div>
           </div>
         </div>
         <div style={{ display: mainTab === "overview" ? "block" : "none" }}>
           <div className="section-title">{t("trade.mainSectionTitle")}</div>
-          <div style={{ display: "flex", gap: "16px", flexWrap: "wrap", alignItems: "center" }}>
+          <div
+            style={{
+              display: "flex",
+              gap: "16px",
+              flexWrap: "wrap",
+              alignItems: "center",
+            }}
+          >
             <button
               className="button-primary"
               data-testid="live-trade-refresh-all"
@@ -6719,13 +8744,17 @@ export default function LiveTradePage() {
                 <input
                   type="checkbox"
                   checked={autoRefreshEnabled}
-                  onChange={(event) => setAutoRefreshEnabled(event.target.checked)}
+                  onChange={(event) =>
+                    setAutoRefreshEnabled(event.target.checked)
+                  }
                   data-testid="live-trade-auto-toggle"
                 />
                 <span className="slider" />
               </label>
               <strong data-testid="auto-refresh-status">
-                {autoRefreshEnabled ? t("trade.autoUpdateOn") : t("trade.autoUpdateOff")}
+                {autoRefreshEnabled
+                  ? t("trade.autoUpdateOn")
+                  : t("trade.autoUpdateOff")}
               </strong>
             </div>
           </div>
@@ -6738,7 +8767,10 @@ export default function LiveTradePage() {
             {sections.main.map((key) => {
               if (key === "guard") {
                 return (
-                  <div key="execution-guard" className="span-2 live-trade-execution-row">
+                  <div
+                    key="execution-guard"
+                    className="span-2 live-trade-execution-row"
+                  >
                     {sectionCards.execution}
                     {sectionCards.guard}
                   </div>

@@ -670,6 +670,22 @@ def _coerce_summary_numeric(value: object) -> float | None:
     return float(parsed)
 
 
+def _select_cash_available(items: dict[str, object]) -> tuple[float | None, str | None]:
+    cash_candidates: list[tuple[str, float]] = []
+    for key in ("CashBalance", "TotalCashValue"):
+        value = _coerce_summary_numeric(items.get(key))
+        if value is not None:
+            cash_candidates.append((key, value))
+    if cash_candidates:
+        selected_key, selected_value = min(cash_candidates, key=lambda item: item[1])
+        return selected_value, selected_key
+
+    available_funds = _coerce_summary_numeric(items.get("AvailableFunds"))
+    if available_funds is not None:
+        return available_funds, "AvailableFunds"
+    return None, None
+
+
 def _build_quote_price_map_for_summary(raw_items: list[dict[str, object]]) -> dict[str, float]:
     prices: dict[str, float] = {}
     for item in raw_items:
@@ -2304,12 +2320,8 @@ def fetch_account_summary(session) -> dict[str, float | str | None]:
     mode = settings_row.mode or "paper"
     summary = get_account_summary(session, mode=mode, full=False, force_refresh=False)
     items = summary.get("items") if isinstance(summary.get("items"), dict) else {}
-    cash_available = items.get("AvailableFunds") or items.get("CashBalance") or items.get("TotalCashValue")
-    if isinstance(cash_available, str):
-        try:
-            cash_available = float(cash_available)
-        except ValueError:
-            pass
+    cash_available, cash_available_source = _select_cash_available(items)
     output: dict[str, float | str | None] = dict(items)
     output["cash_available"] = cash_available
+    output["cash_available_source"] = cash_available_source
     return output

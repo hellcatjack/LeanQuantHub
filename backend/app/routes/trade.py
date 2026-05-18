@@ -41,6 +41,22 @@ from app.schemas import (
     TradeGuardStateOut,
     TradeSymbolSummaryOut,
     TradeSymbolSummaryPageOut,
+    CoveredCallExecutionPrepareRequest,
+    CoveredCallExecutionPrepareOut,
+    CoveredCallReviewRequest,
+    CoveredCallReviewOut,
+    CoveredCallReceiptRequest,
+    CoveredCallReceiptOut,
+    CoveredCallAuditRequest,
+    CoveredCallAuditOut,
+    CoveredCallAuditRecentRequest,
+    CoveredCallAuditRecentOut,
+    CoveredCallTimelineRequest,
+    CoveredCallTimelineOut,
+    CoveredCallSubmitRequest,
+    CoveredCallSubmitOut,
+    CoveredCallPilotRequest,
+    CoveredCallPilotOut,
 )
 from app.services.audit_log import record_audit
 from app.services.ib_market import check_market_health
@@ -69,6 +85,14 @@ from app.services import trade_executor
 from app.services.trade_run_summary import build_last_update_at, build_symbol_summary, build_trade_run_detail
 from app.services.trade_run_progress import update_trade_run_progress
 from app.services.trade_strategy_snapshot import build_trade_strategy_snapshot
+from app.services.covered_call_execution import prepare_covered_call_execution
+from app.services.covered_call_review import build_covered_call_review
+from app.services.covered_call_pilot import run_covered_call_pilot
+from app.services.covered_call_audit import build_covered_call_audit
+from app.services.covered_call_audit_recent import list_covered_call_audit_recent
+from app.services.covered_call_receipt import build_covered_call_receipt
+from app.services.covered_call_submit import build_covered_call_submit
+from app.services.covered_call_timeline import build_covered_call_timeline
 
 router = APIRouter(prefix="/api/trade", tags=["trade"])
 logger = logging.getLogger("uvicorn.error")
@@ -558,6 +582,100 @@ def get_trade_run_detail(
             risk_audit=risk_audit,
             decision_basis=decision_basis,
         )
+
+
+@router.post("/options/covered-call/pilot", response_model=CoveredCallPilotOut)
+def run_covered_call_pilot_route(payload: CoveredCallPilotRequest):
+    with get_session() as session:
+        try:
+            return run_covered_call_pilot(session, payload)
+        except ValueError as exc:
+            detail = str(exc)
+            status_code = 400 if detail in {"paper_only", "dry_run_only"} else 409
+            raise HTTPException(status_code=status_code, detail=detail) from exc
+
+
+@router.post("/options/covered-call/prepare", response_model=CoveredCallExecutionPrepareOut)
+def prepare_covered_call_execution_route(payload: CoveredCallExecutionPrepareRequest):
+    with get_session() as session:
+        try:
+            return prepare_covered_call_execution(session, payload)
+        except ValueError as exc:
+            detail = str(exc)
+            status_code = 400 if detail in {"paper_only", "dry_run_only", "symbol_required"} else 409
+            raise HTTPException(status_code=status_code, detail=detail) from exc
+
+
+@router.post("/options/covered-call/review", response_model=CoveredCallReviewOut)
+def build_covered_call_review_route(payload: CoveredCallReviewRequest):
+    with get_session() as session:
+        try:
+            return build_covered_call_review(session, payload)
+        except ValueError as exc:
+            detail = str(exc)
+            status_code = 400 if detail in {"paper_only", "dry_run_only", "symbol_required"} else 409
+            raise HTTPException(status_code=status_code, detail=detail) from exc
+
+
+@router.post("/options/covered-call/submit", response_model=CoveredCallSubmitOut)
+def submit_covered_call_route(payload: CoveredCallSubmitRequest):
+    with get_session() as session:
+        try:
+            return build_covered_call_submit(session, payload)
+        except ValueError as exc:
+            detail = str(exc)
+            status_code = 400 if detail in {
+                "paper_only",
+                "real_submit_required",
+                "symbol_required",
+                "review_id_required",
+                "approval_token_required",
+            } else 409
+            raise HTTPException(status_code=status_code, detail=detail) from exc
+
+
+@router.post("/options/covered-call/receipt", response_model=CoveredCallReceiptOut)
+def get_covered_call_receipt_route(payload: CoveredCallReceiptRequest):
+    with get_session() as session:
+        try:
+            return build_covered_call_receipt(session, payload)
+        except ValueError as exc:
+            detail = str(exc)
+            status_code = 400 if detail in {"paper_only", "review_id_required", "command_id_required"} else 409
+            raise HTTPException(status_code=status_code, detail=detail) from exc
+
+
+@router.post("/options/covered-call/timeline", response_model=CoveredCallTimelineOut)
+def get_covered_call_timeline_route(payload: CoveredCallTimelineRequest):
+    with get_session() as session:
+        try:
+            return build_covered_call_timeline(session, payload)
+        except ValueError as exc:
+            detail = str(exc)
+            status_code = 400 if detail in {"paper_only", "review_id_required"} else 409
+            raise HTTPException(status_code=status_code, detail=detail) from exc
+
+
+@router.post("/options/covered-call/audit", response_model=CoveredCallAuditOut)
+def get_covered_call_audit_route(payload: CoveredCallAuditRequest):
+    with get_session() as session:
+        try:
+            return build_covered_call_audit(session, payload)
+        except ValueError as exc:
+            detail = str(exc)
+            status_code = 400 if detail in {"paper_only", "review_id_required"} else 409
+            raise HTTPException(status_code=status_code, detail=detail) from exc
+
+
+@router.post("/options/covered-call/audit/recent", response_model=CoveredCallAuditRecentOut)
+def list_covered_call_audit_recent_route(payload: CoveredCallAuditRecentRequest):
+    with get_session() as session:
+        try:
+            return list_covered_call_audit_recent(session, payload)
+        except ValueError as exc:
+            detail = str(exc)
+            status_code = 400 if detail in {"paper_only"} else 409
+            raise HTTPException(status_code=status_code, detail=detail) from exc
 
 
 @router.get("/runs/{run_id}/symbols", response_model=TradeSymbolSummaryPageOut)

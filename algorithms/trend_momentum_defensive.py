@@ -80,10 +80,10 @@ class TrendMomentumDefensive(QCAlgorithm):
         self.vol_penalty = float(selection.get("volatility_20d", 0.3))
 
         self.defensive_symbols = self._parse_symbol_list(
-            defensive_params.get("symbols", ["VGSH", "IEF"])
+            defensive_params.get("symbols", ["SGOV"])
         )
         if not self.defensive_symbols:
-            self.defensive_symbols = ["VGSH", "IEF"]
+            self.defensive_symbols = ["SGOV"]
 
         self.set_start_date(2021, 1, 1)
         self.set_end_date(2025, 12, 26)

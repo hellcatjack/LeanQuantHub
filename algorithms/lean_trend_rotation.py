@@ -99,7 +99,7 @@ class TrendRotationAlgorithm(QCAlgorithm):
         self.max_position = float(risk_params.get("max_position", 0.25))
         self.defensive_symbols = [
             str(item).upper()
-            for item in defensive_params.get("symbols", ["VGSH", "IEF"])
+            for item in defensive_params.get("symbols", ["SGOV"])
             if str(item).strip()
         ]
         self.defensive_assets = []

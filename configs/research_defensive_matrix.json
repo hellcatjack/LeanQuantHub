@@ -1,0 +1,21 @@
+{
+  "default": {
+    "risk_off_symbol": "SGOV",
+    "risk_off_symbols": ["SGOV", "VGSH"],
+    "benchmark": "SPY"
+  },
+  "conservative": {
+    "risk_off_symbol": "SGOV",
+    "risk_off_symbols": ["SGOV", "VGSH", "IEF"],
+    "benchmark": "SPY"
+  },
+  "hedge_opt_in": {
+    "symbols": ["GLD"]
+  },
+  "commodity_observation": {
+    "symbols": ["USO", "BNO"]
+  },
+  "benchmark_sensitivity": {
+    "benchmarks": ["QQQ", "SOXX"]
+  }
+}

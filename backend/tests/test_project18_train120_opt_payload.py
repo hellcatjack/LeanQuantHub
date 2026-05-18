@@ -16,7 +16,9 @@ def test_build_payload_applies_overrides_and_risk_off() -> None:
     payload = build_payload(overrides, baseline_algo, "/tmp/scores.csv")
     algo = payload["params"]["algorithm_parameters"]
     assert payload["params"]["pipeline_train_job_id"] == 120
-    assert algo["risk_off_symbols"] == "VGSH,IEF,GLD,TLT"
+    assert payload["params"]["benchmark"] == "SPY"
+    assert algo["risk_off_symbols"] == "SGOV,VGSH"
+    assert algo["benchmark"] == "SPY"
     assert algo["score_csv_path"] == "/tmp/scores.csv"
     assert algo["max_exposure"] == 0.70
     assert algo["vol_target"] == 0.050

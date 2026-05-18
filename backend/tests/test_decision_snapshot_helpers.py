@@ -64,3 +64,52 @@ def test_snapshot_age_days_uses_utc_today(monkeypatch):
 def test_resolve_snapshot_stale_days_defaults_on_invalid_env(monkeypatch):
     monkeypatch.setenv("DECISION_SNAPSHOT_STALE_DAYS", "abc")
     assert decision_snapshot._resolve_snapshot_stale_days() == 7
+
+
+def test_hydrate_snapshot_runtime_fields_backfills_risk_off_symbol(monkeypatch):
+    monkeypatch.setattr(
+        decision_snapshot,
+        "_select_from_defensive_basket",
+        lambda *, summary, algo_params: ("VGSH", ["risk_off_symbol"]),
+    )
+    row = {
+        "snapshot_date": "2026-03-31",
+        "rebalance_date": "2026-03-31",
+        "risk_off": "1",
+        "risk_off_mode": "defensive",
+        "risk_off_symbol": "",
+        "risk_off_selection": "defensive_missing",
+    }
+
+    hydrated = decision_snapshot._hydrate_snapshot_runtime_fields(
+        row,
+        algo_params={"risk_off_symbols": "SGOV,VGSH"},
+    )
+
+    assert hydrated["risk_off_symbol"] == "VGSH"
+    assert hydrated["risk_off_selection"] == "compat_defensive_pick"
+
+
+def test_hydrate_snapshot_runtime_fields_backfills_idle_symbol_and_weight(monkeypatch):
+    monkeypatch.setattr(
+        decision_snapshot,
+        "_resolve_idle_symbol",
+        lambda *, summary, algo_params: ("defensive", "VGSH", ["idle_symbol"]),
+    )
+    row = {
+        "snapshot_date": "2026-03-31",
+        "rebalance_date": "2026-03-31",
+        "risk_off": "0",
+        "idle_allocation_mode": "defensive",
+        "idle_symbol": "",
+        "weights_sum": "0.30000000",
+        "idle_weight": "",
+    }
+
+    hydrated = decision_snapshot._hydrate_snapshot_runtime_fields(
+        row,
+        algo_params={"risk_off_symbols": "SGOV,VGSH"},
+    )
+
+    assert hydrated["idle_symbol"] == "VGSH"
+    assert hydrated["idle_weight"] == "0.70000000"

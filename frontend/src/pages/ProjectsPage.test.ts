@@ -10,4 +10,8 @@ describe("pipeline backtest defaults", () => {
   it("includes risk_off_lookback_days", () => {
     expect(PIPELINE_BACKTEST_DEFAULTS.risk_off_lookback_days).toBe(120);
   });
+
+  it("defaults defensive basket to SGOV and VGSH", () => {
+    expect(PIPELINE_BACKTEST_DEFAULTS.risk_off_symbols).toBe("SGOV,VGSH");
+  });
 });

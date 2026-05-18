@@ -191,3 +191,140 @@ def test_refresh_trade_run_status_does_not_auto_resume_partial_with_rejections(m
         assert child_runs == []
     finally:
         session.close()
+
+
+def test_partial_auto_resume_reuses_existing_child_when_parent_metadata_lags(monkeypatch):
+    session = _make_session()
+    try:
+        session.add(TradeSettings(risk_defaults={}, execution_data_source="lean", auto_recovery={}))
+        session.commit()
+        project, snapshot = _seed_project_snapshot(session)
+
+        run = TradeRun(
+            project_id=project.id,
+            decision_snapshot_id=snapshot.id,
+            mode="paper",
+            status="partial",
+            params={"strategy_snapshot": {"backtest_link_status": "current_project"}},
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        existing_child = TradeRun(
+            project_id=project.id,
+            decision_snapshot_id=snapshot.id,
+            mode="paper",
+            status="running",
+            params={
+                "auto_resume_parent_run_id": run.id,
+                "auto_resume_root_run_id": run.id,
+                "auto_resume_attempt": 1,
+                "auto_resume_reason": "partial_remaining",
+            },
+        )
+        session.add(existing_child)
+        session.commit()
+        session.refresh(existing_child)
+
+        execute_called = {"value": False}
+        monkeypatch.setattr(
+            trade_executor,
+            "execute_trade_run",
+            lambda *_a, **_k: execute_called.update({"value": True}),
+            raising=False,
+        )
+
+        child_run_id = trade_executor._maybe_auto_resume_partial_run(
+            session,
+            run,
+            summary={"total": 2, "filled": 1, "cancelled": 1, "rejected": 0, "skipped": 0},
+        )
+
+        assert child_run_id == existing_child.id
+        assert execute_called["value"] is False
+        child_runs = (
+            session.query(TradeRun)
+            .filter(TradeRun.project_id == project.id, TradeRun.id != run.id)
+            .order_by(TradeRun.id)
+            .all()
+        )
+        assert [child.id for child in child_runs] == [existing_child.id]
+        session.refresh(run)
+        auto_resume = dict((run.params or {}).get("auto_resume") or {})
+        assert auto_resume.get("child_run_id") == existing_child.id
+        assert auto_resume.get("reused_existing") is True
+    finally:
+        session.close()
+
+
+def test_partial_auto_resume_marks_child_blocked_when_execute_lock_busy(monkeypatch):
+    session = _make_session()
+    try:
+        session.add(TradeSettings(risk_defaults={}, execution_data_source="lean", auto_recovery={}))
+        session.commit()
+        project, snapshot = _seed_project_snapshot(session)
+
+        run = TradeRun(
+            project_id=project.id,
+            decision_snapshot_id=snapshot.id,
+            mode="paper",
+            status="running",
+            params={},
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        session.add_all(
+            [
+                TradeOrder(
+                    run_id=run.id,
+                    client_order_id="oi_lock_1",
+                    symbol="AAA",
+                    side="BUY",
+                    quantity=1,
+                    order_type="MKT",
+                    status="FILLED",
+                ),
+                TradeOrder(
+                    run_id=run.id,
+                    client_order_id="oi_lock_2",
+                    symbol="BBB",
+                    side="BUY",
+                    quantity=1,
+                    order_type="MKT",
+                    status="CANCELED",
+                ),
+            ]
+        )
+        session.commit()
+
+        monkeypatch.setattr(trade_executor, "read_open_orders", lambda *_a, **_k: {"items": [], "stale": True})
+        monkeypatch.setattr(trade_executor, "read_positions", lambda *_a, **_k: {"items": [], "stale": True})
+        monkeypatch.setattr(trade_executor, "sync_trade_orders_from_open_orders", lambda *_a, **_k: {})
+        monkeypatch.setattr(trade_executor, "ingest_execution_events", lambda *_a, **_k: {})
+        monkeypatch.setattr(trade_executor, "_reconcile_submit_command_results", lambda *_a, **_k: 0)
+        monkeypatch.setattr(trade_executor, "reconcile_run_with_positions", lambda *_a, **_k: {"reconciled": 0})
+        monkeypatch.setattr(trade_executor, "_lean_no_orders_submitted", lambda *_a, **_k: False)
+
+        def _raise_lock_busy(*_a, **_k):
+            raise RuntimeError("trade_execution_lock_busy")
+
+        monkeypatch.setattr(trade_executor, "execute_trade_run", _raise_lock_busy, raising=False)
+
+        changed = trade_executor.refresh_trade_run_status(session, run)
+
+        assert changed is True
+        session.refresh(run)
+        auto_resume = dict((run.params or {}).get("auto_resume") or {})
+        child_run_id = auto_resume.get("child_run_id")
+        assert child_run_id
+        assert auto_resume.get("execute_error") == "trade_execution_lock_busy"
+        child = session.get(TradeRun, int(child_run_id))
+        assert child is not None
+        assert child.status == "blocked"
+        assert child.message == "trade_execution_lock_busy"
+        assert child.ended_at is not None
+    finally:
+        session.close()

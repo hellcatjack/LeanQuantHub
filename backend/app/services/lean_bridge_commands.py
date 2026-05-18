@@ -86,6 +86,12 @@ def write_submit_order_command(
     limit_price: float | None = None,
     outside_rth: bool = False,
     adaptive_priority: str | None = None,
+    sec_type: str | None = None,
+    underlying_symbol: str | None = None,
+    expiry: str | None = None,
+    strike: float | None = None,
+    right: str | None = None,
+    multiplier: int | None = None,
     actor: str = "system",
     reason: str = "auto_trade_submit",
     expires_seconds: int = 120,
@@ -101,6 +107,9 @@ def write_submit_order_command(
         raise ValueError("tag_required")
 
     normalized_order_type = str(order_type or "MKT").strip().upper() or "MKT"
+    normalized_sec_type = str(sec_type or "").strip().upper()
+    if not normalized_sec_type:
+        normalized_sec_type = "STK"
     now = _now_utc()
     expires_at = now + timedelta(seconds=max(5, int(expires_seconds)))
     if not command_id:
@@ -124,12 +133,34 @@ def write_submit_order_command(
         "expires_at": _iso_z(expires_at),
         "version": 1,
     }
+    if normalized_sec_type != "STK":
+        payload["sec_type"] = normalized_sec_type
     if order_id is not None:
         payload["order_id"] = int(order_id)
     if limit_price is not None:
         payload["limit_price"] = float(limit_price)
     if adaptive_priority:
         payload["adaptive_priority"] = str(adaptive_priority).strip()
+    if normalized_sec_type == "OPT":
+        normalized_underlying = str(underlying_symbol or "").strip().upper()
+        normalized_expiry = str(expiry or "").strip()
+        normalized_right = str(right or "").strip().upper()
+        if not normalized_underlying:
+            raise ValueError("underlying_symbol_required")
+        if not normalized_expiry:
+            raise ValueError("expiry_required")
+        if strike is None or float(strike) <= 0:
+            raise ValueError("strike_required")
+        if normalized_right not in {"C", "P"}:
+            raise ValueError("right_required")
+        normalized_multiplier = int(multiplier or 100)
+        if normalized_multiplier <= 0:
+            raise ValueError("multiplier_required")
+        payload["underlying_symbol"] = normalized_underlying
+        payload["expiry"] = normalized_expiry
+        payload["strike"] = float(strike)
+        payload["right"] = normalized_right
+        payload["multiplier"] = normalized_multiplier
 
     path = commands_dir / f"{command_id}.json"
     _atomic_write_json(path, payload)

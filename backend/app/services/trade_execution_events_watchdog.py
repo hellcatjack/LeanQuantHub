@@ -146,6 +146,7 @@ def reconcile_active_direct_orders(
     root = Path(bridge_root) if bridge_root is not None else resolve_bridge_root()
     mode_value = str(mode or "").strip().lower() or "paper"
     open_orders_payload = read_open_orders(root)
+    open_orders_fresh = isinstance(open_orders_payload, dict) and open_orders_payload.get("stale") is not True
     open_tags = _extract_open_tags(open_orders_payload)
     positions_payload = read_positions(root)
     sync_summary = sync_trade_orders_from_open_orders(
@@ -164,12 +165,28 @@ def reconcile_active_direct_orders(
         infer_canceled_missing=bool(isinstance(open_orders_payload, dict) and open_orders_payload.get("stale") is not True),
         missing_cancel_min_age_seconds=120,
     )
-    ib_completed_summary = reconcile_orders_with_ib_completed_status(
-        session,
-        limit=1200,
-        min_query_interval_seconds=8,
-        lookback_hours=8,
-    )
+    ib_completed_summary = {
+        "candidates": 0,
+        "completed_rows_fetched": 0,
+        "completed_rows_matched": 0,
+        "terminalized": 0,
+        "skipped_filled_hint": 0,
+        "throttled": 0,
+        "errors": 0,
+        "skipped_stale_open_orders": 0,
+    }
+    if open_orders_fresh:
+        ib_completed_summary = reconcile_orders_with_ib_completed_status(
+            session,
+            limit=300,
+            min_query_interval_seconds=60,
+            lookback_hours=8,
+            open_tags=open_tags,
+            missing_min_age_seconds=10,
+            leader_submitted_only=True,
+        )
+    else:
+        ib_completed_summary["skipped_stale_open_orders"] = 1
     positions_summary = reconcile_direct_orders_with_positions(
         session,
         positions_payload,

@@ -26,7 +26,12 @@
 body {
   margin: 0;
   font-family: "IBM Plex Sans", "Noto Sans SC", "Segoe UI", sans-serif;
-  background: radial-gradient(circle at top left, #f3f7ff 0%, #f8f9fb 45%, #eef2f7 100%);
+  background: radial-gradient(
+    circle at top left,
+    #f3f7ff 0%,
+    #f8f9fb 45%,
+    #eef2f7 100%
+  );
   color: var(--text);
 }
 
@@ -166,9 +171,153 @@ a {
   align-items: start;
 }
 
+.covered-call-audit-panel {
+  border-style: dashed;
+}
+
+.covered-call-audit-toolbar {
+  margin-top: 12px;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.covered-call-audit-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  background: rgba(37, 99, 235, 0.08);
+  color: #1d4ed8;
+}
+
+.covered-call-audit-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.covered-call-audit-grid {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.covered-call-audit-list,
+.covered-call-audit-detail {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.covered-call-audit-list-toolbar {
+  display: grid;
+  gap: 8px;
+}
+
+.covered-call-audit-search {
+  width: 100%;
+}
+
+.covered-call-audit-pagination {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.covered-call-audit-page-summary {
+  font-size: 12px;
+  color: var(--muted);
+  margin-right: auto;
+}
+
+.covered-call-audit-item {
+  display: grid;
+  gap: 4px;
+  text-align: left;
+  padding: 10px 12px;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.75);
+  cursor: pointer;
+}
+
+.covered-call-audit-item.active {
+  border-color: rgba(37, 99, 235, 0.45);
+  background: rgba(219, 234, 254, 0.42);
+}
+
+.covered-call-audit-item-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.covered-call-audit-item-meta {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.covered-call-audit-stage-list {
+  display: grid;
+  gap: 8px;
+}
+
+.covered-call-audit-stage {
+  display: grid;
+  grid-template-columns: minmax(80px, 120px) minmax(100px, 140px) minmax(0, 1fr);
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid rgba(15, 23, 42, 0.06);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.72);
+  font-size: 12px;
+}
+
+.covered-call-audit-artifacts {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  word-break: break-all;
+}
+
+.covered-call-audit-json {
+  border: 1px solid rgba(15, 23, 42, 0.06);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.68);
+  padding: 8px 10px;
+}
+
+.covered-call-audit-json summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.covered-call-audit-json pre {
+  margin: 8px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
 @media (max-width: 1100px) {
   .live-trade-execution-row {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .covered-call-audit-grid {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -341,18 +490,19 @@ a {
   grid-column: 1 / -1;
   max-width: none;
   width: 100%;
+  position: relative;
+  overflow: visible;
 }
 
 .positions-workspace {
   margin-top: 12px;
-  display: grid;
-  grid-template-columns: minmax(700px, 1.15fr) minmax(420px, 0.9fr);
-  gap: 16px;
-  align-items: start;
+  position: relative;
+  display: block;
 }
 
 .positions-table-pane {
   min-width: 0;
+  width: 100%;
 }
 
 .position-chart-workspace {
@@ -360,10 +510,99 @@ a {
   border: 1px solid rgba(15, 23, 42, 0.08);
   border-radius: 18px;
   padding: 14px;
+  display: flex;
+  flex-direction: column;
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(244, 247, 251, 0.98)),
-    radial-gradient(circle at top right, rgba(37, 99, 235, 0.08), transparent 34%);
+    linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.96),
+      rgba(244, 247, 251, 0.98)
+    ),
+    radial-gradient(
+      circle at top right,
+      rgba(37, 99, 235, 0.08),
+      transparent 34%
+    );
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
+  z-index: 3;
+}
+
+.position-chart-workspace.is-floating {
+  position: absolute;
+  right: 16px;
+  margin: 0;
+  max-width: min(760px, calc(100% - 48px));
+  overflow: hidden;
+  box-shadow:
+    0 20px 40px rgba(15, 23, 42, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.8);
+}
+
+.position-chart-workspace.is-dragging {
+  cursor: grabbing;
+  box-shadow:
+    0 28px 54px rgba(15, 23, 42, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.86);
+}
+
+.position-chart-workspace.is-stacked {
+  position: static;
+  margin-top: 16px;
+}
+
+.position-chart-workspace.is-minimized {
+  height: 68px !important;
+}
+
+.position-chart-workspace.is-minimized .position-chart-header {
+  align-items: center;
+}
+
+.position-chart-workspace.is-minimized .position-chart-kicker,
+.position-chart-workspace.is-minimized .position-chart-header-meta {
+  display: none;
+}
+
+.position-chart-workspace.is-minimized .position-chart-symbol-line {
+  margin-top: 0;
+}
+
+.position-chart-workspace.is-minimized .position-chart-symbol-line strong {
+  font-size: 18px;
+}
+
+.position-chart-window-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: -4px -4px 8px;
+  padding: 0 2px;
+}
+
+.position-chart-window-handle,
+.position-chart-window-button {
+  border: 1px solid rgba(15, 23, 42, 0.1);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.84);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  min-height: 28px;
+  padding: 0 10px;
+  cursor: pointer;
+}
+
+.position-chart-window-handle {
+  cursor: grab;
+  touch-action: none;
+}
+
+.position-chart-window-handle:active {
+  cursor: grabbing;
+}
+
+.position-chart-window-bar-spacer {
+  flex: 1 1 auto;
 }
 
 .position-chart-header {
@@ -485,11 +724,17 @@ a {
 .position-chart-surface {
   position: relative;
   margin-top: 12px;
+  flex: 1 1 auto;
+  min-height: 0;
   border: 1px solid rgba(15, 23, 42, 0.08);
   border-radius: 16px;
   overflow: hidden;
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(241, 245, 249, 0.92)),
+    linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.96),
+      rgba(241, 245, 249, 0.92)
+    ),
     repeating-linear-gradient(
       90deg,
       rgba(37, 99, 235, 0.02),
@@ -500,7 +745,8 @@ a {
 }
 
 .position-chart-canvas {
-  min-height: 420px;
+  min-height: 260px;
+  height: 100%;
 }
 
 .position-chart-overlay {
@@ -538,6 +784,32 @@ a {
 .position-chart-footer-item {
   border-top: 1px solid rgba(15, 23, 42, 0.08);
   padding-top: 10px;
+}
+
+.position-chart-resize-handle {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  width: 18px;
+  height: 18px;
+  cursor: nwse-resize;
+  touch-action: none;
+  border-radius: 6px;
+  background:
+    linear-gradient(
+      135deg,
+      transparent 40%,
+      rgba(37, 99, 235, 0.26) 40%,
+      rgba(37, 99, 235, 0.26) 52%,
+      transparent 52%
+    ),
+    linear-gradient(
+      135deg,
+      transparent 58%,
+      rgba(37, 99, 235, 0.4) 58%,
+      rgba(37, 99, 235, 0.4) 70%,
+      transparent 70%
+    );
 }
 
 .position-symbol-button {
@@ -691,7 +963,9 @@ a {
   padding: 10px 12px;
   background: #ffffff;
   cursor: pointer;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  transition:
+    border-color 0.2s ease,
+    box-shadow 0.2s ease;
 }
 
 .project-item:hover {
@@ -1005,7 +1279,9 @@ a {
   padding: 10px 12px;
   background: #ffffff;
   cursor: pointer;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  transition:
+    border-color 0.2s ease,
+    box-shadow 0.2s ease;
 }
 
 .algo-item:hover {
@@ -2112,15 +2388,15 @@ a {
 
 .positions-table th,
 .positions-table td {
-  padding: 4px 6px;
+  padding: 3px 6px;
   font-size: 12px;
-  line-height: 1.2;
+  line-height: 1.15;
   white-space: nowrap;
   vertical-align: middle;
 }
 
 .positions-table {
-  min-width: 1320px;
+  min-width: 1460px;
 }
 
 .positions-table tr.is-chart-selected td {
@@ -2129,47 +2405,17 @@ a {
 
 .positions-action-cell {
   min-width: 0;
-  padding-top: 6px !important;
-  padding-bottom: 6px !important;
+  width: 420px;
+  padding-top: 3px !important;
+  padding-bottom: 3px !important;
 }
 
-.positions-action-panel {
-  display: grid;
-  gap: 6px;
-  min-width: max-content;
-}
-
-.positions-action-controls {
-  display: grid;
-  grid-template-columns: 78px 104px 136px 92px;
-  gap: 6px;
-  align-items: end;
-}
-
-.positions-action-field {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-}
-
-.positions-action-field.is-disabled {
-  opacity: 0.72;
-}
-
-.positions-action-field-label {
-  font-size: 10px;
-  line-height: 1;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--muted);
-  white-space: nowrap;
-}
-
-.positions-action-buttons {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+.positions-action-toolbar {
+  display: flex;
+  align-items: center;
   gap: 4px;
+  min-width: max-content;
+  flex-wrap: nowrap;
 }
 
 .positions-fallback-banner {
@@ -2184,8 +2430,11 @@ a {
 }
 
 @media (max-width: 1320px) {
-  .positions-workspace {
-    grid-template-columns: minmax(0, 1fr);
+  .position-chart-workspace.is-floating {
+    position: static;
+    width: auto !important;
+    max-width: none;
+    margin-top: 16px;
   }
 }
 
@@ -2224,7 +2473,7 @@ a {
   padding: 1px 4px !important;
   font-size: 12px;
   line-height: 1;
-  width: 100%;
+  width: 58px;
 }
 
 .positions-action-select,
@@ -2234,7 +2483,18 @@ a {
   padding: 1px 4px !important;
   font-size: 12px;
   line-height: 1;
-  width: 100%;
+}
+
+.positions-action-select {
+  width: 84px;
+}
+
+.positions-action-select-order {
+  width: 112px;
+}
+
+.positions-action-limit {
+  width: 82px;
 }
 
 .positions-action-button {
@@ -2243,13 +2503,7 @@ a {
   padding: 1px 4px !important;
   font-size: 12px;
   line-height: 1;
-  width: 100%;
-}
-
-@media (max-width: 1500px) {
-  .positions-action-controls {
-    grid-template-columns: 74px 96px 126px 88px;
-  }
+  min-width: 54px;
 }
 
 .pretrade-steps-table th,
@@ -3821,7 +4075,6 @@ a {
   font-size: 12px;
   color: var(--text);
 }
-
 
 .market-source {
   color: #334155;

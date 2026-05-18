@@ -50,6 +50,11 @@ from app.schemas import (
     ProjectThemeSearchOut,
 )
 from app.services.audit_log import record_audit
+from app.services.defensive_policy import (
+    DEFAULT_BENCHMARK,
+    DEFAULT_DEFENSIVE_BASKET,
+    DEFAULT_DEFENSIVE_SYMBOL,
+)
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -59,7 +64,6 @@ PROJECT_BACKTEST_TAG = "thematic_backtest"
 CSV_ENCODING = "utf-8-sig"
 PIPELINE_BACKTEST_PRESET_E35 = 0.35
 PIPELINE_BACKTEST_PRESET_E45 = 0.45
-
 
 def _get_data_root() -> Path:
     if settings.data_root:
@@ -154,9 +158,22 @@ def _load_default_algorithm_config() -> dict[str, Any]:
     if not config_path.exists():
         return {}
     try:
-        return json.loads(config_path.read_text(encoding="utf-8"))
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        version_cfg = config.get("version") if isinstance(config.get("version"), dict) else {}
+        params = version_cfg.get("params") if isinstance(version_cfg.get("params"), dict) else None
+        if params is not None:
+            version_cfg["params"] = _normalize_algorithm_default_params(params)
+            config["version"] = version_cfg
+        return config
     except json.JSONDecodeError:
         return {}
+
+
+def _normalize_algorithm_default_params(params: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(params)
+    normalized["risk_off_symbols"] = DEFAULT_DEFENSIVE_BASKET
+    normalized["risk_off_symbol"] = DEFAULT_DEFENSIVE_SYMBOL
+    return normalized
 
 
 def _ensure_default_algorithm(session) -> AlgorithmVersion | None:
@@ -217,7 +234,9 @@ def _ensure_default_algorithm(session) -> AlgorithmVersion | None:
         content = Path(version_path).read_text(encoding="utf-8")
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
     version_params = (
-        ver_cfg.get("params") if isinstance(ver_cfg.get("params"), dict) else None
+        _normalize_algorithm_default_params(ver_cfg.get("params"))
+        if isinstance(ver_cfg.get("params"), dict)
+        else None
     )
     if not version:
         version = AlgorithmVersion(
@@ -323,7 +342,7 @@ def _load_default_config(session=None) -> dict[str, Any]:
                 }
             )
     weights: dict[str, float] = {}
-    benchmark = "SPY"
+    benchmark = DEFAULT_BENCHMARK
     rebalance = "M"
     risk_free_rate = 0.0
     if weights_path.exists():
@@ -354,7 +373,8 @@ def _load_default_config(session=None) -> dict[str, Any]:
         "market_ma_window": 200,
         "risk_off_mode": "defensive",
         "risk_off_pick": "lowest_vol",
-        "risk_off_symbols": "VGSH,IEF,GLD,TLT",
+        "risk_off_symbols": DEFAULT_DEFENSIVE_BASKET,
+        "risk_off_symbol": DEFAULT_DEFENSIVE_SYMBOL,
         "max_drawdown": 0.15,
         "max_drawdown_52w": 0.15,
         "drawdown_exposure_floor": 0.0,
@@ -534,7 +554,7 @@ def _build_weights_config(config: dict[str, Any]) -> dict[str, Any]:
     )
 
     payload = {
-        "benchmark": config.get("benchmark") or "SPY",
+        "benchmark": config.get("benchmark") or DEFAULT_BENCHMARK,
         "rebalance": config.get("rebalance") or "M",
         "risk_free_rate": float(config.get("risk_free_rate") or 0.0),
         "category_weights": weights,
@@ -599,7 +619,7 @@ def _resolve_project_config(session, project_id: int) -> dict[str, Any]:
         try:
             config = json.loads(version.content)
             if isinstance(config, dict) and config:
-                return config
+                return _normalize_project_config(config)
         except json.JSONDecodeError:
             pass
     return _load_default_config(session)
@@ -1638,6 +1658,13 @@ def get_project_config(project_id: int):
         )
 
 
+def _normalize_project_backtest_params(backtest_params: dict[str, Any] | None) -> dict[str, Any]:
+    normalized = dict(backtest_params or {})
+    normalized["risk_off_symbols"] = DEFAULT_DEFENSIVE_BASKET
+    normalized["risk_off_symbol"] = DEFAULT_DEFENSIVE_SYMBOL
+    return normalized
+
+
 def _normalize_project_config(payload: dict[str, Any]) -> dict[str, Any]:
     config = dict(payload)
     data_cfg = config.get("data") if isinstance(config.get("data"), dict) else {}
@@ -1649,6 +1676,9 @@ def _normalize_project_config(payload: dict[str, Any]) -> dict[str, Any]:
     )
     universe_cfg["asset_types"] = ["STOCK"]
     config["universe"] = universe_cfg
+    config["backtest_params"] = _normalize_project_backtest_params(
+        config.get("backtest_params") if isinstance(config.get("backtest_params"), dict) else {}
+    )
     return config
 
 
